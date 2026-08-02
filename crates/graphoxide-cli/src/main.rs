@@ -492,14 +492,29 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
         let Ok(first) = receiver.recv()? else {
             continue;
         };
-        let mut changed = first.paths;
-        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut changed = relevant_watch_paths(&path, first.paths);
+        if changed.is_empty() {
+            continue;
+        }
+
+        // Coalesce a burst of editor writes, but never wait indefinitely for
+        // total filesystem silence. Linux editors and language servers can
+        // continuously emit events in an active workspace.
+        let batch_started = std::time::Instant::now();
+        let hard_deadline = batch_started + std::time::Duration::from_secs(3);
+        let quiet_period = std::time::Duration::from_millis(750);
+        let mut quiet_deadline = batch_started + quiet_period;
         loop {
+            let deadline = quiet_deadline.min(hard_deadline);
             let timeout = deadline.saturating_duration_since(std::time::Instant::now());
             match receiver.recv_timeout(timeout) {
                 Ok(Ok(event)) => {
-                    changed.extend(event.paths);
-                    deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    let paths = relevant_watch_paths(&path, event.paths);
+                    if !paths.is_empty() {
+                        changed.extend(paths);
+                        quiet_deadline =
+                            (std::time::Instant::now() + quiet_period).min(hard_deadline);
+                    }
                 }
                 Ok(Err(error)) => eprintln!("[graphoxide] watch error: {error}"),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
@@ -510,13 +525,6 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
         }
         changed.sort();
         changed.dedup();
-        changed.retain(|changed_path| {
-            let relative = changed_path.strip_prefix(&path).unwrap_or(changed_path);
-            !relative.starts_with("graphoxide-out") && !relative.starts_with(".git")
-        });
-        if changed.is_empty() {
-            continue;
-        }
         if changed
             .iter()
             .any(|changed_path| graphoxide_extract::detect::is_supported_path(changed_path))
@@ -532,6 +540,19 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
             std::fs::write(flag, b"")?;
         }
     }
+}
+
+fn relevant_watch_paths(root: &std::path::Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|changed_path| {
+            let relative = changed_path.strip_prefix(root).unwrap_or(changed_path);
+            !relative.components().any(|component| {
+                let component = component.as_os_str();
+                component == "graphoxide-out" || component == ".git"
+            })
+        })
+        .collect()
 }
 
 fn check_update(path: &std::path::Path) -> anyhow::Result<()> {
@@ -1580,5 +1601,41 @@ fn write_output(output: &str) -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relevant_watch_paths;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn watch_paths_exclude_generated_graph_and_git_events() {
+        let root = Path::new("/workspace/project");
+        let paths = vec![
+            root.join("src/main.rs"),
+            root.join("graphoxide-out/graph.json"),
+            root.join("graphoxide-out/graph.json.123.tmp"),
+            root.join(".git/index"),
+            root.join("docs/guide.md"),
+        ];
+
+        assert_eq!(
+            relevant_watch_paths(root, paths),
+            vec![root.join("src/main.rs"), root.join("docs/guide.md")]
+        );
+    }
+
+    #[test]
+    fn watch_paths_exclude_generated_components_without_a_shared_prefix() {
+        let paths = vec![
+            PathBuf::from("graphoxide-out/graph.json"),
+            PathBuf::from("src/lib.rs"),
+        ];
+
+        assert_eq!(
+            relevant_watch_paths(Path::new("."), paths),
+            vec![PathBuf::from("src/lib.rs")]
+        );
     }
 }
