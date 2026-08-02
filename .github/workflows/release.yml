@@ -215,7 +215,9 @@ jobs:
         shell: bash
         working-directory: release-assets
         run: |
-          find . -maxdepth 1 -type f -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          mapfile -t assets < <(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+          test "${#assets[@]}" -eq 24
+          sha256sum "${assets[@]}" > SHA256SUMS
           test "$(wc -l < SHA256SUMS)" -eq 24
 
       - name: Attest release artifacts
