@@ -137,6 +137,214 @@ mod tests {
         super::engine::extract_as(path, source_file).expect("extract fixture file")
     }
 
+    fn definition_labels(extraction: &graphoxide_core::Extraction) -> Vec<&str> {
+        let mut labels: Vec<_> = extraction
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.extra.get("type").and_then(|value| value.as_str()),
+                    Some("class" | "function")
+                )
+            })
+            .map(|node| node.label.as_str())
+            .collect();
+        labels.sort_unstable();
+        labels
+    }
+
+    fn assert_definition(extraction: &graphoxide_core::Extraction, id: &str, kind: &str) {
+        let node = extraction
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap_or_else(|| panic!("missing {kind} node {id}"));
+        assert_eq!(
+            node.extra.get("type").and_then(|value| value.as_str()),
+            Some(kind),
+            "node {id} should be a {kind}"
+        );
+    }
+
+    fn assert_export_status(extraction: &graphoxide_core::Extraction, id: &str, exported: bool) {
+        let node = extraction
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap_or_else(|| panic!("missing node {id}"));
+        assert_eq!(
+            node.extra
+                .get("exported")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            exported,
+            "unexpected export status for node {id}"
+        );
+    }
+
+    fn assert_single_edge(
+        extraction: &graphoxide_core::Extraction,
+        source: &str,
+        target: &str,
+        relation: &str,
+    ) {
+        let count = extraction
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.relation == relation
+                    && edge.true_source() == source
+                    && edge.true_target() == target
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "expected one {relation} edge from {source} to {target}"
+        );
+    }
+
+    #[test]
+    fn javascript_extracts_exported_and_variable_bound_declarations() {
+        let fixture = Fixture::new();
+        let javascript = fixture.write(
+            "demo.js",
+            r#"
+function bareFn() {}
+async function bareAsyncFn() {}
+const bareArrow = () => {};
+const bareAsyncArrow = async () => {};
+const bareFnExpr = function () {};
+class BareClass { bareMethod() {} }
+
+export function expFn() {}
+export async function expAsyncFn() {}
+export const expArrow = () => {};
+export class ExpClass { expMethod() {} }
+export default function defFn() {}
+"#,
+        );
+        let extraction = extract(&javascript, "demo.js");
+
+        let definitions = definition_labels(&extraction);
+        assert_eq!(definitions.len(), 13);
+        for label in [
+            "BareClass",
+            "ExpClass",
+            "bareArrow()",
+            "bareAsyncArrow()",
+            "bareAsyncFn()",
+            "bareFn()",
+            "bareFnExpr()",
+            "defFn()",
+            "expArrow()",
+            "expAsyncFn()",
+            "expFn()",
+        ] {
+            assert!(definitions.contains(&label), "missing definition {label}");
+        }
+
+        let file = make_id(&["demo"]);
+        for (name, kind) in [
+            ("bareFn", "function"),
+            ("bareAsyncFn", "function"),
+            ("bareArrow", "function"),
+            ("bareAsyncArrow", "function"),
+            ("bareFnExpr", "function"),
+            ("BareClass", "class"),
+            ("expFn", "function"),
+            ("expAsyncFn", "function"),
+            ("expArrow", "function"),
+            ("ExpClass", "class"),
+            ("defFn", "function"),
+        ] {
+            let id = make_id(&["demo", name]);
+            assert_definition(&extraction, &id, kind);
+            assert_single_edge(&extraction, &file, &id, "contains");
+        }
+
+        for id in [
+            make_id(&["demo", "expFn"]),
+            make_id(&["demo", "expAsyncFn"]),
+            make_id(&["demo", "expArrow"]),
+            make_id(&["demo", "ExpClass"]),
+            make_id(&["demo", "defFn"]),
+        ] {
+            assert_export_status(&extraction, &id, true);
+        }
+        assert_export_status(&extraction, &make_id(&["demo", "bareFn"]), false);
+        assert_export_status(&extraction, &make_id(&["demo", "bareArrow"]), false);
+
+        for (class, method) in [("BareClass", "bareMethod"), ("ExpClass", "expMethod")] {
+            let class = make_id(&["demo", class]);
+            let method = make_id(&[&class, method]);
+            assert_definition(&extraction, &method, "function");
+            assert_single_edge(&extraction, &class, &method, "method");
+        }
+    }
+
+    #[test]
+    fn javascript_variable_binding_names_own_their_calls() {
+        let fixture = Fixture::new();
+        let javascript = fixture.write(
+            "calls.js",
+            r#"
+function helper() {}
+export const publicName = function internalName() { helper(); };
+"#,
+        );
+        let extraction = extract(&javascript, "calls.js");
+
+        assert_eq!(
+            definition_labels(&extraction),
+            vec!["helper()", "publicName()"]
+        );
+        let public_name = make_id(&["calls", "publicName"]);
+        assert_export_status(&extraction, &public_name, true);
+        assert!(extraction
+            .nodes
+            .iter()
+            .all(|node| node.id != make_id(&["calls", "internalName"])));
+        assert_single_edge(
+            &extraction,
+            &public_name,
+            &make_id(&["calls", "helper"]),
+            "calls",
+        );
+    }
+
+    #[test]
+    fn typescript_extracts_exported_variable_bound_functions() {
+        let fixture = Fixture::new();
+        let typescript = fixture.write(
+            "demo.ts",
+            r#"
+function helper(): void {}
+export const typedArrow = async (): Promise<void> => { helper(); };
+export const typedFnExpr = function (): void { helper(); };
+export class Service {}
+"#,
+        );
+        let extraction = extract(&typescript, "demo.ts");
+
+        assert_eq!(
+            definition_labels(&extraction),
+            vec!["Service", "helper()", "typedArrow()", "typedFnExpr()"]
+        );
+        for id in [
+            make_id(&["demo", "typedArrow"]),
+            make_id(&["demo", "typedFnExpr"]),
+            make_id(&["demo", "Service"]),
+        ] {
+            assert_export_status(&extraction, &id, true);
+        }
+        assert_export_status(&extraction, &make_id(&["demo", "helper"]), false);
+
+        let helper = make_id(&["demo", "helper"]);
+        for caller in ["typedArrow", "typedFnExpr"] {
+            assert_single_edge(&extraction, &make_id(&["demo", caller]), &helper, "calls");
+        }
+    }
+
     #[test]
     fn python_injected_fields_resolve_to_their_typed_methods() {
         let fixture = Fixture::new();

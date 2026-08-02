@@ -349,6 +349,108 @@ impl State<'_> {
             .map(|child| self.text(child))
             .unwrap_or_default()
     }
+    fn is_javascript_family(&self) -> bool {
+        matches!(self.language_name, "javascript" | "typescript" | "tsx")
+    }
+    fn variable_bound_callable<'tree>(
+        &self,
+        node: TsNode<'tree>,
+    ) -> Option<(String, TsNode<'tree>)> {
+        if !self.is_javascript_family() || node.kind() != "variable_declarator" {
+            return None;
+        }
+        let name = node
+            .child_by_field_name("name")
+            .filter(|name| name.kind() == "identifier")?;
+        let value = node.child_by_field_name("value")?;
+        if !matches!(
+            value.kind(),
+            "arrow_function" | "function_expression" | "generator_function"
+        ) {
+            return None;
+        }
+        Some((self.text(name), value))
+    }
+    fn mark_exported(&mut self, id: &str, node: TsNode<'_>) {
+        if !self.is_javascript_family() {
+            return;
+        }
+        let declaration = if node.kind() == "variable_declarator" {
+            node.parent()
+        } else {
+            Some(node)
+        };
+        let is_exported = declaration
+            .and_then(|declaration| declaration.parent())
+            .is_some_and(|parent| parent.kind() == "export_statement");
+        if !is_exported {
+            return;
+        }
+        if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+            node.extra.insert("exported".into(), true.into());
+        }
+    }
+    fn emit_function(
+        &mut self,
+        node: TsNode<'_>,
+        export_anchor: TsNode<'_>,
+        name: String,
+        kind: &str,
+        line: usize,
+        class: Option<String>,
+    ) {
+        let inferred_owner = if self.language_name == "go" && kind == "method_declaration" {
+            node.child_by_field_name("receiver")
+                .and_then(|receiver| descendant_text(receiver, self.source, &["type_identifier"]))
+                .map(|name| make_id(&[&self.package_scope, name.trim_start_matches('*')]))
+        } else {
+            None
+        };
+        let owner = class.or(inferred_owner);
+        if owner.as_ref().is_some_and(|id| self.enum_ids.contains(id))
+            && kind == "constructor_declaration"
+        {
+            return;
+        }
+        let id = if let Some(owner) = &owner {
+            make_id(&[owner, &name])
+        } else {
+            make_id(&[self.stem, &name])
+        };
+        let label = if owner.is_some() {
+            format!(".{name}()")
+        } else {
+            format!("{name}()")
+        };
+        if let Some(owner) = &owner {
+            self.method_owners.insert(id.clone(), owner.clone());
+        }
+        self.add_node(id.clone(), label, line, Some("function"));
+        self.mark_exported(&id, export_anchor);
+        self.callable_ids.insert(id.clone());
+        self.add_edge(
+            owner.clone().unwrap_or_else(|| self.file_id.clone()),
+            id.clone(),
+            if owner.is_some() {
+                "method"
+            } else {
+                "contains"
+            },
+            line,
+            Confidence::Extracted,
+        );
+        if self.language_name == "python" {
+            self.collect_python_parameter_types(node, &id);
+            self.emit_python_docstring(node, &id);
+            self.emit_python_type_refs(node, &id, line);
+        }
+        self.emit_type_refs(node, &id, line);
+        self.collect_go_type_refs(node, &id);
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.walk(child, owner.clone(), Some(id.clone()))
+        }
+    }
     fn walk(&mut self, node: TsNode<'_>, class: Option<String>, function: Option<String>) {
         let kind = node.kind();
         let line = node.start_position().row + 1;
@@ -399,6 +501,16 @@ impl State<'_> {
             }
         }
         if self.spec.imports.contains(&kind) {
+            if self.is_javascript_family() && kind == "export_statement" {
+                // Local exports wrap their definition. Re-exports have no
+                // declaration and still belong in the import resolver.
+                if let Some(declaration) = node.child_by_field_name("declaration") {
+                    self.walk(declaration, class, function);
+                } else {
+                    self.import(node, line);
+                }
+                return;
+            }
             let edge_start = self.edges.len();
             self.import(node, line);
             if self.language_name == "python" && function.is_some() {
@@ -422,6 +534,7 @@ impl State<'_> {
                 make_id(&[self.stem, &name])
             };
             self.add_node(id.clone(), name, line, Some("class"));
+            self.mark_exported(&id, node);
             if self.language_name == "java" && kind == "enum_declaration" {
                 self.enum_ids.insert(id.clone());
             }
@@ -496,58 +609,11 @@ impl State<'_> {
             if name.is_empty() {
                 return;
             }
-            let inferred_owner = if self.language_name == "go" && kind == "method_declaration" {
-                node.child_by_field_name("receiver")
-                    .and_then(|receiver| {
-                        descendant_text(receiver, self.source, &["type_identifier"])
-                    })
-                    .map(|name| make_id(&[&self.package_scope, name.trim_start_matches('*')]))
-            } else {
-                None
-            };
-            let owner = class.clone().or(inferred_owner);
-            if owner.as_ref().is_some_and(|id| self.enum_ids.contains(id))
-                && kind == "constructor_declaration"
-            {
-                return;
-            }
-            let id = if let Some(owner) = &owner {
-                make_id(&[owner, &name])
-            } else {
-                make_id(&[self.stem, &name])
-            };
-            let label = if owner.is_some() {
-                format!(".{name}()")
-            } else {
-                format!("{name}()")
-            };
-            if let Some(owner) = &owner {
-                self.method_owners.insert(id.clone(), owner.clone());
-            }
-            self.add_node(id.clone(), label, line, Some("function"));
-            self.callable_ids.insert(id.clone());
-            self.add_edge(
-                owner.clone().unwrap_or_else(|| self.file_id.clone()),
-                id.clone(),
-                if owner.is_some() {
-                    "method"
-                } else {
-                    "contains"
-                },
-                line,
-                Confidence::Extracted,
-            );
-            if self.language_name == "python" {
-                self.collect_python_parameter_types(node, &id);
-                self.emit_python_docstring(node, &id);
-                self.emit_python_type_refs(node, &id, line);
-            }
-            self.emit_type_refs(node, &id, line);
-            self.collect_go_type_refs(node, &id);
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                self.walk(child, owner.clone(), Some(id.clone()))
-            }
+            self.emit_function(node, node, name, kind, line, class);
+            return;
+        }
+        if let Some((name, callable)) = self.variable_bound_callable(node) {
+            self.emit_function(callable, node, name, callable.kind(), line, class);
             return;
         }
         if self.spec.calls.contains(&kind) {
