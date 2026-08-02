@@ -19,13 +19,15 @@ export interface RunResult {
 export class GraphoxideCli implements vscode.Disposable {
   readonly output = vscode.window.createOutputChannel('Graphoxide', { log: true });
   private watchProcess?: ChildProcessWithoutNullStreams;
+  private watchReady = false;
+  private watchStart?: Promise<void>;
   private readonly watchEmitter = new vscode.EventEmitter<boolean>();
   readonly onDidChangeWatch = this.watchEmitter.event;
 
   constructor(private readonly extensionUri: vscode.Uri) {}
 
   get watching(): boolean {
-    return Boolean(this.watchProcess);
+    return Boolean(this.watchProcess) && this.watchReady;
   }
 
   async run(options: RunOptions): Promise<RunResult> {
@@ -93,38 +95,66 @@ export class GraphoxideCli implements vscode.Disposable {
     }
   }
 
-  startWatch(folder: vscode.WorkspaceFolder): void {
-    if (this.watchProcess) {
+  async startWatch(folder: vscode.WorkspaceFolder): Promise<void> {
+    if (this.watching) {
       void vscode.window.showInformationMessage('Graphoxide watch mode is already running.');
       return;
     }
+    if (this.watchStart) return this.watchStart;
     const invocation = extensionInvocation(this.extensionUri, folder);
     const executable = invocation.command;
     const args = [...invocation.args.slice(0, -1), 'watch', folder.uri.fsPath];
     this.output.info(`$ ${executable} ${args.map(formatArgument).join(' ')}`);
-    try {
+    this.watchStart = new Promise<void>((resolve, reject) => {
       const child = spawn(executable, args, { cwd: folder.uri.fsPath, env: process.env, shell: false });
       this.watchProcess = child;
-      child.stdout.on('data', (chunk: Buffer) => this.output.append(chunk.toString()));
+      let startupOutput = '';
+      let startupSettled = false;
+      const settleStartup = (error?: Error): void => {
+        if (startupSettled) return;
+        startupSettled = true;
+        clearTimeout(readinessTimeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      const readinessTimeout = setTimeout(() => {
+        const error = new Error('watch mode did not report readiness within 10 seconds');
+        if (this.watchProcess === child) this.stopWatch();
+        settleStartup(error);
+      }, 10000);
+      child.stdout.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        this.output.append(text);
+        if (!this.watchReady) startupOutput += text;
+        if (!this.watchReady && /(^|\n)Watching\s/u.test(startupOutput)) {
+          this.watchReady = true;
+          this.watchEmitter.fire(true);
+          void vscode.commands.executeCommand('setContext', 'graphoxide.watching', true);
+          void vscode.window.showInformationMessage('Graphoxide watch mode started.');
+          settleStartup();
+        }
+      });
       child.stderr.on('data', (chunk: Buffer) => this.output.append(chunk.toString()));
       child.on('error', (error) => {
         this.output.error(`Watch mode failed: ${error.message}`);
         this.output.show(true);
+        settleStartup(error);
       });
       child.on('close', (code) => {
         if (this.watchProcess === child) {
           this.watchProcess = undefined;
+          this.watchReady = false;
           this.watchEmitter.fire(false);
           void vscode.commands.executeCommand('setContext', 'graphoxide.watching', false);
           if (code && code !== 0) void vscode.window.showErrorMessage(`Graphoxide watch mode stopped with exit code ${code}.`);
         }
+        if (!startupSettled) settleStartup(new Error(`watch mode exited before it was ready (code ${code ?? 'unknown'})`));
       });
-      this.watchEmitter.fire(true);
-      void vscode.commands.executeCommand('setContext', 'graphoxide.watching', true);
-      void vscode.window.showInformationMessage('Graphoxide watch mode started.');
-    } catch (error) {
-      this.watchProcess = undefined;
-      throw error;
+    });
+    try {
+      await this.watchStart;
+    } finally {
+      this.watchStart = undefined;
     }
   }
 
@@ -132,6 +162,7 @@ export class GraphoxideCli implements vscode.Disposable {
     const child = this.watchProcess;
     if (!child) return;
     this.watchProcess = undefined;
+    this.watchReady = false;
     child.kill('SIGTERM');
     this.watchEmitter.fire(false);
     void vscode.commands.executeCommand('setContext', 'graphoxide.watching', false);

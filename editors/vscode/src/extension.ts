@@ -141,7 +141,7 @@ function registerCommands(context: vscode.ExtensionContext, services: ExtensionS
     }),
     command('graphoxide.startWatch', async () => {
       const folder = await requireFolder(store);
-      if (folder) cli.startWatch(folder);
+      if (folder) await cli.startWatch(folder);
     }),
     command('graphoxide.stopWatch', () => cli.stopWatch()),
     command('graphoxide.refresh', async () => {

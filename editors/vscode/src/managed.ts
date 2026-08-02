@@ -73,7 +73,7 @@ export class ManagedWorkspaceService implements vscode.Disposable {
     this.changeEmitter.fire();
     const mode = preferredFreshness ?? await this.chooseFreshness(target) ?? 'manual';
     await this.context.workspaceState.update(this.freshnessKey(target), mode);
-    if (mode === 'watch') this.cli.startWatch(target);
+    if (mode === 'watch') await this.cli.startWatch(target);
 
     if (!offerExternalIntegrations) {
       void vscode.window.showInformationMessage(`Graphoxide is managing ${target.name} with ${freshnessDescription(mode)}.`);
@@ -114,7 +114,7 @@ export class ManagedWorkspaceService implements vscode.Disposable {
     if (!mode) return;
     await this.context.workspaceState.update(this.freshnessKey(target), mode);
     this.cli.stopWatch();
-    if (mode === 'watch') this.cli.startWatch(target);
+    if (mode === 'watch') await this.cli.startWatch(target);
     void vscode.window.showInformationMessage(`Graphoxide will use ${freshnessDescription(mode)} for ${target.name}.`);
   }
 
@@ -154,7 +154,7 @@ export class ManagedWorkspaceService implements vscode.Disposable {
         await this.cli.run({ title: 'Graphoxide: refreshing managed workspace…', folder, args: ['update', folder.uri.fsPath], showProgress: false, cancellable: false });
         await this.store.load(folder);
       }
-      if (mode === 'watch' && !this.cli.watching) this.cli.startWatch(folder);
+      if (mode === 'watch' && !this.cli.watching) await this.cli.startWatch(folder);
     } catch (error) {
       this.cli.output.error(`Managed workspace startup failed: ${error instanceof Error ? error.message : String(error)}`);
     }
