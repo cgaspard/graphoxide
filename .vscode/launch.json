@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Graphoxide: Run VS Code Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/editors/vscode",
+        "${workspaceFolder}/examples/vscode-sample"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/editors/vscode/dist/**/*.js"
+      ],
+      "sourceMaps": true,
+      "env": {
+        "PATH": "${workspaceFolder}/target/release${pathSeparator}${env:PATH}"
+      },
+      "preLaunchTask": "Graphoxide: Prepare Extension Host"
+    }
+  ]
+}

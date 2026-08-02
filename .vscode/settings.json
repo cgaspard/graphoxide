@@ -1,0 +1,20 @@
+{
+    "rust-analyzer.check.command": "clippy",
+    "files.watcherExclude": {
+        "**/target/**": true,
+        "**/upstream/**": true
+    },
+    "search.exclude": {
+        "**/target": true,
+        "upstream/uv.lock": true,
+        "upstream/CHANGELOG.md": true
+    },
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true
+    },
+    "hide-files.files": []
+}

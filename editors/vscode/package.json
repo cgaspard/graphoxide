@@ -1,0 +1,241 @@
+{
+  "name": "graphoxide-vscode",
+  "displayName": "Graphoxide",
+  "description": "Explore, query, and maintain Graphoxide code knowledge graphs without leaving VS Code.",
+  "version": "0.1.0",
+  "publisher": "cgaspard",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "graphoxide",
+    "code graph",
+    "knowledge graph",
+    "architecture",
+    "dependency graph"
+  ],
+  "main": "./dist/src/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "files": [
+    "dist/src/**",
+    "bin/**",
+    "media/activity.svg",
+    "media/icon.png",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "LICENSE-MIT",
+    "NOTICE"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run check",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -w -p tsconfig.json",
+    "lint": "eslint src test --ext .ts",
+    "test": "npm run compile && node --test dist/test/**/*.test.js",
+    "test:e2e": "npm run compile && node scripts/run-e2e.mjs",
+    "check": "npm run clean && npm run compile && npm run lint && npm test",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.101.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "@vscode/vsce": "^3.2.1",
+    "eslint": "^8.57.1",
+    "typescript": "^5.7.2"
+  },
+  "contributes": {
+    "commands": [
+      { "command": "graphoxide.initialize", "title": "Graphoxide: Extract Workspace", "icon": "$(play)" },
+      { "command": "graphoxide.update", "title": "Graphoxide: Update Graph", "icon": "$(refresh)" },
+      { "command": "graphoxide.startWatch", "title": "Graphoxide: Start Watch Mode", "icon": "$(eye)" },
+      { "command": "graphoxide.stopWatch", "title": "Graphoxide: Stop Watch Mode", "icon": "$(debug-stop)" },
+      { "command": "graphoxide.refresh", "title": "Graphoxide: Refresh Graph", "icon": "$(refresh)" },
+      { "command": "graphoxide.openGraph", "title": "Graphoxide: Open Interactive Graph", "icon": "$(type-hierarchy)" },
+      { "command": "graphoxide.openGraphBeside", "title": "Graphoxide: Open Interactive Graph Beside" },
+      { "command": "graphoxide.openGraphFile", "title": "Graphoxide: Open graph.json" },
+      { "command": "graphoxide.query", "title": "Graphoxide: Query Graph", "icon": "$(search)" },
+      { "command": "graphoxide.explain", "title": "Graphoxide: Explain Node", "icon": "$(symbol-misc)" },
+      { "command": "graphoxide.explainAtCursor", "title": "Graphoxide: Explain Symbol at Cursor" },
+      { "command": "graphoxide.path", "title": "Graphoxide: Find Path Between Nodes", "icon": "$(git-compare)" },
+      { "command": "graphoxide.affected", "title": "Graphoxide: Show Affected Nodes", "icon": "$(pulse)" },
+      { "command": "graphoxide.godNodes", "title": "Graphoxide: Show Architectural Hubs" },
+      { "command": "graphoxide.revealNode", "title": "Graphoxide: Reveal Node in Source" },
+      { "command": "graphoxide.showCommunity", "title": "Graphoxide: Visualize Community" },
+      { "command": "graphoxide.report", "title": "Graphoxide: Generate Architecture Report" },
+      { "command": "graphoxide.export", "title": "Graphoxide: Export Graph…" },
+      { "command": "graphoxide.startServer", "title": "Graphoxide: Start MCP Server in Terminal (Diagnostics)" },
+      { "command": "graphoxide.copyMcpConfig", "title": "Graphoxide: Copy MCP Configuration" },
+      { "command": "graphoxide.manageMcp", "title": "Graphoxide: Manage MCP Integrations…" },
+      { "command": "graphoxide.enableWorkspace", "title": "Graphoxide: Enable Managed Workspace" },
+      { "command": "graphoxide.disableWorkspace", "title": "Graphoxide: Disable Managed Workspace" },
+      { "command": "graphoxide.configureFreshness", "title": "Graphoxide: Configure Automatic Updates…" },
+      { "command": "graphoxide.resetWorkspacePrompt", "title": "Graphoxide: Reset Workspace Welcome" },
+      { "command": "graphoxide.showStatus", "title": "Graphoxide: Show Graph Status" },
+      { "command": "graphoxide.openSettings", "title": "Graphoxide: Open Settings" },
+      { "command": "graphoxide.clearResults", "title": "Graphoxide: Clear Results", "icon": "$(clear-all)" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "graphoxide",
+          "title": "Graphoxide",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "graphoxide": [
+        { "id": "graphoxide.explorer", "name": "Graph Explorer" },
+        { "id": "graphoxide.results", "name": "Query Results" }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "graphoxide.explorer",
+        "contents": "No Graphoxide graph was found in this workspace.\n[Enable managed workspace](command:graphoxide.enableWorkspace)\n[Extract once](command:graphoxide.initialize)\n[Manage MCP integrations](command:graphoxide.manageMcp)",
+        "when": "!graphoxide.hasGraph"
+      },
+      {
+        "view": "graphoxide.results",
+        "contents": "Run a graph query or inspect a node to see results here.\n[Query graph](command:graphoxide.query)",
+        "when": "graphoxide.hasGraph && !graphoxide.hasResults"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "graphoxide.openGraph", "when": "view == graphoxide.explorer && graphoxide.hasGraph", "group": "navigation@1" },
+        { "command": "graphoxide.refresh", "when": "view == graphoxide.explorer", "group": "navigation@2" },
+        { "command": "graphoxide.clearResults", "when": "view == graphoxide.results && graphoxide.hasResults", "group": "navigation" }
+      ],
+      "view/item/context": [
+        { "command": "graphoxide.revealNode", "when": "view == graphoxide.explorer && viewItem == graphoxide.node", "group": "inline@1" },
+        { "command": "graphoxide.explain", "when": "view == graphoxide.explorer && viewItem == graphoxide.node", "group": "graph@1" },
+        { "command": "graphoxide.affected", "when": "view == graphoxide.explorer && viewItem == graphoxide.node", "group": "graph@2" },
+        { "command": "graphoxide.showCommunity", "when": "view == graphoxide.explorer && viewItem == graphoxide.community", "group": "graph@1" },
+        { "command": "graphoxide.revealNode", "when": "view == graphoxide.results && viewItem == graphoxide.node", "group": "inline@1" }
+      ],
+      "editor/context": [
+        { "command": "graphoxide.explainAtCursor", "when": "editorTextFocus && graphoxide.hasGraph", "group": "navigation@50" }
+      ],
+      "commandPalette": [
+        { "command": "graphoxide.stopWatch", "when": "graphoxide.watching" }
+      ]
+    },
+    "keybindings": [
+      { "command": "graphoxide.query", "key": "ctrl+shift+g q", "mac": "cmd+shift+g q", "when": "graphoxide.hasGraph" },
+      { "command": "graphoxide.explainAtCursor", "key": "ctrl+shift+g e", "mac": "cmd+shift+g e", "when": "editorTextFocus && graphoxide.hasGraph" }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "graphoxide.mcpProvider",
+        "label": "Graphoxide"
+      }
+    ],
+    "configuration": {
+      "title": "Graphoxide",
+      "properties": {
+        "graphoxide.binaryPath": {
+          "type": "string",
+          "default": "graphoxide",
+          "scope": "machine-overridable",
+          "description": "Path or command name for the Graphoxide executable."
+        },
+        "graphoxide.graphPath": {
+          "type": "string",
+          "default": "graphoxide-out/graph.json",
+          "scope": "resource",
+          "description": "Graph path, relative to the workspace folder unless absolute."
+        },
+        "graphoxide.defaultTokenBudget": {
+          "type": "integer",
+          "default": 4000,
+          "minimum": 128,
+          "maximum": 100000,
+          "description": "Default token budget for graph queries."
+        },
+        "graphoxide.defaultAffectedDepth": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Default reverse-traversal depth for affected-node analysis."
+        },
+        "graphoxide.queryTraversal": {
+          "type": "string",
+          "enum": ["breadth-first", "depth-first"],
+          "default": "breadth-first",
+          "description": "Traversal strategy used by Query Graph."
+        },
+        "graphoxide.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh views when graph.json changes on disk."
+        },
+        "graphoxide.promptOnFirstOpen": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Offer to enable managed Graphoxide when a workspace is opened for the first time."
+        },
+        "graphoxide.updateOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run one debounced graph update after source files are saved."
+        },
+        "graphoxide.updateOnSaveDelay": {
+          "type": "integer",
+          "default": 1200,
+          "minimum": 250,
+          "maximum": 30000,
+          "description": "Debounce delay in milliseconds for update on save."
+        },
+        "graphoxide.visualization.maxNodes": {
+          "type": "integer",
+          "default": 750,
+          "minimum": 25,
+          "maximum": 5000,
+          "description": "Maximum nodes drawn at once in the interactive graph."
+        },
+        "graphoxide.extraArguments": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional arguments inserted after the Graphoxide executable and before each subcommand."
+        },
+        "graphoxide.revealOutput": {
+          "type": "string",
+          "enum": ["onError", "always", "never"],
+          "default": "onError",
+          "description": "When to reveal the Graphoxide output channel."
+        },
+        "graphoxide.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show graph connection counts above indexed symbols."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cgaspard/graphoxide.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cgaspard/graphoxide/issues"
+  },
+  "homepage": "https://cgaspard.github.io/graphoxide/"
+}

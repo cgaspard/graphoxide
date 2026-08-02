@@ -1,0 +1,15 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Reference clone of the Python upstream (not part of this repo)
+/upstream
+
+# graphoxide's own output when run on itself
+/graphoxide-out
+/editors/vscode/bin/
+
+# Editors / OS
+.DS_Store
+.idea/
+*.swp

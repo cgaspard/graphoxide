@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --no-fail-fast --locked
+      - run: cargo build --release --workspace --locked
+
+  vscode:
+    name: VS Code extension and E2E
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - run: npm ci
+      - run: npm run check
+      - run: cargo build --release --locked --bin graphoxide
+        working-directory: ${{ github.workspace }}
+      - run: xvfb-run -a npm run test:e2e
+      - run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: graphoxide-vscode
+          path: editors/vscode/*.vsix
+          if-no-files-found: error
+
+  website:
+    name: Website
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check website/app.js
+      - run: node website/scripts/validate.mjs
+
+  licenses:
+    name: Dependency licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.1
+      - run: cargo about generate --workspace --locked --fail --output-file /tmp/THIRD_PARTY_LICENSES.html about.hbs
+      - run: diff -u THIRD_PARTY_LICENSES.html /tmp/THIRD_PARTY_LICENSES.html

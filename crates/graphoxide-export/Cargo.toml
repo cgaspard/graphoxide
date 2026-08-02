@@ -1,0 +1,13 @@
+[package]
+name = "graphoxide-export"
+description = "Report, Obsidian vault, graph.json, HTML viewers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+graphoxide-core.workspace = true
+graphoxide-graph = { path = "../graphoxide-graph" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

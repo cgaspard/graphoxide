@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#080b0d">
+    <meta name="color-scheme" content="dark">
+    <meta
+      name="description"
+      content="Turn an unfamiliar codebase into an explorable architecture map. Trace calls, imports, and dependencies; query the system and understand change impact."
+    >
+    <meta property="og:title" content="Graphoxide — See how your code connects">
+    <meta
+      property="og:description"
+      content="Map unfamiliar code, trace dependencies, and understand change impact in VS Code, the terminal, or an AI client."
+    >
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary">
+    <title>Graphoxide — See how your code connects</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" data-header>
+      <div class="header-inner shell">
+        <a class="brand" href="#top" aria-label="Graphoxide home">
+          <svg class="brand-mark" viewBox="0 0 40 40" role="img" aria-label="">
+            <path d="M9 10.5 20 4l11 6.5v13L20 30 9 23.5z" />
+            <circle cx="9" cy="10.5" r="3" />
+            <circle cx="31" cy="10.5" r="3" />
+            <circle cx="20" cy="30" r="3" />
+            <circle cx="20" cy="17" r="4" />
+            <path d="m11.5 12 5.3 3M28.5 12l-5.3 3M20 21v6" />
+          </svg>
+          <span>graphoxide</span>
+        </a>
+
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="site-nav"
+          data-nav-toggle
+        >
+          <span class="sr-only">Open navigation</span>
+          <span></span><span></span><span></span>
+        </button>
+
+        <nav class="site-nav" id="site-nav" aria-label="Main navigation" data-nav>
+          <a href="#features">Features</a>
+          <a href="#vscode">VS Code</a>
+          <a href="#how-it-works">How it works</a>
+          <a href="#quickstart">Docs</a>
+          <a class="nav-cta" href="#quickstart">Get started</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero shell" id="top">
+        <div class="hero-copy reveal">
+          <div class="eyebrow"><span></span> Map unfamiliar code. Fast.</div>
+          <h1>Make unfamiliar code <em>make sense.</em></h1>
+          <p class="hero-lede">
+            Graphoxide turns a repository into an explorable architecture map. Trace calls,
+            imports, and dependencies; query how a system works; and see the impact of a change
+            without leaving VS Code — or sending your code anywhere.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#quickstart">
+              Install Graphoxide
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg>
+            </a>
+            <a class="button button-secondary" href="#demo">
+              Explore the graph
+              <span aria-hidden="true">↓</span>
+            </a>
+          </div>
+          <div class="hero-proof" aria-label="Product qualities">
+            <span><i aria-hidden="true">✓</i> One native binary</span>
+            <span><i aria-hidden="true">✓</i> Local by default</span>
+            <span><i aria-hidden="true">✓</i> Apache-2.0</span>
+          </div>
+        </div>
+
+        <div class="hero-visual reveal" aria-label="Animated code knowledge graph">
+          <div class="graph-window">
+            <div class="window-bar">
+              <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+              <span>checkout-service.graph</span>
+              <div class="window-state"><i></i> LOCAL</div>
+            </div>
+            <svg class="hero-graph" viewBox="0 0 640 490" role="img" aria-labelledby="hero-graph-title hero-graph-desc">
+              <title id="hero-graph-title">Checkout service code graph</title>
+              <desc id="hero-graph-desc">Connected modules for routes, checkout, inventory, payments, and database storage.</desc>
+              <defs>
+                <filter id="node-glow" x="-80%" y="-80%" width="260%" height="260%">
+                  <feGaussianBlur stdDeviation="8" result="blur" />
+                  <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+                </filter>
+                <linearGradient id="edge-gradient" x1="0" x2="1">
+                  <stop offset="0" stop-color="#f47d4a" stop-opacity=".18" />
+                  <stop offset="1" stop-color="#ecaa50" stop-opacity=".72" />
+                </linearGradient>
+              </defs>
+              <g class="graph-grid" aria-hidden="true">
+                <path d="M0 70h640M0 140h640M0 210h640M0 280h640M0 350h640M0 420h640" />
+                <path d="M80 0v490M160 0v490M240 0v490M320 0v490M400 0v490M480 0v490M560 0v490" />
+              </g>
+              <g class="edges" aria-hidden="true">
+                <path d="M107 114C166 92 202 105 261 153" />
+                <path d="M107 114C147 172 142 221 184 264" />
+                <path d="M261 153C328 102 385 98 445 135" />
+                <path d="M261 153C300 205 315 238 359 277" />
+                <path d="M184 264C238 255 300 262 359 277" />
+                <path d="M359 277C404 226 426 192 445 135" />
+                <path d="M359 277C400 323 434 344 491 361" />
+                <path d="M184 264C179 326 209 357 264 389" />
+                <path d="M264 389C339 416 421 407 491 361" />
+                <path d="M491 361C538 340 555 300 557 250" />
+                <path d="M445 135C510 147 548 183 557 250" />
+              </g>
+              <g class="edge-pulses" aria-hidden="true">
+                <circle r="3"><animateMotion dur="2.8s" repeatCount="indefinite" path="M107 114C166 92 202 105 261 153" /></circle>
+                <circle r="3"><animateMotion dur="3.2s" begin="-.8s" repeatCount="indefinite" path="M261 153C300 205 315 238 359 277" /></circle>
+                <circle r="3"><animateMotion dur="3.5s" begin="-1.6s" repeatCount="indefinite" path="M359 277C400 323 434 344 491 361" /></circle>
+              </g>
+              <g class="graph-node node-rust" transform="translate(261 153)">
+                <circle r="34" />
+                <circle class="node-core" r="7" />
+                <text y="52">checkout.rs</text>
+              </g>
+              <g class="graph-node node-api" transform="translate(107 114)">
+                <circle r="25" />
+                <circle class="node-core" r="5" />
+                <text y="43">routes.ts</text>
+              </g>
+              <g class="graph-node node-ui" transform="translate(184 264)">
+                <circle r="21" />
+                <circle class="node-core" r="4" />
+                <text y="38">Cart.tsx</text>
+              </g>
+              <g class="graph-node node-rust" transform="translate(359 277)">
+                <circle r="38" filter="url(#node-glow)" />
+                <circle class="node-core" r="8" />
+                <text y="57">process_order</text>
+              </g>
+              <g class="graph-node node-data" transform="translate(445 135)">
+                <circle r="27" />
+                <circle class="node-core" r="5" />
+                <text y="45">inventory.go</text>
+              </g>
+              <g class="graph-node node-data" transform="translate(557 250)">
+                <circle r="19" />
+                <circle class="node-core" r="4" />
+                <text y="36">stock_db</text>
+              </g>
+              <g class="graph-node node-api" transform="translate(491 361)">
+                <circle r="30" />
+                <circle class="node-core" r="6" />
+                <text y="48">payment_api</text>
+              </g>
+              <g class="graph-node node-ui" transform="translate(264 389)">
+                <circle r="18" />
+                <circle class="node-core" r="4" />
+                <text y="35">receipt</text>
+              </g>
+            </svg>
+            <div class="graph-toast">
+              <span class="toast-icon" aria-hidden="true">↗</span>
+              <span><b>process_order</b><small>12 incoming · 8 outgoing</small></span>
+              <kbd>⌘ ↵</kbd>
+            </div>
+          </div>
+          <div class="hero-halo" aria-hidden="true"></div>
+        </div>
+      </section>
+
+      <div class="origin-banner origin-note shell" role="note">
+        <span class="origin-mark" aria-hidden="true">◎</span>
+        <span>
+          With thanks to our roots: Graphoxide is an independent Rust project inspired by
+          <a href="https://github.com/Graphify-Labs/graphify">the original Graphify project</a>
+          by Safi Shamsi and its contributors. It is not affiliated with Graphify Labs.
+        </span>
+      </div>
+
+      <section class="metrics" aria-label="Performance highlights">
+        <div class="shell metrics-grid reveal">
+          <div><strong>3.72×</strong><span>faster full extraction</span></div>
+          <div><strong>6.22×</strong><span>lower cold-query latency</span></div>
+          <div><strong>0</strong><span>language runtimes required</span></div>
+          <div><strong>100%</strong><span>local core analysis</span></div>
+        </div>
+        <p class="benchmark-note shell">Measured against the Python reference on an 80-file corpus. Hardware and workloads vary.</p>
+      </section>
+
+      <section class="section shell" id="demo">
+        <div class="section-heading reveal">
+          <div class="eyebrow"><span></span> Ask the architecture</div>
+          <h2>From “where is it?” to <em>“how does it connect?”</em></h2>
+          <p>Search the graph in plain language, then follow real structural relationships back to source.</p>
+        </div>
+
+        <div class="query-demo reveal" data-query-demo>
+          <div class="query-panel">
+            <div class="demo-label">Try a question</div>
+            <div class="query-pills" role="group" aria-label="Example graph questions">
+              <button class="is-active" type="button" data-query="auth">How does authentication work?</button>
+              <button type="button" data-query="impact">What breaks if I change User?</button>
+              <button type="button" data-query="path">Path from API to database</button>
+            </div>
+            <div class="query-code" aria-live="polite">
+              <span class="prompt">$</span>
+              <code data-query-command>graphoxide query "how does authentication work?"</code>
+              <span class="query-caret" aria-hidden="true"></span>
+            </div>
+            <div class="query-response" data-query-response>
+              <div class="response-head"><span></span> 7 relevant nodes · 11 relationships</div>
+              <ol>
+                <li><b>AuthMiddleware</b><span>intercepts requests</span></li>
+                <li><b>verify_token</b><span>validates JWT signature</span></li>
+                <li><b>UserRepository</b><span>loads identity and roles</span></li>
+              </ol>
+            </div>
+          </div>
+          <div class="query-map" aria-hidden="true">
+            <svg viewBox="0 0 560 410">
+              <g class="demo-lines">
+                <path d="M93 85 220 121 333 65 458 121 390 237 267 308 125 268 220 121 390 237 125 268" />
+                <path d="m220 121 47 187m66-243 57 172M93 85l32 183" />
+              </g>
+              <g class="demo-node dim" transform="translate(93 85)"><circle r="20" /><text y="38">routes</text></g>
+              <g class="demo-node hot" transform="translate(220 121)"><circle r="30" /><text y="50">auth</text></g>
+              <g class="demo-node" transform="translate(333 65)"><circle r="18" /><text y="36">config</text></g>
+              <g class="demo-node" transform="translate(458 121)"><circle r="23" /><text y="41">tokens</text></g>
+              <g class="demo-node hot" transform="translate(390 237)"><circle r="27" /><text y="47">verify</text></g>
+              <g class="demo-node" transform="translate(267 308)"><circle r="25" /><text y="44">users</text></g>
+              <g class="demo-node dim" transform="translate(125 268)"><circle r="17" /><text y="35">roles</text></g>
+            </svg>
+            <div class="map-legend"><i></i> Query context</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section feature-section" id="features">
+        <div class="shell">
+          <div class="section-heading section-heading-left reveal">
+            <div class="eyebrow"><span></span> Built for real codebases</div>
+            <h2>Understand the system, not just the file.</h2>
+          </div>
+          <div class="feature-grid">
+            <article class="feature-card feature-card-large reveal">
+              <div class="feature-icon"><span aria-hidden="true">⌘</span></div>
+              <h3>Search by meaning</h3>
+              <p>Ask architecture questions in natural language. Results combine ranked matches with bounded graph traversal, so context stays useful.</p>
+              <div class="mini-search"><span>⌕</span><code>where are permissions enforced?</code><kbd>↵</kbd></div>
+            </article>
+            <article class="feature-card reveal">
+              <div class="feature-icon"><span aria-hidden="true">◎</span></div>
+              <h3>See blast radius</h3>
+              <p>Trace callers, dependencies, and affected nodes before a refactor becomes a surprise.</p>
+              <div class="impact-rings" aria-hidden="true"><i></i><i></i><i></i><b>∆</b></div>
+            </article>
+            <article class="feature-card reveal">
+              <div class="feature-icon"><span aria-hidden="true">↝</span></div>
+              <h3>Follow every path</h3>
+              <p>Find the shortest route between two concepts and inspect each relationship along the way.</p>
+              <div class="path-strip" aria-hidden="true"><i>A</i><span></span><i>B</i><span></span><i>C</i></div>
+            </article>
+            <article class="feature-card feature-card-wide reveal">
+              <div>
+                <div class="feature-icon"><span aria-hidden="true">⌁</span></div>
+                <h3>Architecture, automatically grouped</h3>
+                <p>Leiden community detection finds the natural subsystems in your code — no tags, config, or model prompts required.</p>
+              </div>
+              <div class="community-cloud" aria-hidden="true">
+                <span class="cloud-a">API</span><span class="cloud-a">Routes</span><span class="cloud-a">Auth</span>
+                <span class="cloud-b">Models</span><span class="cloud-b">Store</span>
+                <span class="cloud-c">Jobs</span><span class="cloud-c">Queue</span><span class="cloud-c">Worker</span>
+              </div>
+            </article>
+            <article class="feature-card reveal">
+              <div class="feature-icon"><span aria-hidden="true">⇄</span></div>
+              <h3>Fits your toolchain</h3>
+              <p>Export HTML, GraphML, Cypher, JSON, call flows, and Obsidian vaults — or serve the graph over MCP.</p>
+              <div class="format-list" aria-label="Supported exports"><span>HTML</span><span>GraphML</span><span>Cypher</span><span>JSON</span></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section vscode-section" id="vscode">
+        <div class="shell">
+          <div class="section-heading reveal">
+            <div class="eyebrow"><span></span> Graphoxide for VS Code</div>
+            <h2>Your architecture, <em>in the editor.</em></h2>
+            <p>Enable Graphoxide once, let it build and maintain the graph, and keep architectural context where you work.</p>
+          </div>
+
+          <div class="editor-frame reveal">
+            <div class="editor-titlebar">
+              <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+              <span>checkout-service — Visual Studio Code</span>
+              <span></span>
+            </div>
+            <div class="editor-body">
+              <aside class="activity-bar" aria-label="VS Code activity mockup">
+                <span>▱</span><span>⌕</span><span>⑂</span><span class="active">⌬</span><span>⚙</span>
+              </aside>
+              <aside class="explorer-pane">
+                <div class="pane-title">GRAPH OXIDE</div>
+                <div class="tree-row"><span>⌄</span> CHECKOUT-SERVICE</div>
+                <div class="tree-row indent"><i class="rust-dot"></i> checkout.rs</div>
+                <div class="tree-row indent active"><i class="func-dot"></i> process_order</div>
+                <div class="tree-row indent"><i class="ts-dot"></i> routes.ts</div>
+                <div class="pane-title pane-space">COMMUNITIES</div>
+                <div class="community-row"><i></i> Checkout <b>18</b></div>
+                <div class="community-row"><i></i> Inventory <b>12</b></div>
+                <div class="community-row"><i></i> Payments <b>9</b></div>
+              </aside>
+              <div class="code-pane">
+                <div class="editor-tabs"><span class="active"><i></i> checkout.rs <b>×</b></span><span>Graphoxide: Explorer <b>×</b></span></div>
+                <div class="code-content" aria-label="Rust code example">
+                  <div><b>42</b><code><em>pub async fn</em> <mark>process_order</mark>(ctx: &amp;Context, cart: Cart) {</code></div>
+                  <div><b>43</b><code>  <em>let</em> stock = inventory::reserve(&amp;cart).<em>await</em>?;</code></div>
+                  <div><b>44</b><code>  <em>let</em> payment = payments::authorize(</code></div>
+                  <div><b>45</b><code>    &amp;ctx.user, cart.total()</code></div>
+                  <div><b>46</b><code>  ).<em>await</em>?;</code></div>
+                  <div><b>47</b><code>  orders::commit(stock, payment).<em>await</em></code></div>
+                  <div><b>48</b><code>}</code></div>
+                </div>
+                <div class="code-lens">3 callers · 8 dependencies · community: Checkout</div>
+              </div>
+              <div class="graph-pane">
+                <div class="graph-pane-toolbar"><span>Graph Explorer</span><div>⊖ &nbsp; ⊕ &nbsp; ⛶</div></div>
+                <svg viewBox="0 0 420 330" role="img" aria-label="Graph explorer centered on process order">
+                  <g class="ide-lines"><path d="m70 70 134 83 127-82M204 153l100 108M204 153 94 252M331 71l-27 190M94 252l210 9" /></g>
+                  <g class="ide-node" transform="translate(70 70)"><circle r="18" /><text y="35">route</text></g>
+                  <g class="ide-node selected" transform="translate(204 153)"><circle r="31" /><text y="50">process_order</text></g>
+                  <g class="ide-node data" transform="translate(331 71)"><circle r="22" /><text y="40">inventory</text></g>
+                  <g class="ide-node" transform="translate(94 252)"><circle r="20" /><text y="38">payment</text></g>
+                  <g class="ide-node data" transform="translate(304 261)"><circle r="24" /><text y="42">commit</text></g>
+                </svg>
+                <div class="node-inspector"><span><i></i> function</span><b>process_order</b><small>checkout.rs:42</small></div>
+              </div>
+            </div>
+            <div class="editor-status"><span>⑂ main*</span><span>Graphoxide: ready &nbsp; · &nbsp; 2,162 nodes &nbsp; · &nbsp; 4,300 edges</span></div>
+          </div>
+
+          <div class="editor-benefits reveal">
+            <div><span>01</span><h3>Navigate both ways</h3><p>Reveal a graph node from source, or jump from any node to its exact file and line.</p></div>
+            <div><span>02</span><h3>Refactor with context</h3><p>Preview affected callers and dependencies before you touch a public boundary.</p></div>
+            <div><span>03</span><h3>Fully managed</h3><p>Choose continuous or save-triggered updates and connect detected MCP clients at project or user scope.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section privacy-section">
+        <div class="shell privacy-grid">
+          <div class="privacy-copy reveal">
+            <div class="eyebrow"><span></span> Your code stays yours</div>
+            <h2>Deep analysis.<br><em>Zero upload.</em></h2>
+            <p>Extraction, graph construction, clustering, search, paths, and impact analysis all run locally. No account. No daemon. No source-code telemetry.</p>
+            <ul>
+              <li><span>✓</span> Works completely offline</li>
+              <li><span>✓</span> Skips credentials and ignored files</li>
+              <li><span>✓</span> Deterministic, inspectable JSON output</li>
+              <li><span>✓</span> Optional LLM labeling is explicit</li>
+            </ul>
+          </div>
+          <div class="privacy-visual reveal" aria-label="Local analysis architecture">
+            <div class="local-machine">
+              <span class="machine-label">YOUR MACHINE</span>
+              <div class="machine-core">
+                <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M9 10.5 20 4l11 6.5v13L20 30 9 23.5z" /><circle cx="20" cy="17" r="4" /></svg>
+                <b>Graphoxide</b><small>native Rust engine</small>
+              </div>
+              <div class="local-input"><span>⌘</span> source tree</div>
+              <div class="local-output"><span>⌬</span> code graph</div>
+              <i class="flow-in"></i><i class="flow-out"></i>
+            </div>
+            <div class="blocked-cloud"><span>☁</span><b>No cloud required</b><i></i></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section shell" id="how-it-works">
+        <div class="section-heading reveal">
+          <div class="eyebrow"><span></span> How it works</div>
+          <h2>Source in. Understanding out.</h2>
+          <p>A deterministic pipeline turns syntax into navigable architectural context in seconds.</p>
+        </div>
+        <div class="pipeline reveal">
+          <article><span class="step-number">01</span><div class="step-icon">&lt;/&gt;</div><h3>Parse</h3><p>Compiled parsers extract symbols and relationships across your source tree.</p></article>
+          <i class="pipeline-arrow" aria-hidden="true">→</i>
+          <article><span class="step-number">02</span><div class="step-icon">⌬</div><h3>Connect</h3><p>Calls, imports, inheritance, containment, and references become typed edges.</p></article>
+          <i class="pipeline-arrow" aria-hidden="true">→</i>
+          <article><span class="step-number">03</span><div class="step-icon">◉</div><h3>Cluster</h3><p>Leiden detection finds architectural communities and central nodes.</p></article>
+          <i class="pipeline-arrow" aria-hidden="true">→</i>
+          <article><span class="step-number">04</span><div class="step-icon">⌕</div><h3>Explore</h3><p>Query, traverse, visualize, export, or share context with an MCP client.</p></article>
+        </div>
+      </section>
+
+      <section class="section quickstart-section" id="quickstart">
+        <div class="shell quickstart-grid">
+          <div class="quickstart-copy reveal">
+            <div class="eyebrow"><span></span> Get started</div>
+            <h2>One binary.<br>Three commands.</h2>
+            <p>Graphoxide is a self-contained executable. Install it, point it at a repository, and start exploring.</p>
+            <div class="install-options">
+              <button type="button" class="is-active" data-install="cargo">Cargo + Git</button>
+              <button type="button" data-install="release">Release artifact</button>
+              <button type="button" data-install="source">Local checkout</button>
+            </div>
+            <div class="install-command">
+              <code data-install-command>cargo install --git https://github.com/cgaspard/graphoxide graphoxide-cli</code>
+              <button type="button" class="copy-button" data-copy-target="[data-install-command]" aria-label="Copy install command">Copy</button>
+            </div>
+            <p class="install-note" data-install-note>Builds the CLI from the current main branch and installs it on your Cargo PATH.</p>
+          </div>
+          <div class="terminal reveal" aria-label="Graphoxide quickstart terminal">
+            <div class="terminal-bar"><div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div><span>~/projects/checkout</span><button type="button" class="copy-button" data-copy-target="#quickstart-code">Copy all</button></div>
+            <pre id="quickstart-code"><code><span class="comment"># Build a graph from this repository</span>
+<span class="prompt">$</span> graphoxide extract . --code-only
+<span class="success">✓</span> 2,162 nodes · 4,300 edges · 125 communities
+
+<span class="comment"># Ask an architectural question</span>
+<span class="prompt">$</span> graphoxide query "how does checkout work?"
+<span class="result">process_order</span>  checkout.rs:42
+  calls → inventory::reserve
+  calls → payments::authorize
+  calls → orders::commit
+
+<span class="comment"># Open the MCP server for your AI client</span>
+<span class="prompt">$</span> graphoxide serve
+<span class="success">✓</span> Graphoxide MCP ready on stdio</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="section ecosystem-section">
+        <div class="shell ecosystem-grid reveal">
+          <div>
+            <span class="kicker">USE IT YOUR WAY</span>
+            <h2>One graph.<br>Every workflow.</h2>
+          </div>
+          <div class="ecosystem-cards">
+            <article><span class="ecosystem-icon">⌘</span><div><h3>Command line</h3><p>Extract, query, inspect, report, and export from scripts or a terminal.</p></div></article>
+            <article><span class="ecosystem-icon">⌬</span><div><h3>VS Code</h3><p>Explore architecture and jump between graph nodes and source.</p></div></article>
+            <article><span class="ecosystem-icon">◈</span><div><h3>MCP clients</h3><p>Give coding agents precise, bounded structural context over stdio.</p></div></article>
+            <article><span class="ecosystem-icon">⇄</span><div><h3>Open formats</h3><p>Take your graph to Neo4j, Gephi, Obsidian, or a standalone HTML file.</p></div></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section shell faq-section" id="faq">
+        <div class="section-heading reveal">
+          <div class="eyebrow"><span></span> Questions, answered</div>
+          <h2>Good to know.</h2>
+        </div>
+        <div class="faq-list reveal">
+          <details>
+            <summary>Does Graphoxide use an LLM to analyze my code?<span>+</span></summary>
+            <p>No. Core extraction, clustering, querying, impact analysis, and reports are deterministic and run locally. An optional <code>graphoxide label</code> command can use a configured API only to create friendlier community names.</p>
+          </details>
+          <details>
+            <summary>Is the binary really standalone?<span>+</span></summary>
+            <p>Yes for core use: it requires no Python, Node.js, JVM, parser downloads, account, or network connection. Release binaries are platform-specific. Git integration needs Git, and PR-aware MCP tools need the GitHub CLI.</p>
+          </details>
+          <details>
+            <summary>Which languages are supported?<span>+</span></summary>
+            <p>Graphoxide includes compiled parsers for major languages and deterministic structured fallbacks for a broad language matrix. Unsupported text files are ignored safely.</p>
+          </details>
+          <details>
+            <summary>Can I use it without VS Code?<span>+</span></summary>
+            <p>Absolutely. The CLI is the complete engine. VS Code is a native workspace for the same graph, while MCP and exports make it useful in many other tools.</p>
+          </details>
+          <details>
+            <summary>Does the VS Code extension leave an MCP server running?<span>+</span></summary>
+            <p>No. The extension registers Graphoxide with VS Code and can configure detected clients. Each MCP client starts the native stdio server on demand and owns its lifecycle.</p>
+          </details>
+          <details>
+            <summary>How is Graphoxide related to Graphify?<span>+</span></summary>
+            <p>Graphoxide is a native Rust implementation rooted in the ideas and data model of the original Graphify project. We preserve that lineage prominently and retain its Apache-2.0 and historical MIT notices.</p>
+          </details>
+        </div>
+      </section>
+
+      <section class="final-cta">
+        <div class="final-glow" aria-hidden="true"></div>
+        <div class="shell reveal">
+          <svg class="cta-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M9 10.5 20 4l11 6.5v13L20 30 9 23.5z" /><circle cx="9" cy="10.5" r="3" /><circle cx="31" cy="10.5" r="3" /><circle cx="20" cy="30" r="3" /><circle cx="20" cy="17" r="4" /><path d="m11.5 12 5.3 3M28.5 12l-5.3 3M20 21v6" /></svg>
+          <h2>See what your code<br>has been trying to tell you.</h2>
+          <p>Build your first graph in seconds.</p>
+          <a class="button button-primary" href="#quickstart">Get started with Graphoxide <span>→</span></a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="#top">
+            <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M9 10.5 20 4l11 6.5v13L20 30 9 23.5z" /><circle cx="9" cy="10.5" r="3" /><circle cx="31" cy="10.5" r="3" /><circle cx="20" cy="30" r="3" /><circle cx="20" cy="17" r="4" /><path d="m11.5 12 5.3 3M28.5 12l-5.3 3M20 21v6" /></svg>
+            <span>graphoxide</span>
+          </a>
+          <p>Native code intelligence,<br>for humans and agents.</p>
+        </div>
+        <div class="footer-links"><h3>Product</h3><a href="#features">Features</a><a href="#vscode">VS Code</a><a href="#quickstart">Install</a><a href="#faq">FAQ</a></div>
+        <div class="footer-links"><h3>Origins</h3><a href="https://github.com/Graphify-Labs/graphify">Original Graphify</a></div>
+      </div>
+      <div class="shell footer-bottom">
+        <p>Graphoxide is based on Graphify, © 2026 Safi Shamsi and the Graphify contributors. Licensed under Apache-2.0; portions originally MIT.</p>
+        <p>© <span data-year>2026</span> Graphoxide contributors.</p>
+      </div>
+    </footer>
+  </body>
+</html>

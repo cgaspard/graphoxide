@@ -1,0 +1,18 @@
+[package]
+name = "graphoxide-mcp"
+description = "MCP stdio server exposing graph query tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+graphoxide-core.workspace = true
+graphoxide-query.workspace = true
+graphoxide-graph.workspace = true
+graphoxide-export.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rmcp.workspace = true
+tokio.workspace = true

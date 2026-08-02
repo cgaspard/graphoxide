@@ -1,0 +1,22 @@
+Graphoxide
+Copyright 2026 Corey Gaspard and the Graphoxide contributors.
+
+Graphoxide is an independent Rust reimplementation derived from and inspired
+by Graphify:
+
+Graphify
+Copyright 2026 Safi Shamsi and the Graphify contributors.
+https://github.com/Graphify-Labs/graphify
+
+Graphoxide contains substantial changes, including a complete Rust workspace,
+native parsers and graph pipeline, a single compiled CLI/MCP executable, and
+new editor and website integrations. Graphoxide is not affiliated with or
+endorsed by the upstream Graphify project.
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Portions of the upstream work were contributed under the MIT License before
+its relicensing and remain available under those terms. The historical MIT
+license text and copyright notice are retained in LICENSE-MIT.
+
+Third-party Rust dependency licenses are reproduced in
+THIRD_PARTY_LICENSES.html.

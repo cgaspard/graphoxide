@@ -1,0 +1,14 @@
+[package]
+name = "graphoxide-query"
+description = "Graph traversal: query, path, explain, affected, god-nodes, benchmark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+graphoxide-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+petgraph.workspace = true
+unicode-normalization.workspace = true

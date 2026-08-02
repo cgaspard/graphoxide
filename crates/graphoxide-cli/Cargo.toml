@@ -1,0 +1,28 @@
+[package]
+name = "graphoxide-cli"
+description = "Graphoxide command-line interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "graphoxide"
+path = "src/main.rs"
+
+[dependencies]
+graphoxide-core.workspace = true
+graphoxide-extract.workspace = true
+graphoxide-graph.workspace = true
+graphoxide-query.workspace = true
+graphoxide-export.workspace = true
+graphoxide-mcp.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+notify.workspace = true
+ignore.workspace = true
+reqwest.workspace = true
