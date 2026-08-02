@@ -6,11 +6,13 @@ pub fn resolve(extractions: &mut [Extraction]) {
     let mut definitions: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     let mut call_definitions: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     let mut file_nodes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut node_labels: BTreeMap<String, String> = BTreeMap::new();
     for extraction in extractions.iter() {
         for node in &extraction.nodes {
             if node.source_file.is_empty() {
                 continue;
             }
+            node_labels.insert(node.id.clone(), normalize_id(&node.label));
             if node.extra.get("type").and_then(|v| v.as_str()) == Some("function") {
                 let label = normalize_id(node.label.trim_start_matches('.').trim_end_matches("()"));
                 call_definitions
@@ -47,6 +49,16 @@ pub fn resolve(extractions: &mut [Extraction]) {
     for values in call_definitions.values_mut() {
         values.sort();
         values.dedup();
+    }
+    let mut method_owners = BTreeMap::new();
+    for extraction in extractions.iter() {
+        for edge in &extraction.edges {
+            if edge.relation == "method" {
+                if let Some(owner) = node_labels.get(edge.true_source()) {
+                    method_owners.insert(edge.true_target().to_owned(), owner.clone());
+                }
+            }
+        }
     }
     let mut remap = BTreeMap::new();
     for extraction in extractions.iter() {
@@ -98,13 +110,30 @@ pub fn resolve(extractions: &mut [Extraction]) {
                 .and_then(|v| v.as_str())
                 .map(normalize_id)
                 .unwrap_or_default();
+            let receiver_type = edge
+                .extra
+                .get("receiver_type")
+                .and_then(|value| value.as_str())
+                .map(normalize_id);
+            let self_receiver =
+                edge.extra.get("receiver").and_then(|value| value.as_str()) == Some("self");
             let candidates: Vec<_> = call_definitions
                 .get(&callee)
                 .into_iter()
                 .flatten()
                 .filter(|(_, source)| same_language_family(&edge.source_file, source))
                 .filter(|(id, _)| id != edge.true_source())
+                .filter(|(id, _)| {
+                    if let Some(receiver_type) = &receiver_type {
+                        method_owners.get(id) == Some(receiver_type)
+                    } else {
+                        !self_receiver
+                    }
+                })
                 .filter(|(_, source)| {
+                    if source == &edge.source_file {
+                        return true;
+                    }
                     let stem = std::path::Path::new(source)
                         .file_stem()
                         .and_then(|v| v.to_str())

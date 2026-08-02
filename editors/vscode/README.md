@@ -25,6 +25,13 @@ Alternatively, set **Graphoxide: Binary Path** to an absolute executable path. T
 Binary discovery checks an explicit setting first, followed by the packaged
 binary, `PATH`, and this repository's release/debug build directories.
 
+Tagged releases build and publish six VSIX packages for macOS, Linux, and
+Windows on x64 and arm64. Each package stages the matching native executable,
+records its version and target, includes the third-party license report, and is
+verified before Marketplace publication. Extension-specific notes live in
+[`../../releasenotes/vscode`](../../releasenotes/vscode); the CLI has parallel
+notes under [`../../releasenotes/cli`](../../releasenotes/cli).
+
 ## Get started
 
 1. Open a repository in VS Code.
@@ -68,10 +75,11 @@ npm run test:e2e
 ```
 
 It verifies executable discovery without a `PATH` dependency, managed extraction,
-native MCP initialization and tool calls, active-group and side-by-side graph
-placement, project MCP installation/removal for Claude Code, Codex, and OpenCode,
-update-on-save, and continuous watch mode. User-level tool configuration is never
-modified by the suite.
+native MCP initialization, Codex usage instructions, tool metadata, project
+overview, relation filtering, injected-instance call flows, active-group and
+side-by-side graph placement, project MCP installation/removal for Claude Code,
+Codex, and OpenCode, update-on-save, and continuous watch mode. User-level tool
+configuration is never modified by the suite.
 
 ## Explore the graph
 
@@ -122,7 +130,9 @@ Managed workspaces remember one freshness policy. Continuous watch incrementally
 rebuilds while the workspace is open, update-on-save performs a debounced update,
 and manual mode changes nothing in the background. Use **Graphoxide: Configure
 Automatic Updates…** to change the policy. The status bar shows an eye while watch
-mode is active.
+mode is active. Managed automatic refreshes accept intentional graph reductions,
+so deleting or consolidating code cannot leave the graph permanently stale behind
+the CLI shrink guard.
 
 For smaller projects, **Graphoxide: Update On Save** can run a debounced update whenever a source document is saved. It is disabled by default. Watch mode is more efficient for sustained editing sessions.
 
@@ -157,6 +167,13 @@ or OpenCode starts `graphoxide serve` over stdio when it needs Graphoxide tools 
 stops it according to that client's lifecycle. **Start MCP Server in Terminal
 (Diagnostics)** is only for manual troubleshooting. **Copy MCP Configuration**
 remains available for unsupported clients.
+
+The MCP server tells Codex to use Graphoxide before broad filesystem searches for
+architecture, navigation, call-flow, and impact questions. Its compact
+`project_overview` tool is the recommended first call; focused graph queries can
+then restrict traversal to call, import, type, or structural relationships. Tool
+results are static-analysis evidence with source locations and confidence labels,
+which Codex uses to synthesize and verify its final explanation.
 
 Core extraction, clustering, querying, visualization, and reports are offline and require no API key. Optional community labeling is a separate CLI feature.
 

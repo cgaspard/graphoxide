@@ -19,3 +19,16 @@
   source checkouts also discover repository release and debug builds automatically.
 - Added a real VS Code Extension Host E2E suite covering managed extraction, MCP,
   visualization placement, installers, update-on-save, and watch mode.
+- Improved Codex tool selection with MCP server instructions, intent-based tool
+  descriptions, parameter guidance, and read-only annotations.
+- Added a compact `project_overview` MCP tool and functional call/import/type/
+  structure filters for focused retrieval.
+- Python call graphs now resolve typed constructor-injected fields and method
+  parameters, including checkout calls through repositories, gateways, and
+  notification services.
+- Managed save and startup refreshes now accept intentional graph reductions;
+  the CLI also exposes the previously documented `graphoxide update --force`.
+- Added tag-driven Marketplace publishing for macOS, Linux, and Windows on x64
+  and arm64, with the matching standalone executable verified inside every VSIX.
+- Added component-specific release notes, binary provenance stamps, third-party
+  license reports, checksums, and GitHub build attestations for release artifacts.

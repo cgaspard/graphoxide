@@ -13,11 +13,14 @@ use rmcp::{
 };
 use serde::Deserialize;
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
 };
+
+const SERVER_INSTRUCTIONS: &str = "Use Graphoxide before broad filesystem searches when a user asks to explore, explain, navigate, trace, or assess impact in a codebase. Start with project_overview for architecture, query_graph for a focused neighborhood, then get_node, get_neighbors, or shortest_path for exact evidence. Treat results as deterministic static-analysis evidence, synthesize the answer yourself, cite returned source locations, and verify runtime behavior in source or tests. A no-match result does not prove a concept is absent. Clearly distinguish INFERRED edges from EXTRACTED facts.";
+
 #[derive(Debug, Clone, Default)]
 struct GraphoxideServer {
     cache: Arc<Mutex<GraphCache>>,
@@ -34,89 +37,197 @@ struct Project {
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct QueryParams {
+    #[schemars(
+        description = "Natural-language question, exact symbol, filename, or domain term to find"
+    )]
     question: String,
+    #[schemars(description = "Traversal mode: 'bfs' (default) or 'dfs'")]
     mode: Option<String>,
+    #[schemars(description = "Neighborhood depth from 0 to 6; defaults to 2")]
     depth: Option<usize>,
+    #[schemars(description = "Approximate maximum response tokens; defaults to 2000")]
     token_budget: Option<usize>,
+    #[schemars(
+        description = "Optional relationship categories: call, import, type, structure, or exact relation names"
+    )]
     context_filter: Option<Vec<String>>,
+    #[schemars(
+        description = "Project root containing graphoxide-out/graph.json; defaults to the server working directory"
+    )]
+    project_path: Option<String>,
+}
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct OverviewParams {
+    #[schemars(
+        description = "Maximum architectural hubs to include; defaults to 8 and caps at 20"
+    )]
+    top_n: Option<usize>,
+    #[schemars(description = "Approximate maximum response tokens; defaults to 3000")]
+    token_budget: Option<usize>,
+    #[schemars(
+        description = "Project root containing graphoxide-out/graph.json; defaults to the server working directory"
+    )]
     project_path: Option<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct NodeParams {
+    #[schemars(description = "Exact or partial symbol label, source filename, or node ID")]
     label: String,
+    #[schemars(
+        description = "Project root containing graphoxide-out/graph.json; defaults to the server working directory"
+    )]
     project_path: Option<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct NeighborParams {
+    #[schemars(description = "Exact or partial symbol label, source filename, or node ID")]
     label: String,
+    #[schemars(
+        description = "Optional relation substring such as calls, references, imports, or method"
+    )]
     relation_filter: Option<String>,
+    #[schemars(description = "Approximate maximum response tokens; defaults to 2000")]
     token_budget: Option<usize>,
+    #[schemars(
+        description = "Project root containing graphoxide-out/graph.json; defaults to the server working directory"
+    )]
     project_path: Option<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CommunityParams {
+    #[schemars(description = "Numeric community ID returned by project_overview or query_graph")]
     community_id: i64,
+    #[schemars(description = "Approximate maximum response tokens; defaults to 2000")]
     token_budget: Option<usize>,
+    #[schemars(
+        description = "Project root containing graphoxide-out/graph.json; defaults to the server working directory"
+    )]
     project_path: Option<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PathParams {
+    #[schemars(description = "Starting symbol label, source filename, or node ID")]
     source: String,
+    #[schemars(description = "Target symbol label, source filename, or node ID")]
     target: String,
+    #[schemars(description = "Optional maximum acceptable hop count")]
     max_hops: Option<usize>,
+    #[schemars(
+        description = "Project root containing graphoxide-out/graph.json; defaults to the server working directory"
+    )]
     project_path: Option<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GodParams {
+    #[schemars(description = "Number of hubs to return; defaults to 10")]
     top_n: Option<usize>,
+    #[schemars(
+        description = "Project root containing graphoxide-out/graph.json; defaults to the server working directory"
+    )]
     project_path: Option<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PrListParams {
+    #[schemars(description = "Optional pull request base branch filter")]
     base: Option<String>,
+    #[schemars(description = "Optional GitHub repository in OWNER/REPO form")]
     repo: Option<String>,
+    #[schemars(description = "Project root used as the GitHub CLI working directory")]
     project_path: Option<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PrImpactParams {
+    #[schemars(description = "GitHub pull request number")]
     pr_number: i64,
+    #[schemars(description = "Optional GitHub repository in OWNER/REPO form")]
     repo: Option<String>,
+    #[schemars(
+        description = "Project root containing the graph and used as the GitHub CLI working directory"
+    )]
     project_path: Option<String>,
 }
 
 #[tool_router]
 impl GraphoxideServer {
-    #[tool(description = "Search the code knowledge graph and return a connected neighborhood")]
+    #[tool(
+        description = "Use for codebase questions that need a focused, source-located graph neighborhood. Prefer exact symbols or domain terms; use context_filter=['call'] for execution flow. The result is evidence for the agent to synthesize, not a generated answer.",
+        annotations(
+            title = "Query code graph",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     fn query_graph(&self, Parameters(p): Parameters<QueryParams>) -> String {
         let path = graph_path(p.project_path);
         match self.load_graph(&path) {
             Ok(graph) => {
                 stamp_query(&path);
-                let _context_filter = p.context_filter;
+                let context_filter = p.context_filter.unwrap_or_default();
                 if p.mode.as_deref() == Some("dfs") {
-                    graphoxide_query::query_graph_dfs(
+                    graphoxide_query::query_graph_dfs_filtered(
                         &graph,
                         &p.question,
-                        p.depth.unwrap_or(3).min(6),
+                        p.depth.unwrap_or(2).min(6),
                         p.token_budget.unwrap_or(2000),
+                        &context_filter,
                     )
                 } else {
-                    graphoxide_query::query_graph(
+                    graphoxide_query::query_graph_filtered(
                         &graph,
                         &p.question,
-                        p.depth.unwrap_or(3).min(6),
+                        p.depth.unwrap_or(2).min(6),
                         p.token_budget.unwrap_or(2000),
+                        &context_filter,
                     )
                 }
             }
             Err(error) => format!("Could not load {}: {error}", path.display()),
         }
     }
-    #[tool(description = "Get a node and its incoming and outgoing connections")]
+    #[tool(
+        description = "Use first when asked to explore, summarize, or explain a codebase. Returns a compact architecture inventory with graph counts, hubs, communities, and indexed source files.",
+        annotations(
+            title = "Overview of project architecture",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn project_overview(&self, Parameters(p): Parameters<OverviewParams>) -> String {
+        self.with_graph(p.project_path, |graph| {
+            project_overview_text(
+                graph,
+                p.top_n.unwrap_or(8).min(20),
+                p.token_budget.unwrap_or(3000),
+            )
+        })
+    }
+    #[tool(
+        description = "Use after locating a specific symbol to get its exact graph identity, source location, type, community, and connection count.",
+        annotations(
+            title = "Inspect one code symbol",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     fn get_node(&self, Parameters(p): Parameters<NodeParams>) -> String {
         self.with_graph(p.project_path, |g| node_text(g, &p.label))
     }
-    #[tool(description = "Get neighbors of a graph node")]
+    #[tool(
+        description = "Use for precise incoming and outgoing relationships around one known symbol. Optionally restrict to relations such as calls, references, imports, or method.",
+        annotations(
+            title = "Inspect symbol relationships",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     fn get_neighbors(&self, Parameters(p): Parameters<NeighborParams>) -> String {
         self.with_graph(p.project_path, |g| {
             neighbors_text(
@@ -127,7 +238,16 @@ impl GraphoxideServer {
             )
         })
     }
-    #[tool(description = "List every node in a community")]
+    #[tool(
+        description = "Use after project_overview or query_graph returns a community ID to inspect that architectural area and its source locations.",
+        annotations(
+            title = "Inspect architecture community",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     fn get_community(&self, Parameters(p): Parameters<CommunityParams>) -> String {
         self.with_graph(p.project_path, |g| {
             let mut nodes: Vec<_> = g
@@ -167,7 +287,16 @@ impl GraphoxideServer {
             cut_lines(lines, p.token_budget.unwrap_or(2000))
         })
     }
-    #[tool(description = "List the most connected architectural hub nodes")]
+    #[tool(
+        description = "Use to identify highly connected architectural hubs for impact analysis or to choose where codebase exploration should begin.",
+        annotations(
+            title = "Find architectural hubs",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     fn god_nodes(&self, Parameters(p): Parameters<GodParams>) -> String {
         self.with_graph(p.project_path, |g| {
             let mut lines = vec!["God nodes (most connected):".into()];
@@ -182,11 +311,29 @@ impl GraphoxideServer {
             lines.join("\n")
         })
     }
-    #[tool(description = "Return graph node, edge, community, and source counts")]
+    #[tool(
+        description = "Use to verify graph availability, coverage, and confidence distribution. For an architecture summary, prefer project_overview.",
+        annotations(
+            title = "Check graph coverage",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     fn graph_stats(&self, Parameters(p): Parameters<Project>) -> String {
         self.with_graph(p.project_path, graph_stats_text)
     }
-    #[tool(description = "Find the shortest path between two graph nodes")]
+    #[tool(
+        description = "Use to test how two known symbols are structurally connected. Report edge directions and confidence; a shortest structural path is not necessarily a runtime execution path.",
+        annotations(
+            title = "Trace symbols through the graph",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     fn shortest_path(&self, Parameters(p): Parameters<PathParams>) -> String {
         self.with_graph(p.project_path, |g| {
             let result = graphoxide_query::shortest_path(g, &p.source, &p.target);
@@ -203,17 +350,44 @@ impl GraphoxideServer {
             result
         })
     }
-    #[tool(description = "List open pull requests using the GitHub CLI")]
+    #[tool(
+        description = "Use when the user asks which open GitHub pull requests may need graph-based impact review. Requires an authenticated GitHub CLI.",
+        annotations(
+            title = "List pull requests",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
     fn list_prs(&self, Parameters(p): Parameters<PrListParams>) -> String {
         let mut args = vec!["pr".into(), "list".into(), "--limit".into(), "30".into()];
         append_pr_filters(&mut args, p.base, p.repo);
         gh_owned(p.project_path, &args)
     }
-    #[tool(description = "Show a pull request and its likely graph impact")]
+    #[tool(
+        description = "Use to combine one GitHub pull request's changed files with Graphoxide communities and symbols for a likely-impact summary. Requires an authenticated GitHub CLI.",
+        annotations(
+            title = "Assess pull request impact",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
     fn get_pr_impact(&self, Parameters(p): Parameters<PrImpactParams>) -> String {
         self.pr_impact(p)
     }
-    #[tool(description = "List pull requests for impact triage")]
+    #[tool(
+        description = "Use when triaging several GitHub pull requests by changed files, checks, and review status before deeper graph impact calls. Requires an authenticated GitHub CLI.",
+        annotations(
+            title = "Triage pull requests",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
     fn triage_prs(&self, Parameters(p): Parameters<PrListParams>) -> String {
         let mut args = vec![
             "pr".into(),
@@ -353,7 +527,7 @@ impl ServerHandler for GraphoxideServer {
                 .build(),
         )
         .with_server_info(Implementation::new("graphoxide", env!("CARGO_PKG_VERSION")))
-        .with_instructions("Query and inspect Graphoxide project knowledge graphs.")
+        .with_instructions(SERVER_INSTRUCTIONS)
     }
 
     async fn list_resources(
@@ -428,6 +602,92 @@ fn stamp_query(graph: &Path) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(stamp, b"");
+}
+fn project_overview_text(g: &KnowledgeGraph, top_n: usize, token_budget: usize) -> String {
+    let index = graphoxide_query::GraphIndex::new(g);
+    let communities = g.nodes.iter().enumerate().fold(
+        BTreeMap::<i64, Vec<usize>>::new(),
+        |mut communities, (position, node)| {
+            if let Some(community) = node.community {
+                communities.entry(community).or_default().push(position);
+            }
+            communities
+        },
+    );
+    let sources: BTreeSet<_> = g
+        .nodes
+        .iter()
+        .filter(|node| !node.source_file.is_empty())
+        .map(|node| node.source_file.as_str())
+        .collect();
+    let mut lines = vec![
+        "Project overview (deterministic static-analysis evidence):".into(),
+        format!(
+            "Coverage: {} nodes | {} relationships | {} communities | {} source files",
+            g.nodes.len(),
+            g.links.len(),
+            communities.len(),
+            sources.len()
+        ),
+        "Architectural hubs:".into(),
+    ];
+    lines.extend(
+        graphoxide_query::god_nodes(g, top_n)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, label, degree))| {
+                format!(
+                    "  {}. {} — {} relationships",
+                    index + 1,
+                    graphoxide_core::sanitize_label(&label),
+                    degree
+                )
+            }),
+    );
+    lines.push("Communities:".into());
+    for (community, positions) in communities {
+        let hub = positions.iter().copied().max_by(|a, b| {
+            index
+                .degree(*a)
+                .cmp(&index.degree(*b))
+                .then_with(|| index.node(*b).id.cmp(&index.node(*a).id))
+        });
+        let name = positions
+            .iter()
+            .find_map(|position| {
+                index
+                    .node(*position)
+                    .extra
+                    .get("community_name")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or("");
+        let label = hub
+            .map(|position| index.node(position).label.as_str())
+            .unwrap_or("");
+        lines.push(format!(
+            "  - {community}{}: {} nodes; hub {}",
+            if name.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", graphoxide_core::sanitize_label(name))
+            },
+            positions.len(),
+            graphoxide_core::sanitize_label(label)
+        ));
+    }
+    lines.push(format!("Indexed source files ({}):", sources.len()));
+    lines.extend(
+        sources
+            .into_iter()
+            .map(|source| format!("  - {}", graphoxide_core::sanitize_label(source))),
+    );
+    lines.push(
+        "Limits: this graph describes static structure; verify dynamic behavior and data-dependent branches in source or tests."
+            .into(),
+    );
+    cut_lines(lines, token_budget)
 }
 fn graph_stats_text(g: &KnowledgeGraph) -> String {
     let communities = g
@@ -628,4 +888,57 @@ pub fn serve() -> anyhow::Result<()> {
         service.waiting().await?;
         anyhow::Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_instructions_tell_codex_when_and_how_to_use_the_graph() {
+        let info = GraphoxideServer::default().get_info();
+        let instructions = info.instructions.expect("server instructions");
+        assert!(instructions.starts_with("Use Graphoxide before broad filesystem searches"));
+        assert!(instructions.contains("project_overview"));
+        assert!(instructions.contains("does not prove"));
+    }
+
+    #[test]
+    fn local_graph_tools_advertise_clear_read_only_contracts() {
+        for tool in [
+            GraphoxideServer::project_overview_tool_attr(),
+            GraphoxideServer::query_graph_tool_attr(),
+            GraphoxideServer::get_node_tool_attr(),
+            GraphoxideServer::get_neighbors_tool_attr(),
+        ] {
+            let annotations = tool.annotations.expect("tool annotations");
+            assert_eq!(annotations.read_only_hint, Some(true));
+            assert_eq!(annotations.destructive_hint, Some(false));
+            assert_eq!(annotations.open_world_hint, Some(false));
+            assert!(tool
+                .description
+                .is_some_and(|description| description.len() > 60));
+        }
+    }
+
+    #[test]
+    fn overview_is_compact_and_explicit_about_static_evidence() {
+        let graph = KnowledgeGraph {
+            nodes: vec![graphoxide_core::Node {
+                id: "checkout".into(),
+                label: "CheckoutService".into(),
+                file_type: "code".into(),
+                source_file: "src/checkout.py".into(),
+                source_location: Some("L10".into()),
+                community: Some(1),
+                extra: BTreeMap::from([("community_name".into(), "Checkout".into())]),
+            }],
+            ..Default::default()
+        };
+        let overview = project_overview_text(&graph, 8, 2000);
+        assert!(overview.contains("deterministic static-analysis evidence"));
+        assert!(overview.contains("CheckoutService"));
+        assert!(overview.contains("src/checkout.py"));
+        assert!(overview.contains("verify dynamic behavior"));
+    }
 }

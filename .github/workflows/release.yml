@@ -2,78 +2,232 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: Validate release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      channel: ${{ steps.version.outputs.channel }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve version and Marketplace channel
+        id: version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          MINOR="$(printf '%s' "$VERSION" | cut -d. -f2 | cut -d- -f1)"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag $TAG is not a supported semantic version"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "channel=none" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          elif [ $((MINOR % 2)) -eq 1 ]; then
+            echo "channel=prerelease" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify synchronized versions and component release notes
+        run: node scripts/render-release-notes.mjs "${{ steps.version.outputs.version }}" --check
+
+      - name: Render combined GitHub release notes
+        run: node scripts/render-release-notes.mjs "${{ steps.version.outputs.version }}" > release-body.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-body.md
+          if-no-files-found: error
+
   build:
     name: ${{ matrix.name }}
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: graphoxide-linux-x86_64.tar.gz
           - name: macOS arm64
             os: macos-14
-            target: aarch64-apple-darwin
-            archive: graphoxide-macos-arm64.tar.gz
-          - name: macOS x86_64
+            rust_target: aarch64-apple-darwin
+            vscode_target: darwin-arm64
+            executable: graphoxide
+            archive_extension: tar.gz
+          - name: macOS x64
             os: macos-15-intel
-            target: x86_64-apple-darwin
-            archive: graphoxide-macos-x86_64.tar.gz
-          - name: Windows x86_64
+            rust_target: x86_64-apple-darwin
+            vscode_target: darwin-x64
+            executable: graphoxide
+            archive_extension: tar.gz
+          - name: Linux x64
+            os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            vscode_target: linux-x64
+            executable: graphoxide
+            archive_extension: tar.gz
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            vscode_target: linux-arm64
+            executable: graphoxide
+            archive_extension: tar.gz
+          - name: Windows x64
             os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: graphoxide-windows-x86_64.zip
+            rust_target: x86_64-pc-windows-msvc
+            vscode_target: win32-x64
+            executable: graphoxide.exe
+            archive_extension: zip
+          - name: Windows arm64
+            os: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            vscode_target: win32-arm64
+            executable: graphoxide.exe
+            archive_extension: zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95"
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.rust_target }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
-      - run: cargo build --release --locked --target ${{ matrix.target }} --bin graphoxide
-      - run: npm ci
+
+      - name: Build standalone Graphoxide
+        run: cargo build --release --locked --target ${{ matrix.rust_target }} --bin graphoxide
+
+      - name: Install extension dependencies
+        run: npm ci
         working-directory: editors/vscode
-      - run: npm run check
+
+      - name: Validate extension
+        run: npm run check
         working-directory: editors/vscode
-      - run: npm run package
+
+      - name: Package target-specific VSIX with bundled Graphoxide
         working-directory: editors/vscode
-      - name: Package Unix artifact
+        run: >-
+          node scripts/package.mjs
+          --target ${{ matrix.vscode_target }}
+          --binary "${{ github.workspace }}/target/${{ matrix.rust_target }}/release/${{ matrix.executable }}"
+          --out "${{ github.workspace }}/release-assets/graphoxide-vscode-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}.vsix"
+          ${{ needs.prepare.outputs.channel == 'prerelease' && '--pre-release' || '' }}
+
+      - name: Package standalone Unix archive
         if: runner.os != 'Windows'
-        run: tar -czf "${{ matrix.archive }}" -C "target/${{ matrix.target }}/release" graphoxide -C "$GITHUB_WORKSPACE" LICENSE NOTICE LICENSE-MIT README.md
-      - name: Package Windows artifact
+        shell: bash
+        run: |
+          BUNDLE_NAME="graphoxide-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}"
+          BUNDLE_ROOT="${RUNNER_TEMP}/${BUNDLE_NAME}"
+          mkdir -p "$BUNDLE_ROOT"
+          cp "target/${{ matrix.rust_target }}/release/${{ matrix.executable }}" "$BUNDLE_ROOT/graphoxide"
+          chmod 755 "$BUNDLE_ROOT/graphoxide"
+          cp LICENSE LICENSE-MIT NOTICE README.md THIRD_PARTY_LICENSES.html "$BUNDLE_ROOT/"
+          tar -czf "release-assets/${BUNDLE_NAME}.tar.gz" -C "$RUNNER_TEMP" "$BUNDLE_NAME"
+          cp "release-assets/${BUNDLE_NAME}.tar.gz" "release-assets/graphoxide-${{ matrix.vscode_target }}.tar.gz"
+
+      - name: Package standalone Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/${{ matrix.target }}/release/graphoxide.exe", LICENSE, NOTICE, LICENSE-MIT, README.md -DestinationPath "${{ matrix.archive }}"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleName = 'graphoxide-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}'
+          $bundleRoot = Join-Path $env:RUNNER_TEMP $bundleName
+          New-Item -ItemType Directory -Path $bundleRoot -Force | Out-Null
+          Copy-Item -LiteralPath 'target/${{ matrix.rust_target }}/release/${{ matrix.executable }}' -Destination (Join-Path $bundleRoot 'graphoxide.exe')
+          Copy-Item -LiteralPath LICENSE, LICENSE-MIT, NOTICE, README.md, THIRD_PARTY_LICENSES.html -Destination $bundleRoot
+          $versionedArchive = 'release-assets/{0}.zip' -f $bundleName
+          Compress-Archive -LiteralPath $bundleRoot -DestinationPath $versionedArchive -CompressionLevel Optimal
+          Copy-Item -LiteralPath $versionedArchive -Destination 'release-assets/graphoxide-${{ matrix.vscode_target }}.zip'
+
+      - name: Create stable-name VSIX mirror
+        run: >-
+          node -e "require('node:fs').copyFileSync(process.argv[1], process.argv[2])"
+          "release-assets/graphoxide-vscode-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}.vsix"
+          "release-assets/graphoxide-vscode-${{ matrix.vscode_target }}.vsix"
+
+      - name: Publish target to VS Code Marketplace (${{ needs.prepare.outputs.channel }})
+        if: needs.prepare.outputs.channel != 'none'
+        working-directory: editors/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: >-
+          npx vsce publish
+          ${{ needs.prepare.outputs.channel == 'prerelease' && '--pre-release' || '' }}
+          --packagePath "${{ github.workspace }}/release-assets/graphoxide-vscode-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}.vsix"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: |
-            ${{ matrix.archive }}
-            editors/vscode/*.vsix
+          name: graphoxide-${{ matrix.vscode_target }}
+          path: release-assets/*
           if-no-files-found: error
 
   publish:
     name: Publish GitHub release
-    needs: [build]
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          pattern: graphoxide-*
+          path: release-assets
           merge-multiple: true
-      - name: Create release and upload artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --generate-notes --verify-tag
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        working-directory: release-assets
+        run: |
+          find . -maxdepth 1 -type f -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 24
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-assets/*
+
+      - name: Create GitHub release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Graphoxide ${{ needs.prepare.outputs.tag }}
+          body_path: release-body.md
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          fail_on_unmatched_files: true
+          files: release-assets/*

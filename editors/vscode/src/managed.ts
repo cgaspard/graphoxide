@@ -54,7 +54,7 @@ export class ManagedWorkspaceService implements vscode.Disposable {
     try {
       const state = await this.store.load(target);
       if (state?.model) {
-        await this.cli.run({ title: 'Graphoxide: synchronizing workspace graph…', folder: target, args: ['update', target.uri.fsPath] });
+        await this.cli.run({ title: 'Graphoxide: synchronizing workspace graph…', folder: target, args: ['update', target.uri.fsPath, '--force'] });
       } else {
         await this.cli.run({ title: 'Graphoxide: building workspace graph…', folder: target, args: ['extract', target.uri.fsPath] });
       }
@@ -151,7 +151,7 @@ export class ManagedWorkspaceService implements vscode.Disposable {
         await this.cli.run({ title: 'Graphoxide: rebuilding managed workspace…', folder, args: ['extract', folder.uri.fsPath], showProgress: false, cancellable: false });
         await this.store.load(folder);
       } else if (mode !== 'manual') {
-        await this.cli.run({ title: 'Graphoxide: refreshing managed workspace…', folder, args: ['update', folder.uri.fsPath], showProgress: false, cancellable: false });
+        await this.cli.run({ title: 'Graphoxide: refreshing managed workspace…', folder, args: ['update', folder.uri.fsPath, '--force'], showProgress: false, cancellable: false });
         await this.store.load(folder);
       }
       if (mode === 'watch' && !this.cli.watching) await this.cli.startWatch(folder);

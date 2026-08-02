@@ -34,7 +34,8 @@
     "CHANGELOG.md",
     "LICENSE",
     "LICENSE-MIT",
-    "NOTICE"
+    "NOTICE",
+    "THIRD_PARTY_LICENSES.html"
   ],
   "scripts": {
     "vscode:prepublish": "npm run check",

@@ -1,0 +1,19 @@
+version: 0.1.0
+date: 2026-08-02
+highlights:
+  - First Graphoxide CLI release: one native executable for extraction, graph analysis, querying, exports, watch mode, integrations, and MCP.
+  - Deterministic local analysis requires no Python runtime, hosted service, API key, vector database, or LLM.
+added:
+  - Parallel source extraction across compiled tree-sitter languages and the offline fallback language matrix.
+  - Query, explanation, shortest-path, impact, architectural-hub, report, and export commands.
+  - Incremental updates, continuous watch mode, hooks, global graphs, and atomic graph writes.
+  - An MCP server with architecture overview, focused graph retrieval, exact symbol relationships, graph statistics, paths, and GitHub pull-request impact tools.
+  - Standalone release archives for macOS, Linux, and Windows on x64 and arm64.
+changed:
+  - Python call resolution follows typed constructor-injected fields and method parameters, preserving inferred confidence and receiver context.
+  - MCP instructions and tool contracts now guide coding agents to use graph evidence before broad filesystem searches and to verify dynamic behavior in source or tests.
+fixed:
+  - Filtered queries now honor call, import, type, structure, and exact-relation filters.
+  - No-match and token-budget messages no longer overstate absence or report inaccurate truncation counts.
+  - Managed update flows can explicitly accept intentional graph reductions with update --force.
+removed: []

@@ -2,3 +2,5 @@ dist/
 node_modules/
 .vscode-test/
 *.vsix
+bin/
+THIRD_PARTY_LICENSES.html

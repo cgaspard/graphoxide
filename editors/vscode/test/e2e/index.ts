@@ -55,13 +55,46 @@ async function verifyMcpProtocol(invocation: NonNullable<Awaited<ReturnType<Grap
       capabilities: {},
       clientInfo: { name: 'graphoxide-vscode-e2e', version: '1.0.0' },
     });
-    assert.match(JSON.stringify(initialized), /graphoxide/iu);
+    const initializedText = JSON.stringify(initialized);
+    assert.match(initializedText, /graphoxide/iu);
+    assert.match(initializedText, /Use Graphoxide before broad filesystem searches/iu);
     client.notify('notifications/initialized', {});
     const tools = await client.request('tools/list', {});
-    assert.match(JSON.stringify(tools), /query_graph/iu);
-    assert.match(JSON.stringify(tools), /graph_stats/iu);
+    const toolsText = JSON.stringify(tools);
+    assert.match(toolsText, /project_overview/iu);
+    assert.match(toolsText, /query_graph/iu);
+    assert.match(toolsText, /graph_stats/iu);
+    assert.match(toolsText, /readOnlyHint[^}]*true/iu);
     const stats = await client.request('tools/call', { name: 'graph_stats', arguments: { project_path: invocation.cwd } });
     assert.match(JSON.stringify(stats), /node/iu);
+    const overview = await client.request('tools/call', {
+      name: 'project_overview',
+      arguments: { project_path: invocation.cwd, token_budget: 4000 },
+    });
+    assert.match(JSON.stringify(overview), /CheckoutService/iu);
+    assert.match(JSON.stringify(overview), /static-analysis evidence/iu);
+
+    const callFlow = await client.request('tools/call', {
+      name: 'query_graph',
+      arguments: {
+        question: 'CheckoutService checkout',
+        context_filter: ['call'],
+        depth: 2,
+        token_budget: 4000,
+        project_path: invocation.cwd,
+      },
+    });
+    const callFlowText = JSON.stringify(callFlow);
+    for (const expected of ['reserve', 'charge', 'release', 'save', 'send_confirmation']) {
+      assert.match(callFlowText, new RegExp(expected, 'iu'), `Injected checkout call to ${expected} was missing from MCP results.`);
+    }
+    assert.doesNotMatch(callFlowText, /--references/iu, 'The call relation filter returned a non-call relationship.');
+
+    const releasePath = await client.request('tools/call', {
+      name: 'shortest_path',
+      arguments: { source: 'checkout', target: 'release', project_path: invocation.cwd },
+    });
+    assert.match(JSON.stringify(releasePath), /Shortest path \(1 hops\).*--calls.*release/iu);
   } finally {
     await client.close();
   }

@@ -38,6 +38,9 @@ enum Command {
     Update {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Allow an intentional graph reduction after files or relationships are removed
+        #[arg(long)]
+        force: bool,
     },
     /// BFS traversal of graph.json for a question
     Query {
@@ -356,7 +359,7 @@ fn main() -> anyhow::Result<()> {
             };
             write_output(&output)
         }
-        Command::Update { path } => rebuild(&path, false, false),
+        Command::Update { path, force } => rebuild(&path, false, force),
         Command::ClusterOnly { path } => {
             let graph_path = if path.is_dir() {
                 path.join("graphoxide-out/graph.json")
@@ -1606,7 +1609,8 @@ fn write_output(output: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::relevant_watch_paths;
+    use super::{relevant_watch_paths, Cli, Command};
+    use clap::Parser;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1637,5 +1641,12 @@ mod tests {
             relevant_watch_paths(Path::new("."), paths),
             vec![PathBuf::from("src/lib.rs")]
         );
+    }
+
+    #[test]
+    fn update_accepts_force_for_managed_graph_reductions() {
+        let cli = Cli::try_parse_from(["graphoxide", "update", ".", "--force"])
+            .expect("parse update --force");
+        assert!(matches!(cli.command, Command::Update { force: true, .. }));
     }
 }

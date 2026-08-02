@@ -60,6 +60,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: node scripts/render-release-notes.mjs --current --check
       - run: node --check website/app.js
       - run: node website/scripts/validate.mjs
 

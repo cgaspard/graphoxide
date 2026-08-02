@@ -22,6 +22,13 @@ graph schema while adding a native CLI/MCP runtime and IDE integration.
 
 Rust 1.95 is pinned in `rust-toolchain.toml`.
 
+Download a standalone archive for macOS, Linux, or Windows from the
+[latest GitHub release](https://github.com/cgaspard/graphoxide/releases/latest),
+verify it against `SHA256SUMS`, and place `graphoxide` on your `PATH`. Native
+x64 and arm64 builds are published for all three operating systems.
+
+To build from source instead:
+
 ```bash
 cargo build --release --workspace
 ./target/release/graphoxide --help
@@ -141,6 +148,10 @@ Use the incremental update after changing code:
 graphoxide update .
 ```
 
+If files or relationships were intentionally removed, allow the resulting graph
+reduction with `graphoxide update . --force`. Managed IDE save/watch refreshes
+use this authoritative mode automatically.
+
 To rebuild community assignments without re-extracting source files:
 
 ```bash
@@ -237,19 +248,49 @@ executable lives elsewhere. Platform-specific VSIX packages include the same
 standalone native executable, so Marketplace users do not need a separate CLI
 installation.
 
+Release builds publish six target-specific VSIX packages to the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=cgaspard.graphoxide-vscode)
+and attach the exact packages to the GitHub release. Each package is verified to
+contain `bin/graphoxide` (or `bin/graphoxide.exe`) before it can be published.
+
 The interactive graph opens in the current editor group. Use **Open Interactive
 Graph Beside** when a split view is preferred.
 
 Extension source, settings, shortcuts, and development instructions are in
 [editors/vscode/README.md](editors/vscode/README.md).
 
+## Releases and release notes
+
+The standalone CLI and VS Code extension share one synchronized version but
+maintain separate release notes under [`releasenotes/cli`](releasenotes/cli)
+and [`releasenotes/vscode`](releasenotes/vscode). A `v<version>` tag validates
+both note files, builds native CLI archives and binary-bundled VSIX packages for
+macOS/Linux/Windows x64 and arm64, publishes the VSIX packages to the Marketplace,
+attaches all artifacts plus `SHA256SUMS` to GitHub, and records build provenance.
+
+See [`releasenotes/README.md`](releasenotes/README.md) for the release process.
+
 ## MCP
 
-Run `graphoxide serve` as a stdio MCP server. It exposes ten tools:
+Run `graphoxide serve` as a stdio MCP server. It exposes eleven tools:
 
-`query_graph`, `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`, `list_prs`, `get_pr_impact`, and `triage_prs`.
+`project_overview`, `query_graph`, `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`, `list_prs`, `get_pr_impact`, and `triage_prs`.
 
 It also exposes report, stats, god-node, surprise, audit, and question resources. Every tool accepts an optional `project_path`; graph contexts hot-reload through an eight-entry mtime/size LRU. PR tools use the installed `gh` CLI.
+
+The server advertises Codex-oriented usage instructions, intent-based tool
+descriptions, input guidance, and read-only annotations. For architecture work,
+agents begin with `project_overview`, narrow structural questions with
+`query_graph`, and follow up with exact node, neighbor, or path calls. The
+optional `context_filter` accepts `call`, `import`, `type`, `structure`, or an
+exact relation name. Graphoxide reports source-located static evidence; the
+calling agent remains responsible for synthesizing an answer and verifying
+runtime behavior.
+
+Python extraction follows typed constructor injection and typed method
+parameters. Calls such as `self.inventory.reserve(...)` can therefore resolve
+to the method on `InventoryRepository`, with an `INFERRED` confidence label and
+receiver/type context rather than being omitted from the call graph.
 
 A generic MCP client configuration looks like this:
 
@@ -350,7 +391,7 @@ Questions and full responses may contain sensitive project context, so choose th
 ## Troubleshooting
 
 - **`graphoxide-out/graph.json` was not found:** run `graphoxide extract . --code-only` from the project root, change to that root, or pass `--graph /absolute/path/to/graph.json`.
-- **A graph overwrite is refused:** Graphoxide's shrink guard detected fewer nodes than the existing graph. Inspect deleted files and ignore rules, then rerun extraction with `--force` if the reduction is expected.
+- **A graph overwrite is refused:** Graphoxide's shrink guard detected fewer nodes than the existing graph. Inspect deleted files and ignore rules, then rerun `graphoxide update . --force` (or extraction with `--force`) if the reduction is expected.
 - **A source file is missing:** check its extension, `.gitignore`, `.graphoxideignore`, and whether it is beneath a dependency/build/cache directory.
 - **A node name is ambiguous:** query the name first and reuse the exact node ID or source path from the result.
 - **An MCP PR tool fails:** install `gh`, authenticate with `gh auth login`, and run the server inside a Git repository or supply `repo`.

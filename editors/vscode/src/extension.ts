@@ -317,7 +317,7 @@ function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
     if (!folder) return;
     running = true;
     try {
-      await services.cli.run({ title: 'Graphoxide: updating after save…', folder, args: ['update', folder.uri.fsPath], showProgress: false, cancellable: false });
+      await services.cli.run({ title: 'Graphoxide: updating after save…', folder, args: ['update', folder.uri.fsPath, '--force'], showProgress: false, cancellable: false });
       await services.store.load(folder);
     } catch (error) {
       handleError(error);

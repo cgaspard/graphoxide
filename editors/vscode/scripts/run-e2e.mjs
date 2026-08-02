@@ -12,7 +12,14 @@ const electronEnvironment = new Map();
 
 try {
   await cp(path.join(repositoryRoot, 'examples', 'vscode-sample'), workspace, { recursive: true });
-  await rm(path.join(workspace, 'graphoxide-out'), { recursive: true, force: true });
+  await Promise.all([
+    rm(path.join(workspace, 'graphoxide-out'), { recursive: true, force: true }),
+    rm(path.join(workspace, '.codex'), { recursive: true, force: true }),
+    rm(path.join(workspace, '.mcp.json'), { force: true }),
+    rm(path.join(workspace, 'opencode.json'), { force: true }),
+    rm(path.join(workspace, 'cartograph', '__pycache__'), { recursive: true, force: true }),
+    rm(path.join(workspace, 'tests', '__pycache__'), { recursive: true, force: true }),
+  ]);
   await mkdir(path.join(workspace, '.vscode'), { recursive: true });
   await writeFile(path.join(workspace, '.vscode', 'settings.json'), JSON.stringify({
     'graphoxide.promptOnFirstOpen': false,

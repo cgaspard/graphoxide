@@ -93,3 +93,148 @@ pub fn extract_project_with_options(
     resolution::resolve(&mut extractions);
     Ok(extractions)
 }
+
+#[cfg(test)]
+mod tests {
+    use graphoxide_core::make_id;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture {
+        root: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "graphoxide-injected-calls-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).expect("create extraction fixture");
+            Self { root }
+        }
+
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.root.join(name);
+            fs::write(&path, contents).expect("write extraction fixture");
+            path
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).expect("remove extraction fixture");
+        }
+    }
+
+    fn extract(path: &Path, source_file: &str) -> graphoxide_core::Extraction {
+        super::engine::extract_as(path, source_file).expect("extract fixture file")
+    }
+
+    #[test]
+    fn python_injected_fields_resolve_to_their_typed_methods() {
+        let fixture = Fixture::new();
+        let ports = fixture.write(
+            "ports.py",
+            r#"
+class InventoryRepository:
+    def reserve(self, items): ...
+    def release(self, items): ...
+
+class PaymentGateway:
+    def charge(self, order_id): ...
+
+class DemoPaymentGateway:
+    def charge(self, order_id): ...
+
+class OrderRepository:
+    def save(self, order): ...
+
+class InMemoryOrderRepository:
+    def save(self, order): ...
+
+class NotificationService:
+    def send_confirmation(self, order): ...
+"#,
+        );
+        let checkout_file = fixture.write(
+            "checkout.py",
+            r#"
+from ports import InventoryRepository, NotificationService, OrderRepository, PaymentGateway
+
+class CheckoutService:
+    def __init__(
+        self,
+        inventory: InventoryRepository,
+        payments: PaymentGateway,
+        orders: OrderRepository,
+        notifications: NotificationService,
+    ):
+        self.inventory = inventory
+        self.payments = payments
+        self.orders = orders
+        self.notifications = notifications
+
+    def checkout(self, order):
+        self.inventory.reserve(order.items)
+        self.payments.charge(order.order_id)
+        self.inventory.release(order.items)
+        self.orders.save(order)
+        self.notifications.send_confirmation(order)
+"#,
+        );
+        let mut extractions = vec![
+            extract(&ports, "ports.py"),
+            extract(&checkout_file, "checkout.py"),
+        ];
+        super::resolution::resolve(&mut extractions);
+
+        let checkout = make_id(&["checkout", "CheckoutService", "checkout"]);
+        let expected = [
+            (
+                make_id(&["ports", "InventoryRepository", "reserve"]),
+                "InventoryRepository",
+            ),
+            (
+                make_id(&["ports", "InventoryRepository", "release"]),
+                "InventoryRepository",
+            ),
+            (
+                make_id(&["ports", "PaymentGateway", "charge"]),
+                "PaymentGateway",
+            ),
+            (
+                make_id(&["ports", "OrderRepository", "save"]),
+                "OrderRepository",
+            ),
+            (
+                make_id(&["ports", "NotificationService", "send_confirmation"]),
+                "NotificationService",
+            ),
+        ];
+
+        for (target, receiver_type) in expected {
+            let edge = extractions
+                .iter()
+                .flat_map(|extraction| &extraction.edges)
+                .find(|edge| {
+                    edge.relation == "calls"
+                        && edge.true_source() == checkout
+                        && edge.true_target() == target
+                })
+                .unwrap_or_else(|| panic!("missing injected call from {checkout} to {target}"));
+            assert_eq!(
+                edge.extra
+                    .get("receiver_type")
+                    .and_then(|value| value.as_str()),
+                Some(receiver_type)
+            );
+        }
+    }
+}

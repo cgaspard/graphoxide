@@ -14,4 +14,7 @@ pub mod query;
 
 pub use affected::affected;
 pub use paths::{explain, shortest_path};
-pub use query::{god_nodes, query_graph, query_graph_dfs, GraphIndex};
+pub use query::{
+    god_nodes, query_graph, query_graph_dfs, query_graph_dfs_filtered, query_graph_filtered,
+    GraphIndex,
+};

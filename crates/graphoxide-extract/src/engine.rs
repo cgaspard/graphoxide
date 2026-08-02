@@ -206,6 +206,7 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         edges: Vec::new(),
         seen: HashSet::new(),
         definitions: HashMap::new(),
+        node_labels: HashMap::new(),
         calls: Vec::new(),
         indirect_calls: Vec::new(),
         callable_ids: HashSet::new(),
@@ -223,6 +224,8 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         enum_ids: HashSet::new(),
         pending_local_refs: Vec::new(),
         method_owners: HashMap::new(),
+        python_parameter_types: HashMap::new(),
+        python_attribute_types: HashMap::new(),
     };
     state.add_node(
         file_id.clone(),
@@ -247,6 +250,15 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
     })
 }
 
+struct CallSite {
+    source: String,
+    name: String,
+    line: usize,
+    member_call: bool,
+    receiver: Option<String>,
+    receiver_type: Option<String>,
+}
+
 struct State<'a> {
     source: &'a [u8],
     source_file: &'a str,
@@ -257,7 +269,8 @@ struct State<'a> {
     edges: Vec<Edge>,
     seen: HashSet<String>,
     definitions: HashMap<String, Vec<String>>,
-    calls: Vec<(String, String, usize, bool)>,
+    node_labels: HashMap<String, String>,
+    calls: Vec<CallSite>,
     indirect_calls: Vec<(String, String, usize, &'static str)>,
     callable_ids: HashSet<String>,
     emit_unresolved_calls: bool,
@@ -266,6 +279,8 @@ struct State<'a> {
     enum_ids: HashSet<String>,
     pending_local_refs: Vec<(String, String, String, usize)>,
     method_owners: HashMap<String, String>,
+    python_parameter_types: HashMap<(String, String), String>,
+    python_attribute_types: HashMap<(String, String), String>,
 }
 
 impl State<'_> {
@@ -281,13 +296,11 @@ impl State<'_> {
         if let Some(kind) = kind {
             extra.insert("type".into(), kind.into());
         }
+        let normalized_label = definition_key(&label);
+        self.node_labels
+            .insert(id.clone(), normalized_label.clone());
         self.definitions
-            .entry(
-                label
-                    .trim_start_matches('.')
-                    .trim_end_matches("()")
-                    .to_lowercase(),
-            )
+            .entry(normalized_label)
             .or_default()
             .push(id.clone());
         self.nodes.push(Node {
@@ -525,6 +538,7 @@ impl State<'_> {
                 Confidence::Extracted,
             );
             if self.language_name == "python" {
+                self.collect_python_parameter_types(node, &id);
                 self.emit_python_docstring(node, &id);
                 self.emit_python_type_refs(node, &id, line);
             }
@@ -543,6 +557,12 @@ impl State<'_> {
                     .or_else(|| node.child_by_field_name("type"));
                 if let Some(callee) = callee {
                     let member_call = self.spec.accessor_types.contains(&callee.kind());
+                    let (receiver, receiver_type) = if self.language_name == "python" && member_call
+                    {
+                        self.python_receiver(callee, &owner)
+                    } else {
+                        (None, None)
+                    };
                     let name = if self.spec.accessor_types.contains(&callee.kind()) {
                         callee
                             .child_by_field_name(self.spec.accessor_field)
@@ -563,7 +583,14 @@ impl State<'_> {
                             .into()
                     };
                     if !name.is_empty() && !python_builtin(&name) {
-                        self.calls.push((owner.clone(), name, line, member_call));
+                        self.calls.push(CallSite {
+                            source: owner.clone(),
+                            name,
+                            line,
+                            member_call,
+                            receiver,
+                            receiver_type,
+                        });
                     }
                 }
                 if self.language_name == "python" {
@@ -594,6 +621,9 @@ impl State<'_> {
         }
         if self.language_name == "python" {
             let owner = function.clone().unwrap_or_else(|| self.file_id.clone());
+            if kind == "assignment" {
+                self.record_python_attribute_type(node, class.as_deref(), function.as_deref());
+            }
             if matches!(kind, "dictionary" | "list" | "set" | "tuple") {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
@@ -1187,51 +1217,215 @@ impl State<'_> {
         }
         target
     }
+    fn collect_python_parameter_types(&mut self, node: TsNode<'_>, function: &str) {
+        let Some(parameters) = node.child_by_field_name("parameters") else {
+            return;
+        };
+        let mut typed_parameters = Vec::new();
+        collect_descendants(
+            parameters,
+            &["typed_parameter", "typed_default_parameter"],
+            &mut typed_parameters,
+        );
+        for parameter in typed_parameters {
+            let parameter_name = parameter
+                .child_by_field_name("name")
+                .map(|name| deepest_identifier(name, self.source))
+                .or_else(|| {
+                    let mut cursor = parameter.walk();
+                    let name = parameter
+                        .named_children(&mut cursor)
+                        .find(|child| child.kind() != "type")
+                        .map(|name| deepest_identifier(name, self.source));
+                    name
+                })
+                .unwrap_or_default();
+            if parameter_name.is_empty() {
+                continue;
+            }
+            let Some(annotation) = parameter.child_by_field_name("type") else {
+                continue;
+            };
+            let mut names = Vec::new();
+            collect_python_annotation_names(annotation, self.source, &mut names);
+            let Some(type_name) = names
+                .into_iter()
+                .rev()
+                .find(|name| !matches!(name.as_str(), "None" | "Optional"))
+            else {
+                continue;
+            };
+            self.python_parameter_types
+                .insert((function.to_owned(), parameter_name), type_name);
+        }
+    }
+    fn record_python_attribute_type(
+        &mut self,
+        node: TsNode<'_>,
+        class: Option<&str>,
+        function: Option<&str>,
+    ) {
+        let (Some(class), Some(function), Some(left), Some(right)) = (
+            class,
+            function,
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return;
+        };
+        if right.kind() != "identifier" {
+            return;
+        }
+        let left = self.text(left);
+        let Some(attribute) = left
+            .strip_prefix("self.")
+            .filter(|attribute| !attribute.contains('.'))
+        else {
+            return;
+        };
+        let parameter = self.text(right);
+        if let Some(type_name) = self
+            .python_parameter_types
+            .get(&(function.to_owned(), parameter))
+            .cloned()
+        {
+            self.python_attribute_types
+                .insert((class.to_owned(), attribute.to_owned()), type_name);
+        }
+    }
+    fn python_receiver(
+        &self,
+        callee: TsNode<'_>,
+        function: &str,
+    ) -> (Option<String>, Option<String>) {
+        let Some(object) = callee.child_by_field_name("object") else {
+            return (None, None);
+        };
+        let receiver = self.text(object);
+        let receiver_type = if let Some(attribute) = receiver
+            .strip_prefix("self.")
+            .filter(|attribute| !attribute.contains('.'))
+        {
+            self.method_owners.get(function).and_then(|class| {
+                self.python_attribute_types
+                    .get(&(class.clone(), attribute.to_owned()))
+                    .cloned()
+            })
+        } else if object.kind() == "identifier" {
+            self.python_parameter_types
+                .get(&(function.to_owned(), receiver.clone()))
+                .cloned()
+        } else {
+            None
+        };
+        (Some(receiver), receiver_type)
+    }
+    fn annotate_call_edge(&mut self, call: &CallSite) {
+        let Some(edge) = self.edges.last_mut() else {
+            return;
+        };
+        if let Some(receiver) = &call.receiver {
+            edge.extra
+                .insert("receiver".into(), receiver.clone().into());
+        }
+        if let Some(receiver_type) = &call.receiver_type {
+            edge.extra
+                .insert("receiver_type".into(), receiver_type.clone().into());
+        }
+        let context = match (&call.receiver, &call.receiver_type) {
+            (Some(receiver), Some(receiver_type)) => {
+                Some(format!("receiver={receiver} type={receiver_type}"))
+            }
+            (Some(receiver), None) => Some(format!("receiver={receiver}")),
+            _ => None,
+        };
+        if let Some(context) = context {
+            edge.extra.insert("context".into(), context.into());
+        }
+    }
+    fn emit_unresolved_call(&mut self, call: &CallSite) {
+        let target = make_id(&["__graphoxide_call", &call.name]);
+        self.add_edge(
+            call.source.clone(),
+            target,
+            "calls",
+            call.line,
+            Confidence::Inferred,
+        );
+        if let Some(edge) = self.edges.last_mut() {
+            edge.extra.insert("unresolved_call".into(), true.into());
+            edge.extra.insert("callee".into(), call.name.clone().into());
+        }
+        self.annotate_call_edge(call);
+    }
     fn resolve_calls(&mut self) {
         self.definitions.values_mut().for_each(|ids| ids.sort());
         let calls = std::mem::take(&mut self.calls);
         let mut seen_pairs = BTreeSet::new();
-        for (source, name, line, member_call) in calls {
-            if let Some(targets) = self.definitions.get(&name.to_lowercase()) {
-                let member_allowed = self.language_name != "python"
-                    || if member_call {
-                        self.method_owners.contains_key(&source)
-                            && self.method_owners.get(&source)
-                                == self.method_owners.get(&targets[0])
-                    } else {
-                        !self.method_owners.contains_key(&targets[0])
-                    };
-                if targets.len() == 1 && targets[0] != source && member_allowed {
-                    if !seen_pairs.insert((source.clone(), targets[0].clone())) {
-                        continue;
+        for call in calls {
+            let targets = self
+                .definitions
+                .get(&definition_key(&call.name))
+                .cloned()
+                .unwrap_or_default();
+            let compatible: Vec<_> = targets
+                .into_iter()
+                .filter(|target| target != &call.source)
+                .filter(|target| {
+                    if self.language_name != "python" {
+                        return true;
                     }
-                    self.add_edge(
-                        source,
-                        targets[0].clone(),
-                        "calls",
-                        line,
-                        Confidence::Extracted,
-                    );
-                }
-            } else if self.language_name == "python" && !member_call {
-                let target = make_id(&["__graphoxide_call", &name]);
-                if !seen_pairs.insert((source.clone(), target.clone())) {
+                    if !call.member_call {
+                        return !self.method_owners.contains_key(target);
+                    }
+                    if call.receiver.as_deref() == Some("self") {
+                        return self.method_owners.get(&call.source)
+                            == self.method_owners.get(target);
+                    }
+                    let Some(receiver_type) = call.receiver_type.as_deref() else {
+                        return false;
+                    };
+                    self.method_owners
+                        .get(target)
+                        .and_then(|owner| self.node_labels.get(owner))
+                        .is_some_and(|owner| owner == &definition_key(receiver_type))
+                })
+                .collect();
+            if compatible.len() == 1 {
+                let target = compatible[0].clone();
+                if !seen_pairs.insert((call.source.clone(), target.clone())) {
                     continue;
                 }
-                self.add_edge(source, target, "calls", line, Confidence::Inferred);
-                if let Some(edge) = self.edges.last_mut() {
-                    edge.extra.insert("unresolved_call".into(), true.into());
-                    edge.extra.insert("callee".into(), name.into());
+                self.add_edge(
+                    call.source.clone(),
+                    target,
+                    "calls",
+                    call.line,
+                    if self.language_name == "python"
+                        && call.member_call
+                        && call.receiver_type.is_some()
+                    {
+                        Confidence::Inferred
+                    } else {
+                        Confidence::Extracted
+                    },
+                );
+                self.annotate_call_edge(&call);
+            } else if self.language_name == "python" {
+                let target = make_id(&["__graphoxide_call", &call.name]);
+                if !seen_pairs.insert((call.source.clone(), target)) {
+                    continue;
                 }
+                self.emit_unresolved_call(&call);
             } else if self.emit_unresolved_calls {
-                let target = make_id(&[&name]);
+                let target = make_id(&[&call.name]);
                 if !self.seen.contains(&target) {
                     let mut extra = BTreeMap::from([("_origin".into(), "ast".into())]);
                     extra.insert("origin_file".into(), self.source_file.into());
                     self.seen.insert(target.clone());
                     self.nodes.push(Node {
                         id: target.clone(),
-                        label: format!("{name}()"),
+                        label: format!("{}()", call.name),
                         file_type: "code".into(),
                         source_file: String::new(),
                         source_location: None,
@@ -1239,7 +1433,13 @@ impl State<'_> {
                         extra,
                     });
                 }
-                self.add_edge(source, target, "calls", line, Confidence::Inferred);
+                self.add_edge(
+                    call.source,
+                    target,
+                    "calls",
+                    call.line,
+                    Confidence::Inferred,
+                );
             }
         }
         let indirect = std::mem::take(&mut self.indirect_calls);
@@ -1415,6 +1615,13 @@ fn normalize_name(value: &str) -> String {
         .next()
         .unwrap_or(value)
         .trim_matches('.')
+        .trim_end_matches("()")
+        .to_lowercase()
+}
+
+fn definition_key(value: &str) -> String {
+    value
+        .trim_start_matches('.')
         .trim_end_matches("()")
         .to_lowercase()
 }

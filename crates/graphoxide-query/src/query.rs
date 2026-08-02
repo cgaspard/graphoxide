@@ -430,6 +430,58 @@ pub fn query_graph_dfs(
     traverse_graph(graph, question, depth, token_budget, true)
 }
 
+pub fn query_graph_filtered(
+    graph: &KnowledgeGraph,
+    question: &str,
+    depth: usize,
+    token_budget: usize,
+    relation_filters: &[String],
+) -> String {
+    let filtered = graph_with_relations(graph, relation_filters);
+    traverse_graph(&filtered, question, depth, token_budget, false)
+}
+
+pub fn query_graph_dfs_filtered(
+    graph: &KnowledgeGraph,
+    question: &str,
+    depth: usize,
+    token_budget: usize,
+    relation_filters: &[String],
+) -> String {
+    let filtered = graph_with_relations(graph, relation_filters);
+    traverse_graph(&filtered, question, depth, token_budget, true)
+}
+
+fn graph_with_relations(graph: &KnowledgeGraph, filters: &[String]) -> KnowledgeGraph {
+    if filters.is_empty() {
+        return graph.clone();
+    }
+    let mut filtered = graph.clone();
+    filtered.links.retain(|edge| {
+        let relation = edge.relation.to_lowercase();
+        filters.iter().any(|filter| {
+            let filter = filter.trim().to_lowercase();
+            match filter.as_str() {
+                "call" | "calls" | "call_flow" | "call-flow" => {
+                    matches!(relation.as_str(), "calls" | "indirect_call")
+                }
+                "import" | "imports" => {
+                    matches!(relation.as_str(), "imports" | "imports_from" | "re_exports")
+                }
+                "type" | "types" => matches!(
+                    relation.as_str(),
+                    "references" | "inherits" | "implements" | "type_ref"
+                ),
+                "structure" | "contain" | "contains" => {
+                    matches!(relation.as_str(), "contains" | "method" | "case_of")
+                }
+                _ => !filter.is_empty() && relation.contains(&filter),
+            }
+        })
+    });
+    filtered
+}
+
 fn traverse_graph(
     graph: &KnowledgeGraph,
     question: &str,
@@ -442,7 +494,14 @@ fn traverse_graph(
     let scored = score_nodes(&index, &terms);
     let seeds = seeds(&index, &terms, &scored);
     if seeds.is_empty() {
-        return "No matching nodes found.".into();
+        let terms = terms
+            .iter()
+            .map(|term| format!("'{}'", sanitize_label(term)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "No graph nodes matched the content terms [{terms}]. This means Graphoxide could not choose a starting symbol; it does not prove the concept is absent. Try an exact symbol, filename, or domain term, or inspect the project overview."
+        );
     }
     let mut degrees: Vec<_> = (0..graph.nodes.len()).map(|n| index.degree(n)).collect();
     degrees.sort_unstable();
@@ -615,7 +674,7 @@ fn render(
 
 fn budget_lines(lines: Vec<String>, budget: usize) -> String {
     let full = lines.join("\n");
-    let limit = budget * 3;
+    let limit = budget.saturating_mul(3);
     if full.len() <= limit {
         return full;
     }
@@ -626,16 +685,27 @@ fn budget_lines(lines: Vec<String>, budget: usize) -> String {
         .map(|(i, _)| i)
         .last()
         .unwrap_or(limit.min(full.len()));
+    let visible = &full[..boundary];
     let total_nodes = lines
         .iter()
         .filter(|line| line.starts_with("NODE "))
         .count();
-    let shown_nodes = full[..boundary]
+    let total_edges = lines
+        .iter()
+        .filter(|line| line.starts_with("EDGE "))
+        .count();
+    let shown_nodes = visible
         .lines()
         .filter(|line| line.starts_with("NODE "))
         .count();
-    let cut = total_nodes.saturating_sub(shown_nodes);
-    format!("[!] TRUNCATED: showing {shown_nodes} of {total_nodes} nodes (~{budget}-token budget). The answer may be among the {cut} cut nodes — raise the token budget (CLI: --budget) or narrow the query (e.g. context_filter=['call'], or get_node for a specific symbol).\n\n{}\n... (truncated — {cut} more nodes cut by ~{budget}-token budget. Narrow with context_filter=['call'] or use get_node for a specific symbol)", &full[..boundary])
+    let shown_edges = visible
+        .lines()
+        .filter(|line| line.starts_with("EDGE "))
+        .count();
+    let omitted_lines = lines.len().saturating_sub(visible.lines().count());
+    format!(
+        "[!] TRUNCATED: showing {shown_nodes}/{total_nodes} nodes and {shown_edges}/{total_edges} relationships within the ~{budget}-token budget ({omitted_lines} lines omitted). Raise token_budget or narrow the query with context_filter=['call'] or get_node.\n\n{visible}\n... (truncated — {omitted_lines} lines omitted)"
+    )
 }
 
 pub fn find_node(index: &GraphIndex<'_>, query: &str) -> Vec<usize> {
@@ -751,6 +821,46 @@ mod tests {
         let out = query_graph(&graph(), "how does frontier cache work", 2, 2000);
         assert!(out.contains("FrontierCache"));
         assert!(out.contains("EDGE get() --calls [EXTRACTED]--> FrontierCache"));
+    }
+    #[test]
+    fn relation_filters_keep_call_flow_focused() {
+        let mut graph = graph();
+        graph.nodes.push(Node {
+            id: "file".into(),
+            label: "cache.rs".into(),
+            file_type: "code".into(),
+            source_file: "cache.rs".into(),
+            source_location: Some("L1".into()),
+            community: None,
+            extra: BTreeMap::new(),
+        });
+        graph.links.push(Edge {
+            source: "file".into(),
+            target: "get".into(),
+            relation: "contains".into(),
+            confidence: Confidence::Extracted,
+            source_file: "cache.rs".into(),
+            extra: BTreeMap::new(),
+        });
+
+        let out = query_graph_filtered(&graph, "get", 2, 2000, &["call".into()]);
+        assert!(out.contains("--calls"));
+        assert!(!out.contains("--contains"));
+        assert!(!out.contains("NODE cache.rs"));
+    }
+    #[test]
+    fn no_match_explains_the_limit_of_the_result() {
+        let out = query_graph(&graph(), "authentication", 2, 2000);
+        assert!(out.contains("does not prove the concept is absent"));
+        assert!(out.contains("'authentication'"));
+    }
+    #[test]
+    fn truncation_reports_nodes_and_relationships_separately() {
+        let out = query_graph(&graph(), "get", 2, 10);
+        assert!(out.contains("TRUNCATED"));
+        assert!(out.contains("nodes and"));
+        assert!(out.contains("relationships"));
+        assert!(out.contains("lines omitted"));
     }
     #[test]
     fn raw_extraction_type_remains_available() {
