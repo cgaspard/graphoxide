@@ -13,3 +13,7 @@
 .DS_Store
 .idea/
 *.swp
+
+# Python fixtures
+**/__pycache__/
+*.py[cod]
