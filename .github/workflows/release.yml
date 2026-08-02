@@ -181,7 +181,8 @@ jobs:
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: >-
-          npx vsce publish
+          node node_modules/@vscode/vsce/vsce publish
+          --skip-duplicate
           ${{ needs.prepare.outputs.channel == 'prerelease' && '--pre-release' || '' }}
           --packagePath "${{ github.workspace }}/release-assets/graphoxide-vscode-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}.vsix"
 

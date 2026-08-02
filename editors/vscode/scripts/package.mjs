@@ -15,6 +15,7 @@ const binDirectory = path.join(extensionRoot, 'bin');
 const destination = path.join(binDirectory, executableName);
 const thirdPartySource = path.join(repositoryRoot, 'THIRD_PARTY_LICENSES.html');
 const thirdPartyDestination = path.join(extensionRoot, 'THIRD_PARTY_LICENSES.html');
+const vsceCli = path.join(extensionRoot, 'node_modules', '@vscode', 'vsce', 'vsce');
 const packageJson = JSON.parse(await readFile(path.join(extensionRoot, 'package.json'), 'utf8'));
 let stagedThirdPartyLicenses = false;
 
@@ -48,10 +49,10 @@ try {
     ? path.resolve(process.cwd(), options.out)
     : path.join(extensionRoot, `${packageJson.name}-${target}-${packageJson.version}.vsix`);
   await mkdir(path.dirname(output), { recursive: true });
-  const vsceArgs = ['vsce', 'package', '--no-dependencies', '--target', target];
+  const vsceArgs = ['package', '--no-dependencies', '--target', target];
   if (options.preRelease) vsceArgs.push('--pre-release');
   vsceArgs.push('--out', output);
-  run(process.platform === 'win32' ? 'npx.cmd' : 'npx', vsceArgs, extensionRoot);
+  run(process.execPath, [vsceCli, ...vsceArgs], extensionRoot);
   await verifyVsix(output, executableName);
 } finally {
   await rm(binDirectory, { recursive: true, force: true });
