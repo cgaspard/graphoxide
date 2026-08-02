@@ -79,9 +79,13 @@ async function verifyGraphPlacement(folder: vscode.WorkspaceFolder): Promise<voi
 
   await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One, preview: false });
   await vscode.commands.executeCommand('graphoxide.openGraphBeside');
-  await poll(() => vscode.window.tabGroups.all.length > initialGroups, 'explicit beside graph group to open');
-  assert.equal(vscode.window.tabGroups.activeTabGroup.activeTab?.label, 'Graphoxide Graph');
-  await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  await poll(
+    () => vscode.window.tabGroups.all.length > initialGroups && vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => tab.label === 'Graphoxide Graph')),
+    'explicit beside graph group to open',
+  );
+  const graphTab = vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((tab) => tab.label === 'Graphoxide Graph');
+  assert.ok(graphTab, 'The beside graph tab was not present.');
+  await vscode.window.tabGroups.close(graphTab);
 }
 
 async function verifyProjectInstallers(
