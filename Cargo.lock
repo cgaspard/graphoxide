@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "petgraph",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-export"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "graphoxide-core",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-extract"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "graphoxide-core",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-graph"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "graphoxide-core",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "graphoxide-core",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-query"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "graphoxide-core",

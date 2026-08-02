@@ -1,0 +1,11 @@
+version: 0.1.1
+date: 2026-08-02
+highlights:
+  - JavaScript and TypeScript graphs now include the module APIs and variable-bound functions that were previously invisible.
+added: []
+changed:
+  - Exported JavaScript, JSX, TypeScript, and TSX symbols now carry an exported attribute in the graph.
+fixed:
+  - Extract export-wrapped function, async function, class, and named default declarations instead of treating them only as import statements.
+  - Extract const, let, and var bindings whose values are arrow, async arrow, function-expression, or generator functions, while preserving binding names, containment, and call edges.
+removed: []

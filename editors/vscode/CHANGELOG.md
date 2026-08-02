@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- JavaScript and TypeScript graphs now include exported declarations and
+  variable-bound arrow, async, function-expression, and generator functions.
+- Exported symbols carry export metadata, and newly recognized functions retain
+  their file/class containment and call relationships.
+
 ## 0.1.0
 
 - Initial Graphoxide VS Code integration.

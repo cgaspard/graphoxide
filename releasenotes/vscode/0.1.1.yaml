@@ -1,0 +1,11 @@
+version: 0.1.1
+date: 2026-08-02
+highlights:
+  - The bundled extractor now reveals JavaScript and TypeScript module APIs that were missing from Graph Explorer, queries, and call-flow analysis.
+added: []
+changed:
+  - Graph Explorer can distinguish directly exported JavaScript, JSX, TypeScript, and TSX symbols through export metadata.
+fixed:
+  - Show exported functions, async functions, classes, named defaults, arrow functions, and function expressions in managed workspace graphs.
+  - Preserve file and class ownership plus call relationships for newly recognized variable-bound functions.
+removed: []
