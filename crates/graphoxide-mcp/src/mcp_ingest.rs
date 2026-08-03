@@ -97,7 +97,7 @@ pub fn extract_mcp_config(path: &Path) -> McpConfigResult {
             return McpConfigResult::error(format!("mcp_ingest decode error: {error}"));
         }
     };
-    let document: serde_json::Value = match serde_json::from_str(text) {
+    let document = match graphoxide_core::parse_jsonc(text) {
         Ok(document) => document,
         Err(error) => {
             return McpConfigResult::error(format!("mcp_ingest json error: {error}"));
@@ -653,6 +653,26 @@ mod tests {
         assert!(result
             .error
             .is_some_and(|error| error.contains("json error")));
+    }
+
+    #[test]
+    fn test_jsonc_comments_and_trailing_commas_are_accepted() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join(".mcp.json");
+        fs::write(
+            &path,
+            r#"{
+                // JSONC is supported by MCP hosts and editors.
+                "mcpServers": {
+                    "local": { "command": "node", "args": ["server.js",], },
+                },
+            }"#,
+        )
+        .expect("write JSONC fixture");
+
+        let result = extract_mcp_config(&path);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(labels_by_kind(&result, "mcp_server").contains("local"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Bounded structural extraction for configuration JSON.
 
+use anyhow::Context as _;
 use graphoxide_core::{make_id, normalize_id, Confidence, Edge, Extraction, Node};
 use std::{collections::BTreeMap, fs, io::Read, path::Path};
 use tree_sitter::Parser;
@@ -60,7 +61,8 @@ pub(crate) fn extract_json_config(path: &Path, source_file: &str) -> anyhow::Res
         bytes.len() as u64 <= MAX_BYTES,
         "json file too large to index"
     );
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let value = graphoxide_core::parse_jsonc_slice(&bytes)
+        .with_context(|| format!("parse JSON configuration {source_file}"))?;
     let Some(object) = value.as_object() else {
         return Ok(Extraction::default());
     };

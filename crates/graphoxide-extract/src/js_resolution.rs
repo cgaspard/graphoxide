@@ -1402,53 +1402,7 @@ fn path_contained(candidate: &Path, package: &Path) -> bool {
 
 fn read_jsonc(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text)
-        .or_else(|_| serde_json::from_str(&strip_jsonc(&text)))
-        .ok()
-}
-
-fn strip_jsonc(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let chars = text.as_bytes();
-    let mut index = 0;
-    let mut string = false;
-    let mut escaped = false;
-    while index < chars.len() {
-        let byte = chars[index];
-        if string {
-            output.push(byte as char);
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                string = false;
-            }
-            index += 1;
-        } else if byte == b'"' {
-            string = true;
-            output.push('"');
-            index += 1;
-        } else if byte == b'/' && chars.get(index + 1) == Some(&b'/') {
-            index += 2;
-            while index < chars.len() && chars[index] != b'\n' {
-                index += 1;
-            }
-        } else if byte == b'/' && chars.get(index + 1) == Some(&b'*') {
-            index += 2;
-            while index + 1 < chars.len() && !(chars[index] == b'*' && chars[index + 1] == b'/') {
-                index += 1;
-            }
-            index = (index + 2).min(chars.len());
-        } else {
-            output.push(byte as char);
-            index += 1;
-        }
-    }
-    Regex::new(r",(\s*[}\]])")
-        .expect("trailing JSONC comma regex")
-        .replace_all(&output, "$1")
-        .into_owned()
+    graphoxide_core::parse_jsonc(&text).ok()
 }
 
 fn module_edge(

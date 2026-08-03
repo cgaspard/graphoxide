@@ -26,6 +26,29 @@ try {
     'graphoxide.revealOutput': 'never',
     'graphoxide.updateOnSaveDelay': 250,
   }, null, 2));
+  await writeFile(path.join(workspace, '.vscode', 'tasks.json'), `{
+    // VS Code configuration is JSONC even though the suffix is .json.
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "graphoxide-e2e-build",
+        "type": "shell",
+        "command": "cargo build",
+      },
+    ],
+  }\n`);
+  await writeFile(path.join(workspace, '.vscode', 'launch.json'), `{
+    /* Exercise block comments and object/array trailing commas. */
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Graphoxide E2E",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "cartograph/main.py",
+      },
+    ],
+  }\n`);
   const vscodeExecutablePath = await downloadAndUnzipVSCode(process.env.VSCODE_E2E_VERSION ?? 'stable');
   for (const key of ['ELECTRON_RUN_AS_NODE', 'VSCODE_CLI', 'VSCODE_ESM_ENTRYPOINT']) {
     electronEnvironment.set(key, process.env[key]);

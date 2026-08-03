@@ -7,6 +7,7 @@
 pub mod file_slice;
 pub mod ids;
 pub mod io;
+pub mod jsonc;
 pub mod model;
 pub mod reflect;
 pub mod security;
@@ -27,6 +28,7 @@ pub use io::{
     replace_file, write_graph_atomic, write_json_atomic, write_raw_extractions_atomic,
     write_text_atomic, write_text_atomic_with_replacer, DEFAULT_MAX_GRAPH_BYTES,
 };
+pub use jsonc::{parse_jsonc, parse_jsonc_slice};
 pub use model::{
     coerce_non_string_ids, normalize_graph_value, Confidence, Edge, Extraction, KnowledgeGraph,
     Node,

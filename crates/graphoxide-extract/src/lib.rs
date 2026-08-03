@@ -11,6 +11,8 @@
 //! Extraction runs in-process on a rayon pool (upstream used a subprocess
 //! pool to dodge the GIL — unnecessary here, and one of the main speed wins).
 
+use anyhow::Context as _;
+
 mod bash;
 pub mod cache;
 pub mod cargo_introspect;
@@ -298,7 +300,8 @@ pub fn extract_project_with_scan_options_deferred_manifest(
             let extraction = if let Some(cached) = extraction {
                 cached
             } else {
-                let extracted = engine::extract_as(path, &relative)?;
+                let extracted = engine::extract_as(path, &relative)
+                    .with_context(|| format!("extract {relative}"))?;
                 cache::ast_cache_put_to_output(&managed_output_dir, &relative, &bytes, &extracted)?;
                 extracted
             };
@@ -508,7 +511,8 @@ where
         let extraction = if let Some(cached) = cached {
             cached
         } else {
-            let extracted = extractor(&path, &relative)?;
+            let extracted =
+                extractor(&path, &relative).with_context(|| format!("extract {relative}"))?;
             if extracted.nodes.is_empty() {
                 if detect::classify_file(&path) == Some(detect::FileType::Code)
                     && !engine::has_ast_extractor(&path)

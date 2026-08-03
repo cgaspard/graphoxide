@@ -87,6 +87,67 @@ fn recognized_json_config_filenames_match_the_upstream_gate() {
 }
 
 #[test]
+fn jsonc_editor_files_do_not_abort_extraction_before_the_config_gate() {
+    let temp = tempfile::tempdir().expect("create JSONC editor fixture");
+    let cases = [
+        (
+            "tasks.json",
+            r#"{
+                // VS Code tasks are JSONC even though the suffix is .json.
+                "version": "2.0.0",
+                "tasks": [
+                    { "label": "build", "type": "shell", "command": "cargo build", },
+                ],
+            }"#,
+        ),
+        (
+            "launch.json",
+            r#"{
+                /* Block comments are valid in VS Code configuration. */
+                "version": "0.2.0",
+                "configurations": [
+                    { "name": "Run", "type": "lldb", "request": "launch", },
+                ],
+            }"#,
+        ),
+    ];
+
+    for (name, contents) in cases {
+        let result = extract_json(temp.path(), name, contents);
+        assert!(
+            result.nodes.is_empty(),
+            "editor JSONC unexpectedly emitted nodes: {name}"
+        );
+        assert!(
+            result.edges.is_empty(),
+            "editor JSONC unexpectedly emitted edges: {name}"
+        );
+    }
+}
+
+#[test]
+fn recognized_json_config_accepts_comments_and_trailing_commas() {
+    let temp = tempfile::tempdir().expect("create recognized JSONC fixture");
+    let result = extract_json(
+        temp.path(),
+        "tsconfig.json",
+        r#"{
+            // TypeScript configuration uses JSONC.
+            "compilerOptions": {
+                "strict": true,
+                "baseUrl": ".",
+            },
+        }"#,
+    );
+
+    assert!(result
+        .nodes
+        .iter()
+        .any(|node| node.label == "compilerOptions"));
+    assert!(result.nodes.iter().any(|node| node.label == "strict"));
+}
+
+#[test]
 fn recognized_top_level_keys_match_the_upstream_gate_exactly() {
     let temp = tempfile::tempdir().expect("create JSON key fixture");
     let keys = [

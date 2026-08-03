@@ -1,0 +1,10 @@
+version: 0.4.2
+date: 2026-08-03
+highlights:
+  - Prevent normal VS Code JSON-with-comments files from stopping workspace graphification.
+added:
+  - Exercise realistic tasks.json and launch.json comments and trailing commas in the Extension Host E2E suite.
+changed: []
+fixed:
+  - Accept valid JSONC syntax in VS Code and recognized project configuration files while retaining actionable diagnostics for malformed files.
+removed: []

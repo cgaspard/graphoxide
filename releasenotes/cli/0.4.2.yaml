@@ -1,0 +1,11 @@
+version: 0.4.2
+date: 2026-08-03
+highlights:
+  - Accept JSON-with-comments configuration files without aborting project extraction.
+added:
+  - Add parser, extraction, MCP, and process-level CLI regressions for comments and trailing commas.
+changed:
+  - Share one strict-first JSONC parser across configuration, MCP, and JavaScript resolution paths.
+fixed:
+  - Handle valid VS Code tasks.json and launch.json files during parallel extraction and report repo-relative paths for malformed configuration files.
+removed: []

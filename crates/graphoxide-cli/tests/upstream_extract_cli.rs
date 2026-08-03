@@ -662,6 +662,69 @@ fn test_extract_without_key_remains_intentionally_offline_when_docs_present() {
 }
 
 #[test]
+fn test_extract_accepts_vscode_jsonc_in_the_parallel_project_path() {
+    let fixture = TempDir::new().unwrap();
+    code_corpus(fixture.path());
+    write(
+        &fixture.path().join(".vscode/tasks.json"),
+        r#"{
+            // VS Code permits comments and trailing commas.
+            "version": "2.0.0",
+            "tasks": [
+                {
+                    "label": "build",
+                    "type": "shell",
+                    "command": "cargo build",
+                },
+            ],
+        }"#,
+    );
+    write(
+        &fixture.path().join(".vscode/launch.json"),
+        r#"{
+            /* This file is JSONC despite its .json suffix. */
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Run",
+                    "type": "lldb",
+                    "request": "launch",
+                },
+            ],
+        }"#,
+    );
+
+    let output = run(fixture.path(), &["extract", ".", "--no-cluster"]);
+    assert_success(&output);
+    assert!(sources(fixture.path()).contains("auth.py"));
+}
+
+#[test]
+fn test_extract_reports_the_relative_path_for_malformed_jsonc() {
+    let fixture = TempDir::new().unwrap();
+    code_corpus(fixture.path());
+    write(
+        &fixture.path().join(".vscode/tasks.json"),
+        r#"{
+            "version": "2.0.0",
+            "tasks": [this is not JSONC],
+        }"#,
+    );
+
+    let output = run(fixture.path(), &["extract", ".", "--no-cluster"]);
+    assert!(
+        !output.status.success(),
+        "malformed JSONC unexpectedly passed"
+    );
+    let error = combined(&output);
+    assert!(error.contains("extract .vscode/tasks.json"), "{error}");
+    assert!(
+        !error.contains(&fixture.path().to_string_lossy().to_string()),
+        "error leaked the absolute fixture path: {error}"
+    );
+}
+
+#[test]
 fn test_extract_timing_flag_emits_stage_timings() {
     let fixture = TempDir::new().unwrap();
     let project = fixture.path().join("project");

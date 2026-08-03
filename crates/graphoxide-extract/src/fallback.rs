@@ -1,5 +1,6 @@
 //! Regex and structured-data extraction for languages without a compiled grammar.
 
+use anyhow::Context as _;
 use graphoxide_core::{make_id, sanitize_label, Confidence, Edge, Extraction, Node};
 use regex::Regex;
 use std::{
@@ -208,7 +209,8 @@ fn extract_mcp_config(path: &Path, source_file: &str) -> anyhow::Result<Extracti
     let metadata = fs::metadata(path)?;
     anyhow::ensure!(metadata.len() <= MAX_BYTES, "mcp config too large to index");
     let text = fs::read_to_string(path)?;
-    let document: serde_json::Value = serde_json::from_str(&text)?;
+    let document = graphoxide_core::parse_jsonc(&text)
+        .with_context(|| format!("parse MCP configuration {source_file}"))?;
     let root = document
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("mcp config root is not an object"))?;
@@ -1346,6 +1348,30 @@ mod tests {
             .get("type")
             .and_then(|value| value.as_str())
             != Some("json_key")));
+    }
+
+    #[test]
+    fn mcp_dispatch_accepts_jsonc_without_persisting_values() {
+        let fixture = MarkdownFixture::new();
+        let path = fixture.write(
+            ".mcp.json",
+            r#"{
+                // Project MCP files are commonly edited as JSONC.
+                "mcpServers": {
+                    "local": {
+                        "command": "npx",
+                        "args": ["-y", "@scope/local-mcp", "secret-argument",],
+                        "env": { "LOCAL_TOKEN": "secret-value", },
+                    },
+                },
+            }"#,
+        );
+
+        let result = extract_text(&path, ".mcp.json").expect("extract JSONC MCP config");
+        let serialized = serde_json::to_string(&result).expect("serialize extraction");
+        assert!(serialized.contains("local"));
+        assert!(!serialized.contains("secret-argument"));
+        assert!(!serialized.contains("secret-value"));
     }
 
     #[test]

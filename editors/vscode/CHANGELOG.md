@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 — 2026-08-03
+
+- Fixed workspace graphification failures caused by valid JSON-with-comments
+  files such as `.vscode/tasks.json`, `.vscode/launch.json`, and `tsconfig.json`.
+- Added parser, CLI, MCP, and Extension Host regression coverage for comments
+  and trailing commas, plus repo-relative diagnostics for malformed files.
+
 ## 0.4.1 — 2026-08-03
 
 - Added opt-in AI community naming for OpenAI, LM Studio, Ollama,

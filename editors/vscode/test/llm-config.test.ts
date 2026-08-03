@@ -160,7 +160,7 @@ test('trusted executable candidates exclude configured, PATH, and installed-exte
     'example',
     '.vscode',
     'extensions',
-    'cgaspard.graphoxide-vscode-0.4.1',
+    'cgaspard.graphoxide-vscode-0.4.2',
   );
   const installed = trustedExecutableCandidates(installedExtension, process.platform);
   assert.deepEqual(installed, [path.join(installedExtension, 'bin', executable)]);
