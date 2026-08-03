@@ -1,5 +1,6 @@
 //! Executable Rust port of pinned Graphify `tests/test_detect.py`.
 
+use filetime::{set_file_mtime, FileTime};
 use graphoxide_extract::detect::{
     classify_file, collect_files, convert_office_text, count_words, detect, detect_incremental,
     is_ignored, is_ignored_with_cache, is_noise_dir, is_sensitive, load_ignore_patterns,
@@ -2190,6 +2191,13 @@ fn test_detect_incremental_legacy_float_reextracts_on_backwards_mtime() {
 fn test_detect_incremental_legacy_float_skips_when_mtime_matches() {
     let fixture = fixture();
     let source = write(fixture.path(), "mod.py", "def stable(): return 1\n");
+    // This nanosecond timestamp regressed under serde_json's faster, inexact
+    // float parser: 1785781385.8600407 reloaded as 1785781385.860041.
+    set_file_mtime(
+        &source,
+        FileTime::from_unix_time(1_785_781_385, 860_040_700),
+    )
+    .unwrap();
     let current = fs::metadata(&source)
         .unwrap()
         .modified()
