@@ -61,19 +61,49 @@ fn run(root: &Path, arguments: &[&str]) -> Output {
 }
 
 fn run_with_endpoint(root: &Path, arguments: &[&str], endpoint: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_graphoxide"))
+    run_with_endpoint_and_env(root, arguments, endpoint, &[])
+}
+
+fn run_with_endpoint_and_env(
+    root: &Path,
+    arguments: &[&str],
+    endpoint: &str,
+    environment: &[(&str, &str)],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_graphoxide"));
+    command
         .args(arguments)
         .current_dir(root)
         .env_remove("GRAPHOXIDE_OUT")
         .env_remove("GRAPHIFY_OUT")
         .env("GRAPHOXIDE_LLM_BASE_URL", endpoint)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")
-        .output()
-        .unwrap()
+        .env_remove("GRAPHOXIDE_LLM_TIMEOUT_SECONDS")
+        .env_remove("GRAPHIFY_API_TIMEOUT");
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    command.output().unwrap()
 }
 
-fn serve_once(label_json: &str) -> (String, Receiver<Value>, JoinHandle<()>) {
+#[derive(Debug)]
+struct CapturedRequest {
+    headers: BTreeMap<String, String>,
+    body: Value,
+}
+
+fn serve_once(label_json: &str) -> (String, Receiver<CapturedRequest>, JoinHandle<()>) {
+    serve_once_after(label_json, Duration::ZERO)
+}
+
+fn serve_once_after(
+    label_json: &str,
+    delay: Duration,
+) -> (String, Receiver<CapturedRequest>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (sender, receiver) = mpsc::channel();
@@ -87,6 +117,7 @@ fn serve_once(label_json: &str) -> (String, Receiver<Value>, JoinHandle<()>) {
         let mut buffer = [0_u8; 4096];
         let mut body_start = None;
         let mut content_length = None;
+        let mut headers = BTreeMap::new();
         loop {
             let count = stream.read(&mut buffer).unwrap();
             if count == 0 {
@@ -96,13 +127,16 @@ fn serve_once(label_json: &str) -> (String, Receiver<Value>, JoinHandle<()>) {
             if body_start.is_none() {
                 if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
                     let start = index + 4;
-                    let headers = String::from_utf8_lossy(&request[..index]);
-                    content_length = headers.lines().find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    });
+                    let raw_headers = String::from_utf8_lossy(&request[..index]);
+                    for line in raw_headers.lines().skip(1) {
+                        let Some((name, value)) = line.split_once(':') else {
+                            continue;
+                        };
+                        headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+                    }
+                    content_length = headers
+                        .get("content-length")
+                        .and_then(|value| value.parse::<usize>().ok());
                     body_start = Some(start);
                 }
             }
@@ -116,19 +150,19 @@ fn serve_once(label_json: &str) -> (String, Receiver<Value>, JoinHandle<()>) {
         let start = body_start.unwrap();
         let length = content_length.unwrap();
         let body: Value = serde_json::from_slice(&request[start..start + length]).unwrap();
-        sender.send(body).unwrap();
+        sender.send(CapturedRequest { headers, body }).unwrap();
         let response = json!({
             "choices": [{"message": {"content": label_json}}],
             "usage": {"prompt_tokens": 11, "completion_tokens": 3}
         })
         .to_string();
-        write!(
+        std::thread::sleep(delay);
+        let _ = write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             response.len(),
             response
-        )
-        .unwrap();
+        );
     });
     (format!("http://{address}/v1"), receiver, handle)
 }
@@ -161,11 +195,153 @@ fn test_label_cli_passes_model_override() {
     assert!(result.status.success(), "{}", output_text(&result.stderr));
     let request = request.recv_timeout(Duration::from_secs(5)).unwrap();
     server.join().unwrap();
-    assert_eq!(request["model"], "gemini-3.1-flash-lite");
-    let prompt = request["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(request.body["model"], "gemini-3.1-flash-lite");
+    let prompt = request.body["messages"][0]["content"].as_str().unwrap();
     assert!(prompt.contains("Community 0:"));
     assert!(prompt.contains("Community 1:"));
     assert!(output.join(".graphoxide_labels.json").is_file());
+}
+
+#[test]
+fn test_label_cli_lm_studio_sends_optional_openai_api_key() {
+    let temporary = tempdir().unwrap();
+    two_community_graph(temporary.path());
+    let (endpoint, request, server) = serve_once(r#"{"0":"Orders","1":"Payments"}"#);
+    let key = "lm-studio-test-key-must-not-be-logged";
+    let result = run_with_endpoint_and_env(
+        temporary.path(),
+        &[
+            "label",
+            ".",
+            "--backend",
+            "lm-studio",
+            "--model",
+            "local-model",
+        ],
+        &endpoint,
+        &[("OPENAI_API_KEY", key)],
+    );
+    let combined = format!(
+        "{}{}",
+        output_text(&result.stdout),
+        output_text(&result.stderr)
+    );
+    assert!(result.status.success(), "{combined}");
+    assert!(!combined.contains(key));
+    let request = request.recv_timeout(Duration::from_secs(5)).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        request.headers.get("authorization").map(String::as_str),
+        Some("Bearer lm-studio-test-key-must-not-be-logged")
+    );
+    assert_eq!(request.body["model"], "local-model");
+    assert_eq!(request.body["reasoning_effort"], "none");
+}
+
+#[test]
+fn test_label_cli_lm_studio_allows_keyless_loopback() {
+    let temporary = tempdir().unwrap();
+    two_community_graph(temporary.path());
+    let (endpoint, request, server) = serve_once(r#"{"0":"Orders","1":"Payments"}"#);
+    let result = run_with_endpoint(
+        temporary.path(),
+        &[
+            "label",
+            ".",
+            "--backend",
+            "lm-studio",
+            "--model",
+            "local-model",
+        ],
+        &endpoint,
+    );
+    assert!(result.status.success(), "{}", output_text(&result.stderr));
+    let request = request.recv_timeout(Duration::from_secs(5)).unwrap();
+    server.join().unwrap();
+    assert!(!request.headers.contains_key("authorization"));
+    assert_eq!(request.body["model"], "local-model");
+    assert_eq!(request.body["reasoning_effort"], "none");
+}
+
+#[test]
+fn test_label_cli_generic_openai_does_not_force_reasoning_effort() {
+    let temporary = tempdir().unwrap();
+    two_community_graph(temporary.path());
+    let (endpoint, request, server) = serve_once(r#"{"0":"Orders","1":"Payments"}"#);
+    let result = run_with_endpoint(
+        temporary.path(),
+        &[
+            "label",
+            ".",
+            "--backend",
+            "openai",
+            "--model",
+            "openai-compatible-model",
+        ],
+        &endpoint,
+    );
+    assert!(result.status.success(), "{}", output_text(&result.stderr));
+    let request = request.recv_timeout(Duration::from_secs(5)).unwrap();
+    server.join().unwrap();
+    assert!(request.body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn test_label_cli_accepts_slow_local_completion_with_timeout_override() {
+    let temporary = tempdir().unwrap();
+    two_community_graph(temporary.path());
+    let (endpoint, request, server) = serve_once_after(
+        r#"{"0":"Orders","1":"Payments"}"#,
+        Duration::from_millis(150),
+    );
+    let result = run_with_endpoint(
+        temporary.path(),
+        &[
+            "label",
+            ".",
+            "--backend",
+            "lm-studio",
+            "--model",
+            "slow-local-model",
+            "--timeout-seconds",
+            "1",
+        ],
+        &endpoint,
+    );
+    assert!(result.status.success(), "{}", output_text(&result.stderr));
+    let request = request.recv_timeout(Duration::from_secs(5)).unwrap();
+    server.join().unwrap();
+    assert_eq!(request.body["reasoning_effort"], "none");
+}
+
+#[test]
+fn test_label_cli_timeout_error_explains_how_to_raise_deadline() {
+    let temporary = tempdir().unwrap();
+    two_community_graph(temporary.path());
+    let (endpoint, request, server) = serve_once_after(
+        r#"{"0":"Orders","1":"Payments"}"#,
+        Duration::from_millis(250),
+    );
+    let result = run_with_endpoint(
+        temporary.path(),
+        &[
+            "label",
+            ".",
+            "--backend",
+            "lm-studio",
+            "--model",
+            "stalled-local-model",
+            "--timeout-seconds",
+            "0.05",
+        ],
+        &endpoint,
+    );
+    assert!(!result.status.success());
+    let stderr = output_text(&result.stderr);
+    assert!(stderr.contains("timed out after 0.05s"), "{stderr}");
+    assert!(stderr.contains("increase --timeout-seconds"), "{stderr}");
+    let _ = request.recv_timeout(Duration::from_secs(5)).unwrap();
+    server.join().unwrap();
 }
 
 #[test]
@@ -186,7 +362,7 @@ fn test_label_cli_missing_only_preserves_existing_labels() {
     assert!(result.status.success(), "{}", output_text(&result.stderr));
     let request = request.recv_timeout(Duration::from_secs(5)).unwrap();
     server.join().unwrap();
-    let prompt = request["messages"][0]["content"].as_str().unwrap();
+    let prompt = request.body["messages"][0]["content"].as_str().unwrap();
     assert!(!prompt.contains("Community 0:"));
     assert!(prompt.contains("Community 1:"));
     let labels: Value =

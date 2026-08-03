@@ -40,8 +40,9 @@ notes under [`../../releasenotes/cli`](../../releasenotes/cli).
 2. At the first-open prompt, choose **Enable Graphoxide**.
 3. Graphoxide builds or updates the local graph and registers its MCP server with VS Code.
 4. Choose continuous watch, update-on-save, or manual freshness.
-5. If Claude Code, Codex, or OpenCode is detected, optionally open the MCP manager and install Graphoxide at project or user scope.
-6. Select the Graphoxide icon in the Activity Bar to explore communities, architectural hubs, files, and query results.
+5. Open the **Graphoxide Control Center** from the status bar or Graph Explorer title to review graph health, automatic updates, AI labeling, and MCP connections in one place.
+6. If Claude Code, Codex, or OpenCode is detected, optionally install Graphoxide at project or user scope from the Control Center.
+7. Select the Graphoxide icon in the Activity Bar to explore communities, architectural hubs, files, and query results.
 
 Enabling is workspace-specific and requires a trusted workspace. **Not now** asks
 again on a future opening; **Don’t ask for this workspace** suppresses the prompt.
@@ -140,6 +141,40 @@ For smaller projects, **Graphoxide: Update On Save** can run a debounced update 
 
 All spawned commands are argument-safe, run without a shell, support cancellation where applicable, and stream diagnostics to the Graphoxide output channel.
 
+## Improve community names with an LLM
+
+Graphoxide can optionally ask an LLM to replace its deterministic community
+names with concise architecture-oriented labels. Run **Graphoxide: Configure AI
+Community Labeling…** and choose OpenAI, LM Studio, Ollama, a custom
+OpenAI-compatible endpoint, or Anthropic. LM Studio defaults to
+`http://127.0.0.1:1234/v1`, Ollama defaults to
+`http://127.0.0.1:11434/v1`, and both can run without a key on loopback. Local
+model discovery uses LM Studio's OpenAI-compatible models endpoint or Ollama's
+native tags endpoint; the model ID can always be entered manually.
+LM Studio and Ollama also accept optional API keys. Each provider uses a
+separate Secret Storage entry bound to its configured endpoint, and the key is
+sent as Bearer authentication.
+Both local providers use the same 600-second request timeout by default so a
+cold model has time to load; adjust `graphoxide.llm.timeoutSeconds` when needed.
+LM Studio label requests disable model reasoning because community
+naming is a short structured-output task.
+
+Then run **Graphoxide: Improve Community Names with AI**. Before sending
+anything, the extension shows the endpoint, model, exact graph file, resolved
+executable, and data disclosure for confirmation. The request contains up to 12
+representative `node.label` values per community. Labels can include
+source-derived identifiers, filenames, and truncated comments or docstrings.
+Full files and `source_file` metadata are not included. The command replaces
+community names in the selected `graph.json`, updates the adjacent label sidecar,
+and regenerates `GRAPH_REPORT.md`; it does not perform semantic source extraction.
+
+API keys are kept in VS Code Secret Storage, not settings. Provider, endpoint,
+model, concurrency, batch size, and timeout are machine-scoped settings. Remote endpoints
+must use HTTPS. For this labeling command, the extension ignores Binary Path,
+Additional Arguments, `PATH`, and `GRAPHOXIDE_BINARY`, and invokes only its
+packaged executable (or this repository's own build in an Extension Development
+Host). Use **Graphoxide: Clear Stored AI Credential…** to delete a key.
+
 ## Connect an AI coding client
 
 Graphoxide includes an MCP server in the same binary:
@@ -149,8 +184,8 @@ graphoxide serve
 ```
 
 For an enabled workspace, the extension publishes Graphoxide directly to VS Code
-through its native MCP provider. Run **Graphoxide: Manage MCP Integrations…** to
-detect and configure other installed clients:
+through its native MCP provider. Open **Graphoxide: Open Control Center** to detect
+and configure other installed clients:
 
 | Client | Project scope | User scope |
 | --- | --- | --- |
@@ -159,10 +194,11 @@ detect and configure other installed clients:
 | Codex | `.codex/config.toml` | `~/.codex/config.toml` |
 | OpenCode | `opencode.json` | `~/.config/opencode/opencode.json` |
 
-The manager reports installed, missing, and stale registrations and offers an
-explicit Install, Update, or Remove action. It preserves unrelated servers and
-settings. Project configuration can be shared with collaborators; user
-configuration applies across projects.
+The Control Center separates project scope from all-projects user scope, reports
+installed, missing, and stale registrations, and confirms every Install, Update,
+or Remove action. It preserves unrelated servers and settings. Project
+configuration can be shared with collaborators; user configuration applies
+across projects.
 
 The extension does not keep an MCP process running. VS Code, Claude Code, Codex,
 or OpenCode starts `graphoxide serve` over stdio when it needs Graphoxide tools and
@@ -177,7 +213,7 @@ then restrict traversal to call, import, type, or structural relationships. Tool
 results are static-analysis evidence with source locations and confidence labels,
 which Codex uses to synthesize and verify its final explanation.
 
-Core extraction, clustering, querying, visualization, and reports are offline and require no API key. Optional community labeling is a separate CLI feature.
+Core extraction, clustering, querying, visualization, and reports are offline and require no API key. Explicit AI configuration may contact a loopback endpoint to discover models, and the labeling command contacts the confirmed model endpoint.
 
 ## Settings
 
@@ -192,12 +228,13 @@ Open **Graphoxide: Open Settings** to configure:
 - Source CodeLens
 - Additional CLI arguments
 - Output-channel reveal behavior
+- AI community-labeling provider, endpoint, model, concurrency, batch size, and request timeout
 
-Settings that identify files are scoped per workspace, so multi-root workspaces can use a different graph for each folder. Commands prefer the active editor's workspace and prompt when necessary.
+Settings that identify files are scoped per workspace, so multi-root workspaces can use a different graph for each folder. AI endpoint and model settings are machine-scoped. Commands prefer the active editor's workspace and prompt when necessary.
 
 ## Troubleshooting
 
-**The binary cannot be found:** Set **Graphoxide: Binary Path** to the absolute path returned by `which graphoxide` (macOS/Linux) or `where graphoxide` (Windows), then run **Refresh Graph**.
+**The binary cannot be found:** Set **Graphoxide: Binary Path** to the absolute path returned by `which graphoxide` (macOS/Linux) or `where graphoxide` (Windows), then run **Refresh Graph**. AI labeling intentionally requires the packaged binary or a build from this repository and does not use that setting.
 
 **The graph is empty or missing:** Run **Extract Workspace**. If the repository already has a graph, verify **Graphoxide: Graph Path**.
 
@@ -207,7 +244,7 @@ Settings that identify files are scoped per workspace, so multi-root workspaces 
 
 ## Privacy and security
 
-The extension does not send source code or graph data over the network. Its visualizer uses a restrictive Content Security Policy, has no external runtime dependencies, and escapes graph content before rendering. Network access occurs only if you independently configure and invoke optional CLI labeling.
+The extension does not send complete source files over the network. Its visualizer uses a restrictive Content Security Policy, has no external runtime dependencies, and escapes graph content before rendering. The explicit AI-labeling command sends representative node labels and community IDs to the endpoint shown in its confirmation dialog; labels can contain identifiers, filenames, and truncated comments or docstrings, while full files and `source_file` metadata are excluded. Model discovery contacts only a configured loopback OpenAI-compatible, LM Studio, or Ollama endpoint. MCP clients may separately read graph-derived results when you enable their integration.
 
 ## License
 

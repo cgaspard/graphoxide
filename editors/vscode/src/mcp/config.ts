@@ -6,6 +6,14 @@ export interface ServerInvocation {
   readonly cwd?: string;
 }
 
+export function invocationForScope(
+  projectInvocation: ServerInvocation,
+  userInvocation: ServerInvocation,
+  scope: 'user' | 'project',
+): ServerInvocation {
+  return scope === 'user' ? userInvocation : projectInvocation;
+}
+
 export interface McpJsonEntry {
   readonly type: 'stdio';
   readonly command: string;

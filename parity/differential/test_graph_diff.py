@@ -5,9 +5,12 @@ import re
 import subprocess
 import tempfile
 import unittest
+import unicodedata
 
 from parity.differential.graph_diff import (
     DifferentialError,
+    _language_family,
+    _load_object,
     _verify_clean_pinned_checkout,
     canonical_graph,
     compare_graphs,
@@ -15,7 +18,7 @@ from parity.differential.graph_diff import (
 
 
 class GraphDifferentialTests(unittest.TestCase):
-    def test_reference_checkout_must_be_clean_but_may_create_ignored_environment(self):
+    def test_reference_checkout_rejects_ignored_source_but_allows_caches(self):
         with tempfile.TemporaryDirectory() as temporary:
             checkout = Path(temporary)
 
@@ -29,10 +32,17 @@ class GraphDifferentialTests(unittest.TestCase):
                 )
 
             git("init", "-q")
-            (checkout / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+            (checkout / ".gitignore").write_text(
+                ".venv/\n.pytest_cache/\n__pycache__/\n*.so\n",
+                encoding="utf-8",
+            )
             tracked = checkout / "uv.lock"
             tracked.write_text("pinned\n", encoding="utf-8")
-            git("add", ".gitignore", "uv.lock")
+            package = checkout / "graphify"
+            package.mkdir()
+            source = package / "__init__.py"
+            source.write_text("VERSION = 'pinned'\n", encoding="utf-8")
+            git("add", ".gitignore", "uv.lock", "graphify/__init__.py")
             git(
                 "-c",
                 "user.name=Parity Test",
@@ -47,7 +57,32 @@ class GraphDifferentialTests(unittest.TestCase):
             _verify_clean_pinned_checkout(checkout, head)
             (checkout / ".venv").mkdir()
             (checkout / ".venv/marker").write_text("ignored\n", encoding="utf-8")
+            (checkout / ".pytest_cache").mkdir()
+            (checkout / ".pytest_cache/marker").write_text(
+                "ignored cache\n", encoding="utf-8"
+            )
+            bytecode = package / "__pycache__"
+            bytecode.mkdir()
+            (bytecode / "__init__.cpython-test.pyc").write_bytes(b"cache")
             _verify_clean_pinned_checkout(checkout, head)
+
+            ignored_native = package / "oracle.so"
+            ignored_native.write_bytes(b"ignored shadow")
+            with self.assertRaisesRegex(
+                DifferentialError,
+                r"ignored executable-source artifact.*graphify/oracle\.so",
+            ):
+                _verify_clean_pinned_checkout(checkout, head)
+            ignored_native.unlink()
+
+            orphan_cache = bytecode / "orphan.cpython-test.pyc"
+            orphan_cache.write_bytes(b"not backed by tracked source")
+            with self.assertRaisesRegex(
+                DifferentialError,
+                r"ignored executable-source artifact.*graphify/__pycache__/orphan",
+            ):
+                _verify_clean_pinned_checkout(checkout, head)
+            orphan_cache.unlink()
 
             untracked = checkout / "new-source.py"
             untracked.write_text("print('unexpected')\n", encoding="utf-8")
@@ -73,6 +108,7 @@ class GraphDifferentialTests(unittest.TestCase):
             "links": [
                 {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"}
             ],
+            "hyperedges": [],
         }
         candidate = {
             "multigraph": False,
@@ -84,6 +120,7 @@ class GraphDifferentialTests(unittest.TestCase):
             "edges": [
                 {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"}
             ],
+            "hyperedges": [],
         }
         self.assertTrue(compare_graphs(reference, candidate)["equal"])
 
@@ -104,6 +141,37 @@ class GraphDifferentialTests(unittest.TestCase):
         self.assertEqual(report["edges"]["missing_count"], 2)
         self.assertEqual(report["edges"]["extra_count"], 1)
 
+    def test_multigraph_edge_keys_are_structural_and_strict_facts(self):
+        reference = {
+            "directed": True,
+            "multigraph": True,
+            "nodes": [{"id": "a"}],
+            "links": [
+                {
+                    "source": "a",
+                    "target": "a",
+                    "relation": "calls",
+                    "key": "calls:a.py:L1",
+                }
+            ],
+            "hyperedges": [],
+        }
+        candidate = {
+            **reference,
+            "links": [
+                {
+                    **reference["links"][0],
+                    "key": "calls:a.py:L2",
+                }
+            ],
+        }
+        for profile in ("structure", "strict"):
+            with self.subTest(profile=profile):
+                report = compare_graphs(reference, candidate, profile=profile)
+                self.assertFalse(report["equal"])
+                self.assertEqual(report["edges"]["missing_count"], 1)
+                self.assertEqual(report["edges"]["extra_count"], 1)
+
     def test_paths_are_reanchored_to_the_shared_corpus(self):
         with tempfile.TemporaryDirectory() as temporary:
             corpus = Path(temporary)
@@ -115,6 +183,60 @@ class GraphDifferentialTests(unittest.TestCase):
                 canonical_graph(candidate, corpus=corpus),
             )
 
+    def test_portable_paths_normalize_unicode_roots_and_relative_paths_to_nfc(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root_name = unicodedata.normalize("NFD", "café-root")
+            corpus = Path(temporary) / root_name
+            corpus.mkdir()
+            relative_nfd = unicodedata.normalize("NFD", "src/café.py")
+            relative_nfc = unicodedata.normalize("NFC", relative_nfd)
+            absolute_nfc = unicodedata.normalize(
+                "NFC", str(corpus / relative_nfd)
+            )
+            reference = {
+                "nodes": [{"id": "main", "source_file": absolute_nfc}]
+            }
+            candidate = {
+                "nodes": [{"id": "main", "source_file": relative_nfd}]
+            }
+            reference_graph = canonical_graph(reference, corpus=corpus)
+            candidate_graph = canonical_graph(candidate, corpus=corpus)
+            self.assertEqual(reference_graph, candidate_graph)
+            self.assertEqual(
+                reference_graph["nodes"][0]["source_file"], relative_nfc
+            )
+
+    def test_graph_artifact_loader_rejects_nonfinite_json_numbers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            graph_path = Path(temporary) / "graph.json"
+            for literal in ("NaN", "Infinity", "-Infinity", "1e9999"):
+                with self.subTest(literal=literal):
+                    graph_path.write_text(
+                        '{"nodes":[{"id":"a","score":'
+                        + literal
+                        + '}],"links":[],"hyperedges":[]}',
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        DifferentialError, "non-finite JSON number"
+                    ):
+                        _load_object(graph_path)
+
+    def test_graph_artifact_loader_rejects_duplicate_json_keys(self):
+        documents = [
+            '{"nodes": [], "nodes": []}',
+            '{"nodes": [{"id": "a", "id": "b"}]}',
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            graph_path = Path(temporary) / "graph.json"
+            for document in documents:
+                with self.subTest(document=document):
+                    graph_path.write_text(document, encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        DifferentialError, "duplicate JSON object key"
+                    ):
+                        _load_object(graph_path)
+
     def test_node_field_mismatches_are_reported_by_id(self):
         reference = {"nodes": [{"id": "main", "label": "Main", "type": "function"}]}
         candidate = {"nodes": [{"id": "main", "label": "Main", "type": "class"}]}
@@ -122,6 +244,87 @@ class GraphDifferentialTests(unittest.TestCase):
         self.assertFalse(report["equal"])
         self.assertEqual(report["nodes"]["mismatched_count"], 1)
         self.assertIn("type", report["nodes"]["mismatched"][0]["fields"])
+
+    def test_missing_and_null_node_fields_are_not_equal(self):
+        reference = {
+            "nodes": [{"id": "main", "type": None}],
+            "links": [],
+            "hyperedges": [],
+        }
+        candidate = {"nodes": [{"id": "main"}], "links": [], "hyperedges": []}
+        report = compare_graphs(reference, candidate)
+        self.assertFalse(report["equal"])
+        change = report["nodes"]["mismatched"][0]["fields"]["type"]
+        self.assertIsNone(change["reference"])
+        self.assertTrue(change["reference_present"])
+        self.assertFalse(change["candidate_present"])
+
+    def test_json_booleans_are_not_equal_to_numbers(self):
+        base = {"links": [], "hyperedges": []}
+        node_report = compare_graphs(
+            {**base, "nodes": [{"id": "main", "line": False}]},
+            {**base, "nodes": [{"id": "main", "line": 0}]},
+        )
+        self.assertFalse(node_report["equal"])
+        self.assertIn("line", node_report["nodes"]["mismatched"][0]["fields"])
+
+        metadata_report = compare_graphs(
+            {**base, "nodes": [], "directed": False},
+            {**base, "nodes": [], "directed": 0},
+        )
+        self.assertFalse(metadata_report["equal"])
+        self.assertIn("directed", metadata_report["metadata"])
+
+    def test_integer_node_id_does_not_satisfy_string_edge_endpoint(self):
+        graph = {
+            "nodes": [{"id": 1}],
+            "links": [{"source": "1", "target": "1", "relation": "calls"}],
+            "hyperedges": [],
+        }
+        report = compare_graphs(graph, graph)
+        diagnostics = report["diagnostics"]["pre_normalization"]["candidate"]
+        self.assertFalse(report["gate"]["passed"])
+        self.assertEqual(diagnostics["malformed_records"]["count"], 1)
+        self.assertEqual(diagnostics["dangling_references"]["count"], 2)
+        self.assertEqual(
+            diagnostics["malformed_records"]["examples"][0]["reason"],
+            "missing_or_invalid_id",
+        )
+
+    def test_every_graph_identity_position_requires_a_nonempty_string(self):
+        def invalid_graph(position, value):
+            graph = {
+                "nodes": [{"id": "a"}, {"id": "b"}],
+                "links": [],
+                "hyperedges": [],
+            }
+            if position == "node":
+                graph["nodes"][0]["id"] = value
+            elif position == "edge":
+                graph["links"] = [
+                    {"source": value, "target": "b", "relation": "calls"}
+                ]
+            elif position == "hyperedge_id":
+                graph["hyperedges"] = [{"id": value, "nodes": ["a"]}]
+            else:
+                graph["hyperedges"] = [{"id": "flow", "nodes": [value]}]
+            return graph
+
+        for value_name, value in (
+            ("empty", ""),
+            ("integer", 1),
+            ("boolean", True),
+            ("nonfinite", float("nan")),
+        ):
+            for position in ("node", "edge", "hyperedge_id", "hyperedge_member"):
+                with self.subTest(value=value_name, position=position):
+                    graph = invalid_graph(position, value)
+                    report = compare_graphs(graph, graph)
+                    diagnostics = report["diagnostics"]["pre_normalization"][
+                        "candidate"
+                    ]
+                    self.assertGreater(diagnostics["violation_count"], 0)
+                    self.assertFalse(report["gate"]["passed"])
 
     def test_duplicate_node_ids_are_invalid_and_never_silently_collapsed(self):
         graph = {
@@ -199,8 +402,12 @@ class GraphDifferentialTests(unittest.TestCase):
         self.assertFalse(report["gate"]["passed"])
 
     def test_malformed_candidate_fact_fails_reference_preserving_contract(self):
-        reference = {"nodes": [{"id": "a"}], "links": []}
-        candidate = {"nodes": [{"id": "a"}], "links": ["not-an-edge"]}
+        reference = {"nodes": [{"id": "a"}], "links": [], "hyperedges": []}
+        candidate = {
+            "nodes": [{"id": "a"}],
+            "links": ["not-an-edge"],
+            "hyperedges": [],
+        }
         report = compare_graphs(
             reference, candidate, contract="reference-preserving"
         )
@@ -209,6 +416,50 @@ class GraphDifferentialTests(unittest.TestCase):
         ]
         self.assertEqual(malformed["count"], 1)
         self.assertFalse(report["gate"]["passed"])
+
+    def test_missing_required_graph_collections_are_malformed(self):
+        reference = {"nodes": [], "links": [], "hyperedges": []}
+        report = compare_graphs(reference, {})
+        malformed = report["diagnostics"]["pre_normalization"]["candidate"][
+            "malformed_records"
+        ]
+        self.assertFalse(report["gate"]["passed"])
+        self.assertEqual(malformed["count"], 3)
+        self.assertEqual(
+            {item["collection"] for item in malformed["examples"]},
+            {"nodes", "links/edges", "hyperedges"},
+        )
+
+    def test_hyperedge_ids_are_required_and_unique(self):
+        missing_id = {
+            "nodes": [{"id": "a"}],
+            "links": [],
+            "hyperedges": [{"nodes": ["a"]}],
+        }
+        missing_report = compare_graphs(missing_id, missing_id)
+        malformed = missing_report["diagnostics"]["pre_normalization"]["candidate"][
+            "malformed_records"
+        ]
+        self.assertFalse(missing_report["gate"]["passed"])
+        self.assertEqual(malformed["count"], 1)
+        self.assertEqual(malformed["examples"][0]["reason"], "missing_or_invalid_id")
+
+        duplicate_id = {
+            "nodes": [{"id": "a"}],
+            "links": [],
+            "hyperedges": [
+                {"id": "flow", "nodes": ["a"]},
+                {"id": "flow", "nodes": ["a"]},
+            ],
+        }
+        duplicate_report = compare_graphs(duplicate_id, duplicate_id)
+        duplicates = duplicate_report["diagnostics"]["pre_normalization"][
+            "candidate"
+        ]["duplicate_hyperedge_ids"]
+        self.assertFalse(duplicate_report["gate"]["passed"])
+        self.assertEqual(duplicates["id_count"], 1)
+        self.assertEqual(duplicates["duplicate_occurrence_count"], 1)
+        self.assertEqual(duplicates["ids"], [{"id": "flow", "count": 2}])
 
     def test_asymmetric_duplicate_records_are_compared_as_a_multiset(self):
         reference = {
@@ -275,7 +526,7 @@ class GraphDifferentialTests(unittest.TestCase):
             "absolute_path_value",
         )
 
-    def test_cross_family_identity_hub_is_diagnosed_without_changing_parity(self):
+    def test_cross_runtime_binding_is_reported_without_changing_exact_equality(self):
         graph = {
             "nodes": [
                 {
@@ -293,31 +544,218 @@ class GraphDifferentialTests(unittest.TestCase):
                 {
                     "source": "child",
                     "target": "base",
-                    "relation": "inherits",
+                    "relation": "references",
                     "source_file": "backend/child.py",
                 }
             ],
+            "hyperedges": [],
         }
         report = compare_graphs(graph, graph)
-        hubs = report["diagnostics"]["identity_hubs"]["candidate"]
+        bindings = report["diagnostics"]["cross_runtime_bindings"]["candidate"]
         self.assertTrue(report["equal"])
-        self.assertEqual(hubs["id_count"], 1)
-        self.assertEqual(hubs["ids"][0]["id"], "base")
-        self.assertEqual(hubs["ids"][0]["families"], ["jsts", "python"])
-        self.assertEqual(hubs["ids"][0]["relations"], ["inherits"])
+        self.assertTrue(report["gate"]["passed"])
+        self.assertEqual(bindings["endpoint_count"], 1)
+        self.assertEqual(bindings["endpoints"][0]["id"], "base")
+        self.assertEqual(
+            bindings["endpoints"][0]["families"], ["jsts", "python"]
+        )
+        self.assertEqual(bindings["endpoints"][0]["relations"], ["references"])
 
         gated = compare_graphs(
-            graph, graph, fail_on_candidate_identity_hubs=True
+            graph, graph, fail_on_candidate_cross_runtime_bindings=True
         )
-        self.assertFalse(gated["equal"])
+        self.assertTrue(gated["equal"])
+        self.assertFalse(gated["gate"]["passed"])
         self.assertTrue(
-            gated["diagnostics"]["identity_hubs"]["candidate_gate_enabled"]
+            gated["diagnostics"]["cross_runtime_bindings"][
+                "candidate_gate_enabled"
+            ]
         )
         self.assertFalse(
-            gated["diagnostics"]["identity_hubs"]["candidate_gate_passed"]
+            gated["diagnostics"]["cross_runtime_bindings"][
+                "candidate_gate_passed"
+            ]
         )
 
-    def test_real_interop_and_semantic_edges_are_not_identity_hubs(self):
+    def test_missing_edge_source_uses_directed_source_node_provenance(self):
+        graph = {
+            "nodes": [
+                {"id": "base", "source_file": "frontend/base.ts"},
+                {"id": "child", "source_file": "backend/child.py"},
+            ],
+            "links": [
+                {
+                    "source": "child",
+                    "target": "base",
+                    "relation": "inherits",
+                }
+            ],
+            "hyperedges": [],
+        }
+        report = compare_graphs(graph, graph)
+        candidate = report["diagnostics"]["pre_normalization"]["candidate"]
+        bindings = report["diagnostics"]["cross_runtime_bindings"]["candidate"]
+        self.assertEqual(candidate["violation_count"], 0)
+        self.assertTrue(report["equal"])
+        self.assertEqual(bindings["endpoint_count"], 1)
+        self.assertEqual(bindings["endpoints"][0]["id"], "base")
+        self.assertEqual(
+            bindings["endpoints"][0]["families"], ["jsts", "python"]
+        )
+        self.assertEqual(
+            bindings["endpoints"][0]["source_files"],
+            ["backend/child.py", "frontend/base.ts"],
+        )
+
+        gated = compare_graphs(
+            graph, graph, fail_on_candidate_cross_runtime_bindings=True
+        )
+        self.assertTrue(gated["equal"])
+        self.assertFalse(gated["gate"]["passed"])
+        self.assertFalse(
+            gated["diagnostics"]["cross_runtime_bindings"][
+                "candidate_gate_passed"
+            ]
+        )
+
+    def test_missing_edge_source_keeps_legitimate_runtime_interop_grouped(self):
+        graph = {
+            "nodes": [
+                {"id": "base", "source_file": "jvm/Base.java"},
+                {"id": "child", "source_file": "jvm/Child.kt"},
+            ],
+            "links": [
+                {
+                    "source": "child",
+                    "target": "base",
+                    "relation": "inherits",
+                }
+            ],
+            "hyperedges": [],
+        }
+        report = compare_graphs(
+            graph, graph, fail_on_candidate_cross_runtime_bindings=True
+        )
+        self.assertTrue(report["equal"])
+        self.assertTrue(report["gate"]["passed"])
+        self.assertEqual(
+            report["diagnostics"]["cross_runtime_bindings"]["candidate"],
+            {"endpoint_count": 0, "endpoints": []},
+        )
+
+    def test_supported_runtime_extensions_have_explicit_families(self):
+        expected = {
+            "jsts": [
+                "js", "jsx", "mjs", "cjs", "ejs", "ets", "ts", "tsx",
+                "mts", "cts", "vue", "svelte", "astro",
+            ],
+            "jvm": ["java", "kt", "kts", "scala", "groovy", "gradle"],
+            "native": [
+                "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "cu",
+                "cuh", "metal", "m", "mm", "swift",
+            ],
+            "python": ["py", "pyi"],
+            "go": ["go"],
+            "rust": ["rs"],
+            "ruby": ["rb", "rake"],
+            "php": ["php", "phtml", "php3", "php4", "php5", "php7", "phps"],
+            "dotnet": [
+                "cs", "sln", "slnx", "csproj", "fsproj", "vbproj", "razor",
+                "cshtml", "xaml",
+            ],
+            "lua": ["lua", "luau", "toc"],
+            "zig": ["zig"],
+            "elixir": ["ex", "exs"],
+            "julia": ["jl"],
+            "dart": ["dart"],
+            "shell": ["sh", "bash", "zsh", "dash", "ksh"],
+            "powershell": ["ps1", "psm1", "psd1"],
+            "fortran": ["f", "f90", "f95", "f03", "f08"],
+            "pascal": [
+                "pas", "pp", "dpr", "dpk", "lpr", "inc", "dfm", "lfm", "lpk",
+            ],
+            "terraform": ["tf", "tfvars", "hcl"],
+            "sql": ["sql"],
+            "r": ["r"],
+            "hardware": ["v", "sv", "svh"],
+            "apex": ["cls", "trigger"],
+            "dm": ["dm", "dme", "dmi", "dmm", "dmf"],
+        }
+        for family, extensions in expected.items():
+            for extension in extensions:
+                with self.subTest(family=family, extension=extension):
+                    self.assertEqual(_language_family(f"src/example.{extension}"), family)
+                    self.assertEqual(_language_family(f"src/example.{extension.upper()}"), family)
+        for generic in ["package.json", "compose.yaml", "settings.toml", "view.xml"]:
+            with self.subTest(generic=generic):
+                self.assertIsNone(_language_family(generic))
+
+    def test_symbol_binding_relations_report_cross_runtime_endpoints(self):
+        for relation in [
+            "accesses",
+            "bound_to",
+            "case_of",
+            "defines",
+            "instantiates",
+            "listened_by",
+            "mixes_in",
+            "requires",
+        ]:
+            graph = {
+                "nodes": [
+                    {"id": "target", "source_file": "frontend/target.ts"},
+                    {"id": "origin", "source_file": "backend/origin.py"},
+                ],
+                "links": [
+                    {
+                        "source": "origin",
+                        "target": "target",
+                        "relation": relation,
+                        "source_file": "backend/origin.py",
+                    }
+                ],
+            }
+            with self.subTest(relation=relation):
+                bindings = compare_graphs(graph, graph)["diagnostics"][
+                    "cross_runtime_bindings"
+                ]
+                self.assertEqual(bindings["candidate"]["endpoint_count"], 1)
+                self.assertEqual(
+                    bindings["candidate"]["endpoints"][0]["id"], "target"
+                )
+
+    def test_config_and_data_flow_relations_do_not_create_cross_runtime_bindings(self):
+        for relation in [
+            "depends_on",
+            "reads_from",
+            "uses",
+            "implemented_by",
+            "semantically_similar_to",
+        ]:
+            graph = {
+                "nodes": [
+                    {"id": "target", "source_file": "infra/target.tf"},
+                    {"id": "origin", "source_file": "backend/origin.py"},
+                ],
+                "links": [
+                    {
+                        "source": "origin",
+                        "target": "target",
+                        "relation": relation,
+                        "source_file": "backend/origin.py",
+                    }
+                ],
+            }
+            with self.subTest(relation=relation):
+                bindings = compare_graphs(graph, graph)["diagnostics"][
+                    "cross_runtime_bindings"
+                ]
+                self.assertEqual(
+                    bindings["candidate"],
+                    {"endpoint_count": 0, "endpoints": []},
+                )
+
+    def test_real_interop_and_semantic_edges_are_not_cross_runtime_bindings(self):
         graph = {
             "nodes": [
                 {"id": "shared", "source_file": "src/shared.js"},
@@ -339,9 +777,15 @@ class GraphDifferentialTests(unittest.TestCase):
                 },
             ],
         }
-        hubs = compare_graphs(graph, graph)["diagnostics"]["identity_hubs"]
-        self.assertEqual(hubs["reference"], {"id_count": 0, "ids": []})
-        self.assertEqual(hubs["candidate"], {"id_count": 0, "ids": []})
+        bindings = compare_graphs(graph, graph)["diagnostics"][
+            "cross_runtime_bindings"
+        ]
+        self.assertEqual(
+            bindings["reference"], {"endpoint_count": 0, "endpoints": []}
+        )
+        self.assertEqual(
+            bindings["candidate"], {"endpoint_count": 0, "endpoints": []}
+        )
 
     def test_mismatches_are_grouped_by_file_relation_and_field(self):
         reference = {
@@ -444,6 +888,7 @@ class GraphDifferentialTests(unittest.TestCase):
             "directed": True,
             "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
             "links": [{"source": "a", "target": "b", "relation": "calls"}],
+            "hyperedges": [],
         }
         candidate = {
             "directed": True,
@@ -456,6 +901,7 @@ class GraphDifferentialTests(unittest.TestCase):
                 {"source": "a", "target": "b", "relation": "calls"},
                 {"source": "a", "target": "c", "relation": "references"},
             ],
+            "hyperedges": [],
         }
         report = compare_graphs(reference, candidate, contract="reference-preserving")
         self.assertFalse(report["equal"])
@@ -500,6 +946,7 @@ class GraphDifferentialTests(unittest.TestCase):
                     "context": "call",
                 }
             ],
+            "hyperedges": [],
         }
         candidate = {
             "nodes": [{"id": "caller"}, {"id": "target"}],
@@ -511,11 +958,38 @@ class GraphDifferentialTests(unittest.TestCase):
                     "context": "import_guided_call",
                 }
             ],
+            "hyperedges": [],
         }
         report = compare_graphs(reference, candidate, contract="reference-preserving")
         self.assertFalse(report["equal"])
         self.assertTrue(report["parity"]["reference_preservation"]["preserved"])
         self.assertTrue(report["gate"]["passed"])
+
+    def test_context_refinement_is_limited_to_edge_records(self):
+        reference = {
+            "nodes": [{"id": "a"}],
+            "links": [],
+            "hyperedges": [
+                {"id": "flow", "nodes": ["a"], "context": "call"}
+            ],
+        }
+        candidate = {
+            "nodes": [{"id": "a"}],
+            "links": [],
+            "hyperedges": [
+                {
+                    "id": "flow",
+                    "nodes": ["a"],
+                    "context": "import_guided_call",
+                }
+            ],
+        }
+        report = compare_graphs(reference, candidate, contract="reference-preserving")
+        preservation = report["parity"]["reference_preservation"]
+        self.assertFalse(report["equal"])
+        self.assertFalse(preservation["preserved"])
+        self.assertEqual(preservation["hyperedges"]["missing_or_changed_count"], 1)
+        self.assertFalse(report["gate"]["passed"])
 
 
 if __name__ == "__main__":

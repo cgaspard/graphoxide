@@ -35,7 +35,14 @@ try {
     vscodeExecutablePath,
     extensionDevelopmentPath: extensionRoot,
     extensionTestsPath: path.join(extensionRoot, 'dist', 'test', 'e2e', 'index.js'),
-    launchArgs: [workspace, '--disable-extensions', '--skip-welcome', '--skip-release-notes'],
+    launchArgs: [
+      workspace,
+      `--user-data-dir=${path.join(temporaryRoot, 'user-data')}`,
+      `--extensions-dir=${path.join(temporaryRoot, 'extensions')}`,
+      '--disable-extensions',
+      '--skip-welcome',
+      '--skip-release-notes',
+    ],
   });
 } finally {
   for (const [key, value] of electronEnvironment) {

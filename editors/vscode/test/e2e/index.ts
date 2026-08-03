@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
+import type { AddressInfo, Socket } from 'node:net';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { GraphoxideExtensionApi } from '../../src/extension';
@@ -39,12 +41,203 @@ export async function run(): Promise<void> {
   await verifyGraphPlacement(folder);
   await verifyProjectInstallers(folder, enabled.mcp!);
   await verifySaveAndWatchUpdates(api, folder, enabled.graphPath!);
+  await verifyAiProviders(api, enabled.graphPath!);
+  await verifyControlCenter();
 
   const finalStatus = await api.status();
   assert.equal(finalStatus.enabled, true);
   assert.equal(finalStatus.freshness, 'manual');
   assert.equal(finalStatus.watching, false);
   console.log(`Graphoxide E2E passed: ${finalStatus.nodes} nodes, ${finalStatus.edges} edges.`);
+}
+
+interface CapturedProviderRequest {
+  readonly method: string;
+  readonly path: string;
+  readonly authorization?: string;
+  readonly body?: Record<string, unknown>;
+}
+
+type FakeProviderKind = 'lm-studio' | 'ollama';
+
+class FakeLabelProvider {
+  private readonly sockets = new Set<Socket>();
+  private server?: http.Server;
+  private port = 0;
+  readonly requests: CapturedProviderRequest[] = [];
+
+  constructor(
+    readonly kind: FakeProviderKind,
+    readonly model: string,
+    private readonly expectedKey?: string,
+    private readonly completionDelayMs = 200,
+  ) {}
+
+  get baseUrl(): string {
+    return `http://127.0.0.1:${this.port}/v1`;
+  }
+
+  async start(): Promise<void> {
+    this.server = http.createServer((request, response) => {
+      void this.handle(request, response).catch((error: unknown) => {
+        response.statusCode = 500;
+        response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      });
+    });
+    this.server.on('connection', (socket) => {
+      this.sockets.add(socket);
+      socket.on('close', () => this.sockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => this.server!.listen(0, '127.0.0.1', resolve));
+    this.port = (this.server.address() as AddressInfo).port;
+  }
+
+  async close(): Promise<void> {
+    const server = this.server;
+    this.server = undefined;
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  find(pathname: string): CapturedProviderRequest[] {
+    return this.requests.filter((request) => request.path === pathname);
+  }
+
+  private async handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const pathname = new URL(request.url ?? '/', 'http://provider.invalid').pathname;
+    const body = await readJsonBody(request);
+    const captured: CapturedProviderRequest = {
+      method: request.method ?? 'GET',
+      path: pathname,
+      ...(typeof request.headers.authorization === 'string' ? { authorization: request.headers.authorization } : {}),
+      ...(body ? { body } : {}),
+    };
+    this.requests.push(captured);
+    if (this.expectedKey && captured.authorization !== `Bearer ${this.expectedKey}`) {
+      this.respond(response, 401, { error: 'API key required' });
+      return;
+    }
+    if (this.kind === 'lm-studio' && pathname === '/v1/models') {
+      this.respond(response, 200, { data: [{ id: this.model }] });
+      return;
+    }
+    if (this.kind === 'ollama' && pathname === '/api/tags') {
+      this.respond(response, 200, { models: [{ name: this.model, model: this.model }] });
+      return;
+    }
+    if (pathname === '/v1/chat/completions') {
+      await new Promise((resolve) => setTimeout(resolve, this.completionDelayMs));
+      const prompt = completionPrompt(body);
+      const prefix = this.kind === 'lm-studio' ? 'LM Studio' : 'Ollama';
+      const labels = Object.fromEntries(
+        [...prompt.matchAll(/Community (-?\d+):/gu)].map((match) => [match[1]!, `${prefix} ${match[1]} Architecture`]),
+      );
+      this.respond(response, 200, {
+        choices: [{ message: { content: JSON.stringify(labels) } }],
+        usage: { prompt_tokens: 17, completion_tokens: 5 },
+      });
+      return;
+    }
+    this.respond(response, 404, { error: `Unhandled ${pathname}` });
+  }
+
+  private respond(response: http.ServerResponse, status: number, body: unknown): void {
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(body));
+  }
+}
+
+async function readJsonBody(request: http.IncomingMessage): Promise<Record<string, unknown> | undefined> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  if (chunks.length === 0) return undefined;
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+}
+
+function completionPrompt(body: Record<string, unknown> | undefined): string {
+  const messages = body?.messages;
+  if (!Array.isArray(messages)) return '';
+  const first = messages[0];
+  if (typeof first !== 'object' || first === null || Array.isArray(first)) return '';
+  const content = (first as Record<string, unknown>).content;
+  return typeof content === 'string' ? content : '';
+}
+
+async function verifyAiProviders(api: GraphoxideExtensionApi, graphPath: string): Promise<void> {
+  assert.ok(api.test, 'The Extension Development Host did not expose Graphoxide test controls.');
+  const lmKey = 'lm-studio-e2e-key-never-log';
+  const lmStudio = new FakeLabelProvider('lm-studio', 'e2e/lm-studio-model', lmKey, 250);
+  const ollama = new FakeLabelProvider('ollama', 'e2e-ollama:latest', undefined, 250);
+  try {
+    await lmStudio.start();
+    const lmModels = await api.test.configureAi({
+      provider: 'lm-studio',
+      baseUrl: lmStudio.baseUrl,
+      model: lmStudio.model,
+      apiKey: lmKey,
+      timeoutSeconds: 600,
+    });
+    assert.deepEqual(lmModels, [lmStudio.model]);
+    await api.test.improveCommunityLabels();
+    const lmDiscovery = lmStudio.find('/v1/models');
+    const lmCompletions = lmStudio.find('/v1/chat/completions');
+    assert.equal(lmDiscovery.length, 1);
+    assert.equal(lmDiscovery[0]?.authorization, `Bearer ${lmKey}`);
+    assert.ok(lmCompletions.length >= 1, 'LM Studio did not receive a completion request.');
+    assert.ok(lmCompletions.every((request) => request.authorization === `Bearer ${lmKey}`));
+    assert.ok(lmCompletions.every((request) => request.body?.model === lmStudio.model));
+    assert.ok(lmCompletions.every((request) => request.body?.reasoning_effort === 'none'));
+    await assertGeneratedLabels(graphPath, 'LM Studio', lmKey);
+    await lmStudio.close();
+
+    await ollama.start();
+    const ollamaModels = await api.test.configureAi({
+      provider: 'ollama',
+      baseUrl: ollama.baseUrl,
+      model: ollama.model,
+      timeoutSeconds: 600,
+    });
+    assert.deepEqual(ollamaModels, [ollama.model]);
+    await api.test.improveCommunityLabels();
+    const ollamaDiscovery = ollama.find('/api/tags');
+    const ollamaCompletions = ollama.find('/v1/chat/completions');
+    assert.equal(ollamaDiscovery.length, 1);
+    assert.equal(ollamaDiscovery[0]?.authorization, undefined);
+    assert.ok(ollamaCompletions.length >= 1, 'Ollama did not receive a completion request.');
+    assert.ok(ollamaCompletions.every((request) => request.authorization === undefined));
+    assert.ok(ollamaCompletions.every((request) => request.body?.model === ollama.model));
+    assert.ok(ollamaCompletions.every((request) => request.body?.reasoning_effort === undefined));
+    await assertGeneratedLabels(graphPath, 'Ollama', lmKey);
+  } finally {
+    await api.test.clearAi();
+    await Promise.all([lmStudio.close(), ollama.close()]);
+  }
+}
+
+async function assertGeneratedLabels(graphPath: string, prefix: string, forbiddenSecret: string): Promise<void> {
+  const directory = path.dirname(graphPath);
+  const graphText = await fs.readFile(graphPath, 'utf8');
+  const graph = JSON.parse(graphText) as { nodes?: Array<{ community_name?: string }> };
+  const generated = graph.nodes?.flatMap((node) => node.community_name ? [node.community_name] : []) ?? [];
+  assert.ok(generated.length > 0, `${prefix} did not write community names to graph.json.`);
+  assert.ok(generated.every((label) => label.startsWith(prefix)), `Unexpected ${prefix} community label.`);
+  const sidecar = await fs.readFile(path.join(directory, '.graphoxide_labels.json'), 'utf8');
+  const report = await fs.readFile(path.join(directory, 'GRAPH_REPORT.md'), 'utf8');
+  assert.match(sidecar, new RegExp(prefix, 'u'));
+  assert.match(report, new RegExp(prefix, 'u'));
+  assert.doesNotMatch(`${graphText}\n${sidecar}\n${report}`, new RegExp(forbiddenSecret, 'u'));
+}
+
+async function verifyControlCenter(): Promise<void> {
+  await vscode.commands.executeCommand('graphoxide.openControlCenter');
+  await poll(
+    () => vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => tab.label === 'Graphoxide Control Center')),
+    'Control Center to open',
+  );
+  const tab = vscode.window.tabGroups.all.flatMap((group) => group.tabs).find((candidate) => candidate.label === 'Graphoxide Control Center');
+  assert.ok(tab);
+  await vscode.window.tabGroups.close(tab);
 }
 
 async function verifyMcpProtocol(invocation: NonNullable<Awaited<ReturnType<GraphoxideExtensionApi['status']>>['mcp']>): Promise<void> {
@@ -134,7 +327,11 @@ async function verifyProjectInstallers(
   for (const id of ['claude-code', 'codex', 'opencode'] as const) {
     const installer = installerById(id);
     assert.ok(installer, `Missing ${id} installer.`);
-    const context = { folder, invocation };
+    const context = {
+      folder,
+      invocation,
+      userInvocation: { command: invocation.command, args: ['serve'] },
+    };
     const installed = await installer.install(context, 'project');
     assert.equal(installed.ok, true, installed.message);
     const status = await installer.status(context);

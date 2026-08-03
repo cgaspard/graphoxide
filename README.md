@@ -246,7 +246,7 @@ workflows, managed graph freshness, report/export commands, and MCP integration.
 Install the packaged extension for your platform from this checkout, for example:
 
 ```bash
-code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.2.0.vsix
+code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.4.0.vsix
 ```
 
 Then open a repository and accept the first-open **Enable Graphoxide** prompt.
@@ -375,14 +375,44 @@ Offline clustering always provides deterministic hub labels. Richer labels can b
 
 ```bash
 export OPENAI_API_KEY=...
-export GRAPHOXIDE_MODEL=gpt-4o-mini
-# Optional: GRAPHOXIDE_LLM_BASE_URL=http://localhost:11434/v1
-graphoxide label . --missing-only
+graphoxide label graphoxide-out/graph.json --backend openai --model gpt-4.1-mini
 ```
 
-For Anthropic, set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_BASE_URL`) instead. `GRAPHOXIDE_LLM_PROVIDER=anthropic` selects Anthropic explicitly when multiple provider variables are present.
+For a keyless Ollama server on the same computer:
 
-Only community names are sent. Structural extraction, build, queries, reports, and exports remain fully offline.
+```bash
+GRAPHOXIDE_LLM_BASE_URL=http://localhost:11434/v1 \
+  graphoxide label graphoxide-out/graph.json --backend ollama --model qwen2.5-coder:7b
+```
+
+For LM Studio (with an optional OpenAI-compatible Bearer key):
+
+```bash
+export OPENAI_API_KEY=... # omit for a keyless loopback server
+GRAPHOXIDE_LLM_BASE_URL=http://127.0.0.1:1234/v1 \
+  graphoxide label graphoxide-out/graph.json --backend lm-studio \
+  --model qwen/qwen3.6-27b --timeout-seconds 600
+```
+
+Label requests default to a 600-second whole-request timeout so LM Studio and
+Ollama have time to load a cold local model. Use `--timeout-seconds` to tune it.
+The LM Studio backend disables model reasoning for this short structured task,
+preventing reasoning-only responses from consuming the label output budget.
+
+For Anthropic, set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_BASE_URL`)
+instead. `GRAPHOXIDE_LLM_PROVIDER=anthropic` selects Anthropic explicitly when
+multiple provider variables are present. Add `--missing-only` only when you want
+to preserve every existing non-placeholder community name; without it, all
+communities are relabeled.
+
+The VS Code extension exposes configuration, execution, and status through the
+**Graphoxide Control Center**, with Secret Storage for keys and an explicit
+data/endpoint confirmation.
+
+Labeling sends up to 12 graph node labels per community. Labels can include
+source-derived identifiers, filenames, and truncated comments or docstrings.
+Full files and `source_file` metadata are not included. Structural extraction,
+builds, queries, reports, and exports remain fully offline.
 
 ## Query logging
 

@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
+import { trustedExecutableCandidates } from '../llm/config';
 import { ServerInvocation } from './config';
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +18,41 @@ export function configuredInvocation(folder?: vscode.WorkspaceFolder): ServerInv
 export function extensionInvocation(extensionUri: vscode.Uri, folder?: vscode.WorkspaceFolder): ServerInvocation {
   const configured = configuredInvocation(folder);
   return { ...configured, command: resolveGraphoxideExecutable(extensionUri, configured.command, folder) };
+}
+
+/**
+ * Resolve an executable that is controlled by this extension. This deliberately
+ * excludes workspace settings, extra arguments, environment overrides, and PATH
+ * because callers may pass API credentials to the child process.
+ */
+export function trustedExtensionInvocation(
+  extensionUri: vscode.Uri,
+  folder: vscode.WorkspaceFolder,
+): ServerInvocation {
+  const command = trustedExecutable(extensionUri);
+  if (!command) {
+    throw new Error(
+      'AI community labeling requires the Graphoxide executable bundled with this extension or built in this repository. '
+      + 'The configured binary, extra arguments, environment override, and PATH are not used for this command.',
+    );
+  }
+  return { command, args: [], cwd: folder.uri.fsPath };
+}
+
+/**
+ * Resolve the workspace-independent invocation persisted by user-scope MCP
+ * installers. Workspace binary settings, extra arguments, cwd, overrides, and
+ * PATH are deliberately excluded because this registration applies globally.
+ */
+export function trustedMcpInvocation(extensionUri: vscode.Uri): ServerInvocation {
+  const command = trustedExecutable(extensionUri);
+  if (!command) {
+    throw new Error(
+      'User-scope MCP registration requires the Graphoxide executable bundled with this extension or built in this repository. '
+      + 'Workspace binary settings, extra arguments, environment overrides, and PATH are not used for all-project registrations.',
+    );
+  }
+  return { command, args: ['serve'] };
 }
 
 export async function resolvedInvocation(folder?: vscode.WorkspaceFolder, extensionUri?: vscode.Uri): Promise<ServerInvocation> {
@@ -80,6 +116,10 @@ function findOnPath(executable: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function trustedExecutable(extensionUri: vscode.Uri): string | undefined {
+  return trustedExecutableCandidates(extensionUri.fsPath, process.platform).find(isExecutable);
 }
 
 function isExecutable(file: string): boolean {

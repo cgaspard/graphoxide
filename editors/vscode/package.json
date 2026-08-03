@@ -2,7 +2,7 @@
   "name": "graphoxide-vscode",
   "displayName": "Graphoxide",
   "description": "Explore, query, and maintain Graphoxide code knowledge graphs without leaving VS Code.",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "publisher": "cgaspard",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -152,8 +152,23 @@
         "title": "Graphoxide: Copy MCP Configuration"
       },
       {
-        "command": "graphoxide.manageMcp",
-        "title": "Graphoxide: Manage MCP Integrations…"
+        "command": "graphoxide.openControlCenter",
+        "title": "Graphoxide: Open Control Center",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "graphoxide.configureAiLabeling",
+        "title": "Graphoxide: Configure AI Community Labeling…",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "graphoxide.clearAiCredential",
+        "title": "Graphoxide: Clear Stored AI Credential…"
+      },
+      {
+        "command": "graphoxide.improveCommunityLabels",
+        "title": "Graphoxide: Improve Community Names with AI",
+        "icon": "$(sparkle)"
       },
       {
         "command": "graphoxide.enableWorkspace",
@@ -170,10 +185,6 @@
       {
         "command": "graphoxide.resetWorkspacePrompt",
         "title": "Graphoxide: Reset Workspace Welcome"
-      },
-      {
-        "command": "graphoxide.showStatus",
-        "title": "Graphoxide: Show Graph Status"
       },
       {
         "command": "graphoxide.openSettings",
@@ -209,7 +220,7 @@
     "viewsWelcome": [
       {
         "view": "graphoxide.explorer",
-        "contents": "No Graphoxide graph was found in this workspace.\n[Enable managed workspace](command:graphoxide.enableWorkspace)\n[Extract once](command:graphoxide.initialize)\n[Manage MCP integrations](command:graphoxide.manageMcp)",
+        "contents": "No Graphoxide graph was found in this workspace.\n[Open Graphoxide Control Center](command:graphoxide.openControlCenter)",
         "when": "!graphoxide.hasGraph"
       },
       {
@@ -221,14 +232,9 @@
     "menus": {
       "view/title": [
         {
-          "command": "graphoxide.openGraph",
-          "when": "view == graphoxide.explorer && graphoxide.hasGraph",
-          "group": "navigation@1"
-        },
-        {
-          "command": "graphoxide.refresh",
+          "command": "graphoxide.openControlCenter",
           "when": "view == graphoxide.explorer",
-          "group": "navigation@2"
+          "group": "navigation@1"
         },
         {
           "command": "graphoxide.clearResults",
@@ -387,6 +393,64 @@
           "type": "boolean",
           "default": true,
           "description": "Show graph connection counts above indexed symbols."
+        },
+        "graphoxide.llm.provider": {
+          "type": "string",
+          "enum": [
+            "none",
+            "openai",
+            "lm-studio",
+            "ollama",
+            "openai-compatible",
+            "anthropic"
+          ],
+          "enumDescriptions": [
+            "Disable AI community labeling.",
+            "OpenAI cloud API.",
+            "Local LM Studio OpenAI-compatible server.",
+            "Local Ollama server.",
+            "Custom OpenAI-compatible endpoint.",
+            "Anthropic Messages API."
+          ],
+          "default": "none",
+          "scope": "machine",
+          "description": "Provider used only to name existing graph communities. Configure through the command so API keys stay in VS Code Secret Storage."
+        },
+        "graphoxide.llm.baseUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "API base URL for AI community labeling. HTTP is permitted only for a loopback endpoint."
+        },
+        "graphoxide.llm.model": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Exact model ID used to name graph communities."
+        },
+        "graphoxide.llm.maxConcurrency": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 32,
+          "scope": "machine",
+          "description": "Maximum parallel AI labeling requests. Ollama is kept at one request unless the CLI is explicitly configured otherwise."
+        },
+        "graphoxide.llm.batchSize": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 1000,
+          "scope": "machine",
+          "description": "Maximum number of communities included in each AI labeling request."
+        },
+        "graphoxide.llm.timeoutSeconds": {
+          "type": "integer",
+          "default": 600,
+          "minimum": 30,
+          "maximum": 3600,
+          "scope": "machine",
+          "description": "Timeout in seconds for each AI community-labeling HTTP request. Increase this for slower local models."
         }
       }
     }

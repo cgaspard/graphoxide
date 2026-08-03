@@ -201,6 +201,9 @@ enum Command {
         max_concurrency: usize,
         #[arg(long, default_value_t = graphoxide_graph::DEFAULT_BATCH_SIZE)]
         batch_size: usize,
+        /// Whole-request timeout for each LLM labeling batch, in seconds.
+        #[arg(long)]
+        timeout_seconds: Option<f64>,
     },
     /// Generate GRAPH_REPORT.md from an existing graph
     Report {
@@ -952,6 +955,7 @@ fn main() -> anyhow::Result<()> {
             missing_only,
             max_concurrency,
             batch_size,
+            timeout_seconds,
         } => label_communities(
             &path,
             backend.as_deref(),
@@ -959,6 +963,7 @@ fn main() -> anyhow::Result<()> {
             missing_only,
             max_concurrency,
             batch_size,
+            timeout_seconds,
         ),
         Command::Report { graph, output } => {
             let graph = graphoxide_core::read_graph(graph)?;
@@ -1766,6 +1771,7 @@ fn label_communities(
     missing_only: bool,
     max_concurrency: usize,
     batch_size: usize,
+    timeout_seconds: Option<f64>,
 ) -> anyhow::Result<()> {
     let graph_path = if path.is_dir() {
         managed_output_directory(path, None).join("graph.json")
@@ -1811,7 +1817,7 @@ fn label_communities(
             "No LLM backend configured; keeping current community labels. Pass --backend or set an API key.",
         );
     };
-    let transport = LabelHttpTransport::new(&backend, model)?;
+    let transport = LabelHttpTransport::new(&backend, model, timeout_seconds)?;
     let mut options = graphoxide_graph::LabelingOptions::new(&backend);
     options.model = model.map(str::to_owned);
     options.max_concurrency = max_concurrency;
@@ -1894,13 +1900,20 @@ struct LabelHttpTransport {
     model: String,
     key: Option<String>,
     anthropic: bool,
+    disable_reasoning: bool,
+    timeout: std::time::Duration,
 }
 
 impl LabelHttpTransport {
-    fn new(backend: &str, requested_model: Option<&str>) -> anyhow::Result<Self> {
-        let backend = match backend {
-            "anthropic" => "claude",
-            backend => backend,
+    fn new(
+        backend: &str,
+        requested_model: Option<&str>,
+        timeout_seconds: Option<f64>,
+    ) -> anyhow::Result<Self> {
+        let (backend, disable_reasoning) = match backend {
+            "anthropic" => ("claude", false),
+            "lm-studio" | "lmstudio" => ("openai", true),
+            backend => (backend, false),
         };
         let (base_key, default_base, key_names, model_key, default_model, anthropic) = match backend
         {
@@ -1989,14 +2002,18 @@ impl LabelHttpTransport {
             .or_else(|| std::env::var(model_key).ok())
             .or_else(|| std::env::var("GRAPHOXIDE_MODEL").ok())
             .unwrap_or_else(|| default_model.into());
+        let timeout = label_request_timeout(timeout_seconds)?;
         Ok(Self {
             client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(timeout)
                 .build()?,
             endpoint,
             model,
             key,
             anthropic,
+            disable_reasoning,
+            timeout,
         })
     }
 
@@ -2005,12 +2022,15 @@ impl LabelHttpTransport {
         request: &graphoxide_graph::LabelRequest,
     ) -> anyhow::Result<graphoxide_graph::LabelResponse> {
         let model = request.model.as_deref().unwrap_or(&self.model);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "max_tokens": request.max_tokens,
             "temperature": 0,
             "messages": [{"role": "user", "content": request.prompt}],
         });
+        if self.disable_reasoning {
+            body["reasoning_effort"] = "none".into();
+        }
         let mut builder = self.client.post(&self.endpoint).json(&body);
         if self.anthropic {
             builder = builder.header("anthropic-version", "2023-06-01");
@@ -2021,7 +2041,18 @@ impl LabelHttpTransport {
             builder = builder.bearer_auth(key);
         }
         let response = builder
-            .send()?
+            .send()
+            .map_err(|error| {
+                if error.is_timeout() {
+                    anyhow::anyhow!(
+                        "label request to {} timed out after {}s; local models may need more time, so increase --timeout-seconds (or GRAPHOXIDE_LLM_TIMEOUT_SECONDS)",
+                        self.endpoint,
+                        self.timeout.as_secs_f64()
+                    )
+                } else {
+                    error.into()
+                }
+            })?
             .error_for_status()?
             .json::<serde_json::Value>()?;
         let content = response
@@ -2045,6 +2076,34 @@ impl LabelHttpTransport {
             },
         })
     }
+}
+
+fn label_request_timeout(explicit: Option<f64>) -> anyhow::Result<std::time::Duration> {
+    let (source, seconds) = if let Some(seconds) = explicit {
+        ("--timeout-seconds", seconds)
+    } else if let Ok(value) = std::env::var("GRAPHOXIDE_LLM_TIMEOUT_SECONDS") {
+        (
+            "GRAPHOXIDE_LLM_TIMEOUT_SECONDS",
+            value.parse::<f64>().map_err(|error| {
+                anyhow::anyhow!("GRAPHOXIDE_LLM_TIMEOUT_SECONDS must be a number: {error}")
+            })?,
+        )
+    } else if let Ok(value) = std::env::var("GRAPHIFY_API_TIMEOUT") {
+        (
+            "GRAPHIFY_API_TIMEOUT",
+            value.parse::<f64>().map_err(|error| {
+                anyhow::anyhow!("GRAPHIFY_API_TIMEOUT must be a number: {error}")
+            })?,
+        )
+    } else {
+        ("default", 600.0)
+    };
+    anyhow::ensure!(
+        seconds.is_finite() && seconds > 0.0,
+        "{source} must be a finite number greater than zero"
+    );
+    std::time::Duration::try_from_secs_f64(seconds)
+        .map_err(|error| anyhow::anyhow!("{source} is not a valid timeout: {error}"))
 }
 
 fn install_agent_platform(

@@ -12,7 +12,7 @@ artifacts for inspection:
 python3 -m parity.differential.graph_diff run \
   --corpus parity/corpora/resolution-adversarial \
   --build \
-  --fail-on-candidate-identity-hubs \
+  --fail-on-candidate-cross-runtime-bindings \
   --work-dir /tmp/graphoxide-resolution-adversarial \
   --output /tmp/graphoxide-resolution-adversarial/report.json
 ```

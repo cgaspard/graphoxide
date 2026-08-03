@@ -1,0 +1,13 @@
+version: 0.4.0
+date: 2026-08-03
+highlights:
+  - Make local community labeling reliable for slow or reasoning-capable LM Studio and Ollama models.
+added:
+  - Add an explicit LM Studio labeling backend and a configurable per-request timeout through --timeout-seconds or GRAPHOXIDE_LLM_TIMEOUT_SECONDS.
+changed:
+  - Allow ten minutes per labeling request by default while retaining a short connection timeout for unreachable endpoints.
+  - Disable LM Studio reasoning for the concise structured community-naming task without changing generic OpenAI-compatible requests.
+  - Strengthen pinned Graphify parity validation with strict corpus identity, duplicate-key rejection, cross-runtime binding gates, and mutation-safe baselines.
+fixed:
+  - Report actionable local-model timeout guidance instead of an opaque nested HTTP timeout.
+removed: []

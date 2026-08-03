@@ -8,7 +8,7 @@ harness from the repository root:
 python3 -m parity.differential.graph_diff run \
   --corpus parity/corpora/identity-collisions \
   --build \
-  --fail-on-candidate-identity-hubs \
+  --fail-on-candidate-cross-runtime-bindings \
   --work-dir /tmp/graphoxide-identity-collisions \
   --output /tmp/graphoxide-identity-collisions/report.json
 ```
@@ -24,7 +24,8 @@ The hostile cases are:
 - a C# `Child : Base` and an otherwise unrelated Python `Base` definition.
 
 The Swift class/extension is a legitimate shared identity. Native, JVM, and
-JavaScript/TypeScript interop families are likewise grouped by the hub audit.
+JavaScript/TypeScript interop families are likewise grouped by the cross-runtime
+binding audit.
 The C#/Python inheritance pair is a deliberate safety divergence from pinned
 upstream behavior: Graphoxide keeps the unresolved C# supertype stub instead
 of rewiring it to an unrelated Python class with the same label.

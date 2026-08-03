@@ -27,8 +27,14 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
+
+if __package__:
+    from parity.upstream_oracle import ignored_executable_artifact
+else:
+    from upstream_oracle import ignored_executable_artifact
 
 
 PARITY_DIR = Path(__file__).resolve().parent
@@ -519,8 +525,29 @@ def collect_upstream_nodeids(
     _verify_clean_pinned_checkout(
         checkout, str(lock["commit"]), runner=runner
     )
-    command = lock["pytest"]["collect_command"]
-    completed = _run(command, checkout, runner)
+    command = list(lock["pytest"]["collect_command"])
+    if command[:2] == ["uv", "run"] and "python" in command[2:]:
+        python_index = command.index("python", 2)
+        with tempfile.TemporaryDirectory(
+            prefix="graphoxide-upstream-pycache-"
+        ) as cache:
+            command = [
+                "uv",
+                "run",
+                "--isolated",
+                "--no-editable",
+                "--project",
+                str(checkout),
+                *command[2:python_index],
+                "python",
+                "-I",
+                "-X",
+                f"pycache_prefix={cache}",
+                *command[python_index + 1 :],
+            ]
+            completed = _run(command, checkout, runner)
+    else:
+        completed = _run(command, checkout, runner)
     _verify_clean_pinned_checkout(
         checkout, str(lock["commit"]), runner=runner
     )
@@ -540,7 +567,7 @@ def _verify_clean_pinned_checkout(
     *,
     runner: CommandRunner = subprocess.run,
 ) -> None:
-    """Reject a reference checkout whose tracked/non-ignored state is impure."""
+    """Reject a reference checkout whose executable source is impure."""
     head = _run(["git", "rev-parse", "HEAD"], checkout, runner).stdout.strip()
     if head != expected_commit:
         raise ParityError(
@@ -556,6 +583,24 @@ def _verify_clean_pinned_checkout(
         raise ParityError(
             "upstream checkout has staged, unstaged, or non-ignored untracked "
             f"changes; refusing a contaminated reference ({first})"
+        )
+    ignored = _run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        checkout,
+        runner,
+    ).stdout
+    artifact = ignored_executable_artifact(checkout, ignored.split("\0"))
+    if artifact is not None:
+        raise ParityError(
+            "upstream checkout has an ignored executable-source artifact that can "
+            f"shadow the pinned oracle; refusing a contaminated reference ({artifact})"
         )
 
 

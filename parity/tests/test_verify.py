@@ -141,6 +141,7 @@ class InventoryTests(unittest.TestCase):
         outputs = {
             "rev-parse": self.lock["commit"] + "\n",
             "status": " M uv.lock\n?? new_source.py\n",
+            "ls-files": "",
         }
 
         def fake_runner(command, **_kwargs):
@@ -168,6 +169,8 @@ class InventoryTests(unittest.TestCase):
                     stdout = self.lock["commit"] + "\n"
                 elif command[:2] == ["git", "status"]:
                     stdout = next(statuses)
+                elif command[:2] == ["git", "ls-files"]:
+                    stdout = ""
                 else:
                     stdout = self.nodeids[0] + "\n"
                 return subprocess.CompletedProcess(

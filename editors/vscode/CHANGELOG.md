@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 — 2026-08-03
+
+- Added opt-in AI community naming for OpenAI, LM Studio, Ollama,
+  OpenAI-compatible endpoints, and Anthropic, with local model discovery,
+  Secret Storage credentials, explicit data disclosure, and a trusted-binary
+  execution boundary.
+- Added a unified Graphoxide Control Center for graph health, workspace freshness,
+  AI configuration, trusted-executable status, and clearer project/user MCP
+  installation management with confirmed changes.
+- Added deterministic Extension Host E2E coverage for keyed LM Studio and keyless
+  Ollama discovery and labeling. Local requests now allow ten minutes by default,
+  and LM Studio disables reasoning for concise structured community names.
+
 ## 0.2.0
 
 - Accounted for all 3,978 pinned Graphify v0.9.32 cases across the CLI and

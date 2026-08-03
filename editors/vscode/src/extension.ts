@@ -2,9 +2,10 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { GraphoxideCli } from './cli';
 import { GraphCodeLensProvider } from './codelens';
+import { ControlCenterPanel } from './control-center';
 import { GraphNode } from './graph';
+import { AiLabelingService, AiLabelingTestConfiguration } from './llm/service';
 import { ManagedWorkspaceService } from './managed';
-import { McpManagerPanel } from './mcp/manager';
 import { GraphoxideMcpProvider } from './mcp/provider';
 import { GraphStore } from './store';
 import { communityFromArgument, GraphExplorerProvider, nodeFromArgument, ResultsProvider } from './tree';
@@ -18,6 +19,7 @@ interface ExtensionServices {
   readonly visualizer: GraphVisualizer;
   readonly statusBar: vscode.StatusBarItem;
   readonly managed: ManagedWorkspaceService;
+  readonly aiLabeling: AiLabelingService;
 }
 
 export interface GraphoxideExtensionStatus {
@@ -32,6 +34,11 @@ export interface GraphoxideExtensionStatus {
 
 export interface GraphoxideExtensionApi {
   readonly version: 1;
+  readonly test?: {
+    configureAi(input: AiLabelingTestConfiguration): Promise<readonly string[]>;
+    improveCommunityLabels(): Promise<void>;
+    clearAi(): Promise<void>;
+  };
   enableWorkspace(freshness?: 'watch' | 'save' | 'manual'): Promise<void>;
   configureFreshness(freshness: 'watch' | 'save' | 'manual'): Promise<void>;
   status(): Promise<GraphoxideExtensionStatus>;
@@ -44,15 +51,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   const results = new ResultsProvider();
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 40);
   statusBar.name = 'Graphoxide';
-  statusBar.command = 'graphoxide.showStatus';
+  statusBar.command = 'graphoxide.openControlCenter';
   const visualizer = new GraphVisualizer(
     context.extensionUri,
     (id) => void revealNodeById(store, id),
     (id) => void vscode.commands.executeCommand('graphoxide.explain', store.state?.model?.getNode(id)),
   );
   const managed = new ManagedWorkspaceService(context, store, cli);
+  const aiLabeling = new AiLabelingService(context, cli, store);
   const mcpProvider = new GraphoxideMcpProvider(context, (folder) => managed.isEnabled(folder));
-  const services: ExtensionServices = { store, cli, explorer, results, visualizer, statusBar, managed };
+  const services: ExtensionServices = { store, cli, explorer, results, visualizer, statusBar, managed, aiLabeling };
   const codeLens = new GraphCodeLensProvider(store);
 
   context.subscriptions.push(
@@ -94,6 +102,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   void managed.start();
   return {
     version: 1,
+    ...(context.extensionMode !== vscode.ExtensionMode.Production ? {
+      test: {
+        configureAi: (input: AiLabelingTestConfiguration) => aiLabeling.configureForTest(input),
+        improveCommunityLabels: () => aiLabeling.improveCommunityLabelsForTest(),
+        clearAi: () => aiLabeling.clearTestConfiguration(),
+      },
+    } : {}),
     enableWorkspace: (freshness = 'manual') => managed.enable(undefined, freshness, false),
     configureFreshness: (freshness) => managed.configureFreshness(undefined, freshness),
     status: async () => {
@@ -116,9 +131,10 @@ export function deactivate(): void {
 }
 
 function registerCommands(context: vscode.ExtensionContext, services: ExtensionServices): vscode.Disposable[] {
-  const { store, cli, explorer, results, visualizer, managed } = services;
+  const { store, cli, explorer, results, visualizer, managed, aiLabeling } = services;
   const command = (id: string, handler: (...args: unknown[]) => unknown): vscode.Disposable =>
     vscode.commands.registerCommand(id, (...args: unknown[]) => Promise.resolve(handler(...args)).catch((error: unknown) => handleError(error)));
+  const openControlCenter = (): void => ControlCenterPanel.show(context, { store, cli, managed, aiLabeling });
 
   return [
     command('graphoxide.initialize', async () => {
@@ -290,15 +306,17 @@ function registerCommands(context: vscode.ExtensionContext, services: ExtensionS
       await vscode.env.clipboard.writeText(JSON.stringify(value, null, 2));
       void vscode.window.showInformationMessage('Graphoxide MCP configuration copied to the clipboard.');
     }),
-    command('graphoxide.manageMcp', () => McpManagerPanel.show(context, () => {
-      const folder = vscode.workspace.workspaceFolders?.[0];
-      return folder ? managed.isEnabled(folder) : false;
-    })),
+    command('graphoxide.openControlCenter', openControlCenter),
+    // Compatibility aliases for existing links, keybindings, and callers.
+    command('graphoxide.manageMcp', openControlCenter),
+    command('graphoxide.configureAiLabeling', () => aiLabeling.configure()),
+    command('graphoxide.clearAiCredential', () => aiLabeling.clearCredential()),
+    command('graphoxide.improveCommunityLabels', () => aiLabeling.improveCommunityLabels()),
     command('graphoxide.enableWorkspace', (freshness?: unknown) => managed.enable(undefined, isFreshnessMode(freshness) ? freshness : undefined)),
     command('graphoxide.disableWorkspace', () => managed.disable()),
     command('graphoxide.configureFreshness', (freshness?: unknown) => managed.configureFreshness(undefined, isFreshnessMode(freshness) ? freshness : undefined)),
     command('graphoxide.resetWorkspacePrompt', () => managed.resetPrompt()),
-    command('graphoxide.showStatus', () => showStatus(services)),
+    command('graphoxide.showStatus', openControlCenter),
     command('graphoxide.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:cgaspard.graphoxide-vscode')),
     command('graphoxide.clearResults', () => results.clear()),
   ];
@@ -409,36 +427,6 @@ function updateStatusBar(item: vscode.StatusBarItem, nodes?: number, edges?: num
     item.tooltip = `${nodes} nodes · ${edges ?? 0} edges${watching ? ' · watch mode active' : ''}`;
     item.backgroundColor = undefined;
   }
-}
-
-async function showStatus(services: ExtensionServices): Promise<void> {
-  const state = services.store.state;
-  if (!state?.model) {
-    const choice = await vscode.window.showQuickPick([
-      { label: '$(sparkle) Enable managed workspace', command: 'graphoxide.enableWorkspace' },
-      { label: '$(play) Extract workspace once', command: 'graphoxide.initialize' },
-      { label: '$(server-process) Manage MCP integrations', command: 'graphoxide.manageMcp' },
-    ], { title: 'Graphoxide · No graph found' });
-    if (choice) await vscode.commands.executeCommand(choice.command);
-    return;
-  }
-  const snapshot = state.model.snapshot;
-  const managed = services.managed.isEnabled(state.folder);
-  const choice = await vscode.window.showQuickPick([
-    { label: '$(type-hierarchy) Open interactive graph', command: 'graphoxide.openGraph' },
-    { label: '$(split-horizontal) Open interactive graph beside', command: 'graphoxide.openGraphBeside' },
-    { label: '$(search) Query graph', command: 'graphoxide.query' },
-    { label: '$(refresh) Update graph', command: 'graphoxide.update' },
-    { label: '$(server-process) Manage MCP integrations', command: 'graphoxide.manageMcp' },
-    { label: '$(settings) Configure automatic updates', command: 'graphoxide.configureFreshness' },
-    { label: managed ? '$(circle-slash) Disable managed workspace' : '$(sparkle) Enable managed workspace', command: managed ? 'graphoxide.disableWorkspace' : 'graphoxide.enableWorkspace' },
-    { label: services.cli.watching ? '$(debug-stop) Stop watch mode' : '$(eye) Start watch mode', command: services.cli.watching ? 'graphoxide.stopWatch' : 'graphoxide.startWatch' },
-    { label: '$(json) Open graph.json', command: 'graphoxide.openGraphFile' },
-  ], {
-    title: `Graphoxide · ${snapshot.nodes.length} nodes · ${snapshot.edges.length} edges · ${state.model.communities().length} communities`,
-    placeHolder: state.graphUri.fsPath,
-  });
-  if (choice) await vscode.commands.executeCommand(choice.command);
 }
 
 function handleError(error: unknown): void {

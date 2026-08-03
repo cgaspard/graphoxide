@@ -8,6 +8,7 @@ import {
   MCP_SERVER_KEY,
   ServerInvocation,
   desiredMcpJsonEntry,
+  invocationForScope,
   mcpJsonEntryMatches,
   openCodeEntryMatches,
   readMcpJsonEntry,
@@ -40,7 +41,10 @@ export interface IntegrationStatus {
 
 export interface InstallerContext {
   readonly folder?: vscode.WorkspaceFolder;
+  /** Workspace-aware invocation used only for project-scope registrations. */
   readonly invocation: ServerInvocation;
+  /** Extension-controlled invocation safe to persist across all projects. */
+  readonly userInvocation: ServerInvocation;
 }
 
 export interface InstallResult {
@@ -81,13 +85,11 @@ class ClaudeCodeInstaller implements IntegrationInstaller {
   async status(context: InstallerContext): Promise<IntegrationStatus> {
     const detected = Boolean(vscode.extensions.getExtension('anthropic.claude-code')) || await commandDetected('claude');
     const userPath = path.join(os.homedir(), '.claude.json');
-    const userEntry = readClaudeUserEntry(await readOptional(userPath));
-    const user: ScopeStatus = {
-      configured: userEntry !== undefined,
-      stale: userEntry !== undefined && !mcpJsonEntryMatches(userEntry, context.invocation),
-      configPath: userPath,
-      ...(!detected ? { detail: 'Claude Code was not detected.' } : {}),
-    };
+    const user = await claudeUserStatus(
+      userPath,
+      context.userInvocation,
+      !detected ? 'Claude Code was not detected.' : undefined,
+    );
     const project = context.folder
       ? await mcpJsonStatus(path.join(context.folder.uri.fsPath, '.mcp.json'), context.invocation, 'Shared with the project; Claude asks for trust before first use.')
       : undefined;
@@ -98,7 +100,7 @@ class ClaudeCodeInstaller implements IntegrationInstaller {
     if (scope === 'project') return installMcpJsonProject(context);
     const executable = await resolveExecutable('claude');
     if (!executable) return { ok: false, message: 'The Claude Code CLI was not found on PATH.' };
-    const entry = desiredMcpJsonEntry(context.invocation);
+    const entry = desiredMcpJsonEntry(context.userInvocation);
     await execFileAsync(executable, ['mcp', 'remove', '--scope', 'user', MCP_SERVER_KEY], { timeout: 15000 }).catch(() => undefined);
     try {
       await execFileAsync(executable, ['mcp', 'add-json', '--scope', 'user', MCP_SERVER_KEY, JSON.stringify(entry)], { timeout: 15000 });
@@ -130,7 +132,7 @@ class CodexInstaller implements IntegrationInstaller {
   async status(context: InstallerContext): Promise<IntegrationStatus> {
     const detected = Boolean(vscode.extensions.getExtension('openai.chatgpt')) || await commandDetected('codex');
     const userPath = path.join(codexHome(), 'config.toml');
-    const user = await codexStatus(userPath, context.invocation, !detected ? 'Codex was not detected.' : undefined);
+    const user = await codexStatus(userPath, context.userInvocation, !detected ? 'Codex was not detected.' : undefined);
     const project = context.folder
       ? await codexStatus(path.join(context.folder.uri.fsPath, '.codex', 'config.toml'), context.invocation, 'Project config is loaded only after Codex trusts this repository.')
       : undefined;
@@ -142,7 +144,11 @@ class CodexInstaller implements IntegrationInstaller {
     if (!file) return noWorkspace();
     try {
       const existing = await readOptional(file) ?? '';
-      const edit = upsertCodexInvocation(existing, context.invocation, scope === 'project');
+      const edit = upsertCodexInvocation(
+        existing,
+        invocationForScope(context.invocation, context.userInvocation, scope),
+        scope === 'project',
+      );
       await writeFile(file, edit.content);
       return { ok: true, message: `${edit.existed ? 'Updated' : 'Added'} [mcp_servers.graphoxide] in ${file}.` };
     } catch (error) {
@@ -174,7 +180,7 @@ class OpenCodeInstaller implements IntegrationInstaller {
   async status(context: InstallerContext): Promise<IntegrationStatus> {
     const detected = await commandDetected('opencode');
     const userPath = openCodeUserPath();
-    const user = await openCodeStatus(userPath, context.invocation, !detected ? 'OpenCode was not detected.' : undefined);
+    const user = await openCodeStatus(userPath, context.userInvocation, !detected ? 'OpenCode was not detected.' : undefined);
     const project = context.folder
       ? await openCodeStatus(path.join(context.folder.uri.fsPath, 'opencode.json'), context.invocation)
       : undefined;
@@ -185,7 +191,10 @@ class OpenCodeInstaller implements IntegrationInstaller {
     const file = openCodePath(context, scope);
     if (!file) return noWorkspace();
     try {
-      const edit = upsertOpenCode(await readOptional(file), context.invocation);
+      const edit = upsertOpenCode(
+        await readOptional(file),
+        invocationForScope(context.invocation, context.userInvocation, scope),
+      );
       await writeFile(file, edit.content);
       return { ok: true, message: `${edit.existed ? 'Updated' : 'Added'} Graphoxide in ${file}.` };
     } catch (error) {
@@ -238,6 +247,20 @@ async function mcpJsonStatus(file: string, invocation: ServerInvocation, detail?
   try {
     const entry = readMcpJsonEntry(await readOptional(file));
     return { configured: entry !== undefined, stale: entry !== undefined && !mcpJsonEntryMatches(entry, invocation), configPath: file, ...(detail ? { detail } : {}) };
+  } catch (error) {
+    return invalidStatus(file, error);
+  }
+}
+
+async function claudeUserStatus(file: string, invocation: ServerInvocation, detail?: string): Promise<ScopeStatus> {
+  try {
+    const entry = readClaudeUserEntry(await readOptional(file));
+    return {
+      configured: entry !== undefined,
+      stale: entry !== undefined && !mcpJsonEntryMatches(entry, invocation),
+      configPath: file,
+      ...(detail ? { detail } : {}),
+    };
   } catch (error) {
     return invalidStatus(file, error);
   }

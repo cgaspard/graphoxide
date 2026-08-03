@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import * as vscode from 'vscode';
-import { extensionInvocation } from './mcp/runtime';
+import { EnvironmentOverlay, overlayEnvironment, shouldUseTrustedExecutable } from './llm/config';
+import { extensionInvocation, trustedExtensionInvocation } from './mcp/runtime';
 
 export interface RunOptions {
   readonly title: string;
@@ -8,6 +9,8 @@ export interface RunOptions {
   readonly args: readonly string[];
   readonly cancellable?: boolean;
   readonly showProgress?: boolean;
+  readonly environment?: EnvironmentOverlay;
+  readonly trustedExecutable?: boolean;
 }
 
 export interface RunResult {
@@ -33,14 +36,22 @@ export class GraphoxideCli implements vscode.Disposable {
   async run(options: RunOptions): Promise<RunResult> {
     const execute = async (token?: vscode.CancellationToken): Promise<RunResult> => {
       const config = vscode.workspace.getConfiguration('graphoxide', options.folder.uri);
-      const invocation = extensionInvocation(this.extensionUri, options.folder);
+      const useTrustedExecutable = shouldUseTrustedExecutable(options.trustedExecutable, options.environment);
+      const invocation = useTrustedExecutable
+        ? trustedExtensionInvocation(this.extensionUri, options.folder)
+        : extensionInvocation(this.extensionUri, options.folder);
       const executable = invocation.command;
-      const args = [...invocation.args.slice(0, -1), ...options.args];
+      const prefix = useTrustedExecutable ? invocation.args : invocation.args.slice(0, -1);
+      const args = [...prefix, ...options.args];
       this.output.info(`$ ${executable} ${args.map(formatArgument).join(' ')}`);
       const result = await new Promise<RunResult>((resolve, reject) => {
         let child: ChildProcessWithoutNullStreams;
         try {
-          child = spawn(executable, args, { cwd: options.folder.uri.fsPath, env: process.env, shell: false });
+          child = spawn(executable, args, {
+            cwd: options.folder.uri.fsPath,
+            env: overlayEnvironment(process.env, options.environment),
+            shell: false,
+          });
         } catch (error) {
           reject(error);
           return;
@@ -178,6 +189,11 @@ export class GraphoxideCli implements vscode.Disposable {
 
   invocation(folder: vscode.WorkspaceFolder): { readonly command: string; readonly args: readonly string[]; readonly cwd: string } {
     const invocation = extensionInvocation(this.extensionUri, folder);
+    return { command: invocation.command, args: invocation.args, cwd: folder.uri.fsPath };
+  }
+
+  trustedInvocation(folder: vscode.WorkspaceFolder): { readonly command: string; readonly args: readonly string[]; readonly cwd: string } {
+    const invocation = trustedExtensionInvocation(this.extensionUri, folder);
     return { command: invocation.command, args: invocation.args, cwd: folder.uri.fsPath };
   }
 

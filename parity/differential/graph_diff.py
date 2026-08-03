@@ -11,12 +11,16 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path, PureWindowsPath
 import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from typing import Any, Iterable
+
+from parity.upstream_oracle import ignored_executable_artifact
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -67,18 +71,25 @@ EDGE_STRUCTURAL_FIELDS = {
     "line",
     "line_number",
     "context",
+    "key",
 }
 
-# Keep this aligned with Graphify's real-interop families.  The diagnostic below
+# Keep this aligned with the extraction/runtime families.  The diagnostic below
 # is deliberately stricter than comparing file extensions: Java/Kotlin and
 # TypeScript/JavaScript are expected to share symbols, while Python/TypeScript
-# are not.  Unknown/config/document suffixes are excluded from the signal.
+# are not. Runtime-owned declarative formats (for example XAML and Terraform)
+# stay in their ecosystem so their identities cannot silently weld onto code
+# from another runtime. Generic data/document formats such as JSON, YAML, TOML,
+# XML, and Markdown remain unclassified because they legitimately describe many
+# different runtimes.
 LANGUAGE_FAMILY_BY_EXTENSION = {
     # JavaScript/TypeScript and script-bearing single-file components.
     ".js": "jsts",
     ".jsx": "jsts",
     ".mjs": "jsts",
     ".cjs": "jsts",
+    ".ejs": "jsts",
+    ".ets": "jsts",
     ".ts": "jsts",
     ".tsx": "jsts",
     ".mts": "jsts",
@@ -123,11 +134,17 @@ LANGUAGE_FAMILY_BY_EXTENSION = {
     ".php7": "php",
     ".phps": "php",
     ".cs": "dotnet",
+    ".sln": "dotnet",
+    ".slnx": "dotnet",
+    ".csproj": "dotnet",
+    ".fsproj": "dotnet",
+    ".vbproj": "dotnet",
     ".razor": "dotnet",
     ".cshtml": "dotnet",
     ".xaml": "dotnet",
     ".lua": "lua",
     ".luau": "lua",
+    ".toc": "lua",
     ".zig": "zig",
     ".ex": "elixir",
     ".exs": "elixir",
@@ -146,16 +163,48 @@ LANGUAGE_FAMILY_BY_EXTENSION = {
     ".f95": "fortran",
     ".f03": "fortran",
     ".f08": "fortran",
+    ".pas": "pascal",
+    ".pp": "pascal",
+    ".dpr": "pascal",
+    ".dpk": "pascal",
+    ".lpr": "pascal",
+    ".inc": "pascal",
+    ".dfm": "pascal",
+    ".lfm": "pascal",
+    ".lpk": "pascal",
+    ".tf": "terraform",
+    ".tfvars": "terraform",
+    ".hcl": "terraform",
+    ".sql": "sql",
+    ".r": "r",
+    ".v": "hardware",
+    ".sv": "hardware",
+    ".svh": "hardware",
+    ".cls": "apex",
+    ".trigger": "apex",
+    ".dm": "dm",
+    ".dme": "dm",
+    ".dmi": "dm",
+    ".dmm": "dm",
+    ".dmf": "dm",
 }
 
-# These relations bind an endpoint identity.  Deliberately exclude analytical
-# cross-language facts such as `semantically_similar_to`: they connect distinct
-# identities and should not make either endpoint look like a welded symbol hub.
-IDENTITY_BINDING_RELATIONS = {
+# These relations resolve or own an endpoint identity. Deliberately exclude
+# analytical and configuration/data-flow facts such as `semantically_similar_to`,
+# `depends_on`, `reads_from`, and the deliberately broad `uses`: those may connect
+# distinct identities across runtimes and should be guarded by explicit corpus
+# contracts instead of being mistaken for a welded symbol hub.
+CROSS_RUNTIME_BINDING_RELATIONS = {
+    "accesses",
+    "bound_to",
     "calls",
+    "case_of",
+    "defines",
     "indirect_call",
     "imports",
     "imports_from",
+    "instantiates",
+    "listened_by",
     "re_exports",
     "references",
     "inherits",
@@ -163,6 +212,8 @@ IDENTITY_BINDING_RELATIONS = {
     "extends",
     "contains",
     "method",
+    "mixes_in",
+    "requires",
 }
 
 
@@ -200,6 +251,39 @@ def _first_alias(record: dict[str, Any], aliases: tuple[str, ...]) -> Any:
     return next((record[field] for field in aliases if field in record), None)
 
 
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's bool/number type coercion."""
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        return (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+            and left == right
+        )
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and isinstance(right, str) and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(_json_values_equal(a, b) for a, b in zip(left, right))
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and left.keys() == right.keys()
+            and all(_json_values_equal(left[key], right[key]) for key in left)
+        )
+    return type(left) is type(right) and left == right
+
+
 def _alias_conflicts(
     kind: str, collection: str, index: int, record: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -232,7 +316,9 @@ def _alias_conflicts(
             ]
             disagrees = any(value != encoded[0] for value in encoded[1:])
         else:
-            disagrees = any(value != values[0] for value in values[1:])
+            disagrees = any(
+                not _json_values_equal(value, values[0]) for value in values[1:]
+            )
         if disagrees:
             conflicts.append(
                 {
@@ -247,11 +333,7 @@ def _alias_conflicts(
 
 
 def _valid_identity(value: Any) -> bool:
-    return (
-        value is not None
-        and not isinstance(value, (dict, list))
-        and not (isinstance(value, str) and value == "")
-    )
+    return isinstance(value, str) and value != ""
 
 
 def _pre_normalization_diagnostics(
@@ -272,6 +354,23 @@ def _pre_normalization_diagnostics(
     alias_conflicts: list[dict[str, Any]] = []
     malformed_records: list[dict[str, Any]] = []
     dangling_references: list[dict[str, Any]] = []
+    for key in ("nodes", "hyperedges"):
+        if key not in graph:
+            malformed_records.append(
+                {
+                    "kind": "collection",
+                    "collection": key,
+                    "reason": "missing_required_collection",
+                }
+            )
+    if "links" not in graph and "edges" not in graph:
+        malformed_records.append(
+            {
+                "kind": "collection",
+                "collection": "links/edges",
+                "reason": "missing_required_edge_collection",
+            }
+        )
     for key in ("nodes", "links", "edges", "hyperedges"):
         if key in graph and not isinstance(graph[key], list):
             malformed_records.append(
@@ -433,6 +532,15 @@ def _pre_normalization_diagnostics(
                                 }
                             )
             else:
+                if not _valid_identity(record.get("id")):
+                    malformed_records.append(
+                        {
+                            "kind": kind,
+                            "collection": collection,
+                            "index": index,
+                            "reason": "missing_or_invalid_id",
+                        }
+                    )
                 members = _first_alias(record, ("nodes", "members", "node_ids"))
                 if not isinstance(members, list) or not members:
                     malformed_records.append(
@@ -466,6 +574,18 @@ def _pre_normalization_diagnostics(
         if count > 1
     ]
     duplicate_occurrences = sum(item["count"] - 1 for item in duplicate_ids)
+    hyperedge_id_counts: Counter[str] = Counter()
+    for hyperedge in hyperedges:
+        if isinstance(hyperedge, dict) and _valid_identity(hyperedge.get("id")):
+            hyperedge_id_counts[str(hyperedge["id"])] += 1
+    duplicate_hyperedge_ids = [
+        {"id": hyperedge_id, "count": count}
+        for hyperedge_id, count in sorted(hyperedge_id_counts.items())
+        if count > 1
+    ]
+    duplicate_hyperedge_occurrences = sum(
+        item["count"] - 1 for item in duplicate_hyperedge_ids
+    )
     result = {
         "absolute_source_paths": {
             "count": len(absolute_source_paths),
@@ -479,6 +599,11 @@ def _pre_normalization_diagnostics(
             "id_count": len(duplicate_ids),
             "duplicate_occurrence_count": duplicate_occurrences,
             "ids": duplicate_ids[:max_examples],
+        },
+        "duplicate_hyperedge_ids": {
+            "id_count": len(duplicate_hyperedge_ids),
+            "duplicate_occurrence_count": duplicate_hyperedge_occurrences,
+            "ids": duplicate_hyperedge_ids[:max_examples],
         },
         "alias_conflicts": {
             "count": len(alias_conflicts),
@@ -497,6 +622,7 @@ def _pre_normalization_diagnostics(
         result["absolute_source_paths"]["count"]
         + result["absolute_ids"]["count"]
         + result["duplicate_node_ids"]["duplicate_occurrence_count"]
+        + result["duplicate_hyperedge_ids"]["duplicate_occurrence_count"]
         + result["alias_conflicts"]["count"]
         + result["malformed_records"]["count"]
         + result["dangling_references"]["count"]
@@ -511,17 +637,16 @@ def _language_family(source_file: Any) -> str | None:
     return LANGUAGE_FAMILY_BY_EXTENSION.get(Path(normalized).suffix.casefold())
 
 
-def _identity_hub_diagnostics(
+def _cross_runtime_binding_diagnostics(
     graph: dict[str, Any], *, max_examples: int
 ) -> dict[str, Any]:
-    """Find one endpoint identity carrying provenance from incompatible runtimes.
+    """Find binding endpoints whose evidence spans incompatible runtimes.
 
-    Duplicate-ID checks cannot see a false hub after graph construction: the
-    damage is precisely that two unrelated symbols have already collapsed into
-    one unique node.  For each persisted node, combine its own language family
-    with the source provenance of incident identity-binding edges.  Two or more
-    real-interop families are an audit signal, not an automatic parity failure;
-    callers can classify explicit bridges from the reported relations/sources.
+    For each persisted endpoint, combine its own language family with the source
+    provenance of incident symbol-binding edges. Two or more runtime families are
+    an audit signal: they can reveal a bad cross-runtime resolution, but do not by
+    themselves prove that identities were collapsed because explicit bridges are
+    legitimate. Callers must review the reported relations and sources.
     """
     records_by_id: dict[str, list[dict[str, Any]]] = {}
     families_by_id: dict[str, set[str]] = {}
@@ -538,27 +663,54 @@ def _identity_hub_diagnostics(
             families_by_id.setdefault(node_id, set()).add(family)
             sources_by_id.setdefault(node_id, set()).add(str(source_file))
 
+    # Keep node-owned provenance immutable while incident edges enrich the
+    # diagnostic maps below. Falling back to an already-enriched endpoint would
+    # make the result edge-order-dependent and could spread a false family
+    # transitively across an otherwise valid graph.
+    node_families_by_id = {
+        node_id: set(families) for node_id, families in families_by_id.items()
+    }
+    node_sources_by_id = {
+        node_id: set(sources) for node_id, sources in sources_by_id.items()
+    }
+
     for raw in _raw_edges(graph):
         if not isinstance(raw, dict):
             continue
         relation = str(raw.get("relation", raw.get("type", "")))
-        if relation not in IDENTITY_BINDING_RELATIONS:
+        if relation not in CROSS_RUNTIME_BINDING_RELATIONS:
             continue
-        family = _language_family(raw.get("source_file"))
-        if family is None:
-            continue
-        edge_source_file = str(raw["source_file"])
         source = raw.get("_src", raw.get("source", raw.get("from")))
         target = raw.get("_tgt", raw.get("target", raw.get("to")))
+        edge_source_file = raw.get("source_file")
+        edge_family = _language_family(edge_source_file)
+        if edge_family is not None:
+            edge_families = {edge_family}
+            edge_sources = {str(edge_source_file)}
+        elif not isinstance(edge_source_file, str) or not edge_source_file:
+            # Built graphs from older/third-party producers may omit edge-level
+            # source provenance. Symbol-binding relations are directed, so the
+            # source endpoint's own immutable node provenance is the conservative
+            # substitute. Never infer from the target: that would reverse caller,
+            # importer, child, or owner provenance and create false attribution.
+            source_id = str(source)
+            edge_families = set(node_families_by_id.get(source_id, set()))
+            edge_sources = set(node_sources_by_id.get(source_id, set()))
+        else:
+            # A present but deliberately unclassified document/data source is
+            # not missing provenance and must not be relabeled from an endpoint.
+            continue
+        if not edge_families:
+            continue
         for endpoint in (source, target):
             node_id = str(endpoint)
             if endpoint is None or node_id not in records_by_id:
                 continue
-            families_by_id.setdefault(node_id, set()).add(family)
-            sources_by_id.setdefault(node_id, set()).add(edge_source_file)
+            families_by_id.setdefault(node_id, set()).update(edge_families)
+            sources_by_id.setdefault(node_id, set()).update(edge_sources)
             relations_by_id.setdefault(node_id, set()).add(relation)
 
-    hubs: list[dict[str, Any]] = []
+    endpoints: list[dict[str, Any]] = []
     for node_id in sorted(records_by_id):
         families = sorted(families_by_id.get(node_id, set()))
         if len(families) < 2:
@@ -569,7 +721,7 @@ def _identity_hub_diagnostics(
                 for record in records_by_id[node_id]
             }
         )
-        hubs.append(
+        endpoints.append(
             {
                 "id": node_id,
                 "labels": labels,
@@ -578,13 +730,45 @@ def _identity_hub_diagnostics(
                 "relations": sorted(relations_by_id.get(node_id, set())),
             }
         )
-    return {"id_count": len(hubs), "ids": hubs[:max_examples]}
+    return {
+        "endpoint_count": len(endpoints),
+        "endpoints": endpoints[:max_examples],
+    }
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value}")
+
+
+def _reject_duplicate_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        value[key] = item
+    return value
+
+
+def _require_finite_json_numbers(value: Any) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"non-finite JSON number {value}")
+    if isinstance(value, list):
+        for item in value:
+            _require_finite_json_numbers(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _require_finite_json_numbers(item)
 
 
 def _load_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=_reject_nonfinite_json_constant,
+            object_pairs_hook=_reject_duplicate_json_object,
+        )
+        _require_finite_json_numbers(value)
+    except (OSError, UnicodeError, ValueError) as error:
         raise DifferentialError(f"could not load graph {path}: {error}") from error
     if not isinstance(value, dict):
         raise DifferentialError(f"graph {path} is not a JSON object")
@@ -594,14 +778,20 @@ def _load_object(path: Path) -> dict[str, Any]:
 def _portable_path(value: Any, corpus: Path | None) -> Any:
     if not isinstance(value, str):
         return value
-    normalized = value.replace("\\", "/")
+    normalized = unicodedata.normalize("NFC", value.replace("\\", "/"))
     if corpus is None:
         return normalized
-    path = Path(value)
+    path = Path(normalized)
     if not path.is_absolute():
         return normalized.removeprefix("./")
     try:
-        return path.resolve().relative_to(corpus.resolve()).as_posix()
+        resolved = Path(unicodedata.normalize("NFC", path.resolve().as_posix()))
+        resolved_corpus = Path(
+            unicodedata.normalize("NFC", corpus.resolve().as_posix())
+        )
+        return unicodedata.normalize(
+            "NFC", resolved.relative_to(resolved_corpus).as_posix()
+        )
     except (OSError, ValueError):
         return normalized
 
@@ -650,7 +840,7 @@ def _canonical_edge(
     edge["source"] = source
     edge["target"] = target
     edge["relation"] = relation
-    for alias in ["from", "to", "type", "_src", "_tgt", "key"]:
+    for alias in ["from", "to", "type", "_src", "_tgt"]:
         edge.pop(alias, None)
     if "source_file" in edge:
         edge["source_file"] = _portable_path(edge["source_file"], corpus)
@@ -865,39 +1055,75 @@ def _hyperedge_partition(
 def _field_changes(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     changed: dict[str, Any] = {}
     for key in sorted(reference.keys() | candidate.keys()):
-        if reference.get(key) != candidate.get(key):
-            changed[key] = {
-                "reference": reference.get(key),
-                "candidate": candidate.get(key),
-            }
+        reference_present = key in reference
+        candidate_present = key in candidate
+        reference_value = reference.get(key)
+        candidate_value = candidate.get(key)
+        if reference_present == candidate_present and _json_values_equal(
+            reference_value, candidate_value
+        ):
+            continue
+        change = {
+            "reference": reference_value,
+            "candidate": candidate_value,
+        }
+        if not reference_present or not candidate_present:
+            change.update(
+                {
+                    "reference_present": reference_present,
+                    "candidate_present": candidate_present,
+                }
+            )
+        changed[key] = change
     return changed
 
 
-def _value_preserved(reference: Any, candidate: Any, *, field: str | None = None) -> bool:
+def _value_preserved(
+    reference: Any,
+    candidate: Any,
+    *,
+    allow_edge_context_refinement: bool = False,
+) -> bool:
     """Return whether the candidate contains the complete reference value.
 
     Object fields may be additive in the candidate. Lists and scalar values
     remain exact because their order/multiplicity can carry graph meaning.
     """
     if isinstance(reference, dict):
-        return isinstance(candidate, dict) and all(
-            key in candidate and _value_preserved(value, candidate[key], field=key)
-            for key, value in reference.items()
-        )
-    if field == "context" and reference == "call" and candidate == "import_guided_call":
+        if not isinstance(candidate, dict):
+            return False
+        for key, value in reference.items():
+            if key not in candidate:
+                return False
+            if (
+                allow_edge_context_refinement
+                and key == "context"
+                and value == "call"
+                and candidate[key] == "import_guided_call"
+            ):
+                continue
+            if not _value_preserved(value, candidate[key]):
+                return False
         return True
-    return reference == candidate
+    return _json_values_equal(reference, candidate)
 
 
 def _preserved_record_count(
-    reference: list[dict[str, Any]], candidate: list[dict[str, Any]]
+    reference: list[dict[str, Any]],
+    candidate: list[dict[str, Any]],
+    *,
+    allow_edge_context_refinement: bool = False,
 ) -> int:
     """Maximum multiplicity-aware matching of reference records to candidates."""
     compatible = [
         [
             candidate_index
             for candidate_index, candidate_record in enumerate(candidate)
-            if _value_preserved(reference_record, candidate_record)
+            if _value_preserved(
+                reference_record,
+                candidate_record,
+                allow_edge_context_refinement=allow_edge_context_refinement,
+            )
         ]
         for reference_record in reference
     ]
@@ -927,11 +1153,14 @@ def _reference_preservation(
     left: dict[str, Any],
     right: dict[str, Any],
     pre_normalization_valid: bool,
-    candidate_identity_hub_gate_passed: bool,
 ) -> dict[str, Any]:
     collections = {}
     for key in ("nodes", "edges", "hyperedges"):
-        matched = _preserved_record_count(left[key], right[key])
+        matched = _preserved_record_count(
+            left[key],
+            right[key],
+            allow_edge_context_refinement=key == "edges",
+        )
         collections[key] = {
             "preserved": matched == len(left[key]),
             "reference_count": len(left[key]),
@@ -942,7 +1171,6 @@ def _reference_preservation(
     preserved = all(
         [
             pre_normalization_valid,
-            candidate_identity_hub_gate_passed,
             metadata_preserved,
             *(collection["preserved"] for collection in collections.values()),
         ]
@@ -951,7 +1179,6 @@ def _reference_preservation(
         "preserved": preserved,
         "metadata_preserved": metadata_preserved,
         "pre_normalization_valid": pre_normalization_valid,
-        "candidate_identity_hub_gate_passed": candidate_identity_hub_gate_passed,
         **collections,
     }
 
@@ -1098,7 +1325,7 @@ def compare_graphs(
     corpus: Path | None = None,
     profile: str = "structure",
     max_examples: int = 20,
-    fail_on_candidate_identity_hubs: bool = False,
+    fail_on_candidate_cross_runtime_bindings: bool = False,
     contract: str = "exact",
 ) -> dict[str, Any]:
     """Return a machine-readable, multiplicity-aware parity report."""
@@ -1116,25 +1343,23 @@ def compare_graphs(
     has_pre_normalization_violation = any(
         side["violation_count"] for side in pre_normalization.values()
     )
-    identity_hubs = {
-        "reference": _identity_hub_diagnostics(
+    cross_runtime_bindings = {
+        "reference": _cross_runtime_binding_diagnostics(
             reference, max_examples=max_examples
         ),
-        "candidate": _identity_hub_diagnostics(
+        "candidate": _cross_runtime_binding_diagnostics(
             candidate, max_examples=max_examples
         ),
     }
-    candidate_identity_hub_violation = (
-        fail_on_candidate_identity_hubs
-        and identity_hubs["candidate"]["id_count"] > 0
+    candidate_cross_runtime_binding_violation = (
+        fail_on_candidate_cross_runtime_bindings
+        and cross_runtime_bindings["candidate"]["endpoint_count"] > 0
     )
     left = canonical_graph(reference, corpus=corpus, profile=profile)
     right = canonical_graph(candidate, corpus=corpus, profile=profile)
     report: dict[str, Any] = {
         "profile": profile,
-        "equal": not (
-            has_pre_normalization_violation or candidate_identity_hub_violation
-        ),
+        "equal": not has_pre_normalization_violation,
         "summary": {},
         "metadata": {},
         "nodes": {},
@@ -1142,10 +1367,10 @@ def compare_graphs(
         "hyperedges": {},
         "diagnostics": {
             "pre_normalization": pre_normalization,
-            "identity_hubs": {
-                **identity_hubs,
-                "candidate_gate_enabled": fail_on_candidate_identity_hubs,
-                "candidate_gate_passed": not candidate_identity_hub_violation,
+            "cross_runtime_bindings": {
+                **cross_runtime_bindings,
+                "candidate_gate_enabled": fail_on_candidate_cross_runtime_bindings,
+                "candidate_gate_passed": not candidate_cross_runtime_binding_violation,
             },
         },
         "parity": {},
@@ -1248,12 +1473,14 @@ def compare_graphs(
         left=left,
         right=right,
         pre_normalization_valid=not has_pre_normalization_violation,
-        candidate_identity_hub_gate_passed=not candidate_identity_hub_violation,
     )
-    report["gate"]["passed"] = (
+    contract_passed = (
         report["equal"]
         if contract == "exact"
         else report["parity"]["reference_preservation"]["preserved"]
+    )
+    report["gate"]["passed"] = (
+        contract_passed and not candidate_cross_runtime_binding_violation
     )
     return report
 
@@ -1276,7 +1503,7 @@ def _run(command: list[str], cwd: Path, timeout: int) -> None:
 
 
 def _verify_clean_pinned_checkout(upstream: Path, expected: str) -> None:
-    """Require the exact commit and a clean tracked/non-ignored worktree."""
+    """Require the exact commit and an executable-source-pure worktree."""
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=upstream,
@@ -1307,6 +1534,32 @@ def _verify_clean_pinned_checkout(upstream: Path, expected: str) -> None:
         raise DifferentialError(
             "upstream checkout has staged, unstaged, or non-ignored untracked changes; "
             f"refusing a contaminated reference ({first})"
+        )
+    ignored = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        cwd=upstream,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if ignored.returncode:
+        raise DifferentialError(
+            "could not inspect ignored upstream artifacts: "
+            f"{ignored.stderr.strip()}"
+        )
+    artifact = ignored_executable_artifact(upstream, ignored.stdout.split("\0"))
+    if artifact is not None:
+        raise DifferentialError(
+            "upstream checkout has an ignored executable-source artifact that can "
+            f"shadow the pinned oracle; refusing a contaminated reference ({artifact})"
         )
 
 
@@ -1340,22 +1593,34 @@ def build_and_compare(args: argparse.Namespace) -> dict[str, Any]:
         reference_root.mkdir(parents=True, exist_ok=True)
         candidate_root.mkdir(parents=True, exist_ok=True)
         _verify_upstream_pin(upstream)
-        _run(
-            [
-                "uv",
-                "run",
-                "--frozen",
-                "graphify",
-                "extract",
-                str(corpus),
-                "--code-only",
-                "--force",
-                "--out",
-                str(reference_root),
-            ],
-            upstream,
-            args.timeout,
-        )
+        with tempfile.TemporaryDirectory(
+            prefix="graphoxide-reference-pycache-"
+        ) as reference_pycache:
+            _run(
+                [
+                    "uv",
+                    "run",
+                    "--isolated",
+                    "--no-editable",
+                    "--frozen",
+                    "--project",
+                    str(upstream),
+                    "python",
+                    "-I",
+                    "-X",
+                    f"pycache_prefix={reference_pycache}",
+                    "-m",
+                    "graphify",
+                    "extract",
+                    str(corpus),
+                    "--code-only",
+                    "--force",
+                    "--out",
+                    str(reference_root),
+                ],
+                reference_root,
+                args.timeout,
+            )
         # `uv run --frozen` may populate ignored environments/caches, but it
         # must not alter or create any reference source used by the oracle.
         _verify_upstream_pin(upstream)
@@ -1380,7 +1645,9 @@ def build_and_compare(args: argparse.Namespace) -> dict[str, Any]:
             corpus=corpus,
             profile=args.profile,
             max_examples=args.max_examples,
-            fail_on_candidate_identity_hubs=args.fail_on_candidate_identity_hubs,
+            fail_on_candidate_cross_runtime_bindings=(
+                args.fail_on_candidate_cross_runtime_bindings
+            ),
             contract=args.contract,
         )
         report["artifacts"] = {"retained": retained, "work_dir": str(work)}
@@ -1445,9 +1712,14 @@ def _parser() -> argparse.ArgumentParser:
         )
         child.add_argument("--max-examples", type=int, default=20)
         child.add_argument(
+            "--fail-on-candidate-cross-runtime-bindings",
             "--fail-on-candidate-identity-hubs",
+            dest="fail_on_candidate_cross_runtime_bindings",
             action="store_true",
-            help="fail when the candidate contains a cross-runtime identity hub",
+            help=(
+                "fail when a candidate symbol-binding endpoint carries evidence "
+                "from incompatible runtime families"
+            ),
         )
         child.add_argument("--output", type=Path)
     return parser
@@ -1463,7 +1735,9 @@ def main(argv: list[str] | None = None) -> int:
                 corpus=args.corpus,
                 profile=args.profile,
                 max_examples=args.max_examples,
-                fail_on_candidate_identity_hubs=args.fail_on_candidate_identity_hubs,
+                fail_on_candidate_cross_runtime_bindings=(
+                    args.fail_on_candidate_cross_runtime_bindings
+                ),
                 contract=args.contract,
             )
         else:

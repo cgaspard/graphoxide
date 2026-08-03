@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
 import { GraphoxideCli } from './cli';
 import { integrationReports } from './mcp/installers';
-import { McpManagerPanel } from './mcp/manager';
-import { resolvedInvocation } from './mcp/runtime';
+import { resolvedInvocation, trustedMcpInvocation } from './mcp/runtime';
 import { GraphStore } from './store';
 
 export type FreshnessMode = 'watch' | 'save' | 'manual';
@@ -83,10 +82,10 @@ export class ManagedWorkspaceService implements vscode.Disposable {
     if (toolNames.length > 0) {
       const choice = await vscode.window.showInformationMessage(
         `Graphoxide is enabled. Also configure MCP for ${formatNames(toolNames)}?`,
-        'Manage MCP integrations',
+        'Open Control Center',
         'Later',
       );
-      if (choice === 'Manage MCP integrations') McpManagerPanel.show(this.context, () => this.isEnabled(target));
+      if (choice === 'Open Control Center') await vscode.commands.executeCommand('graphoxide.openControlCenter');
     } else {
       void vscode.window.showInformationMessage(`Graphoxide is managing ${target.name} with ${freshnessDescription(mode)}.`);
     }
@@ -175,7 +174,8 @@ export class ManagedWorkspaceService implements vscode.Disposable {
 
   private async detectUnconfiguredTools(folder: vscode.WorkspaceFolder): Promise<string[]> {
     const invocation = await resolvedInvocation(folder, this.context.extensionUri);
-    const reports = await integrationReports({ folder, invocation });
+    const userInvocation = trustedMcpInvocation(this.context.extensionUri);
+    const reports = await integrationReports({ folder, invocation, userInvocation });
     return reports
       .filter(({ status }) => status.detected && !status.user.configured && !status.project?.configured)
       .map(({ installer }) => installer.displayName);

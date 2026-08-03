@@ -1,24 +1,26 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "corpora": [
     {
       "name": "resolution-adversarial",
       "path": "parity/corpora/resolution-adversarial",
       "expect": {
+        "corpus_input_sha256": "807bb3d4480bef16d36c4a5037644ac2c693dabebfce862a71d0781654a1e07b",
         "reference_strict_sha256": "b7f5a7c3711ac38b5ed18e410896318fb3b4a4bd66be266be034309f1277bf05",
         "candidate_strict_sha256": "12be1b98c1aeec3ec8a4554f805a63cf676f482363f31b31488916d55d586efd",
         "reference_preserved": true,
-        "candidate_identity_hubs": 0
+        "candidate_cross_runtime_bindings": 0
       }
     },
     {
       "name": "identity-collisions",
       "path": "parity/corpora/identity-collisions",
       "expect": {
+        "corpus_input_sha256": "a3850dc8b55a4e2291b4908a1232456471384c72ca1adbc1b5a4200ac9d6dfbe",
         "reference_strict_sha256": "31729532cc13428607a77c991d416341182d2b5bf9e6b6a8a526e6a0779ab703",
         "candidate_strict_sha256": "30832d591d22032067611752295d08c02bd4b48653536acb94e7a6f86c540681",
-        "candidate_identity_hubs": 0,
-        "reference_identity_hubs_min": 3,
+        "candidate_cross_runtime_bindings": 0,
+        "reference_cross_runtime_bindings_min": 3,
         "required_candidate_edges": [
           {"source": "child_child", "target": "csharp_ref_child_cs_base", "relation": "inherits"},
           {"source": "consumer_ts_consumer", "target": "logger_ts_logger", "relation": "imports_from"},
@@ -37,11 +39,12 @@
       "name": "language-matrix",
       "path": "parity/corpora/language-matrix",
       "expect": {
+        "corpus_input_sha256": "1b0e49b8bbac8a7414a38bb36b6e52b4259e66d04cbc5b2e5663e93a88adf0ef",
         "reference_strict_sha256": "110603af55f8ad253a996afed18358467d925e4cfd4fc67c6cf662691582e51c",
         "candidate_strict_sha256": "33ee36e67d3488d5b65f5cb4ebb486e6c339e965a6b96aaaf926fa48e88fcf90",
         "reference_preserved": false,
-        "candidate_identity_hubs": 0,
-        "reference_identity_hubs_min": 2,
+        "candidate_cross_runtime_bindings": 0,
+        "reference_cross_runtime_bindings_min": 2,
         "required_candidate_edges": [
           {"source": "bash_runner", "target": "bash_lib", "relation": "imports_from"},
           {"source": "bash_runner_main", "target": "bash_lib_worker_run", "relation": "calls"},

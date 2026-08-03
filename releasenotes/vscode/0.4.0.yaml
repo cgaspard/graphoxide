@@ -1,0 +1,15 @@
+version: 0.4.0
+date: 2026-08-03
+highlights:
+  - Add one Graphoxide Control Center for graph health, workspace automation, AI labeling, and MCP integrations.
+  - Add opt-in community naming through OpenAI, LM Studio, Ollama, custom OpenAI-compatible endpoints, and Anthropic.
+added:
+  - Store endpoint-bound provider credentials in VS Code Secret Storage, including optional Bearer keys for LM Studio and Ollama.
+  - Discover local models through LM Studio and Ollama native endpoints and confirm the exact endpoint, model, graph, executable, and disclosed data before labeling.
+  - Add deterministic Extension Host E2E coverage that drives the real extension and CLI through fake LM Studio and Ollama servers.
+changed:
+  - Consolidate status and settings into a responsive Control Center with clearer project-versus-user MCP installation states and confirmed changes.
+  - Give both local providers a configurable ten-minute request window and keep Ollama serial by default.
+fixed:
+  - Prevent LM Studio reasoning models from exhausting the community-label output budget before returning JSON.
+removed: []
