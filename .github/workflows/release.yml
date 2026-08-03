@@ -150,8 +150,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.95.0"
           targets: ${{ matrix.rust_target }}
+
+      - name: Ensure exact release target is installed
+        shell: bash
+        run: |
+          rustup target add --toolchain 1.95.0 "${{ matrix.rust_target }}"
+          rustup target list --installed --toolchain 1.95.0 | grep -Fx -- "${{ matrix.rust_target }}"
 
       - uses: Swatinem/rust-cache@v2
         with:
