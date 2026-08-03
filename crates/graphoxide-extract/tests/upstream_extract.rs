@@ -2519,7 +2519,10 @@ fn test_extract_parallel_returns_false_on_broken_pool() {
         |_path, _relative| anyhow::bail!("broken extraction backend"),
     )
     .unwrap_err();
-    assert!(error.to_string().contains("broken extraction backend"));
+    assert!(error.to_string().contains("extract broken.py"));
+    assert!(error
+        .chain()
+        .any(|cause| cause.to_string().contains("broken extraction backend")));
 }
 
 #[test]
