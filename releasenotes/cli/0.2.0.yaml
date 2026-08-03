@@ -1,0 +1,16 @@
+version: 0.2.0
+date: 2026-08-03
+highlights:
+  - Graphoxide now carries an executable ledger for all 3,978 pinned Graphify v0.9.32 cases: 3,975 verified parity mappings, 3 reviewed expected divergences, and no unaccounted cases.
+added:
+  - Add language extraction and resolution coverage for Bash, C#, Dart, Java, JavaScript and TypeScript frameworks, native code, Pascal, PHP, Ruby, SQL, Swift, Terraform, and project manifests.
+  - Add a pinned Graphify-versus-Graphoxide differential harness that compares normalized nodes, directed edges, multiplicity, hyperedges, source identity, and unsafe cross-runtime hubs.
+  - Add managed agent integrations, HTTP MCP serving, watch mode, transcription and document ingestion, PostgreSQL introspection, and richer install and diagnostics commands.
+changed:
+  - Build graphs before committing manifests, preserve non-code state during code-only updates, and reject suspicious partial graph shrinkage unless explicitly allowed.
+  - Keep runtime-specific symbol identities separate while preserving safe imported, inherited, called, and structural relationships across files.
+  - Ship statically linked musl executables for Linux x64 and arm64 so release binaries do not inherit the build runner's glibc requirement.
+fixed:
+  - Prevent stale files, duplicate raw edges, excluded live sources, interrupted writes, and legacy absolute identifiers from corrupting incremental graph updates.
+  - Make semantic and AST caches portable across checkout roots, symlinks, and macOS path aliases while keeping all managed cache state under the selected output root.
+removed: []

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_home_sandbox.py::test_path_home_is_sandboxed",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_path_home_is_sandboxed"}]
+    },
+    {
+      "upstream": "tests/test_home_sandbox.py::test_expanduser_is_sandboxed",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_expanduser_is_sandboxed"}]
+    },
+    {
+      "upstream": "tests/test_home_sandbox.py::test_claude_config_dir_escape_hatch_is_cleared",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_claude_config_dir_escape_hatch_is_cleared"}]
+    },
+    {
+      "upstream": "tests/test_home_sandbox.py::test_global_uninstall_is_captured_by_sandbox",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_global_uninstall_is_captured_by_sandbox"}]
+    }
+  ]
+}

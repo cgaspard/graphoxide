@@ -25,7 +25,9 @@ Rust 1.95 is pinned in `rust-toolchain.toml`.
 Download a standalone archive for macOS, Linux, or Windows from the
 [latest GitHub release](https://github.com/cgaspard/graphoxide/releases/latest),
 verify it against `SHA256SUMS`, and place `graphoxide` on your `PATH`. Native
-x64 and arm64 builds are published for all three operating systems.
+x64 and arm64 builds are published for all three operating systems. Linux
+archives and Linux-targeted VSIX packages use statically linked musl binaries,
+so they do not depend on the host distribution's glibc version.
 
 To build from source instead:
 
@@ -197,6 +199,7 @@ HTML outputs open directly in a browser. GraphML can be imported by graph tools,
 | Command | Purpose |
 |---|---|
 | `extract <path>` | Extract, build, deduplicate, cluster, and write a graph |
+| `audit [path]` | Report unresolved, malformed, merged, repaired, or dropped graph facts |
 | `update [path]` | Incrementally refresh an existing project graph |
 | `cluster-only <path>` | Recompute communities without source extraction |
 | `query <question>` | Search and traverse a relevant neighborhood |
@@ -218,9 +221,16 @@ HTML outputs open directly in a browser. GraphML can be imported by graph tools,
 
 Run `graphoxide <command> --help` for the exact arguments and defaults of any command.
 
+Use `graphoxide audit . --json` for a machine-readable conservation report. Add
+`--strict` in CI to return a failure whenever extraction or graph construction
+loses an unexplained node or edge; the report still prints before the command
+exits so the exact reason counters and source findings remain available.
+
 ## Supported source formats
 
-Compiled tree-sitter extraction covers Python, JavaScript/JSX, TypeScript/TSX, Go, Rust, Java, C, C++, Ruby, C#, Bash, and JSON.
+Compiled tree-sitter extraction covers Python, JavaScript/JSX, TypeScript/TSX,
+Go, Rust, Java, C, C++, Ruby, and C#. Bash and JSON currently use the
+deterministic fallback tier while their grammar-backed adapters are hardened.
 
 Deterministic structured/regex extraction covers the remaining offline matrix, including Kotlin, Scala, PHP, Swift, Lua, Groovy, Elixir, Zig, Julia, Fortran, Verilog/SystemVerilog, Objective-C, PowerShell, Terraform/HCL, SQL, Apex, Dart, Pascal, Blade/Razor, Visual Studio solutions/projects, XAML, Delphi/Lazarus forms, Vue/Svelte/Astro containers, and package manifests. Header routing distinguishes C++, C, and Objective-C markers.
 
@@ -236,7 +246,7 @@ workflows, managed graph freshness, report/export commands, and MCP integration.
 Install the packaged extension for your platform from this checkout, for example:
 
 ```bash
-code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.1.1.vsix
+code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.2.0.vsix
 ```
 
 Then open a repository and accept the first-open **Enable Graphoxide** prompt.
@@ -399,7 +409,12 @@ Questions and full responses may contain sensitive project context, so choose th
 
 ## Compatibility and verification
 
-The Python reference implementation is kept in the gitignored `upstream/` checkout for differential tests. The Rust workspace includes unit tests for schema tolerance, IDs, write semantics, extraction caches, structured fallbacks, resolution, build repair, dedup, clustering, and query behavior.
+The Python reference implementation is kept in the gitignored `upstream/`
+checkout as a differential oracle. The pinned 3,978-case inventory is accounted
+for by 3,975 executable parity mappings and 3 reviewed expected divergences;
+expected divergences are reported separately and never presented as blanket
+parity. The end-to-end corpus gate also compares reviewed deterministic graphs
+from both implementations.
 
 ```bash
 cargo test --workspace --no-fail-fast

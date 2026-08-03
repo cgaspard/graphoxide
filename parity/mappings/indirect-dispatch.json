@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_indirect_dispatch.py::test_emits_indirect_call_edges_and_keeps_calls_precise","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_emits_indirect_call_edges_and_keeps_calls_precise"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_affected_includes_indirect_callers","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_affected_includes_indirect_callers"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_param_shadow_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_param_shadow_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_local_assignment_shadow_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_local_assignment_shadow_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_data_var_matching_function_name_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_data_var_matching_function_name_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_genuine_module_function_still_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_genuine_module_function_still_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_cross_file_indirect_survives_id_relativization","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_indirect_survives_id_relativization"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_cross_file_imported_callback_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_imported_callback_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_cross_file_class_ref_is_not_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_class_ref_is_not_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_cross_file_affected_includes_importing_dispatcher","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_affected_includes_importing_dispatcher"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_cross_file_param_shadow_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_param_shadow_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_module_level_dict_registry_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_level_dict_registry_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_module_level_list_registry_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_level_list_registry_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_function_scoped_dispatch_table_attributes_to_function","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_function_scoped_dispatch_table_attributes_to_function"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_dict_keys_are_not_dispatch_targets","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_dict_keys_are_not_dispatch_targets"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_non_callable_collection_value_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_callable_collection_value_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_module_level_reassigned_name_shadows_dispatch_value","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_level_reassigned_name_shadows_dispatch_value"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_cross_file_dict_registry_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_dict_registry_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_function_scoped_call_argument","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_function_scoped_call_argument"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_module_object_and_array_registry","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_module_object_and_array_registry"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_module_level_callback_registration","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_module_level_callback_registration"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_inline_arrow_argument_is_not_a_reference","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_inline_arrow_argument_is_not_a_reference"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_parameter_shadow_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_parameter_shadow_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_object_keys_and_data_values_excluded","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_object_keys_and_data_values_excluded"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_shorthand_property_reference","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_shorthand_property_reference"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_js_cross_file_imported_callback_in_object","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_cross_file_imported_callback_in_object"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_typescript_typed_params_and_arrow_consts","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_typescript_typed_params_and_arrow_consts"}]},
+    {"upstream":"tests/test_indirect_dispatch.py::test_class_ref_is_not_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_ref_is_not_indirect_call"}]}
+  ]
+}

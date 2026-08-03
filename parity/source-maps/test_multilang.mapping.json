@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/Graphify-Labs/graphify",
+    "revision": "00efd6e7969837ae4a9f11d8d504dcd3b20b09df",
+    "file": "tests/test_multilang.py",
+    "sha256": "32578947a4f77ab68b1ab1a3038f069bb13d796bb7e99bd6b9c74317ee0a4eb5",
+    "collected_cases": 53
+  },
+  "rust": {
+    "package": "graphoxide-extract",
+    "target": "upstream_multilang",
+    "mapped_cases": 53
+  },
+  "cases": [
+    {
+      "ordinal": 1,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_finds_class",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_finds_class"
+    },
+    {
+      "ordinal": 2,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_finds_methods",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_finds_methods"
+    },
+    {
+      "ordinal": 3,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_finds_function",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_finds_function"
+    },
+    {
+      "ordinal": 4,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_emits_calls",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_emits_calls"
+    },
+    {
+      "ordinal": 5,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_calls_are_extracted",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_calls_are_extracted"
+    },
+    {
+      "ordinal": 6,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_import_edges_have_import_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 7,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_call_edges_have_call_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 8,
+      "upstream_nodeid": "tests/test_multilang.py::test_ts_no_dangling_edges",
+      "rust_target": "upstream_multilang",
+      "rust_test": "typescript::test_ts_no_dangling_edges"
+    },
+    {
+      "ordinal": 9,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_finds_struct",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_finds_struct"
+    },
+    {
+      "ordinal": 10,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_finds_methods",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_finds_methods"
+    },
+    {
+      "ordinal": 11,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_finds_constructor",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_finds_constructor"
+    },
+    {
+      "ordinal": 12,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_emits_calls",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_emits_calls"
+    },
+    {
+      "ordinal": 13,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_has_extracted_calls",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_has_extracted_calls"
+    },
+    {
+      "ordinal": 14,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_import_edges_have_import_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 15,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_call_edges_have_call_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 16,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_no_dangling_edges",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_no_dangling_edges"
+    },
+    {
+      "ordinal": 17,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_embeds_struct_field",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_embeds_struct_field"
+    },
+    {
+      "ordinal": 18,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_interface_embedding_emits_embeds",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_interface_embedding_emits_embeds"
+    },
+    {
+      "ordinal": 19,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_struct_named_field_emits_field_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_struct_named_field_emits_field_context"
+    },
+    {
+      "ordinal": 20,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_method_parameter_return_contexts",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_method_parameter_return_contexts"
+    },
+    {
+      "ordinal": 21,
+      "upstream_nodeid": "tests/test_multilang.py::test_go_method_declaration_emits_refs_only_when_name_present",
+      "rust_target": "upstream_multilang",
+      "rust_test": "go::test_go_method_declaration_emits_refs_only_when_name_present"
+    },
+    {
+      "ordinal": 22,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_finds_struct",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_finds_struct"
+    },
+    {
+      "ordinal": 23,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_finds_impl_methods",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_finds_impl_methods"
+    },
+    {
+      "ordinal": 24,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_finds_function",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_finds_function"
+    },
+    {
+      "ordinal": 25,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_emits_calls",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_emits_calls"
+    },
+    {
+      "ordinal": 26,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_calls_are_extracted",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_calls_are_extracted"
+    },
+    {
+      "ordinal": 27,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_import_edges_have_import_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 28,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_call_edges_have_call_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 29,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_no_dangling_edges",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_no_dangling_edges"
+    },
+    {
+      "ordinal": 30,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_trait_impl_emits_implements",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_trait_impl_emits_implements"
+    },
+    {
+      "ordinal": 31,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_supertrait_emits_inherits",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_supertrait_emits_inherits"
+    },
+    {
+      "ordinal": 32,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_enum_variant_references",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_enum_variant_references"
+    },
+    {
+      "ordinal": 33,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_struct_field_emits_field_context",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_struct_field_emits_field_context"
+    },
+    {
+      "ordinal": 34,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_tuple_struct_field_references",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_tuple_struct_field_references"
+    },
+    {
+      "ordinal": 35,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_method_parameter_return_and_generic_contexts",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_method_parameter_return_and_generic_contexts"
+    },
+    {
+      "ordinal": 36,
+      "upstream_nodeid": "tests/test_multilang.py::test_rust_no_cross_crate_spurious_edges",
+      "rust_target": "upstream_multilang",
+      "rust_test": "rust::test_rust_no_cross_crate_spurious_edges"
+    },
+    {
+      "ordinal": 37,
+      "upstream_nodeid": "tests/test_multilang.py::test_extract_dispatches_all_languages",
+      "rust_target": "upstream_multilang",
+      "rust_test": "dispatch_cache::test_extract_dispatches_all_languages"
+    },
+    {
+      "ordinal": 38,
+      "upstream_nodeid": "tests/test_multilang.py::test_cache_hit_returns_same_result",
+      "rust_target": "upstream_multilang",
+      "rust_test": "dispatch_cache::test_cache_hit_returns_same_result"
+    },
+    {
+      "ordinal": 39,
+      "upstream_nodeid": "tests/test_multilang.py::test_cache_miss_after_file_change",
+      "rust_target": "upstream_multilang",
+      "rust_test": "dispatch_cache::test_cache_miss_after_file_change"
+    },
+    {
+      "ordinal": 40,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_finds_tables",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_finds_tables"
+    },
+    {
+      "ordinal": 41,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_finds_view",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_finds_view"
+    },
+    {
+      "ordinal": 42,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_finds_function",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_finds_function"
+    },
+    {
+      "ordinal": 43,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_emits_foreign_key_edge",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_emits_foreign_key_edge"
+    },
+    {
+      "ordinal": 44,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_emits_reads_from_edge",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_emits_reads_from_edge"
+    },
+    {
+      "ordinal": 45,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_no_dangling_edges",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_no_dangling_edges"
+    },
+    {
+      "ordinal": 46,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_cross_file_fk_resolves_and_never_leaks_scan_path",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_cross_file_fk_resolves_and_never_leaks_scan_path"
+    },
+    {
+      "ordinal": 47,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_alter_table_fk_edge",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_alter_table_fk_edge"
+    },
+    {
+      "ordinal": 48,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_schema_qualified_names",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_schema_qualified_names"
+    },
+    {
+      "ordinal": 49,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_schema_qualified_alter_fk",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_schema_qualified_alter_fk"
+    },
+    {
+      "ordinal": 50,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_plpgsql_functions_survive_parse_errors",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_plpgsql_functions_survive_parse_errors"
+    },
+    {
+      "ordinal": 51,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_plpgsql_clean_function_not_double_emitted",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_plpgsql_clean_function_not_double_emitted"
+    },
+    {
+      "ordinal": 52,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_quoted_plpgsql_routines_are_recovered",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_quoted_plpgsql_routines_are_recovered"
+    },
+    {
+      "ordinal": 53,
+      "upstream_nodeid": "tests/test_multilang.py::test_sql_quoted_plpgsql_file_stays_clean",
+      "rust_target": "upstream_multilang",
+      "rust_test": "sql::test_sql_quoted_plpgsql_file_stays_clean"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+version: 0.2.0
+date: 2026-08-03
+highlights:
+  - Graphoxide for VS Code now ships the multi-language graph engine with 3,975 verified upstream parity mappings and 3 explicitly reviewed expected divergences.
+added:
+  - Bundle the matching standalone Graphoxide binary plus 133 generated agent integration artifacts in every platform-specific extension package.
+  - Add automated release validation for packaged agent assets and live Graphify-versus-Graphoxide graph differentials.
+changed:
+  - Managed workspace refreshes now use safer graph-first commits, stronger partial-build guards, portable caches, and runtime-aware symbol resolution.
+fixed:
+  - Keep relocated workspaces, code-only refreshes, interrupted builds, and output directories outside the source tree from replaying stale or cross-root graph data.
+removed: []

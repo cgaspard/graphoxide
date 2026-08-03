@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ruby_resolution.py::test_member_call_captures_receiver","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_member_call_captures_receiver"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_local_binding_gives_receiver_a_type","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_local_binding_gives_receiver_a_type"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_ambiguous_binding_yields_no_type","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ambiguous_binding_yields_no_type"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_resolves_member_call_by_type","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_resolves_member_call_by_type"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_resolution_is_type_based_not_name_luck","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_resolution_is_type_based_not_name_luck"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_no_false_positive_when_type_unknown","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_no_false_positive_when_type_unknown"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_class_new_creates_instantiation_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_new_creates_instantiation_edge"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_plain_module_gets_a_node_with_methods","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_plain_module_gets_a_node_with_methods"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_nested_modules_each_get_a_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_nested_modules_each_get_a_node"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_struct_new_constant_creates_class_with_methods","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_struct_new_constant_creates_class_with_methods"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_class_new_constant_creates_class_and_inherits","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_new_constant_creates_class_and_inherits"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_data_define_constant_creates_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_data_define_constant_creates_class"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_constant_receiver_singleton_call_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_constant_receiver_singleton_call_resolves"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_constant_receiver_module_function_call_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_constant_receiver_module_function_call_resolves"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_constant_receiver_unknown_class_method_falls_back_to_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_constant_receiver_unknown_class_method_falls_back_to_class"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_ambiguous_constant_receiver_emits_no_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ambiguous_constant_receiver_emits_no_edge"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_include_emits_mixes_in_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_include_emits_mixes_in_edge"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_extend_and_prepend_emit_mixes_in","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extend_and_prepend_emit_mixes_in"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_extend_self_and_nonconstant_args_emit_no_mixin","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extend_self_and_nonconstant_args_emit_no_mixin"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_include_of_undefined_or_ambiguous_module_emits_no_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_include_of_undefined_or_ambiguous_module_emits_no_edge"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_mixin_is_not_emitted_as_calls_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mixin_is_not_emitted_as_calls_edge"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_compact_and_nested_module_includes_resolve","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_compact_and_nested_module_includes_resolve"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_qualified_external_mixin_does_not_bind_to_local","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_qualified_external_mixin_does_not_bind_to_local"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_in_corpus_qualified_mixin_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_in_corpus_qualified_mixin_resolves"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_nested_declared_class_still_resolves_as_receiver","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_nested_declared_class_still_resolves_as_receiver"}]},
+    {"upstream":"tests/test_ruby_resolution.py::test_rake_files_extract_and_resolve_like_rb","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_rake_files_extract_and_resolve_like_rb"}]}
+  ]
+}

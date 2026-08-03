@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_workspace_internal_dependency_only","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_workspace_internal_dependency_only"}]},
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_malformed_toml_reports_parser_error","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_malformed_toml_reports_parser_error"}]},
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_degenerate_manifests_return_empty_or_skip_bad_deps","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_degenerate_manifests_return_empty_or_skip_bad_deps"}]},
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_old_manifest_keeps_internal_path_dep_and_skips_external","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_old_manifest_keeps_internal_path_dep_and_skips_external"}]},
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_modern_virtual_and_root_package_workspaces","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_modern_virtual_and_root_package_workspaces"}]},
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_large_workspace_dependency_chain","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_large_workspace_dependency_chain"}]},
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_honors_package_rename_on_internal_dep","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_honors_package_rename_on_internal_dep"}]},
+    {"upstream":"tests/test_cargo_introspect.py::test_cargo_introspect_package_rename_falls_through_when_unresolved","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cargo_introspect_package_rename_falls_through_when_unresolved"}]}
+  ]
+}

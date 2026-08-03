@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_charmap_encoding.py::TestSubprocessEncoding::test_subprocess_called_with_utf8_encoding","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_subprocess_called_with_utf8_encoding"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestSubprocessEncoding::test_subprocess_does_not_use_text_true_without_encoding","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_subprocess_does_not_use_text_true_without_encoding"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestSubprocessEncoding::test_unicode_chars_survive_subprocess_roundtrip","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_unicode_chars_survive_subprocess_roundtrip"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestSubprocessEncoding::test_call_llm_claude_cli_subprocess_encoding","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_call_llm_claude_cli_subprocess_encoding"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestLoudChunkFailure::test_failure_count_in_merged_result","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_failure_count_in_merged_result"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestLoudChunkFailure::test_summary_printed_when_chunks_fail","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_summary_printed_when_chunks_fail"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestLoudChunkFailure::test_no_false_alarm_when_all_chunks_succeed","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_no_false_alarm_when_all_chunks_succeed"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestSubstitutionValidation::test_read_files_produces_utf8_safe_prompt","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_read_files_produces_utf8_safe_prompt"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestSubstitutionValidation::test_cp1252_would_fail_but_utf8_succeeds","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cp1252_would_fail_but_utf8_succeeds"}]},
+    {"upstream":"tests/test_charmap_encoding.py::TestSubstitutionValidation::test_subprocess_encoding_kwarg_in_extract_files_direct","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_subprocess_encoding_kwarg_in_extract_files_direct"}]}
+  ]
+}

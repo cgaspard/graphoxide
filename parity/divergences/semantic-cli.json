@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "divergences": [
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_mode_deep_dispatches_over_warm_cache",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_extract_mode_deep_is_rejected_until_semantic_cli_is_supported"
+        }
+      ],
+      "reason": "Graphoxide does not expose Graphify's hosted semantic deep mode and rejects --mode instead of accepting a no-op compatibility flag."
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_without_key_still_errors_when_docs_present",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_extract_without_key_remains_intentionally_offline_when_docs_present"
+        }
+      ],
+      "reason": "Graphoxide intentionally indexes mixed code and documents offline, while Graphify requires hosted semantic credentials for this command."
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_mixed_repo_without_key_errors_and_points_at_code_only",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_mixed_repo_without_key_remains_intentionally_offline"
+        }
+      ],
+      "reason": "Graphoxide intentionally indexes mixed repositories offline without forcing --code-only, unlike Graphify's credential error contract."
+    }
+  ]
+}

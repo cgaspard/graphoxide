@@ -1,0 +1,1335 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-agents.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-aider.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-amp.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-claw.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-codex.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-copilot.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-devin.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-droid.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-kilo.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-kiro.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-opencode.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-pi.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-trae.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill-windows.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skill.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/agents/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/amp/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claude/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/claw/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/codex/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/copilot/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/droid/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kilo/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/kiro/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/opencode/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/pi/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/trae/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/vscode/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/add-watch.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/exports.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/extraction-spec.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/github-and-merge.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/hooks.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/query.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/transcribe.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[skills/windows/references/update.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[always_on/agents-md.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[always_on/antigravity-rules.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[always_on/claude-md.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[always_on/gemini-md.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[always_on/kiro-steering.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_wheel_packaging.py::test_skill_artifact_ships_in_wheel[always_on/vscode-instructions.md]",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "stages all 133 agent artifacts for distribution"
+        }
+      ]
+    }
+  ]
+}

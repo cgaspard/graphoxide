@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_file_slice.py::test_slice_boundaries_small_text_is_one_range",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_slice_boundaries_small_text_is_one_range"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_slice_boundaries_full_coverage_and_bounds[50]",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_slice_boundaries_full_coverage_and_bounds"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_slice_boundaries_full_coverage_and_bounds[100]",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_slice_boundaries_full_coverage_and_bounds"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_slice_boundaries_full_coverage_and_bounds[500]",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_slice_boundaries_full_coverage_and_bounds"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_slice_boundaries_full_coverage_and_bounds[1000]",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_slice_boundaries_full_coverage_and_bounds"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_slice_boundaries_single_huge_line_still_progresses",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_slice_boundaries_single_huge_line_still_progresses"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_slice_boundaries_prefers_heading_boundary",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_slice_boundaries_prefers_heading_boundary"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_expand_small_file_stays_whole",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_expand_small_file_stays_whole"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_expand_oversized_markdown_is_sliced_with_full_coverage",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_expand_oversized_markdown_is_sliced_with_full_coverage"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_expand_does_not_slice_code_even_when_oversized",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_expand_does_not_slice_code_even_when_oversized"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_expand_unreadable_file_passes_through",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_expand_unreadable_file_passes_through"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_read_files_keys_every_slice_to_parent_path",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_read_files_keys_every_slice_to_parent_path"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_unit_path_resolves_slice_and_path",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_unit_path_resolves_slice_and_path"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_estimate_tokens_for_slice_scales_with_range",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_estimate_tokens_for_slice_scales_with_range"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_partition_keeps_slices_as_text",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_partition_keeps_slices_as_text"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_pack_chunks_handles_slices",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_pack_chunks_handles_slices"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_bisect_slice_splits_at_newline",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_bisect_slice_splits_at_newline"}]
+    },
+    {
+      "upstream": "tests/test_file_slice.py::test_bisect_slice_returns_none_for_tiny",
+      "targets": [{"runner": "rust", "package": "graphoxide-core", "id": "test_bisect_slice_returns_none_for_tiny"}]
+    }
+  ]
+}

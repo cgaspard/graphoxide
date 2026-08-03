@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_falkordb_integration.py::test_push_to_falkordb_creates_expected_graph","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_push_to_falkordb_creates_expected_graph"}]},
+    {"upstream":"tests/test_falkordb_integration.py::test_push_to_falkordb_is_idempotent","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_push_to_falkordb_is_idempotent"}]}
+  ]
+}

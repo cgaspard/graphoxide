@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_cross_ext_reexport_emits_no_self_loop","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_ext_reexport_emits_no_self_loop"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_cross_ext_reexport_target_is_the_sibling_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_ext_reexport_target_is_the_sibling_node"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_cross_ext_reexport_no_phantom_import_cycle","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_ext_reexport_no_phantom_import_cycle"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_same_basename_three_colliding_siblings_reexport_selects_named_variant","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_same_basename_three_colliding_siblings_reexport_selects_named_variant"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_disambiguation_strips_transient_target_file_hint","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_disambiguation_strips_transient_target_file_hint"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_target_file_hint_stripped_even_without_a_collision","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_target_file_hint_stripped_even_without_a_collision"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_graph_json_has_no_target_file_and_no_absolute_path","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_graph_json_has_no_target_file_and_no_absolute_path"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_graph_json_is_checkout_location_independent","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_graph_json_is_checkout_location_independent"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_build_drops_persisted_target_file_from_a_pre_fix_graph","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_build_drops_persisted_target_file_from_a_pre_fix_graph"}]},
+    {"upstream":"tests/test_cross_extension_reexport_self_cycle.py::test_target_file_hint_never_written_to_the_ast_cache","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_target_file_hint_never_written_to_the_ast_cache"}]}
+  ]
+}

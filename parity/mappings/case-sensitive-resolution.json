@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_case_sensitive_resolution.py::test_python_Path_does_not_resolve_to_shell_PATH","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_python_path_does_not_resolve_to_shell_path"}]},
+    {"upstream":"tests/test_case_sensitive_resolution.py::test_case_sensitive_cross_file_ref_respects_case","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_case_sensitive_cross_file_ref_respects_case"}]},
+    {"upstream":"tests/test_case_sensitive_resolution.py::test_exact_case_cross_file_still_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_exact_case_cross_file_still_resolves"}]},
+    {"upstream":"tests/test_case_sensitive_resolution.py::test_php_case_insensitive_resolution_preserved","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_php_case_insensitive_resolution_preserved"}]}
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_code_only_succeeds_without_key",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_code_only_succeeds_without_key"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_extract_usage_advertises_code_only",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_usage_advertises_code_only"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_output_flag_is_alias_of_out",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_output_flag_is_alias_of_out"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_output_flag_inline_form",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_output_flag_inline_form"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_no_gitignore_indexes_vcs_ignored_code_but_keeps_graphifyignore",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_no_gitignore_indexes_vcs_ignored_code_but_keeps_graphifyignore"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_no_gitignore_setting_persists_across_flagless_extract",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_no_gitignore_setting_persists_across_flagless_extract"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_exclude_setting_persists_across_flagless_extract",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_exclude_setting_persists_across_flagless_extract"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_explicit_exclude_replaces_persisted_setting_with_custom_out",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_explicit_exclude_replaces_persisted_setting_with_custom_out"}]
+    },
+    {
+      "upstream": "tests/test_extract_code_only_cli.py::test_extract_names_skipped_sensitive_files",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_names_skipped_sensitive_files"}]
+    }
+  ]
+}

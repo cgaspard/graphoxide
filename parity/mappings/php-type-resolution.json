@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_php_type_resolution.py::test_php_external_namespaced_base_does_not_collapse_onto_internal_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_php_external_namespaced_base_does_not_collapse_onto_internal_class"}]},
+    {"upstream":"tests/test_php_type_resolution.py::test_php_ambiguous_base_disambiguated_by_use","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_php_ambiguous_base_disambiguated_by_use"}]},
+    {"upstream":"tests/test_php_type_resolution.py::test_php_use_alias_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_php_use_alias_resolves"}]},
+    {"upstream":"tests/test_php_type_resolution.py::test_php_fully_qualified_base_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_php_fully_qualified_base_resolves"}]},
+    {"upstream":"tests/test_php_type_resolution.py::test_php_plain_no_namespace_inheritance_preserved","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_php_plain_no_namespace_inheritance_preserved"}]}
+  ]
+}

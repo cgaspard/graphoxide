@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_file_node_id_spec.py::test_file_node_id_uses_parent_dir_and_stem_no_extension","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_file_node_id_uses_parent_dir_and_stem_no_extension"}]},
+    {"upstream":"tests/test_file_node_id_spec.py::test_top_level_file_node_id_is_bare_stem","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_top_level_file_node_id_is_bare_stem"}]},
+    {"upstream":"tests/test_file_node_id_spec.py::test_top_level_file_SYMBOL_ids_use_bare_stem","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_top_level_file_symbol_ids_use_bare_stem"}]},
+    {"upstream":"tests/test_file_node_id_spec.py::test_nested_file_symbol_ids_unchanged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_nested_file_symbol_ids_unchanged"}]},
+    {"upstream":"tests/test_file_node_id_spec.py::test_symbol_and_file_ids_share_the_same_stem","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_symbol_and_file_ids_share_the_same_stem"}]},
+    {"upstream":"tests/test_file_node_id_spec.py::test_cross_file_import_edges_stay_connected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_import_edges_stay_connected"}]}
+  ]
+}

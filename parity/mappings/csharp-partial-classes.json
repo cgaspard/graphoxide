@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_csharp_partial_classes.py::test_partial_halves_merge_to_one_class_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_partial_halves_merge_to_one_class_node"}]},
+    {"upstream":"tests/test_csharp_partial_classes.py::test_cross_file_caller_resolves_into_both_halves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_caller_resolves_into_both_halves"}]},
+    {"upstream":"tests/test_csharp_partial_classes.py::test_cross_half_unqualified_in_class_call_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_half_unqualified_in_class_call_resolves"}]},
+    {"upstream":"tests/test_csharp_partial_classes.py::test_same_name_different_namespace_not_merged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_same_name_different_namespace_not_merged"}]},
+    {"upstream":"tests/test_csharp_partial_classes.py::test_non_partial_same_name_not_merged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_partial_same_name_not_merged"}]},
+    {"upstream":"tests/test_csharp_partial_classes.py::test_nested_partial_not_merged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_nested_partial_not_merged"}]}
+  ]
+}

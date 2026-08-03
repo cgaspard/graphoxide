@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_provider_registry.py::test_custom_provider_add_list_show_remove","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_custom_provider_add_list_show_remove"}]},
+    {"upstream":"tests/test_provider_registry.py::test_custom_provider_pricing_defaults_to_zero","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_custom_provider_pricing_defaults_to_zero"}]},
+    {"upstream":"tests/test_provider_registry.py::test_custom_provider_cannot_shadow_builtin","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_custom_provider_cannot_shadow_builtin"}]},
+    {"upstream":"tests/test_provider_registry.py::test_project_local_providers_ignored_without_optin","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_project_local_providers_ignored_without_optin"}]},
+    {"upstream":"tests/test_provider_registry.py::test_project_local_providers_loaded_with_optin","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_project_local_providers_loaded_with_optin"}]},
+    {"upstream":"tests/test_provider_registry.py::test_non_http_provider_base_url_rejected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_http_provider_base_url_rejected"}]},
+    {"upstream":"tests/test_provider_registry.py::test_provider_base_url_ok_scheme_and_warnings","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_provider_base_url_ok_scheme_and_warnings"}]},
+    {"upstream":"tests/test_provider_registry.py::test_detect_backend_custom_provider_after_builtins","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_detect_backend_custom_provider_after_builtins"}]}
+  ]
+}

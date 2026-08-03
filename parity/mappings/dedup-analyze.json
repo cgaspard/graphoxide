@@ -1,0 +1,1145 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_dedup.py::test_entropy_short_label_low",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_entropy_short_label_low"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_entropy_normal_label_high",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_entropy_normal_label_high"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_entropy_empty_string",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_entropy_empty_string"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_shingles_produces_trigrams",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_shingles_produces_trigrams"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_shingles_short_string",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_shingles_short_string"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_exact_duplicates_merged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_exact_duplicates_merged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_typo_merged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_typo_merged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_unrelated_not_merged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_unrelated_not_merged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_short_low_entropy_not_merged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_short_low_entropy_not_merged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_edges_rewired_after_merge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_edges_rewired_after_merge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_self_loops_dropped_after_merge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_self_loops_dropped_after_merge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_community_boost_aids_merge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_community_boost_aids_merge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_empty_inputs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_empty_inputs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_single_node_no_crash",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_single_node_no_crash"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_llm_flag_accepted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_llm_flag_accepted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_build_calls_dedup",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_build_calls_dedup"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_build_dedup_preserves_semantic_attributes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_build_dedup_preserves_semantic_attributes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_does_not_merge_numeric_variants",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_does_not_merge_numeric_variants"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_does_not_merge_short_insertion_variants",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_does_not_merge_short_insertion_variants"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_does_not_merge_model_with_suffix",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_does_not_merge_model_with_suffix"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_still_merges_real_typos",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_still_merges_real_typos"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_variant_pair_helper",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_variant_pair_helper"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_prefix_extension_symbols_not_merged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_prefix_extension_symbols_not_merged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_pass2_winner_union_does_not_pull_in_uncompared_same_label_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_pass2_winner_union_does_not_pull_in_uncompared_same_label_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_prefix_guard_does_not_block_same_length_typos",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_prefix_guard_does_not_block_same_length_typos"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_prefix_guard_fires_for_extension_pairs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_prefix_guard_fires_for_extension_pairs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_numeric_tokens_differ_helper",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_numeric_tokens_differ_helper"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_does_not_merge_numbered_siblings",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_does_not_merge_numbered_siblings"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_does_not_merge_crossfile_rationale_boilerplate",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_does_not_merge_crossfile_rationale_boilerplate"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_does_not_merge_crossfile_document_headings",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_does_not_merge_crossfile_document_headings"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_still_merges_samefile_rationale_duplicates",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_still_merges_samefile_rationale_duplicates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_does_not_merge_crossfile_shared_prefix_divergence",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_does_not_merge_crossfile_shared_prefix_divergence"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_still_merges_crossfile_true_duplicates",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_still_merges_crossfile_true_duplicates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_cross_chunk_id_collision_emits_warning",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cross_chunk_id_collision_emits_warning"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_same_id_same_source_file_no_warning",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_same_id_same_source_file_no_warning"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_summary_prints_fuzzy_count_when_no_exact_merges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_summary_prints_fuzzy_count_when_no_exact_merges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_summary_still_reports_exact_only",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_summary_still_reports_exact_only"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_defining_file_wins_over_referencing_file[definition-first]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_defining_file_wins_over_referencing_file_definition_first"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_defining_file_wins_over_referencing_file[reference-first]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_defining_file_wins_over_referencing_file_reference_first"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_reference_collision_is_silent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_reference_collision_is_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_absolute_source_path_still_defines_id",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_absolute_source_path_still_defines_id"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_same_file_relabel_is_noted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_same_file_relabel_is_noted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_same_id_same_entity_retains_complementary_attributes[ast-first]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_same_id_same_entity_retains_complementary_attributes_ast_first"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_same_id_same_entity_retains_complementary_attributes[semantic-first]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_same_id_same_entity_retains_complementary_attributes_semantic_first"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_cross_file_id_collision_does_not_mix_attributes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cross_file_id_collision_does_not_mix_attributes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_collision_survivor_is_order_independent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_collision_survivor_is_order_independent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_bare_file_node_defines_its_own_id",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_bare_file_node_defines_its_own_id"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_defines_id_helper",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_defines_id_helper"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_gapfill_is_order_independent_with_multiple_losers",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_gapfill_is_order_independent_with_multiple_losers"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_no_attribute_merge_when_source_file_missing",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_no_attribute_merge_when_source_file_missing"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_survivor_does_not_inherit_false_origin_ast",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_survivor_does_not_inherit_false_origin_ast"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_dedup_fills_explicit_none_attribute",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_dedup_fills_explicit_none_attribute"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_concepts_merge_and_rewire",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_concepts_merge_and_rewire"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_one_char_typo_concepts_still_merge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_one_char_typo_concepts_still_merge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_labels_stay_distinct_for_guarded_types[document]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_labels_stay_distinct_for_guarded_types_document"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_labels_stay_distinct_for_guarded_types[rationale]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_labels_stay_distinct_for_guarded_types_rationale"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_labels_stay_distinct_for_guarded_types[code]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_labels_stay_distinct_for_guarded_types_code"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_labels_stay_distinct_for_guarded_types[image-basename]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_labels_stay_distinct_for_guarded_types_image_basename"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_labels_stay_distinct_for_guarded_types[concept-image-mixed]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_labels_stay_distinct_for_guarded_types_concept_image_mixed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_labels_stay_distinct_for_guarded_types[empty-source-file]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_labels_stay_distinct_for_guarded_types_empty_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_identical_labels_stay_distinct_for_guarded_types[low-entropy-concept]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_identical_labels_stay_distinct_for_guarded_types_low_entropy_concept"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_cross_repo_guard_still_raises",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cross_repo_guard_still_raises"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_concept_merge_is_order_independent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_concept_merge_is_order_independent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_concept_merge_deterministic_across_hash_seeds",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_concept_merge_deterministic_across_hash_seeds"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_dedup.py::test_crossfile_concept_merge_is_transitive",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_crossfile_concept_merge_is_transitive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_returns_list",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_returns_list"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_sorted_by_degree",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_sorted_by_degree"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_have_required_keys",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_have_required_keys"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprising_connections_cross_source_multi_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprising_connections_cross_source_multi_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprising_connections_excludes_concept_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprising_connections_excludes_concept_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprising_connections_single_file_uses_community_bridges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprising_connections_single_file_uses_community_bridges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprising_connections_ambiguous_scores_higher_than_extracted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprising_connections_ambiguous_scores_higher_than_extracted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprise_score_accepts_precomputed_degrees",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprise_score_accepts_precomputed_degrees"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprising_connections_cross_type_scores_higher",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprising_connections_cross_type_scores_higher"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_cross_language_inferred_calls_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cross_language_inferred_calls_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_cross_language_inferred_uses_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cross_language_inferred_uses_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_cross_language_semantically_similar_not_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cross_language_semantically_similar_not_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_same_language_inferred_calls_not_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_same_language_inferred_calls_not_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_cross_language_extracted_calls_not_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cross_language_extracted_calls_not_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprising_connections_have_why_field",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprising_connections_have_why_field"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_file_category",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_file_category"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_is_concept_node_empty_source",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_is_concept_node_empty_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_is_concept_node_real_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_is_concept_node_real_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_surprising_connections_have_required_keys",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_surprising_connections_have_required_keys"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_graph_diff_new_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_graph_diff_new_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_graph_diff_removed_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_graph_diff_removed_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_graph_diff_new_edges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_graph_diff_new_edges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_graph_diff_empty_diff",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_graph_diff_empty_diff"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_code_doc_inferred_calls_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_code_doc_inferred_calls_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_code_doc_inferred_uses_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_code_doc_inferred_uses_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_code_doc_extracted_calls_not_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_code_doc_extracted_calls_not_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_code_doc_inferred_semantically_similar_not_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_code_doc_inferred_semantically_similar_not_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_code_unknown_extension_inferred_calls_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_code_unknown_extension_inferred_calls_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_code_paper_inferred_calls_not_suppressed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_code_paper_inferred_calls_not_suppressed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_is_json_key_node_noise_label",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_is_json_key_node_noise_label"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_is_json_key_node_non_json_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_is_json_key_node_non_json_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_excludes_npm_dep_block_keys[dependencies]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_excludes_npm_dep_block_keys_dependencies"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_excludes_npm_dep_block_keys[devDependencies]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_excludes_npm_dep_block_keys_dev_dependencies"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_excludes_npm_dep_block_keys[peerDependencies]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_excludes_npm_dep_block_keys_peer_dependencies"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_excludes_npm_dep_block_keys[optionalDependencies]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_excludes_npm_dep_block_keys_optional_dependencies"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_excludes_npm_dep_block_keys[bundledDependencies]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_excludes_npm_dep_block_keys_bundled_dependencies"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_is_json_key_node_real_label",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_is_json_key_node_real_label"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_excludes_json_noise",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_excludes_json_noise"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_god_nodes_filter_is_case_insensitive",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_god_nodes_filter_is_case_insensitive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_suggest_questions_excludes_rationale_nodes_from_isolated_count",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_suggest_questions_excludes_rationale_nodes_from_isolated_count"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_returns_structured_records",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_returns_structured_records"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_detects_2_and_3_cycles",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_detects_2_and_3_cycles"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_includes_self_loop_cycle",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_includes_self_loop_cycle"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_respects_max_cycle_length",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_respects_max_cycle_length"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_skips_nodes_without_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_skips_nodes_without_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_handles_undirected_graph_input",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_handles_undirected_graph_input"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_ignores_non_import_relations",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_ignores_non_import_relations"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_empty_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_empty_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_analyze.py::test_find_import_cycles_no_cycles",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_find_import_cycles_no_cycles"
+        }
+      ]
+    }
+  ]
+}

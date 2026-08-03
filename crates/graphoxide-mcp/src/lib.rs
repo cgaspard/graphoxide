@@ -1,4 +1,7 @@
-//! Graphoxide MCP stdio server.
+//! Graphoxide MCP server and MCP-configuration ingestion.
+
+pub mod http;
+pub mod mcp_ingest;
 use graphoxide_core::KnowledgeGraph;
 use rmcp::{
     handler::server::wrapper::Parameters,
@@ -21,14 +24,35 @@ use std::{
 
 const SERVER_INSTRUCTIONS: &str = "Use Graphoxide before broad filesystem searches when a user asks to explore, explain, navigate, trace, or assess impact in a codebase. Start with project_overview for architecture, query_graph for a focused neighborhood, then get_node, get_neighbors, or shortest_path for exact evidence. Treat results as deterministic static-analysis evidence, synthesize the answer yourself, cite returned source locations, and verify runtime behavior in source or tests. A no-match result does not prove a concept is absent. Clearly distinguish INFERRED edges from EXTRACTED facts.";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct GraphoxideServer {
     cache: Arc<Mutex<GraphCache>>,
+    default_graph: Option<PathBuf>,
+    max_project_contexts: usize,
 }
 #[derive(Debug, Default)]
 struct GraphCache {
-    values: HashMap<PathBuf, (u128, u64, Arc<KnowledgeGraph>)>,
+    values: HashMap<
+        PathBuf,
+        (
+            u128,
+            u64,
+            Arc<KnowledgeGraph>,
+            Arc<graphoxide_query::GraphQueryCache>,
+        ),
+    >,
+    /// Only non-default project graphs participate in eviction.
     order: VecDeque<PathBuf>,
+}
+
+impl Default for GraphoxideServer {
+    fn default() -> Self {
+        Self {
+            cache: Arc::new(Mutex::new(GraphCache::default())),
+            default_graph: None,
+            max_project_contexts: http::DEFAULT_MAX_CONTEXTS,
+        }
+    }
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct Project {
@@ -160,28 +184,21 @@ impl GraphoxideServer {
         )
     )]
     fn query_graph(&self, Parameters(p): Parameters<QueryParams>) -> String {
-        let path = graph_path(p.project_path);
-        match self.load_graph(&path) {
-            Ok(graph) => {
+        let is_default = p.project_path.is_none();
+        let path = self.graph_path(p.project_path);
+        match self.load_graph_context(&path, is_default) {
+            Ok((graph, query_cache)) => {
                 stamp_query(&path);
                 let context_filter = p.context_filter.unwrap_or_default();
-                if p.mode.as_deref() == Some("dfs") {
-                    graphoxide_query::query_graph_dfs_filtered(
-                        &graph,
-                        &p.question,
-                        p.depth.unwrap_or(2).min(6),
-                        p.token_budget.unwrap_or(2000),
-                        &context_filter,
-                    )
-                } else {
-                    graphoxide_query::query_graph_filtered(
-                        &graph,
-                        &p.question,
-                        p.depth.unwrap_or(2).min(6),
-                        p.token_budget.unwrap_or(2000),
-                        &context_filter,
-                    )
-                }
+                graphoxide_query::query_graph_text_with_cache(
+                    &graph,
+                    query_cache,
+                    &p.question,
+                    p.mode.as_deref().unwrap_or("bfs"),
+                    p.depth.unwrap_or(2).min(6),
+                    p.token_budget.unwrap_or(2000),
+                    &context_filter,
+                )
             }
             Err(error) => format!("Could not load {}: {error}", path.display()),
         }
@@ -403,19 +420,57 @@ impl GraphoxideServer {
 }
 
 impl GraphoxideServer {
+    fn with_default_graph(path: PathBuf, max_project_contexts: usize) -> Self {
+        Self {
+            cache: Arc::new(Mutex::new(GraphCache::default())),
+            default_graph: Some(path),
+            max_project_contexts: max_project_contexts.max(1),
+        }
+    }
+
+    fn graph_path(&self, project: Option<String>) -> PathBuf {
+        if let Some(project) = project {
+            let root = PathBuf::from(project);
+            if root.extension().and_then(|extension| extension.to_str()) == Some("json") {
+                return root;
+            }
+            let native = root.join("graphoxide-out/graph.json");
+            let legacy = root.join("graphify-out/graph.json");
+            if native.exists() || !legacy.exists() {
+                native
+            } else {
+                legacy
+            }
+        } else {
+            self.default_graph
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("graphoxide-out/graph.json"))
+        }
+    }
+
     fn with_graph(
         &self,
         project: Option<String>,
         f: impl FnOnce(&KnowledgeGraph) -> String,
     ) -> String {
-        let path = graph_path(project);
-        match self.load_graph(&path) {
+        let is_default = project.is_none();
+        let path = self.graph_path(project);
+        match self.load_graph(&path, is_default) {
             Ok(graph) => f(&graph),
-            Err(error) => format!("Could not load {}: {error}", path.display()),
+            Err(error) => format!("Could not load graph.json at {}: {error}", path.display()),
         }
     }
 
-    fn load_graph(&self, path: &Path) -> anyhow::Result<Arc<KnowledgeGraph>> {
+    fn load_graph(&self, path: &Path, is_default: bool) -> anyhow::Result<Arc<KnowledgeGraph>> {
+        self.load_graph_context(path, is_default)
+            .map(|(graph, _)| graph)
+    }
+
+    fn load_graph_context(
+        &self,
+        path: &Path,
+        is_default: bool,
+    ) -> anyhow::Result<(Arc<KnowledgeGraph>, Arc<graphoxide_query::GraphQueryCache>)> {
         let metadata = std::fs::metadata(path)?;
         let stamp = metadata
             .modified()?
@@ -427,23 +482,36 @@ impl GraphoxideServer {
             .cache
             .lock()
             .map_err(|_| anyhow::anyhow!("graph cache lock poisoned"))?;
-        if let Some((cached_stamp, cached_size, graph)) = cache.values.get(path) {
-            if *cached_stamp == stamp && *cached_size == size {
-                return Ok(graph.clone());
+        let cached = cache
+            .values
+            .get(path)
+            .filter(|(cached_stamp, cached_size, _, _)| {
+                *cached_stamp == stamp && *cached_size == size
+            })
+            .map(|(_, _, graph, query_cache)| (graph.clone(), query_cache.clone()));
+        if let Some((graph, query_cache)) = cached {
+            if !is_default {
+                cache.order.retain(|candidate| candidate != path);
+                cache.order.push_back(path.to_path_buf());
             }
+            return Ok((graph, query_cache));
         }
         let graph = Arc::new(graphoxide_core::read_graph(path)?);
-        cache
-            .values
-            .insert(path.to_path_buf(), (stamp, size, graph.clone()));
+        let query_cache = Arc::new(graphoxide_query::GraphQueryCache::default());
+        cache.values.insert(
+            path.to_path_buf(),
+            (stamp, size, graph.clone(), query_cache.clone()),
+        );
         cache.order.retain(|p| p != path);
-        cache.order.push_back(path.to_path_buf());
-        while cache.order.len() > 8 {
+        if !is_default {
+            cache.order.push_back(path.to_path_buf());
+        }
+        while cache.order.len() > self.max_project_contexts {
             if let Some(old) = cache.order.pop_front() {
                 cache.values.remove(&old);
             }
         }
-        Ok(graph)
+        Ok((graph, query_cache))
     }
 
     fn pr_impact(&self, p: PrImpactParams) -> String {
@@ -479,21 +547,14 @@ impl GraphoxideServer {
                     .map(str::to_owned)
             })
             .collect();
-        let graph_path = graph_path(root);
-        let graph = match self.load_graph(&graph_path) {
+        let is_default = root.is_none();
+        let graph_path = self.graph_path(root);
+        let graph = match self.load_graph(&graph_path, is_default) {
             Ok(graph) => graph,
             Err(error) => return format!("Could not load {}: {error}", graph_path.display()),
         };
-        let touched: Vec<_> = graph
-            .nodes
-            .iter()
-            .filter(|node| {
-                files.iter().any(|file| {
-                    node.source_file == *file || node.source_file.ends_with(&format!("/{file}"))
-                })
-            })
-            .collect();
-        let communities: BTreeSet<_> = touched.iter().filter_map(|node| node.community).collect();
+        let (communities, nodes_affected) =
+            graphoxide_query::prs::compute_pr_impact(&files, &graph);
         let title = value.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let mut lines = vec![
             format!(
@@ -503,7 +564,7 @@ impl GraphoxideServer {
             ),
             format!(
                 "Graph impact: {} nodes across {} communities",
-                touched.len(),
+                nodes_affected,
                 communities.len()
             ),
             format!("Communities touched: {communities:?}"),
@@ -558,9 +619,9 @@ impl ServerHandler for GraphoxideServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        let path = graph_path(None);
+        let path = self.graph_path(None);
         let graph = self
-            .load_graph(&path)
+            .load_graph(&path, true)
             .map_err(|e| ErrorData::resource_not_found(e.to_string(), None))?;
         let name = request.uri.trim_start_matches("graphoxide://");
         let analysis = graphoxide_graph::analyze(&graph)
@@ -577,7 +638,15 @@ impl ServerHandler for GraphoxideServer {
             "surprises" => analysis
                 .surprising_connections
                 .iter()
-                .map(|s| format!("{} --{}--> {}: {}", s.source, s.relation, s.target, s.why))
+                .map(|s| {
+                    format!(
+                        "{} --{}--> {}: {}",
+                        s.source,
+                        s.relation,
+                        s.target,
+                        s.why.as_deref().or(s.note.as_deref()).unwrap_or_default()
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
             "questions" => analysis.suggested_questions.join("\n"),
@@ -591,9 +660,6 @@ impl ServerHandler for GraphoxideServer {
         };
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, request.uri)]).into())
     }
-}
-fn graph_path(project: Option<String>) -> PathBuf {
-    PathBuf::from(project.unwrap_or_else(|| ".".into())).join("graphoxide-out/graph.json")
 }
 fn stamp_query(graph: &Path) {
     let Some(out) = graph.parent() else { return };
@@ -825,20 +891,11 @@ fn neighbors_text(
 }
 
 fn cut_lines(lines: Vec<String>, token_budget: usize) -> String {
-    let budget = token_budget.saturating_mul(3);
-    let mut output = String::new();
-    for line in lines {
-        let needed = line.chars().count() + usize::from(!output.is_empty());
-        if output.chars().count() + needed > budget {
-            output.push_str("\n[truncated — raise token_budget for more]");
-            break;
-        }
-        if !output.is_empty() {
-            output.push('\n');
-        }
-        output.push_str(&line);
-    }
-    output
+    graphoxide_query::cut_lines_to_budget(
+        &lines,
+        token_budget,
+        "Raise token_budget or narrow the request with relation_filter or get_node.",
+    )
 }
 fn audit_text(g: &KnowledgeGraph) -> String {
     let ids: BTreeSet<_> = g.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -881,10 +938,16 @@ fn gh_owned(project: Option<String>, args: &[String]) -> String {
     run_gh(project, args).unwrap_or_else(|error| format!("Error: {error}"))
 }
 pub fn serve() -> anyhow::Result<()> {
+    serve_graph("graphoxide-out/graph.json")
+}
+
+pub fn serve_graph(graph_path: impl Into<PathBuf>) -> anyhow::Result<()> {
+    let graph_path = graph_path.into();
     tokio::runtime::Runtime::new()?.block_on(async {
-        let service = GraphoxideServer::default()
-            .serve(rmcp::transport::stdio())
-            .await?;
+        let service =
+            GraphoxideServer::with_default_graph(graph_path, http::max_server_contexts_from_env())
+                .serve(rmcp::transport::stdio())
+                .await?;
         service.waiting().await?;
         anyhow::Ok(())
     })

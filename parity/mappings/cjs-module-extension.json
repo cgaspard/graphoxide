@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_cjs_module_extension.py::test_cjs_registered_as_code","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cjs_registered_as_code"}]},
+    {"upstream":"tests/test_cjs_module_extension.py::test_cjs_in_extractor_dispatch","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cjs_in_extractor_dispatch"}]},
+    {"upstream":"tests/test_cjs_module_extension.py::test_cjs_in_js_language_family","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cjs_in_js_language_family"}]},
+    {"upstream":"tests/test_cjs_module_extension.py::test_cjs_in_js_resolution_sets","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cjs_in_js_resolution_sets"}]},
+    {"upstream":"tests/test_cjs_module_extension.py::test_cjs_in_hook_source_exts","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cjs_in_hook_source_exts"}]},
+    {"upstream":"tests/test_cjs_module_extension.py::test_cjs_extracts_like_js","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cjs_extracts_like_js"}]}
+  ]
+}

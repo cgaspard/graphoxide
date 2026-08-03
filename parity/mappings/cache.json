@@ -1,0 +1,595 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_cache.py::test_file_hash_consistent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_file_hash_consistent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_file_hash_changes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_file_hash_changes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_cache_roundtrip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_cache_roundtrip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_cache_miss_on_change",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_cache_miss_on_change"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_cached_files",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_cached_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_clear_cache",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_clear_cache"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_md_frontmatter_only_change_same_hash",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_md_frontmatter_only_change_same_hash"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_md_body_change_different_hash",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_md_body_change_different_hash"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_md_no_frontmatter_hashed_normally",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_md_no_frontmatter_hashed_normally"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_non_md_file_hashed_fully",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_non_md_file_hashed_fully"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_body_content_strips_frontmatter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_body_content_strips_frontmatter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_body_content_no_frontmatter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_body_content_no_frontmatter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_body_content_hr_start_is_not_frontmatter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_body_content_hr_start_is_not_frontmatter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_body_content_dash_title_start_is_not_frontmatter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_body_content_dash_title_start_is_not_frontmatter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_body_content_dash_text_line_is_not_close_delimiter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_body_content_dash_text_line_is_not_close_delimiter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_body_content_later_proper_close_skips_dash_text_lines",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_body_content_later_proper_close_skips_dash_text_lines"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_body_content_well_formed_output_byte_identical",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_body_content_well_formed_output_byte_identical"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_md_edit_above_hr_changes_hash",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_md_edit_above_hr_changes_hash"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_cached_relativizes_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_cached_relativizes_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_load_cached_absolutizes_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_load_cached_absolutizes_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_load_cached_passes_through_legacy_absolute_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_load_cached_passes_through_legacy_absolute_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_cache_portable_across_roots",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_cache_portable_across_roots"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_warm_cache_from_another_root_does_not_leak_that_root",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_warm_cache_from_another_root_does_not_leak_that_root"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_cached_ids_round_trip_under_the_same_root",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_cached_ids_round_trip_under_the_same_root"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_relative_root_does_not_reanchor_an_already_canonical_id",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relative_root_does_not_reanchor_an_already_canonical_id"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_ast_cache_invalidated_on_version_bump",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ast_cache_invalidated_on_version_bump"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_ast_cache_version_bump_cleans_stale_entries",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ast_cache_version_bump_cleans_stale_entries"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_legacy_unversioned_ast_entries_not_served",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_legacy_unversioned_ast_entries_not_served"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_survives_version_bump",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_survives_version_bump"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_cached_in_root_symlink_keeps_symlink_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_cached_in_root_symlink_keeps_symlink_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_prune_removes_orphan_entries",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_prune_removes_orphan_entries"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_prune_keeps_live_unchanged_entries",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_prune_keeps_live_unchanged_entries"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_prune_handles_deleted_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_prune_handles_deleted_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_prune_ignores_ast_and_tmp",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_prune_ignores_ast_and_tmp"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_overwrites_by_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_overwrites_by_default"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_rejects_out_of_scope_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_rejects_out_of_scope_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_deep_mode_roundtrip_under_deep_namespace",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_deep_mode_roundtrip_under_deep_namespace"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_deep_invisible_to_plain_reads_and_vice_versa",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_deep_invisible_to_plain_reads_and_vice_versa"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_mode_none_layout_unchanged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_mode_none_layout_unchanged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_clear_cache_removes_deep_namespace",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_clear_cache_removes_deep_namespace"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_cached_files_includes_deep_namespace",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_cached_files_includes_deep_namespace"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_prune_sweeps_both_namespaces_against_same_live_set",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_prune_sweeps_both_namespaces_against_same_live_set"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_merge_existing_unions",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_merge_existing_unions"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_drops_edges_to_out_of_scope_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_drops_edges_to_out_of_scope_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_drops_edges_to_ghost_file_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_drops_edges_to_ghost_file_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_drops_hyperedges_touching_skipped_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_drops_hyperedges_touching_skipped_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_unscoped_preserves_dangling_refs_verbatim",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_unscoped_preserves_dangling_refs_verbatim"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_save_semantic_cache_merge_existing_prunes_only_incoming",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_semantic_cache_merge_existing_prunes_only_incoming"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_prompt_fingerprint_stable_and_prompt_sensitive",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_prompt_fingerprint_stable_and_prompt_sensitive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_prompt_fingerprint_ignores_line_endings",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_prompt_fingerprint_ignores_line_endings"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_prompt_change_invalidates",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_prompt_change_invalidates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_prompt_namespaced_layout",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_prompt_namespaced_layout"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_prompt_and_mode_compose",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_prompt_and_mode_compose"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_legacy_entries_served_with_warning",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_legacy_entries_served_with_warning"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_fingerprinted_entry_beats_legacy",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_fingerprinted_entry_beats_legacy"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_merge_existing_never_fuses_legacy_vintage",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_merge_existing_never_fuses_legacy_vintage"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_prune_and_clear_reach_fingerprint_subdirs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_prune_and_clear_reach_fingerprint_subdirs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_semantic_cache_unreadable_prompt_file_warns_and_falls_back",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_semantic_cache_unreadable_prompt_file_warns_and_falls_back"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_cache.py::test_prompt_file_reflects_edited_spec",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_prompt_file_reflects_edited_spec"
+        }
+      ]
+    }
+  ]
+}

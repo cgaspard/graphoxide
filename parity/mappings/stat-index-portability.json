@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_stat_index_portability.py::test_cache_hits_survive_corpus_move","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cache_hits_survive_corpus_move"}]},
+    {"upstream":"tests/test_stat_index_portability.py::test_deleted_entries_are_pruned_on_flush","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_deleted_entries_are_pruned_on_flush"}]},
+    {"upstream":"tests/test_stat_index_portability.py::test_legacy_absolute_index_migrates_gracefully","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_legacy_absolute_index_migrates_gracefully"}]},
+    {"upstream":"tests/test_stat_index_portability.py::test_out_of_root_key_round_trips_absolute","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_out_of_root_key_round_trips_absolute"}]},
+    {"upstream":"tests/test_stat_index_portability.py::test_relative_key_wins_over_colliding_legacy_absolute","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_relative_key_wins_over_colliding_legacy_absolute"}]},
+    {"upstream":"tests/test_stat_index_portability.py::test_semantic_cache_normalizes_absolute_source_file","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_semantic_cache_normalizes_absolute_source_file"}]},
+    {"upstream":"tests/test_stat_index_portability.py::test_semantic_cache_normalizes_backslash_poisoned_source_file","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_semantic_cache_normalizes_backslash_poisoned_source_file"}]}
+  ]
+}

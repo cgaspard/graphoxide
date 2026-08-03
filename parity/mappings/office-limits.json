@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_office_limits.py::test_file_within_size_cap","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_file_within_size_cap"}]},
+    {"upstream":"tests/test_office_limits.py::test_zip_ratio_bomb_rejected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_zip_ratio_bomb_rejected"}]},
+    {"upstream":"tests/test_office_limits.py::test_legit_zip_passes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_legit_zip_passes"}]},
+    {"upstream":"tests/test_office_limits.py::test_non_zip_rejected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_zip_rejected"}]},
+    {"upstream":"tests/test_office_limits.py::test_converters_return_empty_for_bomb","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_converters_return_empty_for_bomb"}]},
+    {"upstream":"tests/test_office_limits.py::test_legit_multi_member_passes_streaming","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_legit_multi_member_passes_streaming"}]},
+    {"upstream":"tests/test_office_limits.py::test_streaming_ceiling_rejects_oversized_actual","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_streaming_ceiling_rejects_oversized_actual"}]},
+    {"upstream":"tests/test_office_limits.py::test_pdf_over_cap_returns_empty","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pdf_over_cap_returns_empty"}]}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_llm_parser.py::test_preamble_then_fence_is_parsed","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_preamble_then_fence_is_parsed"}]},
+    {"upstream":"tests/test_llm_parser.py::test_prose_wrapped_json_without_fence_is_parsed","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_prose_wrapped_json_without_fence_is_parsed"}]},
+    {"upstream":"tests/test_llm_parser.py::test_raw_json_still_works","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_raw_json_still_works"}]},
+    {"upstream":"tests/test_llm_parser.py::test_total_refusal_returns_empty_fragment","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_total_refusal_returns_empty_fragment"}]},
+    {"upstream":"tests/test_llm_parser.py::test_fence_with_uppercase_language_tag","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_fence_with_uppercase_language_tag"}]},
+    {"upstream":"tests/test_llm_parser.py::test_fence_without_closing_backticks","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_fence_without_closing_backticks"}]},
+    {"upstream":"tests/test_llm_parser.py::test_empty_response_returns_empty_fragment","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_empty_response_returns_empty_fragment"}]},
+    {"upstream":"tests/test_llm_parser.py::test_instructions_ride_in_user_turn_not_system_prompt","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_instructions_ride_in_user_turn_not_system_prompt"}]},
+    {"upstream":"tests/test_llm_parser.py::test_model_env_var_adds_model_flag","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_model_env_var_adds_model_flag"}]},
+    {"upstream":"tests/test_llm_parser.py::test_no_model_flag_when_env_var_unset","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_no_model_flag_when_env_var_unset"}]}
+  ]
+}

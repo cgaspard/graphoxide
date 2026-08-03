@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_rationale.py::test_module_docstring_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_docstring_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_function_docstring_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_function_docstring_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_class_docstring_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_docstring_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_rationale_comment_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_rationale_comment_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_rationale_for_edges_present","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_rationale_for_edges_present"}]},
+    {"upstream":"tests/test_rationale.py::test_short_docstring_ignored","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_short_docstring_ignored"}]},
+    {"upstream":"tests/test_rationale.py::test_rationale_confidence_is_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_rationale_confidence_is_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_alembic_module_docstring_suppressed","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_alembic_module_docstring_suppressed"}]},
+    {"upstream":"tests/test_rationale.py::test_alembic_function_docstrings_still_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_alembic_function_docstrings_still_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_non_migration_revision_var_not_suppressed","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_migration_revision_var_not_suppressed"}]},
+    {"upstream":"tests/test_rationale.py::test_django_migration_module_docstring_suppressed","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_django_migration_module_docstring_suppressed"}]},
+    {"upstream":"tests/test_rationale.py::test_generated_file_module_docstring_suppressed","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_generated_file_module_docstring_suppressed"}]},
+    {"upstream":"tests/test_rationale.py::test_decorated_method_node_id_is_class_qualified","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_decorated_method_node_id_is_class_qualified"}]},
+    {"upstream":"tests/test_rationale.py::test_long_docstring_label_truncates_on_word_boundary","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_long_docstring_label_truncates_on_word_boundary"}]},
+    {"upstream":"tests/test_rationale.py::test_docstring_newline_and_indentation_collapsed_to_single_space","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_docstring_newline_and_indentation_collapsed_to_single_space"}]},
+    {"upstream":"tests/test_rationale.py::test_truncated_docstring_never_ends_with_bare_period","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_truncated_docstring_never_ends_with_bare_period"}]},
+    {"upstream":"tests/test_rationale.py::test_docstring_opening_with_unbroken_long_token_keeps_content","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_docstring_opening_with_unbroken_long_token_keeps_content"}]},
+    {"upstream":"tests/test_rationale.py::test_short_docstring_label_unchanged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_short_docstring_label_unchanged"}]},
+    {"upstream":"tests/test_rationale.py::test_js_rationale_comment_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_rationale_comment_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_js_block_comment_rationale_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_block_comment_rationale_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_js_adr_reference_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_adr_reference_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_js_adr_reference_normalized_and_deduped","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_adr_reference_normalized_and_deduped"}]},
+    {"upstream":"tests/test_rationale.py::test_js_adr_in_string_literal_not_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_adr_in_string_literal_not_extracted"}]},
+    {"upstream":"tests/test_rationale.py::test_js_rationale_label_truncates_on_word_boundary","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_rationale_label_truncates_on_word_boundary"}]},
+    {"upstream":"tests/test_rationale.py::test_js_rationale_label_never_ends_with_bare_period_when_truncated","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_rationale_label_never_ends_with_bare_period_when_truncated"}]},
+    {"upstream":"tests/test_rationale.py::test_js_rationale_comment_opening_with_unbroken_long_token_keeps_content","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_rationale_comment_opening_with_unbroken_long_token_keeps_content"}]},
+    {"upstream":"tests/test_rationale.py::test_js_short_rationale_comment_unchanged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_js_short_rationale_comment_unchanged"}]}
+  ]
+}

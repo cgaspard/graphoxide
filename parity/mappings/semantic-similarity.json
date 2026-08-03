@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_semantic_similarity.py::test_semantic_edge_survives_build_from_json","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_edge_survives_build_from_json"}]},
+    {"upstream":"tests/test_semantic_similarity.py::test_semantic_edge_nodes_present","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_edge_nodes_present"}]},
+    {"upstream":"tests/test_semantic_similarity.py::test_semantic_edge_confidence_score_preserved","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_edge_confidence_score_preserved"}]},
+    {"upstream":"tests/test_semantic_similarity.py::test_semantic_edge_scores_higher_than_references","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_edge_scores_higher_than_references"}]},
+    {"upstream":"tests/test_semantic_similarity.py::test_semantic_edge_reason_mentions_similarity","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_edge_reason_mentions_similarity"}]},
+    {"upstream":"tests/test_semantic_similarity.py::test_report_renders_semantically_similar_tag","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_renders_semantically_similar_tag"}]},
+    {"upstream":"tests/test_semantic_similarity.py::test_report_semantic_tag_on_correct_line","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_semantic_tag_on_correct_line"}]},
+    {"upstream":"tests/test_semantic_similarity.py::test_report_no_semantic_tag_for_other_relations","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_no_semantic_tag_for_other_relations"}]}
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/Graphify-Labs/graphify.git",
+  "tag": "v0.9.32",
+  "version": "0.9.32",
+  "commit": "00efd6e7969837ae4a9f11d8d504dcd3b20b09df",
+  "pytest": {
+    "collect_command": [
+      "uv",
+      "run",
+      "--frozen",
+      "python",
+      "-m",
+      "pytest",
+      "--collect-only",
+      "-q"
+    ],
+    "case_count": 3978,
+    "module_count": 176,
+    "nodeids_sha256": "f4abbb1c5f690e04d5a8bdaef643b372eb56ca7416fa7260c39b1bb52f69e975"
+  }
+}

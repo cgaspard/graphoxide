@@ -24,6 +24,8 @@ Alternatively, set **Graphoxide: Binary Path** to an absolute executable path. T
 
 Binary discovery checks an explicit setting first, followed by the packaged
 binary, `PATH`, and this repository's release/debug build directories.
+Linux-targeted packages use a statically linked musl executable and therefore do
+not inherit a glibc-version requirement from the GitHub Actions runner.
 
 Tagged releases build and publish six VSIX packages for macOS, Linux, and
 Windows on x64 and arm64. Each package stages the matching native executable,

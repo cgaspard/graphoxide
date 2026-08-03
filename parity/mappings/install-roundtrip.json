@@ -1,0 +1,505 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-agents]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-aider]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_aider"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-amp]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_amp"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-antigravity]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_antigravity"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-antigravity-windows]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_antigravity_windows"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-claude]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_claude"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-claw]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_claw"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-codebuddy]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_codebuddy"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-codex]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_codex"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-copilot]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_copilot"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-devin]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_devin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-droid]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_droid"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-hermes]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_hermes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-kilo]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_kilo"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-kimi]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_kimi"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-kiro]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_kiro"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-opencode]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_opencode"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-pi]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_pi"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-trae]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_trae"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-trae-cn]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_trae_cn"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[user-windows]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_user_windows"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-agents]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-aider]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_aider"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-amp]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_amp"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-antigravity]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_antigravity"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-antigravity-windows]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_antigravity_windows"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-claude]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_claude"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-claw]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_claw"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-codebuddy]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_codebuddy"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-codex]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_codex"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-copilot]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_copilot"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-devin]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_devin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-droid]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_droid"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-hermes]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_hermes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-kilo]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_kilo"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-kimi]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_kimi"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-kiro]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_kiro"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-opencode]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_opencode"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-pi]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_pi"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-trae]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_trae"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-trae-cn]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_trae_cn"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_skill_roundtrip_at_real_destination[project-windows]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_skill_roundtrip_project_windows"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_amp_user_install_at_corrected_agents_path",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_amp_user_install_at_corrected_agents_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_amp_project_install_at_agents_path",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_amp_project_install_at_agents_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_vscode_install_uninstall_roundtrip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_vscode_install_uninstall_roundtrip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_install_entrypoint_roundtrip_for_progressive_and_monolith",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_entrypoint_roundtrip_for_progressive_and_monolith"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_monolith_to_progressive_upgrade",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_monolith_to_progressive_upgrade"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_progressive_to_monolith_downgrade_clears_references",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_progressive_to_monolith_downgrade_clears_references"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_interrupted_references_staging_self_heals",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_interrupted_references_staging_self_heals"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install_roundtrip.py::test_failed_copytree_leaves_no_partial_references",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_failed_copytree_leaves_no_partial_references"
+        }
+      ]
+    }
+  ]
+}

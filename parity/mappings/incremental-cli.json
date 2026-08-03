@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_incremental.py::test_manifest_written_after_extract","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_manifest_written_after_extract"}]},
+    {"upstream":"tests/test_incremental.py::test_incremental_mode_detected_via_manifest","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_incremental_mode_detected_via_manifest"}]},
+    {"upstream":"tests/test_incremental.py::test_no_incremental_without_manifest","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_no_incremental_without_manifest"}]},
+    {"upstream":"tests/test_incremental.py::test_extract_no_cluster_incremental_noop_preserves_existing_graph","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_extract_no_cluster_incremental_noop_preserves_existing_graph"}]},
+    {"upstream":"tests/test_incremental.py::test_extract_no_cluster_incremental_changed_file_preserves_unchanged_files","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_extract_no_cluster_incremental_changed_file_preserves_unchanged_files"}]},
+    {"upstream":"tests/test_incremental.py::test_extract_no_cluster_incremental_code_only_preserves_doc_nodes","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_extract_no_cluster_incremental_code_only_preserves_doc_nodes"}]},
+    {"upstream":"tests/test_incremental.py::test_incremental_python_relative_import_target_canonicalizes","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_incremental_python_relative_import_target_canonicalizes"}]},
+    {"upstream":"tests/test_incremental.py::test_incremental_md_reference_target_canonicalizes","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_incremental_md_reference_target_canonicalizes"}]},
+    {"upstream":"tests/test_incremental.py::test_update_prunes_a_removed_imports_edge","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_update_prunes_a_removed_imports_edge"}]}
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_jsconfig_baseurl_static_import_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_jsconfig_baseurl_static_import_resolves"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_jsconfig_baseurl_dynamic_import_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_jsconfig_baseurl_dynamic_import_resolves"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_jsconfig_baseurl_extensionless_specifier_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_jsconfig_baseurl_extensionless_specifier_resolves"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_tsconfig_baseurl_without_paths_also_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_tsconfig_baseurl_without_paths_also_resolves"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_declared_paths_alias_still_wins_over_baseurl","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_declared_paths_alias_still_wins_over_baseurl"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_declared_directory_prefix_alias_still_wins","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_declared_directory_prefix_alias_still_wins"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_tsconfig_paths_alias_unchanged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_tsconfig_paths_alias_unchanged"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_external_package_not_fabricated_under_baseurl","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_external_package_not_fabricated_under_baseurl"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_relative_import_unaffected_by_baseurl","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_relative_import_unaffected_by_baseurl"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_no_baseurl_declared_changes_nothing","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_no_baseurl_declared_changes_nothing"}]},
+    {"upstream":"tests/test_jsconfig_baseurl.py::test_tsconfig_wins_when_both_configs_present","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_tsconfig_wins_when_both_configs_present"}]}
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "corpora": [
+    {
+      "name": "resolution-adversarial",
+      "path": "parity/corpora/resolution-adversarial",
+      "expect": {
+        "reference_strict_sha256": "b7f5a7c3711ac38b5ed18e410896318fb3b4a4bd66be266be034309f1277bf05",
+        "candidate_strict_sha256": "12be1b98c1aeec3ec8a4554f805a63cf676f482363f31b31488916d55d586efd",
+        "reference_preserved": true,
+        "candidate_identity_hubs": 0
+      }
+    },
+    {
+      "name": "identity-collisions",
+      "path": "parity/corpora/identity-collisions",
+      "expect": {
+        "reference_strict_sha256": "31729532cc13428607a77c991d416341182d2b5bf9e6b6a8a526e6a0779ab703",
+        "candidate_strict_sha256": "30832d591d22032067611752295d08c02bd4b48653536acb94e7a6f86c540681",
+        "candidate_identity_hubs": 0,
+        "reference_identity_hubs_min": 3,
+        "required_candidate_edges": [
+          {"source": "child_child", "target": "csharp_ref_child_cs_base", "relation": "inherits"},
+          {"source": "consumer_ts_consumer", "target": "logger_ts_logger", "relation": "imports_from"},
+          {"source": "consumer_ps1_consumer", "target": "consumer_ps1_foo", "relation": "imports_from"},
+          {"source": "modules", "target": "modules_psd1_logger", "relation": "imports_from"}
+        ],
+        "forbidden_candidate_edges": [
+          {"source": "child_child", "target": "interfaces_base", "relation": "inherits"},
+          {"source": "consumer_ts_consumer", "target": "logger", "relation": "imports_from"},
+          {"source": "consumer_ps1_consumer", "target": "foo", "relation": "imports_from"},
+          {"source": "modules", "target": "logger", "relation": "imports_from"}
+        ]
+      }
+    },
+    {
+      "name": "language-matrix",
+      "path": "parity/corpora/language-matrix",
+      "expect": {
+        "reference_strict_sha256": "110603af55f8ad253a996afed18358467d925e4cfd4fc67c6cf662691582e51c",
+        "candidate_strict_sha256": "33ee36e67d3488d5b65f5cb4ebb486e6c339e965a6b96aaaf926fa48e88fcf90",
+        "reference_preserved": false,
+        "candidate_identity_hubs": 0,
+        "reference_identity_hubs_min": 2,
+        "required_candidate_edges": [
+          {"source": "bash_runner", "target": "bash_lib", "relation": "imports_from"},
+          {"source": "bash_runner_main", "target": "bash_lib_worker_run", "relation": "calls"},
+          {"source": "pascal_runner_trunner", "target": "pascal_worker_tworker", "relation": "inherits"},
+          {"source": "pascal_runner_trunner_execute", "target": "pascal_worker_tworker_process", "relation": "calls"},
+          {"source": "jvm_app_runner_runner", "target": "jvm_api_baseworker_baseworker", "relation": "inherits"},
+          {"source": "jvm_app_runner_runner_process", "target": "jvm_api_worker_worker_process", "relation": "calls"},
+          {"source": "jvm_app_runner_runner_process", "target": "jvm_api_baseworker_baseworker_normalize", "relation": "calls"},
+          {"source": "jvm_groovyworker_groovyrunner_execute", "target": "jvm_groovyworker_groovyworker_process", "relation": "calls"},
+          {"source": "jvm_scalaworker_scalarunner_execute", "target": "jvm_scalaworker_scalaworker_process", "relation": "calls"},
+          {"source": "jvm_kotlinworker_kotlinrunner_process", "target": "jvm_kotlinworker_kotlinworker_process", "relation": "calls"},
+          {"source": "ruby_runner", "target": "ruby_worker", "relation": "imports_from"},
+          {"source": "ruby_runner_matrixruntime_runner", "target": "ruby_worker_matrixruntime_worker", "relation": "inherits"},
+          {"source": "ruby_runner_matrixruntime_runner_execute", "target": "ruby_worker_matrixruntime_worker_process", "relation": "calls"},
+          {"source": "ruby_worker_matrixruntime_worker", "target": "ruby_worker_matrixruntime_audited", "relation": "mixes_in"},
+          {"source": "ruby_worker_matrixruntime_worker_process", "target": "ruby_worker_matrixruntime_audited_audit", "relation": "calls"},
+          {"source": "dart_runner", "target": "dart_worker", "relation": "imports"},
+          {"source": "dart_runner_runner", "target": "dart_worker_service", "relation": "inherits"},
+          {"source": "dart_runner", "target": "dart_worker_service", "relation": "references"},
+          {"source": "php_contracts_worker", "target": "php_contracts_service", "relation": "bound_to"},
+          {"source": "php_contracts_service", "target": "php_contracts_worker", "relation": "implements"},
+          {"source": "php_runner_runner", "target": "php_contracts_service", "relation": "inherits"},
+          {"source": "php_runner_runner_execute", "target": "php_contracts_service_process", "relation": "calls"},
+          {"source": "terraform_null_resource_runner", "target": "terraform_null_resource_worker", "relation": "depends_on"},
+          {"source": "sql_schema_matrix_job", "target": "sql_schema_matrix_worker", "relation": "references"},
+          {"source": "sql_schema_pending_jobs", "target": "sql_schema_matrix_job", "relation": "reads_from"},
+          {"source": "dotnet_runner_matrix_runtime_runner", "target": "dotnet_worker_matrix_runtime_service", "relation": "inherits"},
+          {"source": "dotnet_worker_matrix_runtime_service", "target": "dotnet_worker_matrix_runtime_iworker", "relation": "implements"},
+          {"source": "dotnet_runner_matrix_runtime_runner_execute", "target": "dotnet_worker_matrix_runtime_service_process", "relation": "calls"},
+          {"source": "dotnet_matrix_runtime", "target": "nuget_microsoft_extensions_dependencyinjection", "relation": "imports"},
+          {"source": "native_runner_run_worker", "target": "native_worker_nativeworker_process", "relation": "calls"},
+          {"source": "native_worker_service", "target": "native_worker_worker", "relation": "implements"},
+          {"source": "native_worker_runner", "target": "native_worker_service", "relation": "inherits"},
+          {"source": "native_legacyworker_m_native_legacyworker", "target": "native_legacyworker_h_native_legacyworker", "relation": "imports"}
+        ],
+        "forbidden_candidate_edges": [
+          {"source": "dart_runner_runner", "target": "php_contracts_service", "relation": "inherits"},
+          {"source": "dart_runner", "target": "php_contracts_service", "relation": "references"},
+          {"source": "dotnet_runner_matrix_runtime_runner", "target": "php_contracts_service", "relation": "inherits"},
+          {"source": "php_contracts_service", "target": "worker", "relation": "implements"},
+          {"source": "jvm_scalaworker_scalaworker_process", "target": "jvm_scalaworker_scalarunner_execute", "relation": "calls"},
+          {"source": "jvm_groovyworker_groovyworker_process", "target": "jvm_groovyworker_groovyrunner_execute", "relation": "calls"},
+          {"source": "php_runner_runner", "target": "return", "relation": "references"},
+          {"source": "ruby_runner_matrixruntime_runner", "target": "worker", "relation": "inherits"}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_global_graph.py::test_prefix_graph_preserves_label","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_prefix_graph_preserves_label"}]},
+    {"upstream":"tests/test_global_graph.py::test_prefix_graph_sets_repo_and_local_id","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_prefix_graph_sets_repo_and_local_id"}]},
+    {"upstream":"tests/test_global_graph.py::test_prefix_graph_rewrites_edges","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_prefix_graph_rewrites_edges"}]},
+    {"upstream":"tests/test_global_graph.py::test_prefix_graph_rewrites_edge_directional_attributes","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_prefix_graph_rewrites_edge_directional_attributes"}]},
+    {"upstream":"tests/test_global_graph.py::test_prune_repo_removes_correct_nodes","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_prune_repo_removes_correct_nodes"}]},
+    {"upstream":"tests/test_global_graph.py::test_prune_repo_returns_zero_if_not_present","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_prune_repo_returns_zero_if_not_present"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_add_creates_global_graph","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_add_creates_global_graph"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_add_skip_on_unchanged_hash","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_add_skip_on_unchanged_hash"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_add_two_repos_no_collision","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_add_two_repos_no_collision"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_remove","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_remove"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_remove_unknown_tag_raises","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_remove_unknown_tag_raises"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_add_collision_warning","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_add_collision_warning"}]},
+    {"upstream":"tests/test_global_graph.py::test_dedup_raises_on_cross_repo_nodes","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_dedup_raises_on_cross_repo_nodes"}]},
+    {"upstream":"tests/test_global_graph.py::test_dedup_ok_with_single_repo","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_dedup_ok_with_single_repo"}]},
+    {"upstream":"tests/test_global_graph.py::test_dedup_ok_with_no_repo_attr","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_dedup_ok_with_no_repo_attr"}]},
+    {"upstream":"tests/test_global_graph.py::test_merge_graphs_prefixes_ids","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_merge_graphs_prefixes_ids"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_add_rewires_edges_to_deduplicated_externals","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_add_rewires_edges_to_deduplicated_externals"}]},
+    {"upstream":"tests/test_global_graph.py::test_global_add_rejects_oversized_source_graph","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_global_add_rejects_oversized_source_graph"}]}
+  ]
+}

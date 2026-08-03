@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_install_references.py::test_install_stages_references_sidecar",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_install_stages_references_sidecar" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_single_version_stamp_covers_skill_and_references",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_single_version_stamp_covers_skill_and_references" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_reinstall_replaces_references_atomically",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_reinstall_replaces_references_atomically" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_uninstall_removes_references_then_walks_dirs",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_uninstall_removes_references_then_walks_dirs" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_check_skill_version_warns_on_missing_references",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_check_skill_version_warns_on_missing_references" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_check_skill_version_ignores_permission_error",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_check_skill_version_ignores_permission_error" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_hard_fail_when_bundle_dir_present_but_references_missing",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_hard_fail_when_bundle_dir_present_but_references_missing" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_unbuilt_bundle_host_falls_back_to_monolith",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_unbuilt_bundle_host_falls_back_to_monolith" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_claude_install_ships_lean_core_and_references",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_claude_install_ships_lean_core_and_references" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_gemini_install_references_all_resolve",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_gemini_install_references_all_resolve" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_claude_twins_ride_the_claude_bundle",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_claude_twins_ride_the_claude_bundle" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_pyproject_declares_references_globs",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_pyproject_declares_references_globs" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_built_wheel_ships_the_full_skill_payload",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_built_wheel_ships_the_full_skill_payload" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_monolith_install_clears_orphan_references",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_monolith_install_clears_orphan_references" }]
+    },
+    {
+      "upstream": "tests/test_install_references.py::test_amp_user_install_carries_references",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_amp_user_install_carries_references" }]
+    }
+  ]
+}

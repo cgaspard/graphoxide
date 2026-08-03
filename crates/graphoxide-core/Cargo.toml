@@ -13,3 +13,13 @@ serde_json.workspace = true
 petgraph.workspace = true
 unicode-normalization.workspace = true
 unicode-casefold.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+libc = "0.2"
+proptest = "1"
+tempfile = "3"
+filetime = "0.2"

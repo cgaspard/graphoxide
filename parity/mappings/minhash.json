@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_minhash.py::test_identical_texts_produce_identical_hashvalues","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_identical_texts_produce_identical_hashvalues"}]},
+    {"upstream":"tests/test_minhash.py::test_similar_texts_share_most_hashvalues","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_similar_texts_share_most_hashvalues"}]},
+    {"upstream":"tests/test_minhash.py::test_unrelated_texts_share_few_hashvalues","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_unrelated_texts_share_few_hashvalues"}]},
+    {"upstream":"tests/test_minhash.py::test_update_mutates_hashvalues","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_update_mutates_hashvalues"}]},
+    {"upstream":"tests/test_minhash.py::test_near_duplicates_are_candidates","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_near_duplicates_are_candidates"}]},
+    {"upstream":"tests/test_minhash.py::test_unrelated_strings_not_candidates","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_unrelated_strings_not_candidates"}]},
+    {"upstream":"tests/test_minhash.py::test_query_always_returns_self","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_query_always_returns_self"}]},
+    {"upstream":"tests/test_minhash.py::test_duplicate_insert_raises","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_duplicate_insert_raises"}]},
+    {"upstream":"tests/test_minhash.py::test_optimal_params_within_budget","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_optimal_params_within_budget"}]},
+    {"upstream":"tests/test_minhash.py::test_optimal_params_cached","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_optimal_params_cached"}]},
+    {"upstream":"tests/test_minhash.py::test_dedup_import_does_not_pull_scipy_or_numpy_testing","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_dedup_import_does_not_pull_scipy_or_numpy_testing"}]}
+  ]
+}

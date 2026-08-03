@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_getattr_string_literal_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_getattr_string_literal_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_getattr_with_default_emits","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_getattr_with_default_emits"}]},
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_module_level_getattr_emits","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_level_getattr_emits"}]},
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_getattr_feeds_affected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_getattr_feeds_affected"}]},
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_getattr_string_not_shadowed_by_param","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_getattr_string_not_shadowed_by_param"}]},
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_dynamic_getattr_names_emit_nothing","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_dynamic_getattr_names_emit_nothing"}]},
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_getattr_non_callable_name_emits_nothing","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_getattr_non_callable_name_emits_nothing"}]},
+    {"upstream":"tests/test_indirect_dispatch_getattr.py::test_method_named_getattr_is_not_the_builtin","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_method_named_getattr_is_not_the_builtin"}]}
+  ]
+}

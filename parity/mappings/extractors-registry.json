@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_extractors_registry.py::test_every_registry_extractor_is_reexported_from_facade","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_every_registry_extractor_is_reexported_from_facade"}]},
+    {"upstream":"tests/test_extractors_registry.py::test_terraform_migrated","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_terraform_migrated"}]}
+  ]
+}

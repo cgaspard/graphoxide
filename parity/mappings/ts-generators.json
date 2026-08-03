@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ts_generators.py::test_generator_declaration_is_node_ts","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_generator_declaration_is_node_ts"}]},
+    {"upstream":"tests/test_ts_generators.py::test_generator_declaration_is_node_js","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_generator_declaration_is_node_js"}]},
+    {"upstream":"tests/test_ts_generators.py::test_generator_expression_is_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_generator_expression_is_node"}]},
+    {"upstream":"tests/test_ts_generators.py::test_generator_body_calls_are_attributed","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_generator_body_calls_are_attributed"}]},
+    {"upstream":"tests/test_ts_generators.py::test_async_generator_declaration_is_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_async_generator_declaration_is_node"}]}
+  ]
+}

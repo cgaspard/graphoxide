@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_devin.py::test_devin_install_user_creates_skill_file",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_install_user_creates_skill_file" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_skill_file_contains_frontmatter",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_skill_file_contains_frontmatter" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_skill_file_references_graphify_query",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_skill_file_references_graphify_query" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_install_user_does_not_write_rules",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_install_user_does_not_write_rules" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_install_project_creates_skill_file",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_install_project_creates_skill_file" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_install_project_creates_rules_file",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_install_project_creates_rules_file" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_rules_content_recommends_graphify_query",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_rules_content_recommends_graphify_query" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_rules_install_idempotent",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_rules_install_idempotent" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_install_project_hints_git_add",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_install_project_hints_git_add" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_uninstall_user_removes_skill_file",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_uninstall_user_removes_skill_file" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_uninstall_user_noop_when_not_installed",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_uninstall_user_noop_when_not_installed" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_uninstall_project_removes_skill_file",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_uninstall_project_removes_skill_file" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_uninstall_project_removes_rules_file",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_uninstall_project_removes_rules_file" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_uninstall_project_does_not_touch_user_scope",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_uninstall_project_does_not_touch_user_scope" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_rules_uninstall_noop_when_not_installed",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_rules_uninstall_noop_when_not_installed" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_skill_file_exists_in_package",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_skill_file_exists_in_package" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_skill_file_uses_python_c_syntax",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_skill_file_uses_python_c_syntax" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_skill_file_frontmatter_has_triggers",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_skill_file_frontmatter_has_triggers" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_in_platform_config",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_in_platform_config" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_platform_skill_destination_user_scope",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_platform_skill_destination_user_scope" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_in_main_help_text",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_in_main_help_text" }]
+    },
+    {
+      "upstream": "tests/test_devin.py::test_devin_platform_skill_destination_project_scope",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "devin::test_devin_platform_skill_destination_project_scope" }]
+    }
+  ]
+}

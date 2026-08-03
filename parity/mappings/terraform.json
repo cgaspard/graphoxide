@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_terraform.py::test_no_error_and_all_block_types_become_nodes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_no_error_and_all_block_types_become_nodes"}]},
+    {"upstream":"tests/test_terraform.py::test_reference_edges","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_reference_edges"}]},
+    {"upstream":"tests/test_terraform.py::test_depends_on_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_depends_on_edge"}]},
+    {"upstream":"tests/test_terraform.py::test_file_contains_blocks","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_file_contains_blocks"}]},
+    {"upstream":"tests/test_terraform.py::test_meta_heads_not_emitted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_meta_heads_not_emitted"}]},
+    {"upstream":"tests/test_terraform.py::test_cross_file_references_resolve_after_merge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_references_resolve_after_merge"}]},
+    {"upstream":"tests/test_terraform.py::test_empty_and_commentonly_files_are_safe","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_empty_and_commentonly_files_are_safe"}]},
+    {"upstream":"tests/test_terraform.py::test_tfvars_key_value_is_safe","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_tfvars_key_value_is_safe"}]}
+  ]
+}

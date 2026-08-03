@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_install_upgrade.py::test_claude_install_upgrades_stale_section",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_claude_install_upgrades_stale_section" }]
+    },
+    {
+      "upstream": "tests/test_install_upgrade.py::test_claude_install_upgrades_stale_hook_payload",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_claude_install_upgrades_stale_hook_payload" }]
+    },
+    {
+      "upstream": "tests/test_install_upgrade.py::test_agents_install_upgrades_stale_section",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_agents_install_upgrades_stale_section" }]
+    },
+    {
+      "upstream": "tests/test_install_upgrade.py::test_gemini_install_upgrades_stale_section",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_gemini_install_upgrades_stale_section" }]
+    },
+    {
+      "upstream": "tests/test_install_upgrade.py::test_vscode_install_upgrades_stale_section",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_vscode_install_upgrades_stale_section" }]
+    },
+    {
+      "upstream": "tests/test_install_upgrade.py::test_cursor_install_upgrades_stale_rule",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_cursor_install_upgrades_stale_rule" }]
+    },
+    {
+      "upstream": "tests/test_install_upgrade.py::test_kiro_install_upgrades_stale_steering",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_kiro_install_upgrades_stale_steering" }]
+    },
+    {
+      "upstream": "tests/test_install_upgrade.py::test_kiro_install_ships_references_sidecar_and_version_stamp",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "test_kiro_install_ships_references_sidecar_and_version_stamp" }]
+    }
+  ]
+}

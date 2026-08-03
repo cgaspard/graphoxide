@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[Foundation]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_foundation"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[SwiftUI]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_swiftui"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[NSLock]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_nslock"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[Data]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_data"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[View]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_view"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[Sendable]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_sendable"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[Codable]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_codable"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[DispatchQueue]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_dispatchqueue"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_god_nodes_excludes_swift_builtin_labels[Color]","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_god_nodes_excludes_swift_builtin_labels_color"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_swift_builtin_receiver_does_not_bind_to_user_symbol","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_builtin_receiver_does_not_bind_to_user_symbol"}]},
+    {"upstream":"tests/test_swift_builtin_noise.py::test_swift_user_receiver_type_still_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_user_receiver_type_still_resolves"}]},
+    {"upstream":"tests/test_swift_computed_properties.py::TestSwiftComputedProperties::test_computed_property_emits_node_and_walks_body","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_computed_property_emits_node_and_walks_body"}]},
+    {"upstream":"tests/test_swift_computed_properties.py::TestSwiftComputedProperties::test_observed_property_body_is_walked","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_observed_property_body_is_walked"}]},
+    {"upstream":"tests/test_swift_computed_properties.py::TestSwiftComputedProperties::test_stored_property_not_emitted_as_member_but_keeps_type_ref","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_stored_property_not_emitted_as_member_but_keeps_type_ref"}]},
+    {"upstream":"tests/test_swift_cross_file_calls.py::test_swift_cross_file_member_calls_resolve","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_cross_file_member_calls_resolve"}]},
+    {"upstream":"tests/test_swift_cross_file_calls.py::test_swift_cross_file_member_calls_have_correct_confidence_and_resolve","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_cross_file_member_calls_have_correct_confidence_and_resolve"}]},
+    {"upstream":"tests/test_swift_cross_file_calls.py::test_swift_ambiguous_type_does_not_over_connect","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_ambiguous_type_does_not_over_connect"}]},
+    {"upstream":"tests/test_swift_cross_file_calls.py::test_swift_unknown_receiver_emits_no_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_unknown_receiver_emits_no_edge"}]},
+    {"upstream":"tests/test_swift_cross_file_calls.py::test_deferred_singleton_local_var_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_deferred_singleton_local_var_resolves"}]},
+    {"upstream":"tests/test_swift_import_resolution.py::test_swift_import_resolves_to_module_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_import_resolves_to_module_node"}]},
+    {"upstream":"tests/test_swift_import_resolution.py::test_swift_same_module_imported_twice_collapses_to_one_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_same_module_imported_twice_collapses_to_one_node"}]},
+    {"upstream":"tests/test_swift_import_resolution.py::test_swift_import_edges_survive_build","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_swift_import_edges_survive_build"}]}
+  ]
+}

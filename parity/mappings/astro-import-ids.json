@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_astro_import_ids.py::test_astro_absolute_inputs_no_ghost_import_nodes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_astro_absolute_inputs_no_ghost_import_nodes"}]},
+    {"upstream":"tests/test_astro_import_ids.py::test_astro_relative_inputs_keep_canonical_ids","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_astro_relative_inputs_keep_canonical_ids"}]},
+    {"upstream":"tests/test_astro_import_ids.py::test_svelte_absolute_inputs_no_ghost_import_nodes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_svelte_absolute_inputs_no_ghost_import_nodes"}]},
+    {"upstream":"tests/test_astro_import_ids.py::test_astro_unresolved_relative_import_id_still_portable","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_astro_unresolved_relative_import_id_still_portable"}]}
+  ]
+}

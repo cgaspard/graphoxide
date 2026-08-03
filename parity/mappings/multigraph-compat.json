@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_multigraph_compat.py::test_probe_multigraph_capabilities_passes_current_runtime","targets":[{"runner":"rust","package":"graphoxide-graph","id":"multigraph_compat::tests::test_probe_multigraph_capabilities_passes_current_runtime"}]},
+    {"upstream":"tests/test_multigraph_compat.py::test_require_multigraph_capabilities_returns_result","targets":[{"runner":"rust","package":"graphoxide-graph","id":"multigraph_compat::tests::test_require_multigraph_capabilities_returns_result"}]},
+    {"upstream":"tests/test_multigraph_compat.py::test_failure_message_is_actionable","targets":[{"runner":"rust","package":"graphoxide-graph","id":"multigraph_compat::tests::test_failure_message_is_actionable"}]},
+    {"upstream":"tests/test_multigraph_compat.py::test_networkx_duplicate_key_overwrite_trap_is_real","targets":[{"runner":"rust","package":"graphoxide-graph","id":"multigraph_compat::tests::test_networkx_duplicate_key_overwrite_trap_is_real"}]}
+  ]
+}

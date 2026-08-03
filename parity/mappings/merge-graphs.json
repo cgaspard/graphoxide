@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_merge_graphs_cli.py::test_merge_graphs_mixed_directed_and_multigraph","targets":[{"runner":"rust","package":"graphoxide-graph","id":"merge_repos::tests::test_merge_graphs_mixed_directed_and_multigraph"}]},
+    {"upstream":"tests/test_merge_graphs_cli.py::test_merge_graphs_same_named_repo_dirs_do_not_collapse","targets":[{"runner":"rust","package":"graphoxide-graph","id":"merge_repos::tests::test_merge_graphs_same_named_repo_dirs_do_not_collapse"}]},
+    {"upstream":"tests/test_merge_graphs_cli.py::test_distinct_repo_tags_unit","targets":[{"runner":"rust","package":"graphoxide-graph","id":"merge_repos::tests::test_distinct_repo_tags_unit"}]},
+    {"upstream":"tests/test_merge_graphs_cli.py::test_merge_graphs_preserves_import_edge_direction","targets":[{"runner":"rust","package":"graphoxide-graph","id":"merge_repos::tests::test_merge_graphs_preserves_import_edge_direction"}]}
+  ]
+}

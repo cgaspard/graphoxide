@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_long_path_hashing.py::test_os_path_noop_on_posix","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_os_path_noop_on_posix"}]},
+    {"upstream":"tests/test_long_path_hashing.py::test_os_path_adds_prefix_on_win32","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_os_path_adds_prefix_on_win32"}]},
+    {"upstream":"tests/test_long_path_hashing.py::test_os_path_idempotent_on_win32","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_os_path_idempotent_on_win32"}]},
+    {"upstream":"tests/test_long_path_hashing.py::test_hashing_still_works_and_stabilizes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_hashing_still_works_and_stabilizes"}]}
+  ]
+}

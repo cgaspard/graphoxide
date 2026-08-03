@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ollama.py::test_ollama_blocks_link_local_and_metadata[http://169.254.169.254/v1]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_blocks_link_local_and_metadata"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_blocks_link_local_and_metadata[http://169.254.1.5:11434/v1]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_blocks_link_local_and_metadata"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_blocks_link_local_and_metadata[http://metadata.google.internal/v1]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_blocks_link_local_and_metadata"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_blocks_link_local_and_metadata[http://0.0.0.0:11434/v1]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_blocks_link_local_and_metadata"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_loopback_and_lan_do_not_raise","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_loopback_and_lan_do_not_raise"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_alias_resolving_to_link_local_blocked","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_alias_resolving_to_link_local_blocked"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_warn_false_still_hard_blocks_but_stays_quiet","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_warn_false_still_hard_blocks_but_stays_quiet"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_in_backends","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_in_backends"}]},
+    {"upstream":"tests/test_ollama.py::test_detect_backend_ollama","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_detect_backend_ollama"}]},
+    {"upstream":"tests/test_ollama.py::test_detect_backend_kimi_beats_ollama","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_detect_backend_kimi_beats_ollama"}]},
+    {"upstream":"tests/test_ollama.py::test_detect_backend_claude_beats_ollama","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_detect_backend_claude_beats_ollama"}]},
+    {"upstream":"tests/test_ollama.py::test_detect_backend_none_without_envvars","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_detect_backend_none_without_envvars"}]},
+    {"upstream":"tests/test_ollama.py::test_ollama_api_key_sentinel","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_api_key_sentinel"}]}
+  ]
+}

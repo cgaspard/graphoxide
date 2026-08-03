@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_partial_cache.py::test_intrinsic_partial_marker_makes_entry_a_cache_miss","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_intrinsic_partial_marker_makes_entry_a_cache_miss"}]},
+    {"upstream":"tests/test_partial_cache.py::test_partial_source_files_arg_stamps_entry","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_partial_source_files_arg_stamps_entry"}]},
+    {"upstream":"tests/test_partial_cache.py::test_non_partial_entry_loads_normally","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_partial_entry_loads_normally"}]},
+    {"upstream":"tests/test_partial_cache.py::test_partial_entry_self_heals_on_complete_reextraction","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_partial_entry_self_heals_on_complete_reextraction"}]},
+    {"upstream":"tests/test_partial_cache.py::test_merge_existing_accumulates_slices_and_stays_partial","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_merge_existing_accumulates_slices_and_stays_partial"}]},
+    {"upstream":"tests/test_partial_cache.py::test_save_stamps_partial_file_with_no_items","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_save_stamps_partial_file_with_no_items"}]},
+    {"upstream":"tests/test_partial_cache.py::test_clean_slice_does_not_repromote_empty_parse_partial","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_clean_slice_does_not_repromote_empty_parse_partial"}]},
+    {"upstream":"tests/test_partial_cache.py::test_partial_files_carries_empty_parse_truncation","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_partial_files_carries_empty_parse_truncation"}]},
+    {"upstream":"tests/test_partial_cache.py::test_stamped_manifest_excludes_partial_files","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_stamped_manifest_excludes_partial_files"}]},
+    {"upstream":"tests/test_partial_cache.py::test_group_has_partial_marker","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_group_has_partial_marker"}]},
+    {"upstream":"tests/test_partial_cache.py::test_mark_partial_and_partial_source_files","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mark_partial_and_partial_source_files"}]},
+    {"upstream":"tests/test_partial_cache.py::test_partial_source_files_empty_when_unmarked","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_partial_source_files_empty_when_unmarked"}]},
+    {"upstream":"tests/test_partial_cache.py::test_strip_partial_markers_removes_internal_key","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_strip_partial_markers_removes_internal_key"}]},
+    {"upstream":"tests/test_semantic_cache_out_root.py::test_save_semantic_cache_writes_to_cache_root_not_corpus","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_save_semantic_cache_writes_to_cache_root_not_corpus"}]},
+    {"upstream":"tests/test_semantic_cache_out_root.py::test_save_semantic_cache_no_corpus_graphify_out_created","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_save_semantic_cache_no_corpus_graphify_out_created"}]},
+    {"upstream":"tests/test_semantic_cache_out_root.py::test_checkpoint_with_cache_root_is_found_by_check_semantic_cache","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_checkpoint_with_cache_root_is_found_by_check_semantic_cache"}]},
+    {"upstream":"tests/test_semantic_cache_out_root.py::test_final_save_with_out_root_populates_cache","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_final_save_with_out_root_populates_cache"}]},
+    {"upstream":"tests/test_semantic_cache_out_root.py::test_final_save_with_wrong_root_emits_warning","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_final_save_with_wrong_root_emits_warning"}]},
+    {"upstream":"tests/test_semantic_cache_out_root.py::test_save_semantic_cache_backward_compat_no_cache_root","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_save_semantic_cache_backward_compat_no_cache_root"}]},
+    {"upstream":"tests/test_semantic_cache_out_root.py::test_extract_corpus_parallel_accepts_cache_root_kwarg","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extract_corpus_parallel_accepts_cache_root_kwarg"}]}
+  ]
+}

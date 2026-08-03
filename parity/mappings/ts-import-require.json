@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ts_import_require.py::test_import_require_relative_emits_file_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_import_require_relative_emits_file_edge"}]},
+    {"upstream":"tests/test_ts_import_require.py::test_import_require_single_quotes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_import_require_single_quotes"}]},
+    {"upstream":"tests/test_ts_import_require.py::test_import_require_bare_module_targets_ref_stub","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_import_require_bare_module_targets_ref_stub"}]},
+    {"upstream":"tests/test_ts_import_require.py::test_import_require_parity_with_namespace_import","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_import_require_parity_with_namespace_import"}]},
+    {"upstream":"tests/test_ts_import_require.py::test_esm_imports_unaffected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_esm_imports_unaffected"}]}
+  ]
+}

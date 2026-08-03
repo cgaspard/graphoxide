@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_project_dir_call_never_touches_global[claude]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_project_dir_call_never_touches_global_claude" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_project_dir_call_never_touches_global[gemini]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_project_dir_call_never_touches_global_gemini" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_project_dir_call_never_touches_global[codebuddy]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_project_dir_call_never_touches_global_codebuddy" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_bare_call_still_removes_global[claude]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_bare_call_still_removes_global_claude" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_bare_call_still_removes_global[gemini]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_bare_call_still_removes_global_gemini" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_bare_call_still_removes_global[codebuddy]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_bare_call_still_removes_global_codebuddy" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_remove_user_skill_opt_in_with_project_dir[claude]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_remove_user_skill_opt_in_with_project_dir_claude" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_remove_user_skill_opt_in_with_project_dir[gemini]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_remove_user_skill_opt_in_with_project_dir_gemini" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_remove_user_skill_opt_in_with_project_dir[codebuddy]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_remove_user_skill_opt_in_with_project_dir_codebuddy" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_project_true_removes_only_project_tree[claude]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_project_true_removes_only_project_tree_claude" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_project_true_removes_only_project_tree[gemini]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_project_true_removes_only_project_tree_gemini" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_project_true_removes_only_project_tree[codebuddy]",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_project_true_removes_only_project_tree_codebuddy" }]
+    },
+    {
+      "upstream": "tests/test_uninstall_scope.py::test_project_uninstall_codebuddy_spares_global",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "uninstall_scope::test_project_uninstall_codebuddy_spares_global" }]
+    }
+  ]
+}

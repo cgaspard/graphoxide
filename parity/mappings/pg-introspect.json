@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_success","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_success"}]},
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_quoted_identifiers","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_quoted_identifiers"}]},
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_composite_fk","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_composite_fk"}]},
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_fk_query_avoids_privilege_filtered_view","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_fk_query_avoids_privilege_filtered_view"}]},
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_fk_edges_survive_unparseable_function_stubs","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_fk_edges_survive_unparseable_function_stubs"}]},
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_connection_error","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_connection_error"}]},
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_import_error","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_import_error"}]},
+    {"upstream":"tests/test_pg_introspect.py::test_pg_introspect_uri_forward_slashes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pg_introspect_uri_forward_slashes"}]}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ts_receiver_member_calls.py::test_local_new_binding_receiver","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_local_new_binding_receiver"}]},
+    {"upstream":"tests/test_ts_receiver_member_calls.py::test_closure_over_typed_param_receiver","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_closure_over_typed_param_receiver"}]},
+    {"upstream":"tests/test_ts_receiver_member_calls.py::test_new_binding_resolves_to_correct_class_under_ambiguity","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_new_binding_resolves_to_correct_class_under_ambiguity"}]},
+    {"upstream":"tests/test_ts_receiver_member_calls.py::test_untyped_param_receiver_emits_no_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_untyped_param_receiver_emits_no_edge"}]},
+    {"upstream":"tests/test_ts_receiver_member_calls.py::test_array_typed_receiver_emits_no_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_array_typed_receiver_emits_no_edge"}]}
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_evidence_binding.py::test_fabricated_code_symbol_is_downgraded",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_fabricated_code_symbol_is_downgraded"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_qualified_and_prettified_labels_do_not_false_positive",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_qualified_and_prettified_labels_do_not_false_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_document_and_sourceless_nodes_are_never_flagged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_document_and_sourceless_nodes_are_never_flagged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_node_attributed_to_undispatched_file_is_left_to_out_of_scope",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_node_attributed_to_undispatched_file_is_left_to_out_of_scope"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_uncheckable_short_label_is_not_flagged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_uncheckable_short_label_is_not_flagged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_existing_lower_confidence_is_not_overwritten",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_existing_lower_confidence_is_not_overwritten"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_label_identifiers_helper",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_label_identifiers_helper"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_bind_node_evidence_returns_downgrade_count",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_bind_node_evidence_returns_downgrade_count"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_evidence_binding_handles_file_slice",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_evidence_binding_handles_file_slice"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_evidence_binding_handles_absolute_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_evidence_binding_handles_absolute_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_downgrade_emits_stderr_summary",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_downgrade_emits_stderr_summary"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_unverified_flag_does_not_fail_validation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_unverified_flag_does_not_fail_validation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_evidence_binding.py::test_diagnostics_reports_unverified_node_count",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_diagnostics_reports_unverified_node_count"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_phantom_cross_package_call.py::test_unimported_cross_package_call_emits_no_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_unimported_cross_package_call_emits_no_edge"}]},
+    {"upstream":"tests/test_phantom_cross_package_call.py::test_many_files_do_not_collapse_onto_one_export","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_many_files_do_not_collapse_onto_one_export"}]},
+    {"upstream":"tests/test_phantom_cross_package_call.py::test_imported_cross_file_call_still_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_imported_cross_file_call_still_resolves"}]},
+    {"upstream":"tests/test_phantom_cross_package_call.py::test_same_file_call_unaffected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_same_file_call_unaffected"}]},
+    {"upstream":"tests/test_phantom_cross_package_call.py::test_non_js_single_candidate_cross_file_still_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_js_single_candidate_cross_file_still_resolves"}]}
+  ]
+}

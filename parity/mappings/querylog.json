@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_querylog.py::test_nodes_from_result_parses_header",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_nodes_from_result_parses_header"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_nodes_from_result_singular",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_nodes_from_result_singular"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_nodes_from_result_missing",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_nodes_from_result_missing"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_nodes_from_result_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_nodes_from_result_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_log_query_writes_jsonl",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_log_query_writes_jsonl"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_log_query_appends",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_log_query_appends"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_disable_env",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_disable_env"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_disable_env_true",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_disable_env_true"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_responses_not_logged_by_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_responses_not_logged_by_default"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_responses_optin",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_responses_optin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_log_never_raises",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_log_never_raises"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_log_creates_parent_dirs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_log_creates_parent_dirs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_nodes_returned_inferred_from_result",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_nodes_returned_inferred_from_result"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_explicit_nodes_returned_takes_precedence",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_explicit_nodes_returned_takes_precedence"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_kind_mcp_query",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_kind_mcp_query"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_query_log_off_by_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_query_log_off_by_default"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_query_log_enabled_by_explicit_flag",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_query_log_enabled_by_explicit_flag"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_query_log_enabled_by_explicit_path",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_query_log_enabled_by_explicit_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_query_log_disable_wins",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_query_log_disable_wins"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_querylog.py::test_log_query_writes_nothing_by_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "querylog::tests::test_log_query_writes_nothing_by_default"
+        }
+      ]
+    }
+  ]
+}

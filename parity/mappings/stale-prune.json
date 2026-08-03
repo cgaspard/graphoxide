@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_stale_prune.py::test_nfd_disk_nfc_graph_source_not_pruned","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_nfd_disk_nfc_graph_source_not_pruned"}]},
+    {"upstream":"tests/test_stale_prune.py::test_bare_basename_alive_elsewhere_not_pruned","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_bare_basename_alive_elsewhere_not_pruned"}]},
+    {"upstream":"tests/test_stale_prune.py::test_genuinely_deleted_source_still_pruned","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_genuinely_deleted_source_still_pruned"}]},
+    {"upstream":"tests/test_stale_prune.py::test_alive_but_ignored_source_is_pruned","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_alive_but_ignored_source_is_pruned"}]},
+    {"upstream":"tests/test_stale_prune.py::test_alive_unproven_exclusion_kept_with_warning","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_alive_unproven_exclusion_kept_with_warning"}]}
+  ]
+}

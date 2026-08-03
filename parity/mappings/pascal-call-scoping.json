@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_scoped_to_own_class[tree-sitter]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_scoped_to_own_class_tree_sitter"}]},
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_scoped_to_own_class[regex-fallback]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_scoped_to_own_class_regex_fallback"}]},
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_do_not_cross_unrelated_classes[tree-sitter]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_do_not_cross_unrelated_classes_tree_sitter"}]},
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_do_not_cross_unrelated_classes[regex-fallback]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_do_not_cross_unrelated_classes_regex_fallback"}]},
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_scoped_other_direction[tree-sitter]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_scoped_other_direction_tree_sitter"}]},
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_scoped_other_direction[regex-fallback]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_scoped_other_direction_regex_fallback"}]},
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_resolve_via_ancestor_chain[tree-sitter]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_resolve_via_ancestor_chain_tree_sitter"}]},
+    {"upstream":"tests/test_pascal_call_scoping.py::test_calls_resolve_via_ancestor_chain[regex-fallback]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_resolve_via_ancestor_chain_regex_fallback"}]}
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_cluster.py::test_cluster_returns_dict","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cluster_returns_dict"}]},
+    {"upstream":"tests/test_cluster.py::test_cluster_covers_all_nodes","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cluster_covers_all_nodes"}]},
+    {"upstream":"tests/test_cluster.py::test_cohesion_score_complete_graph","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cohesion_score_complete_graph"}]},
+    {"upstream":"tests/test_cluster.py::test_cohesion_score_single_node","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cohesion_score_single_node"}]},
+    {"upstream":"tests/test_cluster.py::test_cohesion_score_disconnected","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cohesion_score_disconnected"}]},
+    {"upstream":"tests/test_cluster.py::test_cohesion_score_range","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cohesion_score_range"}]},
+    {"upstream":"tests/test_cluster.py::test_score_all_keys_match_communities","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_score_all_keys_match_communities"}]},
+    {"upstream":"tests/test_cluster.py::test_cluster_does_not_write_to_stdout","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cluster_does_not_write_to_stdout"}]},
+    {"upstream":"tests/test_cluster.py::test_cluster_does_not_write_to_stderr","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_cluster_does_not_write_to_stderr"}]},
+    {"upstream":"tests/test_cluster.py::test_remap_communities_to_previous_reuses_old_ids","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_remap_communities_to_previous_reuses_old_ids"}]},
+    {"upstream":"tests/test_cluster.py::test_remap_communities_to_previous_assigns_deterministic_new_ids","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_remap_communities_to_previous_assigns_deterministic_new_ids"}]}
+  ]
+}

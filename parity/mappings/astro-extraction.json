@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_astro_extraction.py::test_astro_is_in_code_extensions","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_astro_is_in_code_extensions"}]},
+    {"upstream":"tests/test_astro_extraction.py::test_extract_astro_picks_up_frontmatter_static_imports","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extract_astro_picks_up_frontmatter_static_imports"}]},
+    {"upstream":"tests/test_astro_extraction.py::test_extract_astro_handles_dynamic_import_in_frontmatter","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extract_astro_handles_dynamic_import_in_frontmatter"}]},
+    {"upstream":"tests/test_astro_extraction.py::test_extract_astro_picks_up_client_side_script_imports","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extract_astro_picks_up_client_side_script_imports"}]},
+    {"upstream":"tests/test_astro_extraction.py::test_extract_astro_no_frontmatter_does_not_crash","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extract_astro_no_frontmatter_does_not_crash"}]},
+    {"upstream":"tests/test_astro_extraction.py::test_extract_astro_handles_tsconfig_path_alias","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extract_astro_handles_tsconfig_path_alias"}]}
+  ]
+}

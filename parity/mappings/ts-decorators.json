@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ts_decorators.py::test_class_decorator_on_exported_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_decorator_on_exported_class"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_class_decorator_on_plain_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_decorator_on_plain_class"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_stacked_class_decorators","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_stacked_class_decorators"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_method_decorator_attributes_to_method","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_method_decorator_attributes_to_method"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_stacked_method_decorators","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_stacked_method_decorators"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_field_decorator_attributes_to_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_field_decorator_attributes_to_class"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_parameter_decorator_attributes_to_constructor","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_parameter_decorator_attributes_to_constructor"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_namespaced_decorator_uses_property_name","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_namespaced_decorator_uses_property_name"}]},
+    {"upstream":"tests/test_ts_decorators.py::test_external_decorator_stub_disambiguated_per_file","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_external_decorator_stub_disambiguated_per_file"}]}
+  ]
+}

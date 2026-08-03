@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_install_strings.py::test_every_install_surface_recommends_graphify_query",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_every_install_surface_recommends_graphify_query"}]
+    },
+    {
+      "upstream": "tests/test_install_strings.py::test_no_install_surface_demands_reading_the_full_report_first",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_no_install_surface_demands_reading_the_full_report_first"}]
+    },
+    {
+      "upstream": "tests/test_install_strings.py::test_report_is_still_referenced_as_fallback",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_report_is_still_referenced_as_fallback"}]
+    },
+    {
+      "upstream": "tests/test_install_strings.py::test_agents_section_does_not_skip_dirty_graph_output",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_agents_section_does_not_skip_dirty_graph_output"}]
+    },
+    {
+      "upstream": "tests/test_install_strings.py::test_agents_section_uses_generic_graphify_instruction",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_agents_section_uses_generic_graphify_instruction"}]
+    },
+    {
+      "upstream": "tests/test_install_strings.py::test_skill_registration_uses_host_generic_instruction",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_skill_registration_uses_host_generic_instruction"}]
+    },
+    {
+      "upstream": "tests/test_install_strings.py::test_how_it_works_clarifies_code_only_semantic_extraction",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_how_it_works_clarifies_code_only_semantic_extraction"}]
+    }
+  ]
+}

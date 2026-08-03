@@ -1,0 +1,915 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_empty_doc_returns_empty_lists",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_empty_doc_returns_empty_lists"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_dict_without_documents_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_dict_without_documents_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_documents_not_a_list_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_documents_not_a_list_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_documents_empty_list",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_documents_empty_list"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_single_symbol_no_relationships",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_single_symbol_no_relationships"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_display_name_uses_suffix",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_display_name_uses_suffix"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_trailing_hash_no_display_name_has_non_empty_label",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_trailing_hash_no_display_name_has_non_empty_label"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_hash_uses_full_symbol_as_label",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_hash_uses_full_symbol_as_label"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_occurrences_has_empty_source_location",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_occurrences_has_empty_source_location"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_occurrences_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_occurrences_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_multiple_symbols_in_one_document",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_multiple_symbols_in_one_document"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_multiple_documents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_multiple_documents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_is_reference_emits_scip_ref_edge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_is_reference_emits_scip_ref_edge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_is_definition_emits_scip_def_edge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_is_definition_emits_scip_def_edge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_is_implementation_emits_scip_impl_edge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_is_implementation_emits_scip_impl_edge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_is_type_definition_emits_scip_typed_edge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_is_type_definition_emits_scip_typed_edge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_relationship_priority_order",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_relationship_priority_order"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_relationship_no_boolean_flags_defaults_to_ref",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_relationship_no_boolean_flags_defaults_to_ref"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_multiple_relationships_on_one_symbol",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_multiple_relationships_on_one_symbol"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_relationship_without_target_symbol_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_relationship_without_target_symbol_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_duplicate_edges_are_deduplicated",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_duplicate_edges_are_deduplicated"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_edge_structure_complete",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_edge_structure_complete"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_edge_source_location_from_first_occurrence",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_edge_source_location_from_first_occurrence"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_node_id_contains_source_file_and_symbol_suffix",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_node_id_contains_source_file_and_symbol_suffix"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_node_id_is_deterministic",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_node_id_is_deterministic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_node_id_differs_by_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_node_id_differs_by_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_duplicate_symbols_in_same_file_are_deduplicated",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_duplicate_symbols_in_same_file_are_deduplicated"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_non_dict_input_returns_empty[None]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_non_dict_input_returns_empty_none"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_non_dict_input_returns_empty[a string]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_non_dict_input_returns_empty_a_string"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_non_dict_input_returns_empty[42]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_non_dict_input_returns_empty_42"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_non_dict_input_returns_empty[3.14]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_non_dict_input_returns_empty_3_14"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_non_dict_input_returns_empty[True]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_non_dict_input_returns_empty_true"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_non_dict_input_returns_empty[bad_input5]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_non_dict_input_returns_empty_bad_input5"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_non_dict_input_returns_empty[bad_input6]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_non_dict_input_returns_empty_bad_input6"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_document_item_not_a_dict_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_document_item_not_a_dict_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_item_not_a_dict_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_item_not_a_dict_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_symbol_id_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_symbol_id_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_relationship_item_not_a_dict_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_relationship_item_not_a_dict_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_document_without_symbols_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_document_without_symbols_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_document_with_symbols_not_a_list",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_document_with_symbols_not_a_list"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_kind_defaults_to_unknown",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_kind_defaults_to_unknown"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_default_source_file_is_empty_string",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_default_source_file_is_empty_string"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_source_file_falls_back_to_function_param",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_source_file_falls_back_to_function_param"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_document_relative_path_overrides_source_file_param",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_document_relative_path_overrides_source_file_param"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_document_without_language_defaults_to_function_param",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_document_without_language_defaults_to_function_param"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_with_short_range_uses_first_element_as_line",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_with_short_range_uses_first_element_as_line"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_with_non_dict_occurrence_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_with_non_dict_occurrence_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_with_non_list_range_falls_back_to_zero",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_with_non_list_range_falls_back_to_zero"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_with_documentation_becomes_description",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_with_documentation_becomes_description"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_with_empty_documentation_skips_description",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_with_empty_documentation_skips_description"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_documentation_omits_description",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_documentation_omits_description"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_symbol_without_relationships_key_still_creates_node",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_symbol_without_relationships_key_still_creates_node"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_make_scip_node_id_with_hash_separator",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_make_scip_node_id_with_hash_separator"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_make_scip_node_id_without_hash",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_make_scip_node_id_without_hash"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_make_scip_node_id_special_characters_are_sanitised",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_make_scip_node_id_special_characters_are_sanitised"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_make_scip_node_id_deterministic",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_make_scip_node_id_deterministic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_make_scip_node_id_source_file_affects_hash",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_make_scip_node_id_source_file_affects_hash"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_make_scip_node_id_symbol_affects_hash",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_make_scip_node_id_symbol_affects_hash"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_make_scip_node_id_empty_after_sanitisation_falls_back",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_make_scip_node_id_empty_after_sanitisation_falls_back"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_scip_kind_to_file_type_always_code",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_scip_kind_to_file_type_always_code"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_build_scip_metadata_with_description",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_build_scip_metadata_with_description"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_build_scip_metadata_without_description",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_build_scip_metadata_without_description"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_many_symbols",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_many_symbols"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_edge_with_zero_sourceline_has_empty_location",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_edge_with_zero_sourceline_has_empty_location"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_target_in_same_document_resolves_via_index",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_target_in_same_document_resolves_via_index"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_target_across_documents_resolves_via_index",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_target_across_documents_resolves_via_index"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_target_unknown_emits_stub_node",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_target_unknown_emits_stub_node"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_edges_survive_validate_extraction_and_build",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_edges_survive_validate_extraction_and_build"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_non_string_relative_path_falls_back_to_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_non_string_relative_path_falls_back_to_default"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_non_string_language_falls_back",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_non_string_language_falls_back"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_non_string_symbol_id_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_non_string_symbol_id_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationships_none_is_treated_as_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationships_none_is_treated_as_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_symbol_non_string_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_symbol_non_string_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_non_string_kind_falls_back_to_unknown",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_non_string_kind_falls_back_to_unknown"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_non_string_display_name_falls_back",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_non_string_display_name_falls_back"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_documentation_with_non_string_entries_is_ignored",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_documentation_with_non_string_entries_is_ignored"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_unrecognized_top_level_structure_returns_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_unrecognized_top_level_structure_returns_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_documents_field_non_list_returns_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_documents_field_non_list_returns_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_document_entry_non_dict_is_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_document_entry_non_dict_is_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_occurrence_negative_line_falls_back_to_zero",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_occurrence_negative_line_falls_back_to_zero"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_duplicate_local_symbol_resolves_to_same_document",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_duplicate_local_symbol_resolves_to_same_document"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_unique_cross_document_symbol_still_resolves",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_unique_cross_document_symbol_still_resolves"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ambiguous_duplicate_target_across_docs_creates_stub",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ambiguous_duplicate_target_across_docs_creates_stub"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_truthy_string_flag_is_ignored",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_truthy_string_flag_is_ignored"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_int_flag_is_ignored",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_int_flag_is_ignored"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_relationship_boolean_true_routes_correctly",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_relationship_boolean_true_routes_correctly"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_occurrence_bool_line_falls_back_to_zero",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_occurrence_bool_line_falls_back_to_zero"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_duplicate_same_document_definition_does_not_create_false_ambiguity",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_duplicate_same_document_definition_does_not_create_false_ambiguity"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_node_metadata_html_escaped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_node_metadata_html_escaped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_node_metadata_control_chars_stripped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_node_metadata_control_chars_stripped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_scip_ingest.py::test_ingest_relationship_metadata_sanitized",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ingest_relationship_metadata_sanitized"
+        }
+      ]
+    }
+  ]
+}

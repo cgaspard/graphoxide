@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_semantic_id_remap_root.py::test_file_stem_handles_dot_path","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_file_stem_handles_dot_path"}]},
+    {"upstream":"tests/test_semantic_id_remap_root.py::test_semantic_id_remap_root_equal_source_file_no_crash","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_id_remap_root_equal_source_file_no_crash"}]},
+    {"upstream":"tests/test_semantic_id_remap_root.py::test_build_from_json_with_root_level_concept_node","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_build_from_json_with_root_level_concept_node"}]},
+    {"upstream":"tests/test_semantic_id_remap_root.py::test_normal_semantic_remap_still_works","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_normal_semantic_remap_still_works"}]},
+    {"upstream":"tests/test_semantic_id_remap_root.py::test_semantic_id_remap_is_idempotent_when_stem_contains_legacy_stem","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_id_remap_is_idempotent_when_stem_contains_legacy_stem"}]},
+    {"upstream":"tests/test_semantic_id_remap_root.py::test_semantic_id_remap_bare_file_node_is_idempotent","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_id_remap_bare_file_node_is_idempotent"}]},
+    {"upstream":"tests/test_semantic_id_remap_root.py::test_semantic_id_remap_still_migrates_genuine_legacy_id","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_semantic_id_remap_still_migrates_genuine_legacy_id"}]}
+  ]
+}

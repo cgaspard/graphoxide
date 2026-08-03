@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_labeling.py::test_label_communities_happy_path","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_happy_path"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_passes_model_override","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_passes_model_override"}]},
+    {"upstream":"tests/test_labeling.py::test_label_cli_passes_model_override","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_label_cli_passes_model_override"}]},
+    {"upstream":"tests/test_labeling.py::test_label_cli_missing_only_preserves_existing_labels","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_label_cli_missing_only_preserves_existing_labels"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_partial_reply_fills_placeholder","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_partial_reply_fills_placeholder"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_strips_code_fences","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_strips_code_fences"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_malformed_raises","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_malformed_raises"}]},
+    {"upstream":"tests/test_labeling.py::test_generate_community_labels_degrades_on_error","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_generate_community_labels_degrades_on_error"}]},
+    {"upstream":"tests/test_labeling.py::test_generate_community_labels_no_backend","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_generate_community_labels_no_backend"}]},
+    {"upstream":"tests/test_labeling.py::test_generate_community_labels_success","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_generate_community_labels_success"}]},
+    {"upstream":"tests/test_labeling.py::test_gods_as_dicts_do_not_crash","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_gods_as_dicts_do_not_crash"}]},
+    {"upstream":"tests/test_labeling.py::test_empty_communities_returns_placeholders","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_empty_communities_returns_placeholders"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_batches_when_over_batch_size","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_batches_when_over_batch_size"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_partial_batch_failure_keeps_successful_batches","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_partial_batch_failure_keeps_successful_batches"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_all_batches_fail_raises","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_all_batches_fail_raises"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_max_communities_caps_total","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_max_communities_caps_total"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_parallel_matches_sequential","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_parallel_matches_sequential"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_batch_size_controls_batch_count","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_batch_size_controls_batch_count"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_runs_batches_concurrently","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_runs_batches_concurrently"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_forces_serial_for_ollama","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_forces_serial_for_ollama"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_salvages_truncated_reply","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_salvages_truncated_reply"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_accumulates_token_usage","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_accumulates_token_usage"}]},
+    {"upstream":"tests/test_labeling.py::test_label_communities_counts_tokens_for_failed_batch","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_communities_counts_tokens_for_failed_batch"}]},
+    {"upstream":"tests/test_labeling.py::test_cluster_only_no_label_does_not_persist_placeholders","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_cluster_only_no_label_does_not_persist_placeholders"}]},
+    {"upstream":"tests/test_labeling.py::test_cluster_only_heals_persisted_placeholder_but_reuses_genuine","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_cluster_only_heals_persisted_placeholder_but_reuses_genuine"}]}
+  ]
+}

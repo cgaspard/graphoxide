@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ingest.py::test_file_created","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_file_created"}]},
+    {"upstream":"tests/test_ingest.py::test_filename_format","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_filename_format"}]},
+    {"upstream":"tests/test_ingest.py::test_frontmatter_question","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_frontmatter_question"}]},
+    {"upstream":"tests/test_ingest.py::test_frontmatter_type","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_frontmatter_type"}]},
+    {"upstream":"tests/test_ingest.py::test_source_nodes_included","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_source_nodes_included"}]},
+    {"upstream":"tests/test_ingest.py::test_source_nodes_capped_at_10","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_source_nodes_capped_at_10"}]},
+    {"upstream":"tests/test_ingest.py::test_memory_dir_created","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_memory_dir_created"}]},
+    {"upstream":"tests/test_ingest.py::test_answer_in_body","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_answer_in_body"}]},
+    {"upstream":"tests/test_ingest.py::test_outcome_in_frontmatter_and_body","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_outcome_in_frontmatter_and_body"}]},
+    {"upstream":"tests/test_ingest.py::test_correction_in_frontmatter_and_body","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_correction_in_frontmatter_and_body"}]},
+    {"upstream":"tests/test_ingest.py::test_no_outcome_means_no_outcome_section","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_no_outcome_means_no_outcome_section"}]},
+    {"upstream":"tests/test_ingest.py::test_invalid_outcome_rejected","targets":[{"runner":"rust","package":"graphoxide-core","id":"test_invalid_outcome_rejected"}]}
+  ]
+}

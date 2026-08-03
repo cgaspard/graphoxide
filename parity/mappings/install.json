@@ -1,0 +1,885 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_install.py::test_install_default_claude",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_default_claude"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_codebuddy",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_codebuddy"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_codex",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_codex"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_opencode",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_opencode"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_positional_platform_opencode",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_positional_platform_opencode"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_project_claude_writes_project_scope",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_project_claude_writes_project_scope"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_project_codex_writes_skill_and_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_project_codex_writes_skill_and_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_claude_subcommand_project_install_and_uninstall_are_project_scoped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_claude_subcommand_project_install_and_uninstall_are_project_scoped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codex_subcommand_project_install_and_uninstall_are_project_scoped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codex_subcommand_project_install_and_uninstall_are_project_scoped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_antigravity_install_project_writes_project_skill",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_antigravity_install_project_writes_project_skill"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_help_does_not_install_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_help_does_not_install_default"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_claw",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_claw"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_droid",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_droid"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_trae",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_trae"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_trae_cn",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_trae_cn"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_windows",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_windows"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_install_unknown_platform_exits",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_install_unknown_platform_exits"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codex_skill_contains_spawn_agent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codex_skill_contains_spawn_agent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codex_skill_uses_graphify_with_existing_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codex_skill_uses_graphify_with_existing_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codex_agents_install_mentions_dirty_graph_output",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codex_agents_install_mentions_dirty_graph_output"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_skill_contains_mention",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_skill_contains_mention"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_skill_uses_opencode_agent_guidance",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_skill_uses_opencode_agent_guidance"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_skill_mentions_task_tool",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_skill_mentions_task_tool"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_skill_avoids_double_quoted_python_c_fstring_dict_keys",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_skill_avoids_double_quoted_python_c_fstring_dict_keys"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_claw_skill_uses_agent_tool_dispatch",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_claw_skill_uses_agent_tool_dispatch"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_all_skill_files_exist_in_package",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_all_skill_files_exist_in_package"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_command_file_exists_in_package",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_command_file_exists_in_package"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_claude_install_registers_claude_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_claude_install_registers_claude_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codex_install_does_not_write_claude_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codex_install_does_not_write_claude_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codebuddy_install_writes_codebuddy_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codebuddy_install_writes_codebuddy_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codebuddy_install_writes_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codebuddy_install_writes_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_claude_hook_is_shell_agnostic",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_claude_hook_is_shell_agnostic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_claude_hook_install_idempotent_and_replaces_old_bash_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_claude_hook_install_idempotent_and_replaces_old_bash_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codebuddy_install_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codebuddy_install_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codebuddy_install_merges_existing_codebuddy_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codebuddy_install_merges_existing_codebuddy_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codebuddy_uninstall_removes_section",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codebuddy_uninstall_removes_section"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codebuddy_uninstall_removes_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codebuddy_uninstall_removes_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codebuddy_uninstall_noop_if_not_installed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codebuddy_uninstall_noop_if_not_installed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_uninstall_project_removes_project_skill_only",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_uninstall_project_removes_project_skill_only"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_uninstall_project_without_platform_removes_project_installs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_uninstall_project_without_platform_removes_project_installs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_antigravity_uninstall_project_removes_project_skill_only",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_antigravity_uninstall_project_removes_project_skill_only"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_antigravity_global_install_writes_gemini_config_skills",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_antigravity_global_install_writes_gemini_config_skills"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_antigravity_global_uninstall_removes_gemini_config_skill",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_antigravity_global_uninstall_removes_gemini_config_skill"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codex_agents_install_writes_agents_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codex_agents_install_writes_agents_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_agents_install_writes_agents_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_agents_install_writes_agents_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_claw_agents_install_writes_agents_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_claw_agents_install_writes_agents_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_agents_install_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_agents_install_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_agents_install_appends_to_existing",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_agents_install_appends_to_existing"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_agents_uninstall_removes_section",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_agents_uninstall_removes_section"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_agents_uninstall_preserves_other_content",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_agents_uninstall_preserves_other_content"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_agents_uninstall_no_op_when_not_installed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_agents_uninstall_no_op_when_not_installed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_remove_marker_section_matches_exact_heading_only",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_remove_marker_section_matches_exact_heading_only"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_agents_uninstall_preserves_user_h3_graphify_heading",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_agents_uninstall_preserves_user_h3_graphify_heading"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_uninstall_untouched_when_only_user_h3_present",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_uninstall_untouched_when_only_user_h3_present"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_agents_install_writes_plugin",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_agents_install_writes_plugin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_plugin_reminder_has_no_backticks",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_plugin_reminder_has_no_backticks"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_plugin_uses_semicolon_not_ampersand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_plugin_uses_semicolon_not_ampersand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_agents_install_registers_plugin_in_config",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_agents_install_registers_plugin_in_config"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_agents_install_merges_existing_config",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_agents_install_merges_existing_config"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_opencode_agents_uninstall_removes_plugin",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_opencode_agents_uninstall_removes_plugin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_agents_install_writes_agents_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_agents_install_writes_agents_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_agents_install_writes_plugin",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_agents_install_writes_plugin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_agents_install_registers_plugin_in_config",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_agents_install_registers_plugin_in_config"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_agents_install_merges_existing_config",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_agents_install_merges_existing_config"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_agents_install_preserves_existing_jsonc_config",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_agents_install_preserves_existing_jsonc_config"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_agents_uninstall_preserves_existing_jsonc_config",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_agents_uninstall_preserves_existing_jsonc_config"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_agents_install_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_agents_install_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_install_writes_global_and_project_artifacts",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_install_writes_global_and_project_artifacts"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_kilo_uninstall_removes_plugin_registration_and_command",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_kilo_uninstall_removes_plugin_registration_and_command"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_cursor_install_writes_rule",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_cursor_install_writes_rule"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_cursor_install_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_cursor_install_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_cursor_uninstall_removes_rule",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_cursor_uninstall_removes_rule"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_cursor_uninstall_noop_if_not_installed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_cursor_uninstall_noop_if_not_installed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_gemini_install_writes_gemini_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_install_writes_gemini_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_gemini_install_writes_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_install_writes_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_gemini_install_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_install_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_gemini_install_merges_existing_gemini_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_install_merges_existing_gemini_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_gemini_uninstall_removes_section",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_uninstall_removes_section"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_gemini_uninstall_removes_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_uninstall_removes_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_gemini_uninstall_noop_if_not_installed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_uninstall_noop_if_not_installed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_amp_user_install_lands_in_config_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_amp_user_install_lands_in_config_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_amp_install_cleans_legacy_amp_skills_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_amp_install_cleans_legacy_amp_skills_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_amp_user_uninstall_removes_skill_and_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_amp_user_uninstall_removes_skill_and_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_amp_project_install_lands_in_dot_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_amp_project_install_lands_in_dot_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_uninstall_all_removes_amp_user_skill",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_uninstall_all_removes_amp_user_skill"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_hermes_skill_destination_windows_uses_localappdata",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_hermes_skill_destination_windows_uses_localappdata"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_hermes_skill_destination_posix_uses_home",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_hermes_skill_destination_posix_uses_home"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_install.py::test_codex_hook_command_is_a_real_cli_subcommand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_codex_hook_command_is_a_real_cli_subcommand"
+        }
+      ]
+    }
+  ]
+}

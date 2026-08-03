@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_word_count_cache.py::test_word_count_cached_until_file_changes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_word_count_cached_until_file_changes"}]},
+    {"upstream":"tests/test_word_count_cache.py::test_word_count_augments_existing_hash_entry","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_word_count_augments_existing_hash_entry"}]},
+    {"upstream":"tests/test_word_count_cache.py::test_file_hash_is_order_independent_across_roots","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_file_hash_is_order_independent_across_roots"}]},
+    {"upstream":"tests/test_word_count_cache.py::test_file_hash_ignores_legacy_unsalted_entry","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_file_hash_ignores_legacy_unsalted_entry"}]}
+  ]
+}

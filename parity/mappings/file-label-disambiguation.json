@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_file_label_disambiguation.py::test_disambiguate_raw_node_list_for_no_cluster_path","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_disambiguate_raw_node_list_for_no_cluster_path"}]},
+    {"upstream":"tests/test_file_label_disambiguation.py::test_is_file_node_label_and_suffix_helpers","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_is_file_node_label_and_suffix_helpers"}]},
+    {"upstream":"tests/test_file_label_disambiguation.py::test_colliding_file_labels_are_qualified_uniques_left_bare","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_colliding_file_labels_are_qualified_uniques_left_bare"}]},
+    {"upstream":"tests/test_file_label_disambiguation.py::test_disambiguation_is_idempotent","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_disambiguation_is_idempotent"}]},
+    {"upstream":"tests/test_file_label_disambiguation.py::test_three_way_collision_grows_suffix_until_unique","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_three_way_collision_grows_suffix_until_unique"}]},
+    {"upstream":"tests/test_file_label_disambiguation.py::test_end_to_end_build_and_lookup","targets":[{"runner":"rust","package":"graphoxide-query","id":"test_end_to_end_build_and_lookup"}]}
+  ]
+}

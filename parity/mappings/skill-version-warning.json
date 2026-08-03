@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_skill_version_warning.py::test_version_tuple_orders_numerically",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_version_tuple_orders_numerically"}]
+    },
+    {
+      "upstream": "tests/test_skill_version_warning.py::test_skill_older_than_package_recommends_install",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_skill_older_than_package_recommends_install"}]
+    },
+    {
+      "upstream": "tests/test_skill_version_warning.py::test_skill_newer_than_package_recommends_upgrade_not_install",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_skill_newer_than_package_recommends_upgrade_not_install"}]
+    },
+    {
+      "upstream": "tests/test_skill_version_warning.py::test_matching_version_is_silent",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_matching_version_is_silent"}]
+    }
+  ]
+}

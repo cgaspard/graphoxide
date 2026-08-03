@@ -1,0 +1,8 @@
+@page "/worker"
+@inject Matrix.Runtime.IWorker Worker
+
+<button @onclick="Process">Process</button>
+
+@code {
+    private string Process() => Worker.Process("matrix");
+}

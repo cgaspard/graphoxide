@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_extract_cache_location.py::test_default_cache_lands_in_cwd_not_source_tree","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_default_cache_lands_in_cwd_not_source_tree"}]},
+    {"upstream":"tests/test_extract_cache_location.py::test_default_cache_does_not_leave_stat_index_in_source_tree","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_default_cache_does_not_leave_stat_index_in_source_tree"}]},
+    {"upstream":"tests/test_extract_cache_location.py::test_explicit_cache_root_still_wins","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_explicit_cache_root_still_wins"}]},
+    {"upstream":"tests/test_extract_cache_location.py::test_default_cache_round_trips_via_extract","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_default_cache_round_trips_via_extract"}]},
+    {"upstream":"tests/test_extract_cache_location.py::test_cache_keys_stay_relative_for_out_of_cwd_corpus","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cache_keys_stay_relative_for_out_of_cwd_corpus"}]},
+    {"upstream":"tests/test_zero_node_no_cache.py::test_zero_node_result_not_cached_then_self_heals","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_zero_node_result_not_cached_then_self_heals"}]},
+    {"upstream":"tests/test_zero_node_no_cache.py::test_normal_file_still_cached","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_normal_file_still_cached"}]},
+    {"upstream":"tests/test_zero_node_no_cache.py::test_no_warning_when_all_files_produce_nodes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_no_warning_when_all_files_produce_nodes"}]}
+  ]
+}

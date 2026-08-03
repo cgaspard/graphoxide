@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_claude_md.py::test_install_creates_claude_md",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_install_creates_claude_md" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_install_contains_expected_rules",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_install_contains_expected_rules" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_install_appends_to_existing_claude_md",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_install_appends_to_existing_claude_md" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_install_is_idempotent",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_install_is_idempotent" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_install_idempotent_message",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_install_idempotent_message" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_removes_section",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_removes_section" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_preserves_other_content",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_preserves_other_content" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_no_op_when_not_installed",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_no_op_when_not_installed" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_no_op_when_no_file",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_no_op_when_no_file" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_install_creates_settings_json",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_install_creates_settings_json" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_install_settings_json_idempotent",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_install_settings_json_idempotent" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_removes_settings_hook",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_removes_settings_hook" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_removes_hook_from_settings_local_json",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_removes_hook_from_settings_local_json" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_removes_section_from_dot_claude_local_md",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_removes_section_from_dot_claude_local_md" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_removes_section_from_root_claude_local_md",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_removes_section_from_root_claude_local_md" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_cleans_both_standard_and_local",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_cleans_both_standard_and_local" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_preserves_other_content_in_local_md",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_preserves_other_content_in_local_md" }]
+    },
+    {
+      "upstream": "tests/test_claude_md.py::test_uninstall_tolerates_unreadable_local_md",
+      "targets": [{ "runner": "rust", "package": "graphoxide-cli", "id": "claude_md::test_uninstall_tolerates_unreadable_local_md" }]
+    }
+  ]
+}

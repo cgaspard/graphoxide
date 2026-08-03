@@ -1,0 +1,1265 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_serve.py::test_communities_from_graph_basic",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_communities_from_graph_basic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_communities_from_graph_no_community_attr",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_communities_from_graph_no_community_attr"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_communities_from_graph_isolated",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_communities_from_graph_isolated"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_exact_label_match",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_exact_label_match"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_no_match",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_no_match"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_source_file_partial",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_source_file_partial"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_ignores_trailing_punctuation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_ignores_trailing_punctuation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_multiword_exact_label_outranks_superset",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_multiword_exact_label_outranks_superset"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_coverage_lone_generic_exact_hit_loses_to_multi_term_match",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_coverage_lone_generic_exact_hit_loses_to_multi_term_match"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_coverage_full_coverage_query_is_unchanged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_coverage_full_coverage_query_is_unchanged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_find_node_ignores_trailing_punctuation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_find_node_ignores_trailing_punctuation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_find_node_matches_full_punctuated_unicode_label",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_find_node_matches_full_punctuated_unicode_label"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_find_node_matches_punctuated_file_label_exactly",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_find_node_matches_punctuated_file_label_exactly"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_find_node_resolves_when_label_and_norm_label_diverge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_find_node_resolves_when_label_and_norm_label_diverge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_trigrams_basic",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_trigrams_basic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_node_search_text_includes_all_matched_fields",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_node_search_text_includes_all_matched_fields"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_trigram_candidates_fast_path_fires_for_rare_term",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_trigram_candidates_fast_path_fires_for_rare_term"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_trigram_candidates_falls_back_on_common_term",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_trigram_candidates_falls_back_on_common_term"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_trigram_candidates_falls_back_on_short_token",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_trigram_candidates_falls_back_on_short_token"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_prefilter_is_identical_to_full_scan",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_prefilter_is_identical_to_full_scan"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_find_node_prefilter_is_identical_to_full_scan",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_find_node_prefilter_is_identical_to_full_scan"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_find_node_label_tokens_branch_covered_by_index",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_find_node_label_tokens_branch_covered_by_index"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_find_node_source_file_path_prefers_file_level_node",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_find_node_source_file_path_prefers_file_level_node"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_trigram_index_cached_and_rebuilt_per_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_trigram_index_cached_and_rebuilt_per_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_strips_search_punctuation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_strips_search_punctuation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_drops_question_stopwords",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_drops_question_stopwords"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_all_stopwords_falls_back_to_unfiltered",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_all_stopwords_falls_back_to_unfiltered"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_drops_german_question_stopwords",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_drops_german_question_stopwords"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_all_german_stopwords_falls_back_to_unfiltered",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_all_german_stopwords_falls_back_to_unfiltered"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_german_query_seeds_content_node_not_heading_noise",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_german_query_seeds_content_node_not_heading_noise"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_filters_only_short_english_terms",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_filters_only_short_english_terms"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_graph_text_keeps_short_non_english_terms",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_graph_text_keeps_short_non_english_terms"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_infer_context_filters_for_calls_question",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_infer_context_filters_for_calls_question"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_resolve_context_filters_explicit_overrides_heuristic",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_resolve_context_filters_explicit_overrides_heuristic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_bfs_depth_1",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_bfs_depth_1"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_bfs_depth_2",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_bfs_depth_2"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_bfs_disconnected",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_bfs_disconnected"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_bfs_returns_edges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_bfs_returns_edges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_filter_graph_by_context_limits_traversal",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_filter_graph_by_context_limits_traversal"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_dfs_depth_1",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_dfs_depth_1"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_dfs_full_chain",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_dfs_full_chain"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_contains_labels",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_contains_labels"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_truncates",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_truncates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_edge_included",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_edge_included"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_includes_edge_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_includes_edge_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_annotates_node_with_learning_status",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_annotates_node_with_learning_status"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_marks_stale_status",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_marks_stale_status"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_learning_suffix_counts_against_budget",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_learning_suffix_counts_against_budget"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_no_overlay_is_unchanged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_no_overlay_is_unchanged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_graph_text_explicit_context_filter_changes_traversal",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_graph_text_explicit_context_filter_changes_traversal"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_graph_text_heuristic_context_filter_changes_traversal",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_graph_text_heuristic_context_filter_changes_traversal"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_load_graph_roundtrip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_load_graph_roundtrip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_load_graph_missing_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_load_graph_missing_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_load_graph_corrupted_json_prints_recovery_message",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_load_graph_corrupted_json_prints_recovery_message"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_load_graph_generic_value_error_message_unchanged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_load_graph_generic_value_error_message_unchanged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_load_graph_rejects_oversized_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_load_graph_rejects_oversized_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_load_graph_accepts_under_cap",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_load_graph_accepts_under_cap"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_maybe_reload_detects_graph_change",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_maybe_reload_detects_graph_change"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_load_graph_cache_key_changes_with_content",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_load_graph_cache_key_changes_with_content"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_idf_downweights_common_terms",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_idf_downweights_common_terms"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_idf_cached_on_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_idf_cached_on_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_idf_new_graph_starts_fresh",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_idf_new_graph_starts_fresh"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_idf_rare_term_gets_high_weight",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_idf_rare_term_gets_high_weight"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_idf_common_term_gets_low_weight",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_idf_common_term_gets_low_weight"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_dominant_identifier_gives_one_seed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_dominant_identifier_gives_one_seed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_close_scores_keeps_multiple",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_close_scores_keeps_multiple"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_single",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_single"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_respects_max_k",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_respects_max_k"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_without_diversity_args_is_unchanged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_without_diversity_args_is_unchanged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_diversity_recovers_starved_term",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_diversity_recovers_starved_term"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_dedups_homonymous_generic_labels",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_dedups_homonymous_generic_labels"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_dedup_key_is_case_and_diacritic_normalized",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_dedup_key_is_case_and_diacritic_normalized"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_per_term_guarantee_does_not_reintroduce_generic_dupe",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_per_term_guarantee_does_not_reintroduce_generic_dupe"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_scores_identical_labels_equally",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_scores_identical_labels_equally"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_truncation_hint_is_actionable",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_truncation_hint_is_actionable"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_seeds_from_identifier_not_noise",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_seeds_from_identifier_not_noise"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_graph_text_parameter_type_context_filter_changes_traversal",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_graph_text_parameter_type_context_filter_changes_traversal"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_graph_text_context_filter_aliases_resolve",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_graph_text_context_filter_aliases_resolve"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_chinese_segments_with_cached_jieba",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_chinese_segments_with_cached_jieba"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_chinese_mixed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_chinese_mixed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_non_chinese_scripts_are_not_segmented",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_non_chinese_scripts_are_not_segmented"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_terms_chinese_no_jieba_fallback",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_terms_chinese_no_jieba_fallback"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_nodes_chinese_substring_match",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_nodes_chinese_substring_match"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_text_chinese_finds_routing_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_text_chinese_finds_routing_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_community_header_shows_real_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_community_header_shows_real_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_community_header_skips_placeholder_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_community_header_skips_placeholder_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_community_header_falls_back_when_no_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_community_header_falls_back_when_no_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_community_header_sanitizes_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_community_header_sanitizes_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms0]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms0"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms1"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms2]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms2"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms3]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms3"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms4]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms4"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms5]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms5"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms6]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms6"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_ranked_matches_score_nodes_byte_identical[terms7]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_ranked_matches_score_nodes_byte_identical_terms7"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms0]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms0"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms1"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms2]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms2"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms3]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms3"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms4]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms4"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms5]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms5"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms6]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms6"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_best_seed_by_term_matches_legacy_singleton_scoring[terms7]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_best_seed_by_term_matches_legacy_singleton_scoring_terms7"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms0]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms0"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms1"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms2]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms2"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms3]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms3"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms4]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms4"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms5]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms5"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms6]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms6"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics[terms7]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_pick_seeds_with_optimized_best_seed_matches_legacy_semantics_terms7"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_matches_legacy_across_random_deterministic_graphs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_matches_legacy_across_random_deterministic_graphs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_matches_legacy_under_full_scan_fallback",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_matches_legacy_under_full_scan_fallback"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_graph_text_makes_exactly_one_score_query_call",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_graph_text_makes_exactly_one_score_query_call"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_score_query_collect_per_term_seeds_false_omits_tracking",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_score_query_collect_per_term_seeds_false_omits_tracking"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_seed_survives_truncation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_seed_survives_truncation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_query_graph_text_passes_seeds_so_answer_survives",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_query_graph_text_passes_seeds_so_answer_survives"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_truncation_notice_at_top",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_truncation_notice_at_top"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_no_notice_when_under_budget",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_no_notice_when_under_budget"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_order_is_deterministic",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_order_is_deterministic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_cut_lines_to_budget_under_budget_is_byte_identical",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_cut_lines_to_budget_under_budget_is_byte_identical"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_cut_lines_to_budget_over_budget_announces_at_top",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_cut_lines_to_budget_over_budget_announces_at_top"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_ignores_dangling_src_tgt",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_ignores_dangling_src_tgt"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_serve.py::test_subgraph_to_text_honors_valid_src_tgt_direction",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "test_subgraph_to_text_honors_valid_src_tgt_direction"
+        }
+      ]
+    }
+  ]
+}

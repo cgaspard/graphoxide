@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_exits_nonzero_when_all_semantic_chunks_fail",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_exits_nonzero_when_all_semantic_chunks_fail"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_succeeds_when_at_least_one_chunk_completes",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_succeeds_when_at_least_one_chunk_completes"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_incremental_partial_run_preserves_untouched_semantic_hash",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_incremental_partial_run_preserves_untouched_semantic_hash"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_truncated_doc_semantic_hash_is_cleared_for_requeue",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_truncated_doc_semantic_hash_is_cleared_for_requeue"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_manifest_stamps_freshly_extracted_semantic_docs",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_manifest_stamps_freshly_extracted_semantic_docs"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_stamped_manifest_files_normalizes_both_sides",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_stamped_manifest_files_normalizes_both_sides"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_stamped_manifest_files_counts_hyperedge_only_docs",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_stamped_manifest_files_counts_hyperedge_only_docs"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_manifest_stamps_hyperedge_only_docs",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_manifest_stamps_hyperedge_only_docs"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_force_flag_redispatches_and_stamps_manifest",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_force_flag_redispatches_and_stamps_manifest"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_graphify_force_env_redispatches",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_graphify_force_env_redispatches"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_cache_check_mode_deep_reads_deep_namespace",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_cache_check_mode_deep_reads_deep_namespace"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_codeonly_succeeds_without_api_key",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_codeonly_succeeds_without_api_key"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_missing_manifest_code_only_preserves_semantic_layer",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_missing_manifest_code_only_preserves_semantic_layer"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_out_keeps_project_root_clean",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_out_keeps_project_root_clean"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_timing_flag_emits_stage_timings",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_timing_flag_emits_stage_timings"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_pathless_postgres_extract_initializes_empty_detection[cluster_args0-postgres_args0]",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "tests::test_pathless_postgres_extract_initializes_empty_detection_clustered_space"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_pathless_postgres_extract_initializes_empty_detection[cluster_args0-postgres_args1]",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "tests::test_pathless_postgres_extract_initializes_empty_detection_clustered_equals"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_pathless_postgres_extract_initializes_empty_detection[cluster_args1-postgres_args0]",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "tests::test_pathless_postgres_extract_initializes_empty_detection_no_cluster_space"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_pathless_postgres_extract_initializes_empty_detection[cluster_args1-postgres_args1]",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "tests::test_pathless_postgres_extract_initializes_empty_detection_no_cluster_equals"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_incremental_extract_prunes_newly_excluded_file_not_in_manifest",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_incremental_extract_prunes_newly_excluded_file_not_in_manifest"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_incremental_extract_prunes_excluded_file_listed_in_manifest",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_incremental_extract_prunes_excluded_file_listed_in_manifest"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_no_cluster_incremental_prunes_newly_excluded_file",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_no_cluster_incremental_prunes_newly_excluded_file"}]
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_cache_check_prompt_file_scopes_hits_to_that_prompt",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_cache_check_prompt_file_scopes_hits_to_that_prompt"}]
+    }
+  ]
+}

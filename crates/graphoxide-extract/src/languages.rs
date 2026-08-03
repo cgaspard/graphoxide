@@ -16,7 +16,7 @@ pub fn for_path(path: &Path) -> Option<&'static Lang> {
     let ext = path.extension()?.to_str()?;
     LANGUAGES
         .iter()
-        .find(|(exts, _)| exts.split(',').any(|e| e == ext))
+        .find(|(exts, _)| exts.split(',').any(|e| e.eq_ignore_ascii_case(ext)))
         .map(|(_, l)| l)
 }
 
@@ -85,14 +85,14 @@ static LANGUAGES: &[(&str, Lang)] = &[
         },
     ),
     (
-        "cc,cpp,cxx,hpp,hh",
+        "cc,cpp,cxx,hpp,hh,cu,cuh,metal",
         Lang {
             name: "cpp",
             language: || tree_sitter_cpp::LANGUAGE.into(),
         },
     ),
     (
-        "rb",
+        "rb,rake",
         Lang {
             name: "ruby",
             language: || tree_sitter_ruby::LANGUAGE.into(),

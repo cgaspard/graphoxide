@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_kotlin_object_literal.py::test_object_literal_members_get_nodes_and_method_edges","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_object_literal_members_get_nodes_and_method_edges"}]},
+    {"upstream":"tests/test_kotlin_object_literal.py::test_object_literal_implements_supertype","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_object_literal_implements_supertype"}]},
+    {"upstream":"tests/test_kotlin_object_literal.py::test_object_literal_member_calls_sibling_member","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_object_literal_member_calls_sibling_member"}]},
+    {"upstream":"tests/test_kotlin_object_literal.py::test_two_object_literals_in_one_function_do_not_collide","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_two_object_literals_in_one_function_do_not_collide"}]},
+    {"upstream":"tests/test_kotlin_object_literal.py::test_named_object_and_plain_class_unchanged","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_named_object_and_plain_class_unchanged"}]}
+  ]
+}

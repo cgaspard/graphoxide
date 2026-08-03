@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_community_hub_labels.py::test_labels_by_highest_degree_hub","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_labels_by_highest_degree_hub"}]},
+    {"upstream":"tests/test_community_hub_labels.py::test_not_a_placeholder_for_a_real_community","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_not_a_placeholder_for_a_real_community"}]},
+    {"upstream":"tests/test_community_hub_labels.py::test_tie_breaks_deterministically_by_node_id","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_tie_breaks_deterministically_by_node_id"}]},
+    {"upstream":"tests/test_community_hub_labels.py::test_absent_members_fall_back_to_placeholder","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_absent_members_fall_back_to_placeholder"}]},
+    {"upstream":"tests/test_community_hub_labels.py::test_node_without_label_attr_uses_id","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_node_without_label_attr_uses_id"}]},
+    {"upstream":"tests/test_community_hub_labels.py::test_multiple_communities_each_get_their_own_hub","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_multiple_communities_each_get_their_own_hub"}]},
+    {"upstream":"tests/test_community_hub_labels.py::test_community_member_sigs_are_deterministic_and_order_independent","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_community_member_sigs_are_deterministic_and_order_independent"}]},
+    {"upstream":"tests/test_community_hub_labels.py::test_community_member_sigs_change_when_membership_changes","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_community_member_sigs_change_when_membership_changes"}]}
+  ]
+}

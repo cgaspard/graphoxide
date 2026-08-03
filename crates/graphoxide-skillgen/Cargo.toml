@@ -1,0 +1,10 @@
+[package]
+name = "graphoxide-skillgen"
+description = "Deterministic multi-host skill renderer and drift auditor for Graphoxide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+tempfile = "3"

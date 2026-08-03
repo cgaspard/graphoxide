@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/Graphify-Labs/graphify",
+    "revision": "00efd6e7969837ae4a9f11d8d504dcd3b20b09df",
+    "file": "tests/test_cross_language_call_resolution.py",
+    "sha256": "f4c7ca05ca2546441d630ec633e91a851313f72cb11ed5c024fb8d5b13acbebd",
+    "collected_cases": 4
+  },
+  "rust": {
+    "package": "graphoxide-extract",
+    "target": "upstream_cross_language_call_resolution",
+    "mapped_cases": 4
+  },
+  "cases": [
+    {
+      "ordinal": 1,
+      "upstream_nodeid": "tests/test_cross_language_call_resolution.py::test_tsx_callback_does_not_bind_to_kotlin_method",
+      "rust_target": "upstream_cross_language_call_resolution",
+      "rust_test": "test_tsx_callback_does_not_bind_to_kotlin_method"
+    },
+    {
+      "ordinal": 2,
+      "upstream_nodeid": "tests/test_cross_language_call_resolution.py::test_python_call_does_not_bind_to_kotlin_function",
+      "rust_target": "upstream_cross_language_call_resolution",
+      "rust_test": "test_python_call_does_not_bind_to_kotlin_function"
+    },
+    {
+      "ordinal": 3,
+      "upstream_nodeid": "tests/test_cross_language_call_resolution.py::test_same_language_callback_still_resolves",
+      "rust_target": "upstream_cross_language_call_resolution",
+      "rust_test": "test_same_language_callback_still_resolves"
+    },
+    {
+      "ordinal": 4,
+      "upstream_nodeid": "tests/test_cross_language_call_resolution.py::test_jvm_interop_kotlin_call_to_java_still_resolves",
+      "rust_target": "upstream_cross_language_call_resolution",
+      "rust_test": "test_jvm_interop_kotlin_call_to_java_still_resolves"
+    }
+  ]
+}

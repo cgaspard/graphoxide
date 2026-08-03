@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_pipeline.py::test_pipeline_runs_end_to_end","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_runs_end_to_end"}]},
+    {"upstream":"tests/test_pipeline.py::test_pipeline_graph_has_edges","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_graph_has_edges"}]},
+    {"upstream":"tests/test_pipeline.py::test_pipeline_all_nodes_have_community","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_all_nodes_have_community"}]},
+    {"upstream":"tests/test_pipeline.py::test_pipeline_report_mentions_top_god_node","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_report_mentions_top_god_node"}]},
+    {"upstream":"tests/test_pipeline.py::test_pipeline_detection_finds_code_and_docs","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_detection_finds_code_and_docs"}]},
+    {"upstream":"tests/test_pipeline.py::test_pipeline_incremental_update","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_incremental_update"}]},
+    {"upstream":"tests/test_pipeline.py::test_pipeline_extraction_confidence_labels","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_extraction_confidence_labels"}]},
+    {"upstream":"tests/test_pipeline.py::test_pipeline_no_self_loops","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_pipeline_no_self_loops"}]}
+  ]
+}

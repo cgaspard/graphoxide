@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_typescript_module_extensions.py::test_mts_cts_registered_as_code","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mts_cts_registered_as_code"}]},
+    {"upstream":"tests/test_typescript_module_extensions.py::test_mts_cts_in_js_language_family","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mts_cts_in_js_language_family"}]},
+    {"upstream":"tests/test_typescript_module_extensions.py::test_mts_cts_in_js_resolution_sets","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mts_cts_in_js_resolution_sets"}]},
+    {"upstream":"tests/test_typescript_module_extensions.py::test_mts_uses_the_typescript_grammar","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mts_uses_the_typescript_grammar"}]},
+    {"upstream":"tests/test_typescript_module_extensions.py::test_cts_uses_the_typescript_grammar","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cts_uses_the_typescript_grammar"}]},
+    {"upstream":"tests/test_typescript_module_extensions.py::test_uppercase_typescript_extensions_use_typescript_grammar","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_uppercase_typescript_extensions_use_typescript_grammar"}]},
+    {"upstream":"tests/test_typescript_module_extensions.py::test_mts_cts_route_to_extract_js","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mts_cts_route_to_extract_js"}]}
+  ]
+}

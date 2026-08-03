@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_python_import_resolution.py::test_python_package_reexport_resolves_import_and_call_to_origin_symbol","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_python_package_reexport_resolves_import_and_call_to_origin_symbol"}]},
+    {"upstream":"tests/test_python_import_resolution.py::test_python_parameter_return_and_generic_contexts","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_python_parameter_return_and_generic_contexts"}]}
+  ]
+}

@@ -6,7 +6,8 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  actions: read
+  contents: read
 
 jobs:
   prepare:
@@ -23,6 +24,43 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Require successful CI for the tagged commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEFAULT_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
+          RUNS_URL="repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&per_page=20"
+
+          for attempt in $(seq 1 120); do
+            RESPONSE="$(gh api "$RUNS_URL")"
+            mapfile -t CI_RUN < <(
+              jq -r --arg branch "$DEFAULT_BRANCH" '
+                [.workflow_runs[] | select(.head_branch == $branch)]
+                | sort_by(.run_number, .run_attempt)
+                | last
+                | if . == null then empty else .id, .status, (.conclusion // ""), .html_url end
+              ' <<<"$RESPONSE"
+            )
+
+            if [ "${#CI_RUN[@]}" -eq 0 ]; then
+              echo "Waiting for CI to start for ${GITHUB_SHA} on ${DEFAULT_BRANCH} (${attempt}/120)"
+            elif [ "${CI_RUN[1]}" = "completed" ]; then
+              if [ "${CI_RUN[2]}" = "success" ]; then
+                echo "Verified successful exact-SHA CI run: ${CI_RUN[3]}"
+                exit 0
+              fi
+              echo "::error::Exact-SHA CI concluded ${CI_RUN[2]}: ${CI_RUN[3]}"
+              exit 1
+            else
+              echo "Waiting for exact-SHA CI run ${CI_RUN[0]} (${CI_RUN[1]}, ${attempt}/120): ${CI_RUN[3]}"
+            fi
+            sleep 15
+          done
+
+          echo "::error::Timed out waiting for exact-SHA CI on ${GITHUB_SHA}"
+          exit 1
 
       - name: Resolve version and Marketplace channel
         id: version
@@ -50,6 +88,9 @@ jobs:
 
       - name: Verify synchronized versions and component release notes
         run: node scripts/render-release-notes.mjs "${{ steps.version.outputs.version }}" --check
+
+      - name: Validate bundled agent artifacts
+        run: node scripts/agent-artifacts.mjs --check
 
       - name: Render combined GitHub release notes
         run: node scripts/render-release-notes.mjs "${{ steps.version.outputs.version }}" > release-body.md
@@ -81,13 +122,13 @@ jobs:
             archive_extension: tar.gz
           - name: Linux x64
             os: ubuntu-latest
-            rust_target: x86_64-unknown-linux-gnu
+            rust_target: x86_64-unknown-linux-musl
             vscode_target: linux-x64
             executable: graphoxide
             archive_extension: tar.gz
           - name: Linux arm64
             os: ubuntu-24.04-arm
-            rust_target: aarch64-unknown-linux-gnu
+            rust_target: aarch64-unknown-linux-musl
             vscode_target: linux-arm64
             executable: graphoxide
             archive_extension: tar.gz
@@ -122,8 +163,30 @@ jobs:
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
 
+      - name: Install musl build tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils file musl-tools
+
       - name: Build standalone Graphoxide
         run: cargo build --release --locked --target ${{ matrix.rust_target }} --bin graphoxide
+
+      - name: Verify Linux executable is statically linked
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          BINARY="target/${{ matrix.rust_target }}/release/${{ matrix.executable }}"
+          file "$BINARY"
+          if readelf --program-headers "$BINARY" | grep --quiet 'Requesting program interpreter'; then
+            echo "::error::$BINARY contains a dynamic ELF interpreter"
+            exit 1
+          fi
+          if readelf --dynamic "$BINARY" 2>/dev/null | grep --quiet '(NEEDED)'; then
+            echo "::error::$BINARY contains dynamically linked library dependencies"
+            exit 1
+          fi
 
       - name: Install extension dependencies
         run: npm ci
@@ -152,6 +215,7 @@ jobs:
           cp "target/${{ matrix.rust_target }}/release/${{ matrix.executable }}" "$BUNDLE_ROOT/graphoxide"
           chmod 755 "$BUNDLE_ROOT/graphoxide"
           cp LICENSE LICENSE-MIT NOTICE README.md THIRD_PARTY_LICENSES.html "$BUNDLE_ROOT/"
+          node scripts/agent-artifacts.mjs --out "$BUNDLE_ROOT/agent-assets"
           tar -czf "release-assets/${BUNDLE_NAME}.tar.gz" -C "$RUNNER_TEMP" "$BUNDLE_NAME"
           cp "release-assets/${BUNDLE_NAME}.tar.gz" "release-assets/graphoxide-${{ matrix.vscode_target }}.tar.gz"
 
@@ -165,6 +229,9 @@ jobs:
           New-Item -ItemType Directory -Path $bundleRoot -Force | Out-Null
           Copy-Item -LiteralPath 'target/${{ matrix.rust_target }}/release/${{ matrix.executable }}' -Destination (Join-Path $bundleRoot 'graphoxide.exe')
           Copy-Item -LiteralPath LICENSE, LICENSE-MIT, NOTICE, README.md, THIRD_PARTY_LICENSES.html -Destination $bundleRoot
+          $agentAssets = Join-Path $bundleRoot 'agent-assets'
+          node scripts/agent-artifacts.mjs --out $agentAssets
+          if ($LASTEXITCODE -ne 0) { throw 'Agent artifact staging failed' }
           $versionedArchive = 'release-assets/{0}.zip' -f $bundleName
           Compress-Archive -LiteralPath $bundleRoot -DestinationPath $versionedArchive -CompressionLevel Optimal
           Copy-Item -LiteralPath $versionedArchive -Destination 'release-assets/graphoxide-${{ matrix.vscode_target }}.zip'
@@ -175,26 +242,70 @@ jobs:
           "release-assets/graphoxide-vscode-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}.vsix"
           "release-assets/graphoxide-vscode-${{ matrix.vscode_target }}.vsix"
 
-      - name: Publish target to VS Code Marketplace (${{ needs.prepare.outputs.channel }})
-        if: needs.prepare.outputs.channel != 'none'
-        working-directory: editors/vscode
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: >-
-          node node_modules/@vscode/vsce/vsce publish
-          --skip-duplicate
-          ${{ needs.prepare.outputs.channel == 'prerelease' && '--pre-release' || '' }}
-          --packagePath "${{ github.workspace }}/release-assets/graphoxide-vscode-${{ matrix.vscode_target }}-${{ needs.prepare.outputs.version }}.vsix"
-
       - uses: actions/upload-artifact@v4
         with:
           name: graphoxide-${{ matrix.vscode_target }}
           path: release-assets/*
           if-no-files-found: error
 
+  marketplace:
+    name: Publish VS Code Marketplace
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install extension publishing dependencies
+        run: npm ci
+        working-directory: editors/vscode
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: graphoxide-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Require every target-specific VSIX before publication
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          targets=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64)
+          for target in "${targets[@]}"; do
+            test -f "release-assets/graphoxide-vscode-${target}-${VERSION}.vsix"
+          done
+          test "$(find release-assets -maxdepth 1 -type f -name "graphoxide-vscode-*-${VERSION}.vsix" | wc -l)" -eq 6
+
+      - name: Publish all targets to VS Code Marketplace (${{ needs.prepare.outputs.channel }})
+        if: needs.prepare.outputs.channel != 'none'
+        shell: bash
+        working-directory: editors/vscode
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          targets=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64)
+          channel_args=()
+          if [ "$CHANNEL" = "prerelease" ]; then
+            channel_args+=(--pre-release)
+          fi
+          for target in "${targets[@]}"; do
+            node node_modules/@vscode/vsce/vsce publish \
+              --skip-duplicate \
+              "${channel_args[@]}" \
+              --packagePath "${GITHUB_WORKSPACE}/release-assets/graphoxide-vscode-${target}-${VERSION}.vsix"
+          done
+
   publish:
     name: Publish GitHub release
-    needs: [prepare, build]
+    needs: [prepare, build, marketplace]
     runs-on: ubuntu-latest
     permissions:
       contents: write

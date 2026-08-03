@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_label_retry.py::test_label_batch_recovers_via_split_on_invalid_json","targets":[{"runner":"rust","package":"graphoxide-graph","id":"test_label_batch_recovers_via_split_on_invalid_json"}]}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_java_type_resolution.py::test_java_cross_file_implements_resolves_to_real_def","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_cross_file_implements_resolves_to_real_def"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_ambiguous_implements_disambiguated_by_import","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_ambiguous_implements_disambiguated_by_import"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_ambiguous_reference_disambiguated_by_import","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_ambiguous_reference_disambiguated_by_import"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_implements_edge_survives_build","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_implements_edge_survives_build"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_record_becomes_type_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_record_becomes_type_node"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_record_implements_interface","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_record_implements_interface"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_type_parameters_do_not_resolve_to_real_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_type_parameters_do_not_resolve_to_real_class"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_builtin_library_types_not_emitted_as_references","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_builtin_library_types_not_emitted_as_references"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_user_types_still_emit_references","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_user_types_still_emit_references"}]},
+    {"upstream":"tests/test_java_type_resolution.py::test_java_cross_file_constructor_call_resolves","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_java_cross_file_constructor_call_resolves"}]}
+  ]
+}

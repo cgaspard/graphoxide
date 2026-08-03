@@ -24,6 +24,53 @@ jobs:
       - run: cargo test --workspace --no-fail-fast --locked
       - run: cargo build --release --workspace --locked
 
+  parity:
+    name: Graphify differential parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Graphify-Labs/graphify
+          ref: 00efd6e7969837ae4a9f11d8d504dcd3b20b09df
+          path: upstream
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: parity
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: npm ci
+        working-directory: editors/vscode
+      - run: python3 -m unittest discover -s parity/tests -p 'test_*.py'
+      - run: >-
+          python3 -m unittest discover
+          -s parity/differential
+          -p 'test_*.py'
+      - run: >-
+          python3 parity/verify.py check
+          --require-complete
+          --upstream-checkout upstream
+      - run: >-
+          python3 -m parity.differential.corpus_suite
+          --build
+          --work-dir "${RUNNER_TEMP}/graphoxide-corpus-suite"
+          --output "${RUNNER_TEMP}/graphoxide-corpus-suite.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graphify-differential-report
+          path: |
+            ${{ runner.temp }}/graphoxide-corpus-suite.json
+            ${{ runner.temp }}/graphoxide-corpus-suite/**
+          if-no-files-found: ignore
+
   vscode:
     name: VS Code extension and E2E
     runs-on: ubuntu-latest

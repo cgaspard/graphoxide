@@ -1,0 +1,395 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_user_creates_skill_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_user_creates_skill_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_skill_file_contains_frontmatter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_skill_file_contains_frontmatter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_skill_file_references_graphify_query",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_skill_file_references_graphify_query"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_project_writes_codebuddy_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_project_writes_codebuddy_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_project_writes_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_project_writes_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_hook_has_bash_matcher",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_hook_has_bash_matcher"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_hook_has_read_glob_matcher",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_hook_has_read_glob_matcher"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_upgrades_stale_section",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_upgrades_stale_section"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_merges_existing_codebuddy_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_merges_existing_codebuddy_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_prints_no_change_on_second_run",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_prints_no_change_on_second_run"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_install_hint_git_add",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_install_hint_git_add"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_uninstall_removes_section",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_uninstall_removes_section"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_uninstall_removes_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_uninstall_removes_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_uninstall_noop_if_not_installed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_uninstall_noop_if_not_installed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_uninstall_noop_if_no_section",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_uninstall_noop_if_no_section"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_uninstall_preserves_other_content",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_uninstall_preserves_other_content"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_uninstall_all_removes_codebuddy_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_uninstall_all_removes_codebuddy_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_uninstall_all_removes_codebuddy_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_uninstall_all_removes_codebuddy_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_in_platform_config",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_in_platform_config"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_platform_skill_destination_user_scope",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_platform_skill_destination_user_scope"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_platform_skill_destination_project_scope",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_platform_skill_destination_project_scope"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_in_main_help_text",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_in_main_help_text"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_skill_file_exists_in_package",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_skill_file_exists_in_package"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_codebuddy.py::test_codebuddy_installation_roundtrip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "codebuddy::test_codebuddy_installation_roundtrip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_agents_user_destination_is_user_global_dot_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_agents_user_destination_is_user_global_dot_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_agents_project_destination_is_dot_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_agents_project_destination_is_dot_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_skills_alias_resolves_to_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_skills_alias_resolves_to_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_install_platform_agents_writes_user_global_skill_only[agents]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_install_platform_agents_writes_user_global_skill_only_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_install_platform_agents_writes_user_global_skill_only[skills]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_install_platform_agents_writes_user_global_skill_only_skills"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_uninstall_platform_agents_removes_user_global_skill",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_uninstall_platform_agents_removes_user_global_skill"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_uninstall_platform_flag_global_removes_skill[agents]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_uninstall_platform_flag_global_removes_skill_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_uninstall_platform_flag_global_removes_skill[skills]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_uninstall_platform_flag_global_removes_skill_skills"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_project_uninstall_all_removes_agents_skill",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_project_uninstall_all_removes_agents_skill"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_install_platform_agents_project_writes_dot_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_install_platform_agents_project_writes_dot_agents"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_agents_subcommand_install_also_wires_agents_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_agents_subcommand_install_also_wires_agents_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_agents_subcommand_install_is_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_agents_subcommand_install_is_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_skills_subcommand_is_the_agents_subcommand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_skills_subcommand_is_the_agents_subcommand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_agents_platform.py::test_bare_install_does_not_touch_dot_agents",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "agents_platform::test_bare_install_does_not_touch_dot_agents"
+        }
+      ]
+    }
+  ]
+}

@@ -85,7 +85,9 @@ The `worked/*/graph.json` files in upstream are **stale-format**; don't use as r
   rationale, concept}, `source_file` (repo-relative, forward slashes). Optional:
   `source_location` ("L42"), `community` (int), `community_name`, `norm_label`
   (diacritic-stripped lowercase, added at export), `_origin` ∈ {ast, semantic},
-  `repo`, `local_id`.
+  `repo`, `local_id`. Graphoxide also retains deterministic producer markers
+  (`fallback`, `terraform`, `sql`, `dotnet`, and legacy `scip`) for diagnostics;
+  they share the structural replacement/merge tier with `ast`.
 - **Edge** required: `source`, `target`, `relation`, `confidence` ∈
   {EXTRACTED, INFERRED, AMBIGUOUS}. `confidence_score` backfilled from
   {1.0, 0.5, 0.2}. `weight` default 1.0. Transient keys `target_file`/`local_alias`
@@ -308,6 +310,12 @@ formats. HTTP transport (axum) + API-key middleware later.
 | 6 ✅ | Language tiers 2-3, global graph, merge-graphs, benchmark, LLM labeling via reqwest | feature parity for the offline surface + `BENCHMARKS.md` numbers vs Python |
 
 ## 11. Testing strategy: differential against upstream
+
+> **Coverage status (2026-08-03):** The pinned reference inventory contains
+> 3,978 pytest cases across 176 modules. The executable ledger records 3,975
+> parity mappings, 3 reviewed expected divergences, and 0 unaccounted cases.
+> Preserve that distinction: expected divergences are compatibility debt, not
+> blanket parity. The corpus differential remains the end-to-end graph oracle.
 
 The Python reference is right there in `upstream/` — use it as the oracle:
 1. `cd upstream && uv sync` (uv.lock is committed) to get the runnable upstream Python Graphify.

@@ -1,0 +1,695 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[grep -rn foo .]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[pgrep -f server]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[egrep pattern file]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[fgrep lit file]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[ls -la | grep foo]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[ripgrep thing]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[rg pattern src/]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[find . -name '*.py']",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[fd bar]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[ack needle]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_nudges[ag needle]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[ls -la]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[git status]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[cat README.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[python app.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[cd findings && ls]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[manage db migrate]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent[echo hello]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_silent_without_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_silent_without_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_missing_command_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_missing_command_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_non_string_command_is_silent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_non_string_command_is_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_top_level_command_without_tool_input",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_top_level_command_without_tool_input"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_non_dict_tool_input_is_silent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_non_dict_tool_input_is_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input0]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input2]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input3]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input4]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input5]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input6]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input7]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input8]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input9]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges[tool_input10]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input0]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input2]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input3]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input4]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input5]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input6]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input7]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input8]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input9]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input10]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent[tool_input11]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_silent_without_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_silent_without_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_non_dict_tool_input_is_silent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_non_dict_tool_input_is_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_respects_custom_output_dir_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_respects_custom_output_dir_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudges_source_outside_custom_output_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudges_source_outside_custom_output_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[not json at all-search]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[not json at all-read]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[-search]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[-read]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[[1,2,3]-search]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[[1,2,3]-read]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[\\xff\\xfe\\x00bad-search]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_fail_open_on_bad_stdin[\\xff\\xfe\\x00bad-read]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_fail_open_on_bad_stdin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_search_out_path_error_is_swallowed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_search_out_path_error_is_swallowed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_gemini_allow_with_nudge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_allow_with_nudge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_gemini_allow_without_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_allow_without_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_gemini_always_allows_even_when_check_throws",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_gemini_always_allows_even_when_check_throws"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_dispatch_missing_mode_exits_zero_silent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_dispatch_missing_mode_exits_zero_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_dispatch_unknown_mode_exits_zero_silent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_dispatch_unknown_mode_exits_zero_silent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_dispatch_always_exits_zero[args0-{\"tool_input\":{\"command\":\"grep x\"}}]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_dispatch_always_exits_zero"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_dispatch_always_exits_zero[args1-{\"tool_input\":{\"file_path\":\"a.py\"}}]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_dispatch_always_exits_zero"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_dispatch_always_exits_zero[args2-]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_dispatch_always_exits_zero"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hook_guard.py::test_read_nudge_em_dash_survives_utf8",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_read_nudge_em_dash_survives_utf8"
+        }
+      ]
+    }
+  ]
+}

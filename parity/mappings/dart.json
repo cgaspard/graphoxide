@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_dart.py::TestDart::test_universal_generic_syntax_extraction","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_universal_generic_syntax_extraction"}]},
+    {"upstream":"tests/test_dart.py::TestDart::test_advanced_dart_features","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_advanced_dart_features"}]},
+    {"upstream":"tests/test_dart.py::TestDart::test_namespace_and_spaced_generics","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_namespace_and_spaced_generics"}]},
+    {"upstream":"tests/test_dart.py::TestDart::test_dart_and_flutter_specifics","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_dart_and_flutter_specifics"}]},
+    {"upstream":"tests/test_dart.py::TestDart::test_roadmap_bug_fixes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_roadmap_bug_fixes"}]}
+  ]
+}

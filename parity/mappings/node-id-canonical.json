@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_node_id_canonical.py::test_module_level_dispatch_indirect_call_source_is_canonical","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_level_dispatch_indirect_call_source_is_canonical"}]},
+    {"upstream":"tests/test_node_id_canonical.py::test_bash_source_incremental_target_canonicalizes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_bash_source_incremental_target_canonicalizes"}]},
+    {"upstream":"tests/test_node_id_canonical.py::test_tsx_nested_handler_calls_source_is_canonical","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_tsx_nested_handler_calls_source_is_canonical"}]},
+    {"upstream":"tests/test_node_id_canonical.py::test_extract_invariant_no_absolute_root_slug_anywhere","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_extract_invariant_no_absolute_root_slug_anywhere"}]}
+  ]
+}

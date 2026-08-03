@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_cpp_preprocess.py::test_cpp_preprocess_passes_absolute_path","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cpp_preprocess_passes_absolute_path"}]}
+  ]
+}

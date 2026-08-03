@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_indirect_dispatch_assign_return.py::test_assignment_and_return_emit_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_assignment_and_return_emit_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch_assign_return.py::test_multiple_assignment_emits_for_each","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_multiple_assignment_emits_for_each"}]},
+    {"upstream":"tests/test_indirect_dispatch_assign_return.py::test_module_level_assignment_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_level_assignment_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_dispatch_assign_return.py::test_assignment_feeds_affected","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_assignment_feeds_affected"}]},
+    {"upstream":"tests/test_indirect_dispatch_assign_return.py::test_param_shadow_emits_nothing","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_param_shadow_emits_nothing"}]},
+    {"upstream":"tests/test_indirect_dispatch_assign_return.py::test_local_shadow_emits_nothing","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_local_shadow_emits_nothing"}]},
+    {"upstream":"tests/test_indirect_dispatch_assign_return.py::test_non_callable_value_emits_nothing","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_callable_value_emits_nothing"}]}
+  ]
+}

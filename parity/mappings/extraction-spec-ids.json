@@ -1,0 +1,505 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_files_are_discoverable",
+      "targets": [
+        {
+          "runner": "vscode",
+          "workspace": "editors/vscode",
+          "id": "agent extraction specs carry canonical production node IDs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[agents:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[agents:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[agents:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[agents:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[amp:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[amp:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[amp:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[amp:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[claude:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[claude:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[claude:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[claude:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[claw:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[codex:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[copilot:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[copilot:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[copilot:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[copilot:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[droid:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[droid:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[droid:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[droid:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[kilo:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[kilo:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[kilo:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[kilo:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[kiro:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[opencode:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[opencode:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[opencode:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[opencode:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[pi:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[trae:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[trae:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[trae:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[trae:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[vscode:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[vscode:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[vscode:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[vscode:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[windows:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[windows:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[windows:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[windows:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[references:src/auth/session.py+ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[references:lib/utils/helpers.py+parse_url]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[references:tests/test_foo.py+_helper]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_spec_node_id_examples_match_ast_extractor[references:docs/v1/api/README.md+getUser]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_spec_node_id_examples_match_ast_extractor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_extraction_spec_ids.py::test_cautionary_wrong_forms_are_actually_wrong",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "test_cautionary_wrong_forms_are_actually_wrong"
+        }
+      ]
+    }
+  ]
+}

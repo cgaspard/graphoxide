@@ -3,6 +3,7 @@
 use graphoxide_core::KnowledgeGraph;
 use network_partitions::{leiden, network::LabeledNetworkBuilder};
 use rand::{rngs::SmallRng, SeedableRng};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub fn cluster(graph: &mut KnowledgeGraph) -> anyhow::Result<()> {
@@ -72,28 +73,12 @@ pub fn cluster(graph: &mut KnowledgeGraph) -> anyhow::Result<()> {
         .enumerate()
         .flat_map(|(cid, nodes)| nodes.iter().map(move |node| (node.clone(), cid as i64)))
         .collect();
-    let labels: HashMap<i64, String> = groups
+    let hub_groups = groups
         .iter()
         .enumerate()
-        .map(|(cid, nodes)| {
-            let hub = nodes
-                .iter()
-                .min_by_key(|node| {
-                    (
-                        usize::MAX - degree.get(node.as_str()).copied().unwrap_or(0),
-                        node.as_str(),
-                    )
-                })
-                .unwrap();
-            let label = graph
-                .nodes
-                .iter()
-                .find(|n| &n.id == hub)
-                .map(|n| n.label.trim_end_matches("()").to_owned())
-                .unwrap_or_else(|| format!("Community {cid}"));
-            (cid as i64, label)
-        })
-        .collect();
+        .map(|(community, nodes)| (community as i64, nodes.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let labels = label_communities_by_hub(graph, &hub_groups);
     for node in &mut graph.nodes {
         let cid = reindexed[&node.id];
         node.community = Some(cid);
@@ -101,6 +86,208 @@ pub fn cluster(graph: &mut KnowledgeGraph) -> anyhow::Result<()> {
             .insert("community_name".into(), labels[&cid].clone().into());
     }
     Ok(())
+}
+
+pub fn communities(graph: &KnowledgeGraph) -> BTreeMap<i64, Vec<String>> {
+    let mut output = BTreeMap::new();
+    for node in &graph.nodes {
+        if let Some(community) = node.community {
+            output
+                .entry(community)
+                .or_insert_with(Vec::new)
+                .push(node.id.clone());
+        }
+    }
+    for members in output.values_mut() {
+        members.sort();
+    }
+    output
+}
+
+/// Deterministic, backend-free names based on each community's structural hub.
+/// Degree is measured across the full graph; ties use ascending node ID.
+pub fn label_communities_by_hub(
+    graph: &KnowledgeGraph,
+    groups: &BTreeMap<i64, Vec<String>>,
+) -> BTreeMap<i64, String> {
+    let node_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut degree = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen_edges = BTreeSet::new();
+    for edge in &graph.links {
+        let source = edge.true_source();
+        let target = edge.true_target();
+        if !node_ids.contains(source) || !node_ids.contains(target) {
+            continue;
+        }
+        let key = if source <= target {
+            (source, target)
+        } else {
+            (target, source)
+        };
+        if !seen_edges.insert(key) {
+            continue;
+        }
+        if source == target {
+            *degree.entry(source).or_default() += 2;
+        } else {
+            *degree.entry(source).or_default() += 1;
+            *degree.entry(target).or_default() += 1;
+        }
+    }
+    groups
+        .iter()
+        .map(|(community, members)| {
+            let hub = members
+                .iter()
+                .filter(|member| node_ids.contains(member.as_str()))
+                .min_by_key(|member| {
+                    (
+                        std::cmp::Reverse(degree.get(member.as_str()).copied().unwrap_or(0)),
+                        member.as_str(),
+                    )
+                });
+            let label = hub
+                .and_then(|hub| graph.nodes.iter().find(|node| node.id == *hub))
+                .map(|node| {
+                    let label = node.label.trim();
+                    let label = if label.is_empty() { &node.id } else { label };
+                    label.strip_suffix("()").unwrap_or(label).to_owned()
+                })
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| format!("Community {community}"));
+            (*community, label)
+        })
+        .collect()
+}
+
+/// Stable 16-hex membership fingerprints used to invalidate stale labels.
+pub fn community_member_sigs(groups: &BTreeMap<i64, Vec<String>>) -> BTreeMap<i64, String> {
+    groups
+        .iter()
+        .map(|(community, members)| {
+            let mut members = members.iter().map(String::as_str).collect::<Vec<_>>();
+            members.sort_unstable();
+            let mut digest = Sha256::new();
+            for member in members {
+                digest.update(member.as_bytes());
+                digest.update([0]);
+            }
+            (*community, hex::encode(digest.finalize())[..16].to_owned())
+        })
+        .collect()
+}
+
+/// Ratio of unique, undirected intra-community edges to the complete-graph
+/// maximum. Empty/singleton communities are fully cohesive by definition.
+pub fn cohesion_score(graph: &KnowledgeGraph, members: &[String]) -> f64 {
+    if members.len() <= 1 {
+        return 1.0;
+    }
+    let member_set = members.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let actual = graph
+        .links
+        .iter()
+        .filter_map(|edge| {
+            let source = edge.true_source();
+            let target = edge.true_target();
+            if source == target || !member_set.contains(source) || !member_set.contains(target) {
+                return None;
+            }
+            Some(if source <= target {
+                (source, target)
+            } else {
+                (target, source)
+            })
+        })
+        .collect::<BTreeSet<_>>()
+        .len();
+    let possible = members.len() * (members.len() - 1) / 2;
+    actual as f64 / possible as f64
+}
+
+pub fn score_all(
+    graph: &KnowledgeGraph,
+    groups: &BTreeMap<i64, Vec<String>>,
+) -> BTreeMap<i64, f64> {
+    groups
+        .iter()
+        .map(|(community, members)| (*community, cohesion_score(graph, members)))
+        .collect()
+}
+
+/// Pure remapping counterpart used by incremental callers and tests.
+pub fn remap_community_map(
+    groups: &BTreeMap<i64, Vec<String>>,
+    previous: &BTreeMap<String, i64>,
+) -> BTreeMap<i64, Vec<String>> {
+    let mut old = BTreeMap::<i64, BTreeSet<String>>::new();
+    for (node, community) in previous {
+        old.entry(*community).or_default().insert(node.clone());
+    }
+    let new = groups
+        .iter()
+        .map(|(community, nodes)| (*community, nodes.iter().cloned().collect::<BTreeSet<_>>()))
+        .collect::<BTreeMap<_, _>>();
+    let mut overlaps = Vec::new();
+    for (old_id, old_nodes) in &old {
+        for (new_id, new_nodes) in &new {
+            let overlap = old_nodes.intersection(new_nodes).count();
+            if overlap > 0 {
+                overlaps.push((overlap, *old_id, *new_id));
+            }
+        }
+    }
+    overlaps.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let mut mapping = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    for (_, old_id, new_id) in overlaps {
+        if !mapping.contains_key(&new_id) && used.insert(old_id) {
+            mapping.insert(new_id, old_id);
+        }
+    }
+    let mut unmatched = groups
+        .iter()
+        .filter(|(community, _)| !mapping.contains_key(community))
+        .map(|(community, nodes)| (*community, nodes.clone()))
+        .collect::<Vec<_>>();
+    unmatched.sort_by(|left, right| {
+        right
+            .1
+            .len()
+            .cmp(&left.1.len())
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    let mut next = 0;
+    for (community, _) in unmatched {
+        while used.contains(&next) {
+            next += 1;
+        }
+        mapping.insert(community, next);
+        used.insert(next);
+        next += 1;
+    }
+    groups
+        .iter()
+        .map(|(community, nodes)| {
+            let mut nodes = nodes.clone();
+            nodes.sort();
+            (mapping[community], nodes)
+        })
+        .collect()
 }
 
 fn postprocess_assignments(
@@ -257,35 +444,25 @@ pub fn remap_communities_to_previous(current: &mut KnowledgeGraph, previous: &Kn
             new.entry(cid).or_default().insert(node.id.clone());
         }
     }
-    let mut pairs = Vec::new();
-    for (new_id, new_members) in &new {
-        for (old_id, old_members) in &old {
-            let overlap = new_members.intersection(old_members).count();
-            if overlap > 0 {
-                pairs.push((overlap, *new_id, *old_id));
-            }
-        }
-    }
-    pairs.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| a.2.cmp(&b.2))
-            .then_with(|| a.1.cmp(&b.1))
-    });
-    let mut mapping = BTreeMap::new();
-    let mut used_old = BTreeSet::new();
-    for (_, new_id, old_id) in pairs {
-        if !mapping.contains_key(&new_id) && used_old.insert(old_id) {
-            mapping.insert(new_id, old_id);
-        }
-    }
-    let mut next = old.keys().next_back().map(|v| v + 1).unwrap_or(0);
-    for new_id in new.keys() {
-        mapping.entry(*new_id).or_insert_with(|| {
-            let assigned = next;
-            next += 1;
-            assigned
-        });
-    }
+    let pure_groups = new
+        .iter()
+        .map(|(id, members)| (*id, members.iter().cloned().collect::<Vec<_>>()))
+        .collect();
+    let previous_assignments = old
+        .iter()
+        .flat_map(|(id, members)| members.iter().map(move |member| (member.clone(), *id)))
+        .collect();
+    let remapped = remap_community_map(&pure_groups, &previous_assignments);
+    let mapping = remapped
+        .iter()
+        .flat_map(|(final_id, members)| {
+            members.iter().filter_map(|member| {
+                new.iter()
+                    .find(|(_, candidates)| candidates.contains(member))
+                    .map(|(new_id, _)| (*new_id, *final_id))
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
     let old_names: BTreeMap<_, _> = previous
         .nodes
         .iter()

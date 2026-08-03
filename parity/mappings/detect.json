@@ -1,0 +1,2345 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_detect.py::test_classify_python",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_python"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_typescript",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_typescript"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_powershell_module",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_powershell_module"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_powershell_manifest",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_powershell_manifest"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_markdown",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_markdown"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_skill",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_skill"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_pdf",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_pdf"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_pdf_in_xcassets_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_pdf_in_xcassets_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_pdf_in_xcassets_root_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_pdf_in_xcassets_root_skipped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_unknown_returns_none",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_unknown_returns_none"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_image",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_image"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_count_words_sample_md",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_count_words_sample_md"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_finds_fixtures",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_finds_fixtures"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_warns_small_corpus",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_warns_small_corpus"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_noise_dot_dirs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_noise_dot_dirs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_md_paper_by_signals",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_md_paper_by_signals"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_md_doc_without_signals",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_md_doc_without_signals"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_attention_paper",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_attention_paper"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_excludes_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_excludes_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_missing_is_fine",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_missing_is_fine"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_comments_ignored",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_comments_ignored"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_utf8_bom_first_pattern_honored",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_utf8_bom_first_pattern_honored"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_gitignore_utf8_bom_matches_git",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_gitignore_utf8_bom_matches_git"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_bom_only_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_bom_only_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_bom_then_comment",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_bom_then_comment"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_gitignore_utf8_bom",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_gitignore_utf8_bom"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_git_info_exclude_utf8_bom",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_git_info_exclude_utf8_bom"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_follows_symlinked_directory",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_follows_symlinked_directory"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_follows_symlinked_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_follows_symlinked_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_hermetic_without_vcs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_hermetic_without_vcs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_discovered_from_parent_in_vcs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_discovered_from_parent_in_vcs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_stops_at_git_boundary",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_stops_at_git_boundary"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_at_git_root_is_included",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_at_git_root_is_included"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_gitignore_nested_below_root_excludes_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_gitignore_nested_below_root_excludes_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_gitignore_nested_below_root_prunes_whole_directory",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_gitignore_nested_below_root_prunes_whole_directory"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_gitignore_nested_negation_overrides_broader_root_rule",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_gitignore_nested_negation_overrides_broader_root_rule"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_ignore_overrides_git_info_exclude_and_root",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_ignore_overrides_git_info_exclude_and_root"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_handles_circular_symlinks",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_handles_circular_symlinks"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_default_does_not_auto_follow_direct_symlink_child",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_default_does_not_auto_follow_direct_symlink_child"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_default_does_not_follow_when_no_symlinks",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_default_does_not_follow_when_no_symlinks"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_explicit_false_overrides_auto_detect",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_explicit_false_overrides_auto_detect"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_out_of_root_symlinked_directory_even_when_following",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_out_of_root_symlinked_directory_even_when_following"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_out_of_root_symlinked_file_by_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_out_of_root_symlinked_file_by_default"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_propagates_follow_symlinks",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_propagates_follow_symlinks"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_survives_dict_valued_mtime",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_survives_dict_valued_mtime"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_legacy_float_reextracts_on_backwards_mtime",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_legacy_float_reextracts_on_backwards_mtime"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_legacy_float_skips_when_mtime_matches",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_legacy_float_skips_when_mtime_matches"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_video_extensions",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_video_extensions"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_classify_google_workspace_shortcuts",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_classify_google_workspace_shortcuts"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_google_workspace_shortcuts_by_default",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_google_workspace_shortcuts_by_default"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_converts_google_workspace_shortcuts_when_enabled",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_converts_google_workspace_shortcuts_when_enabled"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_includes_video_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_includes_video_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_finds_video_files",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_finds_video_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_video_not_in_words",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_video_not_in_words"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_coverage_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_coverage_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_coverage_dir_by_lcov_info",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_coverage_dir_by_lcov_info"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_keeps_coverage_code_namespace",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_keeps_coverage_code_namespace"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_collect_files_keeps_coverage_code_namespace",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_collect_files_keeps_coverage_code_namespace"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_is_noise_dir_coverage_is_evidence_gated",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_is_noise_dir_coverage_is_evidence_gated"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_visual_tests_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_visual_tests_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_snapshots_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_snapshots_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_keeps_snapshots_code_namespace",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_keeps_snapshots_code_namespace"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_storybook_static_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_storybook_static_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_allows_github_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_allows_github_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_next_cache",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_next_cache"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_nox_virtualenv",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_nox_virtualenv"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_honors_git_info_exclude",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_honors_git_info_exclude"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_git_info_exclude_ranks_below_gitignore_negation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_git_info_exclude_ranks_below_gitignore_negation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_graphify_own_cache",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_graphify_own_cache"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_anchored_root_wildcard_negation_reincludes_subtree",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_anchored_root_wildcard_negation_reincludes_subtree"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_anchored_negation_cannot_skip_excluded_parent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_anchored_negation_cannot_skip_excluded_parent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_path_pattern_single_star_does_not_cross_segment",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_path_pattern_single_star_does_not_cross_segment"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_directory_only_negation_does_not_reinclude_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_directory_only_negation_does_not_reinclude_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_anchored_double_star_crosses_path_segments",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_anchored_double_star_crosses_path_segments"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_negation_cannot_rescue_file_under_excluded_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_negation_cannot_rescue_file_under_excluded_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_negation_works_when_no_ancestor_excluded",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_negation_works_when_no_ancestor_excluded"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_negation_ancestor_itself_reincluded",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_negation_ancestor_itself_reincluded"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_negation_does_not_disable_directory_pruning",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_negation_does_not_disable_directory_pruning"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_anchored_dir_not_matched_at_depth",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_anchored_dir_not_matched_at_depth"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_anchored_dir_matches_at_root",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_anchored_dir_matches_at_root"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_anchored_file_not_matched_at_depth",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_anchored_file_not_matched_at_depth"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_unanchored_dir_still_matches_at_depth",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_unanchored_dir_still_matches_at_depth"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_anchored_multi_segment_pattern",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_anchored_multi_segment_pattern"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_is_ignored_cache_matches_uncached_results",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_is_ignored_cache_matches_uncached_results"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_is_ignored_cache_evaluates_each_dir_once",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_is_ignored_cache_evaluates_each_dir_once"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_api_token_txt",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_api_token_txt"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_oauth_token_json",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_oauth_token_json"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_underscore_secret",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_underscore_secret"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_tokenizer_py",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_tokenizer_py"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_tokenize_py",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_tokenize_py"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_passwords_py",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_passwords_py"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_ruby_code_modules",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_ruby_code_modules"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_still_flags_data_secret_stores",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_still_flags_data_secret_stores"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_ssh_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_ssh_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_secrets_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_secrets_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_token_txt",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_token_txt"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_credentials_json",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_credentials_json"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_root_file_named_credentials",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_root_file_named_credentials"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_secret_handler_txt",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_secret_handler_txt"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_token_config_yaml",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_token_config_yaml"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_source_under_secrets_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_source_under_secrets_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_still_flags_data_under_secrets_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_still_flags_data_under_secrets_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_everything_under_credential_store_dirs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_everything_under_credential_store_dirs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_dir_carveout_does_not_bypass_name_screens",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_dir_carveout_does_not_bypass_name_screens"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_dir_carveout_still_drops_tfvars_values_store",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_dir_carveout_still_drops_tfvars_values_store"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_token_economics_note",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_token_economics_note"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_does_not_flag_password_policy_discussion",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_does_not_flag_password_policy_discussion"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_keyword_at_end_of_long_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_keyword_at_end_of_long_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_my_private_key_txt",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_my_private_key_txt"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_dotfile_token",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_dotfile_token"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_flags_plural_tokens_txt",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_flags_plural_tokens_txt"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_skips_semantic_hash_for_files_without_cache",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_skips_semantic_hash_for_files_without_cache"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_clear_semantic_erases_stale_hash_for_omitted_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_clear_semantic_erases_stale_hash_for_omitted_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_without_filter_unchanged_for_code",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_without_filter_unchanged_for_code"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_gitignore_fallback_when_no_graphifyignore",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_gitignore_fallback_when_no_graphifyignore"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_and_gitignore_are_merged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_and_gitignore_are_merged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyignore_negation_overrides_gitignore",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyignore_negation_overrides_gitignore"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_worktrees_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_worktrees_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_skips_nested_worktrees_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_skips_nested_worktrees_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_extra_excludes_pattern",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_extra_excludes_pattern"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_plain",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_plain"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_single_arg",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_single_arg"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_dash_s",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_dash_s"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_with_flags",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_with_flags"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_with_assignment",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_with_assignment"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_no_shebang",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_no_shebang"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_quoted_path",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_quoted_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_file_type_classifies_via_interpreter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_file_type_classifies_via_interpreter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_unreadable_returns_none",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_unreadable_returns_none"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_unset_with_operand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_unset_with_operand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_chdir_with_operand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_chdir_with_operand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_path_with_operand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_path_with_operand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_dash_s_after_flag",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_dash_s_after_flag"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_clumped_u_operand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_clumped_u_operand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_missing_operand_returns_none",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_missing_operand_returns_none"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_gnu_split_string_equals",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_gnu_split_string_equals"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_gnu_split_string_separate",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_gnu_split_string_separate"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_gnu_argv0_operand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_gnu_argv0_operand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_compact_dash_s",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_compact_dash_s"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_compact_v_then_s",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_compact_v_then_s"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_long_unset_separate_operand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_long_unset_separate_operand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_long_unset_equals",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_long_unset_equals"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_long_chdir_separate_operand",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_long_chdir_separate_operand"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_long_chdir_equals",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_long_chdir_equals"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_signal_flags",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_signal_flags"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_unknown_option_returns_none",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_unknown_option_returns_none"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_dash_s_assignment_before_interpreter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_dash_s_assignment_before_interpreter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_dash_s_flag_before_interpreter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_dash_s_flag_before_interpreter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_long_split_assignment_before_interpreter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_long_split_assignment_before_interpreter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_long_split_flag_before_interpreter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_long_split_flag_before_interpreter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_nested_split_string_rejected",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_nested_split_string_rejected"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_shebang_interpreter_env_vs_assignment_before_interpreter",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_shebang_interpreter_env_vs_assignment_before_interpreter"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_relativizes_keys_when_root_given",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_relativizes_keys_when_root_given"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_without_root_keeps_absolute_keys",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_without_root_keeps_absolute_keys"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_load_manifest_absolutizes_relative_keys",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_load_manifest_absolutizes_relative_keys"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_load_manifest_passes_through_legacy_absolute_keys",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_load_manifest_passes_through_legacy_absolute_keys"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_out_of_root_keeps_absolute",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_out_of_root_keeps_absolute"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_portable_across_paths",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_portable_across_paths"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_manifest_nfc_keys_survive_macos_path_forms",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_manifest_nfc_keys_survive_macos_path_forms"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_manifest_nfc_keys_legacy_absolute",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_manifest_nfc_keys_legacy_absolute"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_in_root_symlink_roundtrips",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_in_root_symlink_roundtrips"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_convert_office_file_hash_stable_across_nfc_nfd",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_convert_office_file_hash_stable_across_nfc_nfd"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_convert_office_file_does_not_rewrite_existing_sidecar",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_convert_office_file_does_not_rewrite_existing_sidecar"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_convert_office_file_sidecar_name_stable_across_checkouts",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_convert_office_file_sidecar_name_stable_across_checkouts"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_convert_office_file_hash_disambiguates_same_stem",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_convert_office_file_hash_disambiguates_same_stem"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_convert_office_file_outside_root_falls_back",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_convert_office_file_outside_root_falls_back"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_keeps_env_source_dirs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_keeps_env_source_dirs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_still_prunes_real_env_venv",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_still_prunes_real_env_venv"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_prunes_venv_names_without_markers",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_prunes_venv_names_without_markers"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_graphify_out_prunes_only_configured_path[default-parent]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_graphify_out_prunes_only_configured_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_graphify_out_prunes_only_configured_path[custom-parent]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_graphify_out_prunes_only_configured_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_graphify_out_prunes_only_configured_path[absolute]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_graphify_out_prunes_only_configured_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_graphify_out_prunes_only_configured_path[in-root-symlink]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_graphify_out_prunes_only_configured_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_records_unclassified_extensionless_files",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_records_unclassified_extensionless_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_unclassified_empty_when_all_supported",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_unclassified_empty_when_all_supported"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_graphifyinclude_is_inert_and_not_unclassified",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_graphifyinclude_is_inert_and_not_unclassified"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_reports_walk_errors_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_reports_walk_errors_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_surfaces_unreadable_dir_instead_of_silent_skip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_surfaces_unreadable_dir_instead_of_silent_skip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_gitignore_star_does_not_ignore_outside_its_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_gitignore_star_does_not_ignore_outside_its_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_gitignore_patterns_still_apply_inside_their_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_gitignore_patterns_still_apply_inside_their_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_nested_gitignore_does_not_govern_sibling_project",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_nested_gitignore_does_not_govern_sibling_project"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_full_scan_prunes_excluded_but_alive_row",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_full_scan_prunes_excluded_but_alive_row"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_full_scan_still_prunes_missing_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_full_scan_still_prunes_missing_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_subset_save_preserves_untouched_rows",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_subset_save_preserves_untouched_rows"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_save_manifest_full_scan_keeps_out_of_root_rows",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_save_manifest_full_scan_keeps_out_of_root_rows"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_reports_excluded_not_deleted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_reports_excluded_not_deleted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_still_reports_real_deletions",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_still_reports_real_deletions"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_exclusion_stable_across_runs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_exclusion_stable_across_runs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[wiki/privacy-tokens.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[wiki/ai-token-economics.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[wiki/chain-of-hope-tokenomics.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[tokenizer.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[secretary.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[google/oauth2/service_account.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[docs/service-account-setup.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[wiki/aws_credentials_rotation_guide.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[token.economics.notes.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_topic_prose_and_source[password-reset/design.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_topic_prose_and_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[.env]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[id_rsa]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[credentials.json]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[server.pem]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[certs/server.key]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[secrets.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[passwords.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[token.md]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[token.txt]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[api_token.json]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[service-account.json]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[.npmrc]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[.pypirc]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[secring.gpg]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[.git-credentials]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[Secrets/creds.json]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[SECRETS/db.json]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[ID_RSA]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[secrets/prod.tfvars]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_secrets[credentials/id_rsa]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_secrets"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_bare_keyword_prose_still_dropped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_bare_keyword_prose_still_dropped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_env_templates[.env.example]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_env_templates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_env_templates[.env.sample]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_env_templates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_env_templates[.env.template]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_env_templates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_env_templates[.env.dist]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_env_templates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_env_templates[.ENV.EXAMPLE]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_env_templates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_env_templates[.envrc.sample]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_env_templates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_indexes_env_templates[.env.production.example]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_indexes_env_templates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_env_files[.env]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_env_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_env_files[.env.local]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_env_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_env_files[.env.production]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_env_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_env_files[.envrc]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_env_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_env_files[.env.example.local]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_env_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_filter_still_excludes_real_env_files[.env.example.bak]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_filter_still_excludes_real_env_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_env_template_inside_secrets_dir_still_dropped[secrets/.env.example]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_env_template_inside_secrets_dir_still_dropped"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_detect.py::test_sensitive_env_template_inside_secrets_dir_still_dropped[deploy/credentials/.env.example]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_sensitive_env_template_inside_secrets_dir_still_dropped"
+        }
+      ]
+    }
+  ]
+}

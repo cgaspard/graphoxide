@@ -16,10 +16,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
 /// Edge confidence labels, identical to upstream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Confidence {
     /// Relationship explicitly stated in source (import, direct call).
+    #[default]
     Extracted,
     /// Reasonable deduction (call-graph second pass, co-occurrence).
     Inferred,
@@ -42,10 +43,13 @@ impl Confidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
+    #[serde(default)]
     pub label: String,
     /// One of: code, document, paper, image, rationale, concept.
+    #[serde(default = "default_file_type")]
     pub file_type: String,
     /// Repo-relative, forward slashes. Empty string for concept nodes.
+    #[serde(default)]
     pub source_file: String,
     /// "L<line>" from AST extractors, absent/null from semantic extraction.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,12 +69,22 @@ pub struct Node {
 pub struct Edge {
     pub source: String,
     pub target: String,
+    #[serde(default = "default_relation")]
     pub relation: String,
+    #[serde(default)]
     pub confidence: Confidence,
     #[serde(default)]
     pub source_file: String,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_file_type() -> String {
+    "concept".into()
+}
+
+fn default_relation() -> String {
+    String::new()
 }
 
 impl Edge {
@@ -160,7 +174,74 @@ fn numeric_id(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn normalize_graph_value(value: &mut serde_json::Value) {
+/// Coerce only numeric graph identifiers to their exact JSON string spelling.
+/// Booleans, nulls, arrays, and objects remain untouched so validation can
+/// reject them rather than inventing misleading identities.
+pub fn coerce_non_string_ids(value: &mut serde_json::Value) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(nodes) = root
+        .get_mut("nodes")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for node in nodes
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
+            if let Some(id) = node.get("id").and_then(numeric_id) {
+                node.insert("id".into(), id.into());
+            }
+        }
+    }
+    for bucket in ["edges", "links"] {
+        if let Some(edges) = root
+            .get_mut(bucket)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for edge in edges
+                .iter_mut()
+                .filter_map(serde_json::Value::as_object_mut)
+            {
+                for field in ["source", "target", "from", "to"] {
+                    if let Some(id) = edge.get(field).and_then(numeric_id) {
+                        edge.insert(field.into(), id.into());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(hyperedges) = root
+        .get_mut("hyperedges")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for hyperedge in hyperedges
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
+            for field in ["nodes", "members", "node_ids"] {
+                if let Some(members) = hyperedge
+                    .get_mut(field)
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for member in members {
+                        if let Some(id) = numeric_id(member) {
+                            *member = id.into();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Canonicalize legacy Graphify aliases in a raw extraction or built graph.
+///
+/// Validation intentionally does not call this automatically: callers that
+/// accept legacy input should normalize first, exactly as Graphify's builder
+/// does before applying its schema validator.
+pub fn normalize_graph_value(value: &mut serde_json::Value) {
+    coerce_non_string_ids(value);
     let Some(root) = value.as_object_mut() else {
         return;
     };
@@ -177,6 +258,14 @@ fn normalize_graph_value(value: &mut serde_json::Value) {
             let Some(node) = node.as_object_mut() else {
                 continue;
             };
+            // Synthetic/aggregate nodes in older graphs legitimately used JSON
+            // null for these presentation fields. Exporters treat that as an
+            // empty string; normalize before strongly typed deserialization.
+            for field in ["label", "source_file"] {
+                if node.get(field).is_some_and(serde_json::Value::is_null) {
+                    node.insert(field.into(), serde_json::Value::String(String::new()));
+                }
+            }
             if let Some(id) = node.get("id").and_then(numeric_id) {
                 node.insert("id".into(), id.into());
             }

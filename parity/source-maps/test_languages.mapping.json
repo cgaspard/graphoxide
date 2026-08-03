@@ -1,0 +1,2006 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/Graphify-Labs/graphify",
+    "revision": "00efd6e7969837ae4a9f11d8d504dcd3b20b09df",
+    "file": "tests/test_languages.py",
+    "sha256": "2c4b5021a5de5de7239938b6912b6b7c25c278710b6cb41a75ffd5a918330dd9",
+    "collected_cases": 331,
+    "executed_cases": 318,
+    "skipped_optional_dm_cases": 13
+  },
+  "rust": {
+    "package": "graphoxide-extract",
+    "mapped_cases": 331,
+    "language_parity_target_cases": 321,
+    "library_markdown_cases": 10
+  },
+  "cases": [
+    {
+      "ordinal": 1,
+      "upstream_nodeid": "tests/test_languages.py::test_java_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_no_error"
+    },
+    {
+      "ordinal": 2,
+      "upstream_nodeid": "tests/test_languages.py::test_java_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_finds_class"
+    },
+    {
+      "ordinal": 3,
+      "upstream_nodeid": "tests/test_languages.py::test_java_finds_interface",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_finds_interface"
+    },
+    {
+      "ordinal": 4,
+      "upstream_nodeid": "tests/test_languages.py::test_java_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_finds_methods"
+    },
+    {
+      "ordinal": 5,
+      "upstream_nodeid": "tests/test_languages.py::test_java_finds_imports",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_finds_imports"
+    },
+    {
+      "ordinal": 6,
+      "upstream_nodeid": "tests/test_languages.py::test_java_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 7,
+      "upstream_nodeid": "tests/test_languages.py::test_java_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_no_dangling_edges"
+    },
+    {
+      "ordinal": 8,
+      "upstream_nodeid": "tests/test_languages.py::test_java_enum_constants_have_case_of_edge",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_enum_constants_have_case_of_edge"
+    },
+    {
+      "ordinal": 9,
+      "upstream_nodeid": "tests/test_languages.py::test_c_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_no_error"
+    },
+    {
+      "ordinal": 10,
+      "upstream_nodeid": "tests/test_languages.py::test_c_finds_functions",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_finds_functions"
+    },
+    {
+      "ordinal": 11,
+      "upstream_nodeid": "tests/test_languages.py::test_c_finds_includes",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_finds_includes"
+    },
+    {
+      "ordinal": 12,
+      "upstream_nodeid": "tests/test_languages.py::test_c_emits_calls",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_emits_calls"
+    },
+    {
+      "ordinal": 13,
+      "upstream_nodeid": "tests/test_languages.py::test_c_calls_are_extracted",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_calls_are_extracted"
+    },
+    {
+      "ordinal": 14,
+      "upstream_nodeid": "tests/test_languages.py::test_c_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 15,
+      "upstream_nodeid": "tests/test_languages.py::test_c_parameter_and_return_type_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_parameter_and_return_type_contexts"
+    },
+    {
+      "ordinal": 16,
+      "upstream_nodeid": "tests/test_languages.py::test_c_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_c_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 17,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_no_error"
+    },
+    {
+      "ordinal": 18,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_finds_class"
+    },
+    {
+      "ordinal": 19,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_finds_methods"
+    },
+    {
+      "ordinal": 20,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_finds_includes",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_finds_includes"
+    },
+    {
+      "ordinal": 21,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 22,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_method_parameter_and_return_type_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_method_parameter_and_return_type_contexts"
+    },
+    {
+      "ordinal": 23,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_field_and_template_argument_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_field_and_template_argument_contexts"
+    },
+    {
+      "ordinal": 24,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_class_inherits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_class_inherits_edge"
+    },
+    {
+      "ordinal": 25,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_struct_inherits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_struct_inherits_edge"
+    },
+    {
+      "ordinal": 26,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_generic_parents_include_type_argument_references",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cpp_generic_parents_include_type_argument_references"
+    },
+    {
+      "ordinal": 27,
+      "upstream_nodeid": "tests/test_languages.py::test_cuda_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cuda_no_error"
+    },
+    {
+      "ordinal": 28,
+      "upstream_nodeid": "tests/test_languages.py::test_cuda_finds_kernel_and_device_functions",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cuda_finds_kernel_and_device_functions"
+    },
+    {
+      "ordinal": 29,
+      "upstream_nodeid": "tests/test_languages.py::test_cuda_finds_struct",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cuda_finds_struct"
+    },
+    {
+      "ordinal": 30,
+      "upstream_nodeid": "tests/test_languages.py::test_cuda_finds_includes",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cuda_finds_includes"
+    },
+    {
+      "ordinal": 31,
+      "upstream_nodeid": "tests/test_languages.py::test_cuda_host_call_edges",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_cuda_host_call_edges"
+    },
+    {
+      "ordinal": 32,
+      "upstream_nodeid": "tests/test_languages.py::test_metal_is_code_extension",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_metal_is_code_extension"
+    },
+    {
+      "ordinal": 33,
+      "upstream_nodeid": "tests/test_languages.py::test_metal_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_metal_no_error"
+    },
+    {
+      "ordinal": 34,
+      "upstream_nodeid": "tests/test_languages.py::test_metal_finds_kernel_function_and_struct",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_metal_finds_kernel_function_and_struct"
+    },
+    {
+      "ordinal": 35,
+      "upstream_nodeid": "tests/test_languages.py::test_ruby_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_ruby_no_error"
+    },
+    {
+      "ordinal": 36,
+      "upstream_nodeid": "tests/test_languages.py::test_ruby_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_ruby_finds_class"
+    },
+    {
+      "ordinal": 37,
+      "upstream_nodeid": "tests/test_languages.py::test_ruby_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_ruby_finds_methods"
+    },
+    {
+      "ordinal": 38,
+      "upstream_nodeid": "tests/test_languages.py::test_ruby_finds_function",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_ruby_finds_function"
+    },
+    {
+      "ordinal": 39,
+      "upstream_nodeid": "tests/test_languages.py::test_ruby_inherits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_ruby_inherits_edge"
+    },
+    {
+      "ordinal": 40,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_no_error"
+    },
+    {
+      "ordinal": 41,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_finds_class"
+    },
+    {
+      "ordinal": 42,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_finds_interface",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_finds_interface"
+    },
+    {
+      "ordinal": 43,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_finds_methods"
+    },
+    {
+      "ordinal": 44,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_finds_usings",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_finds_usings"
+    },
+    {
+      "ordinal": 45,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_inherits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_inherits_edge"
+    },
+    {
+      "ordinal": 46,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_implements_iprocessor",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_implements_iprocessor"
+    },
+    {
+      "ordinal": 47,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_splits_inherits_and_implements_edges",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_splits_inherits_and_implements_edges"
+    },
+    {
+      "ordinal": 48,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_parameter_return_and_generic_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_parameter_return_and_generic_contexts"
+    },
+    {
+      "ordinal": 49,
+      "upstream_nodeid": "tests/test_languages.py::test_java_normalizes_inherits_and_implements",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_normalizes_inherits_and_implements"
+    },
+    {
+      "ordinal": 50,
+      "upstream_nodeid": "tests/test_languages.py::test_java_generic_parents_include_type_argument_references",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_generic_parents_include_type_argument_references"
+    },
+    {
+      "ordinal": 51,
+      "upstream_nodeid": "tests/test_languages.py::test_java_type_parameters_do_not_emit_references",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_type_parameters_do_not_emit_references"
+    },
+    {
+      "ordinal": 52,
+      "upstream_nodeid": "tests/test_languages.py::test_java_parameter_return_generic_and_attribute_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_parameter_return_generic_and_attribute_contexts"
+    },
+    {
+      "ordinal": 53,
+      "upstream_nodeid": "tests/test_languages.py::test_java_field_type_references_have_field_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_field_type_references_have_field_context"
+    },
+    {
+      "ordinal": 54,
+      "upstream_nodeid": "tests/test_languages.py::test_java_record_component_type_references",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_record_component_type_references"
+    },
+    {
+      "ordinal": 55,
+      "upstream_nodeid": "tests/test_languages.py::test_java_record_components_skip_type_parameters",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_record_components_skip_type_parameters"
+    },
+    {
+      "ordinal": 56,
+      "upstream_nodeid": "tests/test_languages.py::test_java_type_annotations_have_attribute_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_type_annotations_have_attribute_context"
+    },
+    {
+      "ordinal": 57,
+      "upstream_nodeid": "tests/test_languages.py::test_java_enum_and_annotation_declarations_are_type_nodes",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_java_enum_and_annotation_declarations_are_type_nodes"
+    },
+    {
+      "ordinal": 58,
+      "upstream_nodeid": "tests/test_languages.py::test_nested_types_contained_by_enclosing_type",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_nested_types_contained_by_enclosing_type"
+    },
+    {
+      "ordinal": 59,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_nested_type_gets_containment_edge",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_nested_type_gets_containment_edge"
+    },
+    {
+      "ordinal": 60,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_field_type_references_have_field_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_field_type_references_have_field_context"
+    },
+    {
+      "ordinal": 61,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_property_type_references_have_field_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_property_type_references_have_field_context"
+    },
+    {
+      "ordinal": 62,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 63,
+      "upstream_nodeid": "tests/test_languages.py::test_csharp_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "java_c_cpp_ruby_csharp::test_csharp_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 64,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_no_error"
+    },
+    {
+      "ordinal": 65,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_finds_class"
+    },
+    {
+      "ordinal": 66,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_finds_data_class",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_finds_data_class"
+    },
+    {
+      "ordinal": 67,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_finds_methods"
+    },
+    {
+      "ordinal": 68,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_finds_function",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_finds_function"
+    },
+    {
+      "ordinal": 69,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_enum_entries_have_case_of_edge",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_enum_entries_have_case_of_edge"
+    },
+    {
+      "ordinal": 70,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_emits_in_file_calls",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_emits_in_file_calls"
+    },
+    {
+      "ordinal": 71,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_splits_inherits_and_implements",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_splits_inherits_and_implements"
+    },
+    {
+      "ordinal": 72,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_interface_delegation_emits_implements",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_interface_delegation_emits_implements"
+    },
+    {
+      "ordinal": 73,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_parameter_return_generic_and_field_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_parameter_return_generic_and_field_contexts"
+    },
+    {
+      "ordinal": 74,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_builtin_types_not_emitted_as_references",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_builtin_types_not_emitted_as_references"
+    },
+    {
+      "ordinal": 75,
+      "upstream_nodeid": "tests/test_languages.py::test_kotlin_user_types_still_emit_references",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_kotlin_user_types_still_emit_references"
+    },
+    {
+      "ordinal": 76,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_no_error"
+    },
+    {
+      "ordinal": 77,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_finds_class"
+    },
+    {
+      "ordinal": 78,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_finds_object",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_finds_object"
+    },
+    {
+      "ordinal": 79,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_finds_methods"
+    },
+    {
+      "ordinal": 80,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 81,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_splits_inherits_and_mixes_in",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_splits_inherits_and_mixes_in"
+    },
+    {
+      "ordinal": 82,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_constructor_parameter_field_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_constructor_parameter_field_context"
+    },
+    {
+      "ordinal": 83,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_val_definition_field_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_val_definition_field_context"
+    },
+    {
+      "ordinal": 84,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_var_definition_field_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_var_definition_field_context"
+    },
+    {
+      "ordinal": 85,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_method_return_type_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_method_return_type_context"
+    },
+    {
+      "ordinal": 86,
+      "upstream_nodeid": "tests/test_languages.py::test_scala_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_scala_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 87,
+      "upstream_nodeid": "tests/test_languages.py::test_php_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_no_error"
+    },
+    {
+      "ordinal": 88,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_class"
+    },
+    {
+      "ordinal": 89,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_methods"
+    },
+    {
+      "ordinal": 90,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_function",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_function"
+    },
+    {
+      "ordinal": 91,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_imports",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_imports"
+    },
+    {
+      "ordinal": 92,
+      "upstream_nodeid": "tests/test_languages.py::test_php_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 93,
+      "upstream_nodeid": "tests/test_languages.py::test_php_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 94,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_static_property_access",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_static_property_access"
+    },
+    {
+      "ordinal": 95,
+      "upstream_nodeid": "tests/test_languages.py::test_php_static_prop_target_is_holding_class",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_static_prop_target_is_holding_class"
+    },
+    {
+      "ordinal": 96,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_config_helper_call",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_config_helper_call"
+    },
+    {
+      "ordinal": 97,
+      "upstream_nodeid": "tests/test_languages.py::test_php_config_helper_target_matches_first_segment",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_config_helper_target_matches_first_segment"
+    },
+    {
+      "ordinal": 98,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_container_bind",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_container_bind"
+    },
+    {
+      "ordinal": 99,
+      "upstream_nodeid": "tests/test_languages.py::test_php_container_bind_links_contract_to_implementation",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_container_bind_links_contract_to_implementation"
+    },
+    {
+      "ordinal": 100,
+      "upstream_nodeid": "tests/test_languages.py::test_php_finds_event_listeners",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_finds_event_listeners"
+    },
+    {
+      "ordinal": 101,
+      "upstream_nodeid": "tests/test_languages.py::test_php_event_listener_links_event_to_listener",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_event_listener_links_event_to_listener"
+    },
+    {
+      "ordinal": 102,
+      "upstream_nodeid": "tests/test_languages.py::test_php_splits_inherits_implements_mixes_in",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_splits_inherits_implements_mixes_in"
+    },
+    {
+      "ordinal": 103,
+      "upstream_nodeid": "tests/test_languages.py::test_php_property_parameter_and_return_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_property_parameter_and_return_contexts"
+    },
+    {
+      "ordinal": 104,
+      "upstream_nodeid": "tests/test_languages.py::test_php_constructor_property_promotion_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "kotlin_scala_php::test_php_constructor_property_promotion_contexts"
+    },
+    {
+      "ordinal": 105,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_no_error"
+    },
+    {
+      "ordinal": 106,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_class"
+    },
+    {
+      "ordinal": 107,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_protocol",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_protocol"
+    },
+    {
+      "ordinal": 108,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_struct",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_struct"
+    },
+    {
+      "ordinal": 109,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_methods"
+    },
+    {
+      "ordinal": 110,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_function",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_function"
+    },
+    {
+      "ordinal": 111,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_imports",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_imports"
+    },
+    {
+      "ordinal": 112,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 113,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_no_dangling_edges"
+    },
+    {
+      "ordinal": 114,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_imports_survive_build",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_imports_survive_build"
+    },
+    {
+      "ordinal": 115,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_actor",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_actor"
+    },
+    {
+      "ordinal": 116,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_enum",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_enum"
+    },
+    {
+      "ordinal": 117,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_enum_methods",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_enum_methods"
+    },
+    {
+      "ordinal": 118,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_enum_cases",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_enum_cases"
+    },
+    {
+      "ordinal": 119,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_enum_cases_have_case_of_edge",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_enum_cases_have_case_of_edge"
+    },
+    {
+      "ordinal": 120,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_enum_associated_value_type_emits_references",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_enum_associated_value_type_emits_references"
+    },
+    {
+      "ordinal": 121,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_deinit",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_deinit"
+    },
+    {
+      "ordinal": 122,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_finds_subscript",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_finds_subscript"
+    },
+    {
+      "ordinal": 123,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_extension_methods_attach_to_type",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_extension_methods_attach_to_type"
+    },
+    {
+      "ordinal": 124,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_extension_does_not_duplicate_type_node",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_extension_does_not_duplicate_type_node"
+    },
+    {
+      "ordinal": 125,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_protocol_conformance_emits_implements",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_protocol_conformance_emits_implements"
+    },
+    {
+      "ordinal": 126,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_extension_conformance_emits_implements",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_extension_conformance_emits_implements"
+    },
+    {
+      "ordinal": 127,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_splits_inherits_and_implements",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_splits_inherits_and_implements"
+    },
+    {
+      "ordinal": 128,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_parameter_return_generic_and_field_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_parameter_return_generic_and_field_contexts"
+    },
+    {
+      "ordinal": 129,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_emits_calls",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_emits_calls"
+    },
+    {
+      "ordinal": 130,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 131,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_extension_across_files_merges_into_canonical_type",
+      "rust_target": "language_parity",
+      "rust_test": "swift::test_swift_extension_across_files_merges_into_canonical_type"
+    },
+    {
+      "ordinal": 132,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_finds_module",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_finds_module"
+    },
+    {
+      "ordinal": 133,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_finds_functions",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_finds_functions"
+    },
+    {
+      "ordinal": 134,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_finds_imports",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_finds_imports"
+    },
+    {
+      "ordinal": 135,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 136,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_multi_alias_expands",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_multi_alias_expands"
+    },
+    {
+      "ordinal": 137,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_finds_calls",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_finds_calls"
+    },
+    {
+      "ordinal": 138,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 139,
+      "upstream_nodeid": "tests/test_languages.py::test_elixir_method_edges",
+      "rust_target": "language_parity",
+      "rust_test": "elixir::test_elixir_method_edges"
+    },
+    {
+      "ordinal": 140,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_finds_interface",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_finds_interface"
+    },
+    {
+      "ordinal": 141,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_finds_subclass",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_finds_subclass"
+    },
+    {
+      "ordinal": 142,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_finds_methods"
+    },
+    {
+      "ordinal": 143,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_finds_imports",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_finds_imports"
+    },
+    {
+      "ordinal": 144,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 145,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_inherits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_inherits_edge"
+    },
+    {
+      "ordinal": 146,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_splits_inherits_and_implements",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_splits_inherits_and_implements"
+    },
+    {
+      "ordinal": 147,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_protocol_adopts_protocol",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_protocol_adopts_protocol"
+    },
+    {
+      "ordinal": 148,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_property_type_context",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_property_type_context"
+    },
+    {
+      "ordinal": 149,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_no_dangling_edges"
+    },
+    {
+      "ordinal": 150,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_resolves_self_method_calls",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_resolves_self_method_calls"
+    },
+    {
+      "ordinal": 151,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_class_method_labeled_with_plus",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_class_method_labeled_with_plus"
+    },
+    {
+      "ordinal": 152,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_compound_selector_call_resolves",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_compound_selector_call_resolves"
+    },
+    {
+      "ordinal": 153,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_generic_property_type_extracted",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_generic_property_type_extracted"
+    },
+    {
+      "ordinal": 154,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_module_import_edge",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_module_import_edge"
+    },
+    {
+      "ordinal": 155,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_header_dispatch_routes_objc_not_c",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_header_dispatch_routes_objc_not_c"
+    },
+    {
+      "ordinal": 156,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_ns_assume_nonnull_macro_does_not_break_parsing",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_ns_assume_nonnull_macro_does_not_break_parsing"
+    },
+    {
+      "ordinal": 157,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_macro_free_header_unchanged",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_macro_free_header_unchanged"
+    },
+    {
+      "ordinal": 158,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_quoted_import_edges_resolve_to_real_nodes",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_quoted_import_edges_resolve_to_real_nodes"
+    },
+    {
+      "ordinal": 159,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_alloc_init_emits_type_reference",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_alloc_init_emits_type_reference"
+    },
+    {
+      "ordinal": 160,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_alloc_init_unknown_class_no_resolved_edge",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_alloc_init_unknown_class_no_resolved_edge"
+    },
+    {
+      "ordinal": 161,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_dot_syntax_property_accesses_edge",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_dot_syntax_property_accesses_edge"
+    },
+    {
+      "ordinal": 162,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_dot_syntax_no_fanout_two_same_named_properties",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_dot_syntax_no_fanout_two_same_named_properties"
+    },
+    {
+      "ordinal": 163,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_dot_syntax_unresolvable_property_zero_edges",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_dot_syntax_unresolvable_property_zero_edges"
+    },
+    {
+      "ordinal": 164,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_selector_expression_calls_edge",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_selector_expression_calls_edge"
+    },
+    {
+      "ordinal": 165,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_selector_no_fanout_two_same_named_methods",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_selector_no_fanout_two_same_named_methods"
+    },
+    {
+      "ordinal": 166,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_dot_syntax_substring_sibling_exact_match",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_dot_syntax_substring_sibling_exact_match"
+    },
+    {
+      "ordinal": 167,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_selector_substring_method_exact_match",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_objc_selector_substring_method_exact_match"
+    },
+    {
+      "ordinal": 168,
+      "upstream_nodeid": "tests/test_languages.py::test_go_receiver_methods_share_type_node",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_go_receiver_methods_share_type_node"
+    },
+    {
+      "ordinal": 169,
+      "upstream_nodeid": "tests/test_languages.py::test_go_receiver_uses_pkg_scope",
+      "rust_target": "language_parity",
+      "rust_test": "objective_c_and_go::test_go_receiver_uses_pkg_scope"
+    },
+    {
+      "ordinal": 170,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_module",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_module"
+    },
+    {
+      "ordinal": 171,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_structs",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_structs"
+    },
+    {
+      "ordinal": 172,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_abstract_type",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_abstract_type"
+    },
+    {
+      "ordinal": 173,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_functions",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_functions"
+    },
+    {
+      "ordinal": 174,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_short_function",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_short_function"
+    },
+    {
+      "ordinal": 175,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_imports",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_imports"
+    },
+    {
+      "ordinal": 176,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 177,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_qualified_and_relative_imports",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_qualified_and_relative_imports"
+    },
+    {
+      "ordinal": 178,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_inherits",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_inherits"
+    },
+    {
+      "ordinal": 179,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_abstract_concrete_hierarchy_inherits",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_abstract_concrete_hierarchy_inherits"
+    },
+    {
+      "ordinal": 180,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_struct_field_type_context",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_struct_field_type_context"
+    },
+    {
+      "ordinal": 181,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_finds_calls",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_finds_calls"
+    },
+    {
+      "ordinal": 182,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 183,
+      "upstream_nodeid": "tests/test_languages.py::test_julia_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_julia_no_dangling_edges"
+    },
+    {
+      "ordinal": 184,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_module",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_module"
+    },
+    {
+      "ordinal": 185,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_subroutines",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_subroutines"
+    },
+    {
+      "ordinal": 186,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_function",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_function"
+    },
+    {
+      "ordinal": 187,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_program",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_program"
+    },
+    {
+      "ordinal": 188,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_use_imports",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_use_imports"
+    },
+    {
+      "ordinal": 189,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_use_edges_have_use_context",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_use_edges_have_use_context"
+    },
+    {
+      "ordinal": 190,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_calls",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_calls"
+    },
+    {
+      "ordinal": 191,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_function_call",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_function_call"
+    },
+    {
+      "ordinal": 192,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_case_insensitive_names",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_case_insensitive_names"
+    },
+    {
+      "ordinal": 193,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_finds_derived_type",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_finds_derived_type"
+    },
+    {
+      "ordinal": 194,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_parameter_and_return_type_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_parameter_and_return_type_contexts"
+    },
+    {
+      "ordinal": 195,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_no_dangling_edges"
+    },
+    {
+      "ordinal": 196,
+      "upstream_nodeid": "tests/test_languages.py::test_fortran_capital_F_parses_preprocessed",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_fortran_capital_F_parses_preprocessed"
+    },
+    {
+      "ordinal": 197,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_no_error"
+    },
+    {
+      "ordinal": 198,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psm1_dispatched_and_extracted",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psm1_dispatched_and_extracted"
+    },
+    {
+      "ordinal": 199,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_finds_class_and_method",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_finds_class_and_method"
+    },
+    {
+      "ordinal": 200,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_class_base_type_emits_inherits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_class_base_type_emits_inherits_edge"
+    },
+    {
+      "ordinal": 201,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_property_field_type_context",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_property_field_type_context"
+    },
+    {
+      "ordinal": 202,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_method_parameter_and_return_type_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_method_parameter_and_return_type_contexts"
+    },
+    {
+      "ordinal": 203,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_import_module_emits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_import_module_emits_edge"
+    },
+    {
+      "ordinal": 204,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_import_module_with_name_param",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_import_module_with_name_param"
+    },
+    {
+      "ordinal": 205,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_dot_source_forward_slash_emits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_dot_source_forward_slash_emits_edge"
+    },
+    {
+      "ordinal": 206,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_dot_source_backslash_emits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_dot_source_backslash_emits_edge"
+    },
+    {
+      "ordinal": 207,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_import_module_inside_function_emits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_import_module_inside_function_emits_edge"
+    },
+    {
+      "ordinal": 208,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_import_module_not_a_raw_call",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_import_module_not_a_raw_call"
+    },
+    {
+      "ordinal": 209,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_dot_source_inside_function_emits_edge",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_dot_source_inside_function_emits_edge"
+    },
+    {
+      "ordinal": 210,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_dispatched",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_dispatched"
+    },
+    {
+      "ordinal": 211,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_no_error"
+    },
+    {
+      "ordinal": 212,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_has_file_node",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_has_file_node"
+    },
+    {
+      "ordinal": 213,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_root_module",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_root_module"
+    },
+    {
+      "ordinal": 214,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_nested_modules",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_nested_modules"
+    },
+    {
+      "ordinal": 215,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_required_modules_string",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_required_modules_string"
+    },
+    {
+      "ordinal": 216,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_required_modules_hashtable",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_required_modules_hashtable"
+    },
+    {
+      "ordinal": 217,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_no_moduleversion_as_edge",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_no_moduleversion_as_edge"
+    },
+    {
+      "ordinal": 218,
+      "upstream_nodeid": "tests/test_languages.py::test_powershell_psd1_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "julia_fortran_powershell::test_powershell_psd1_no_dangling_edges"
+    },
+    {
+      "ordinal": 219,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_dynamic_import_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_dynamic_import_no_error"
+    },
+    {
+      "ordinal": 220,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_dynamic_import_extracts_edges",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_dynamic_import_extracts_edges"
+    },
+    {
+      "ordinal": 221,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_dynamic_import_confidence",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_dynamic_import_confidence"
+    },
+    {
+      "ordinal": 222,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_dynamic_import_source_is_function",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_dynamic_import_source_is_function"
+    },
+    {
+      "ordinal": 223,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_no_dynamic_import_in_sync_fn",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_no_dynamic_import_in_sync_fn"
+    },
+    {
+      "ordinal": 224,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_dynamic_template_literal_skipped",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_dynamic_template_literal_skipped"
+    },
+    {
+      "ordinal": 225,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_static_template_literal_resolved",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_static_template_literal_resolved"
+    },
+    {
+      "ordinal": 226,
+      "upstream_nodeid": "tests/test_languages.py::test_js_local_const_does_not_emit_phantom_node",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_js_local_const_does_not_emit_phantom_node"
+    },
+    {
+      "ordinal": 227,
+      "upstream_nodeid": "tests/test_languages.py::test_js_module_level_arrow_produces_node_and_call_edges",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_js_module_level_arrow_produces_node_and_call_edges"
+    },
+    {
+      "ordinal": 228,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_local_const_does_not_emit_phantom_node",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_local_const_does_not_emit_phantom_node"
+    },
+    {
+      "ordinal": 229,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_constructor_injection_calls_edge",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_constructor_injection_calls_edge"
+    },
+    {
+      "ordinal": 230,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_this_field_receiver_not_same_file_collision",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_this_field_receiver_not_same_file_collision"
+    },
+    {
+      "ordinal": 231,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_injected_field_resolves_to_typed_class_not_same_named_collision",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_injected_field_resolves_to_typed_class_not_same_named_collision"
+    },
+    {
+      "ordinal": 232,
+      "upstream_nodeid": "tests/test_languages.py::test_ts_injected_field_ambiguous_type_emits_no_edge",
+      "rust_target": "language_parity",
+      "rust_test": "typescript_dynamic_and_injection::test_ts_injected_field_ambiguous_type_emits_no_edge"
+    },
+    {
+      "ordinal": 233,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_no_error",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_no_error"
+    },
+    {
+      "ordinal": 234,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_finds_headings",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_finds_headings"
+    },
+    {
+      "ordinal": 235,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_finds_nested_heading",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_finds_nested_heading"
+    },
+    {
+      "ordinal": 236,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_skips_fenced_code_blocks",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_skips_fenced_code_blocks"
+    },
+    {
+      "ordinal": 237,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_contains_edges",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_contains_edges"
+    },
+    {
+      "ordinal": 238,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_fenced_heading_not_parsed",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_fenced_heading_not_parsed"
+    },
+    {
+      "ordinal": 239,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_no_dangling_edges",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_no_dangling_edges"
+    },
+    {
+      "ordinal": 240,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_link_edges_emitted",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_link_edges_emitted"
+    },
+    {
+      "ordinal": 241,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_link_skips_external_and_images",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_link_skips_external_and_images"
+    },
+    {
+      "ordinal": 242,
+      "upstream_nodeid": "tests/test_languages.py::test_markdown_link_edges_resolve_to_real_nodes",
+      "rust_target": "lib",
+      "rust_test": "fallback::tests::upstream_test_markdown_link_edges_resolve_to_real_nodes"
+    },
+    {
+      "ordinal": 243,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_no_error"
+    },
+    {
+      "ordinal": 244,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_finds_class"
+    },
+    {
+      "ordinal": 245,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_finds_methods",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_finds_methods"
+    },
+    {
+      "ordinal": 246,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_finds_imports",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_finds_imports"
+    },
+    {
+      "ordinal": 247,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_import_edges_have_import_context",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_import_edges_have_import_context"
+    },
+    {
+      "ordinal": 248,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_no_dangling_edges"
+    },
+    {
+      "ordinal": 249,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_extends_edge",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_extends_edge"
+    },
+    {
+      "ordinal": 250,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_implements_edge",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_implements_edge"
+    },
+    {
+      "ordinal": 251,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_spock_finds_class",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_spock_finds_class"
+    },
+    {
+      "ordinal": 252,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_spock_finds_feature_methods",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_spock_finds_feature_methods"
+    },
+    {
+      "ordinal": 253,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_spock_finds_method_with_apostrophe",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_spock_finds_method_with_apostrophe"
+    },
+    {
+      "ordinal": 254,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_spock_preserves_import_edges",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_spock_preserves_import_edges"
+    },
+    {
+      "ordinal": 255,
+      "upstream_nodeid": "tests/test_languages.py::test_groovy_spock_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "groovy::test_groovy_spock_no_dangling_edges"
+    },
+    {
+      "ordinal": 256,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_no_error"
+    },
+    {
+      "ordinal": 257,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_finds_global_proc",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_finds_global_proc"
+    },
+    {
+      "ordinal": 258,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_finds_type_definition",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_finds_type_definition"
+    },
+    {
+      "ordinal": 259,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_qualifies_proc_with_type_path",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_qualifies_proc_with_type_path"
+    },
+    {
+      "ordinal": 260,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_finds_path_form_proc_definition",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_finds_path_form_proc_definition"
+    },
+    {
+      "ordinal": 261,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_emits_include_edge",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_emits_include_edge"
+    },
+    {
+      "ordinal": 262,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_unresolved_include_flagged_external",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_unresolved_include_flagged_external"
+    },
+    {
+      "ordinal": 263,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_resolves_in_file_calls",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_resolves_in_file_calls"
+    },
+    {
+      "ordinal": 264,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_ambiguous_member_call_left_unresolved",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_ambiguous_member_call_left_unresolved"
+    },
+    {
+      "ordinal": 265,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_emits_new_as_instantiates",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_emits_new_as_instantiates"
+    },
+    {
+      "ordinal": 266,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_call_edges_have_call_context",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_call_edges_have_call_context"
+    },
+    {
+      "ordinal": 267,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_no_dangling_edges"
+    },
+    {
+      "ordinal": 268,
+      "upstream_nodeid": "tests/test_languages.py::test_dm_super_call_not_emitted",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dm_super_call_not_emitted"
+    },
+    {
+      "ordinal": 269,
+      "upstream_nodeid": "tests/test_languages.py::test_dmi_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmi_no_error"
+    },
+    {
+      "ordinal": 270,
+      "upstream_nodeid": "tests/test_languages.py::test_dmi_emits_state_nodes",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmi_emits_state_nodes"
+    },
+    {
+      "ordinal": 271,
+      "upstream_nodeid": "tests/test_languages.py::test_dmi_state_contained_by_file",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmi_state_contained_by_file"
+    },
+    {
+      "ordinal": 272,
+      "upstream_nodeid": "tests/test_languages.py::test_dmm_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmm_no_error"
+    },
+    {
+      "ordinal": 273,
+      "upstream_nodeid": "tests/test_languages.py::test_dmm_extracts_type_paths_as_uses_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmm_extracts_type_paths_as_uses_edges"
+    },
+    {
+      "ordinal": 274,
+      "upstream_nodeid": "tests/test_languages.py::test_dmm_strips_var_overrides",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmm_strips_var_overrides"
+    },
+    {
+      "ordinal": 275,
+      "upstream_nodeid": "tests/test_languages.py::test_dmm_handles_multiline_tile_definition",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmm_handles_multiline_tile_definition"
+    },
+    {
+      "ordinal": 276,
+      "upstream_nodeid": "tests/test_languages.py::test_dmm_skips_grid_section",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmm_skips_grid_section"
+    },
+    {
+      "ordinal": 277,
+      "upstream_nodeid": "tests/test_languages.py::test_dmf_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmf_no_error"
+    },
+    {
+      "ordinal": 278,
+      "upstream_nodeid": "tests/test_languages.py::test_dmf_extracts_windows",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmf_extracts_windows"
+    },
+    {
+      "ordinal": 279,
+      "upstream_nodeid": "tests/test_languages.py::test_dmf_elem_labels_carry_control_type",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmf_elem_labels_carry_control_type"
+    },
+    {
+      "ordinal": 280,
+      "upstream_nodeid": "tests/test_languages.py::test_dmf_elem_under_window",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmf_elem_under_window"
+    },
+    {
+      "ordinal": 281,
+      "upstream_nodeid": "tests/test_languages.py::test_dmf_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dm_family::test_dmf_no_dangling_edges"
+    },
+    {
+      "ordinal": 282,
+      "upstream_nodeid": "tests/test_languages.py::test_sln_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_sln_no_error"
+    },
+    {
+      "ordinal": 283,
+      "upstream_nodeid": "tests/test_languages.py::test_sln_finds_projects",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_sln_finds_projects"
+    },
+    {
+      "ordinal": 284,
+      "upstream_nodeid": "tests/test_languages.py::test_sln_contains_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_sln_contains_edges"
+    },
+    {
+      "ordinal": 285,
+      "upstream_nodeid": "tests/test_languages.py::test_sln_project_dependency_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_sln_project_dependency_edges"
+    },
+    {
+      "ordinal": 286,
+      "upstream_nodeid": "tests/test_languages.py::test_csproj_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_csproj_no_error"
+    },
+    {
+      "ordinal": 287,
+      "upstream_nodeid": "tests/test_languages.py::test_csproj_finds_packages",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_csproj_finds_packages"
+    },
+    {
+      "ordinal": 288,
+      "upstream_nodeid": "tests/test_languages.py::test_csproj_finds_project_references",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_csproj_finds_project_references"
+    },
+    {
+      "ordinal": 289,
+      "upstream_nodeid": "tests/test_languages.py::test_csproj_finds_target_framework",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_csproj_finds_target_framework"
+    },
+    {
+      "ordinal": 290,
+      "upstream_nodeid": "tests/test_languages.py::test_csproj_finds_sdk",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_csproj_finds_sdk"
+    },
+    {
+      "ordinal": 291,
+      "upstream_nodeid": "tests/test_languages.py::test_xaml_finds_class_and_event_references",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_xaml_finds_class_and_event_references"
+    },
+    {
+      "ordinal": 292,
+      "upstream_nodeid": "tests/test_languages.py::test_razor_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_razor_no_error"
+    },
+    {
+      "ordinal": 293,
+      "upstream_nodeid": "tests/test_languages.py::test_razor_finds_using_directives",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_razor_finds_using_directives"
+    },
+    {
+      "ordinal": 294,
+      "upstream_nodeid": "tests/test_languages.py::test_razor_finds_component_references",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_razor_finds_component_references"
+    },
+    {
+      "ordinal": 295,
+      "upstream_nodeid": "tests/test_languages.py::test_razor_finds_inherits",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_razor_finds_inherits"
+    },
+    {
+      "ordinal": 296,
+      "upstream_nodeid": "tests/test_languages.py::test_razor_finds_code_block_methods",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_razor_finds_code_block_methods"
+    },
+    {
+      "ordinal": 297,
+      "upstream_nodeid": "tests/test_languages.py::test_razor_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_razor_no_dangling_edges"
+    },
+    {
+      "ordinal": 298,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_class_extraction",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_class_extraction"
+    },
+    {
+      "ordinal": 299,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_enum_extraction",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_enum_extraction"
+    },
+    {
+      "ordinal": 300,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_interface_extraction",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_interface_extraction"
+    },
+    {
+      "ordinal": 301,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_interface_extends",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_interface_extends"
+    },
+    {
+      "ordinal": 302,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_method_extraction",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_method_extraction"
+    },
+    {
+      "ordinal": 303,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_contains_and_method_relations",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_contains_and_method_relations"
+    },
+    {
+      "ordinal": 304,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_soql_uses_edge",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_soql_uses_edge"
+    },
+    {
+      "ordinal": 305,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_dml_uses_edge",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_dml_uses_edge"
+    },
+    {
+      "ordinal": 306,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_file_node_present",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_file_node_present"
+    },
+    {
+      "ordinal": 307,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_trigger_extraction",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_trigger_extraction"
+    },
+    {
+      "ordinal": 308,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_trigger_uses_sobject",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_trigger_uses_sobject"
+    },
+    {
+      "ordinal": 309,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_missing_file_returns_empty",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_missing_file_returns_empty"
+    },
+    {
+      "ordinal": 310,
+      "upstream_nodeid": "tests/test_languages.py::test_apex_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_apex_no_dangling_edges"
+    },
+    {
+      "ordinal": 311,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_no_error",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_no_error"
+    },
+    {
+      "ordinal": 312,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_splits_inherits_and_implements",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_splits_inherits_and_implements"
+    },
+    {
+      "ordinal": 313,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_field_parameter_return_and_generic_contexts",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_field_parameter_return_and_generic_contexts"
+    },
+    {
+      "ordinal": 314,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_qualified_field_references",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_qualified_field_references"
+    },
+    {
+      "ordinal": 315,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_does_not_emit_type_parameter_refs",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_does_not_emit_type_parameter_refs"
+    },
+    {
+      "ordinal": 316,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_preserves_existing_module_extraction",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_preserves_existing_module_extraction"
+    },
+    {
+      "ordinal": 317,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_missing_file_returns_empty",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_missing_file_returns_empty"
+    },
+    {
+      "ordinal": 318,
+      "upstream_nodeid": "tests/test_languages.py::test_systemverilog_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "dotnet_apex_systemverilog::test_systemverilog_no_dangling_edges"
+    },
+    {
+      "ordinal": 319,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_header_routes_to_cpp_extractor",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_cpp_header_routes_to_cpp_extractor"
+    },
+    {
+      "ordinal": 320,
+      "upstream_nodeid": "tests/test_languages.py::test_plain_c_header_stays_on_c_extractor",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_plain_c_header_stays_on_c_extractor"
+    },
+    {
+      "ordinal": 321,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_paired_single_class_node",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_cpp_paired_single_class_node"
+    },
+    {
+      "ordinal": 322,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_paired_method_decl_and_def_are_one_node",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_cpp_paired_method_decl_and_def_are_one_node"
+    },
+    {
+      "ordinal": 323,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_paired_includes_resolve_to_real_header",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_cpp_paired_includes_resolve_to_real_header"
+    },
+    {
+      "ordinal": 324,
+      "upstream_nodeid": "tests/test_languages.py::test_cpp_paired_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_cpp_paired_no_dangling_edges"
+    },
+    {
+      "ordinal": 325,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_header_with_import_routes_to_objc",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_objc_header_with_import_routes_to_objc"
+    },
+    {
+      "ordinal": 326,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_paired_single_class_methods_not_duplicated",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_objc_paired_single_class_methods_not_duplicated"
+    },
+    {
+      "ordinal": 327,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_bridging_header_not_isolated",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_objc_bridging_header_not_isolated"
+    },
+    {
+      "ordinal": 328,
+      "upstream_nodeid": "tests/test_languages.py::test_objc_paired_no_dangling_edges",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_objc_paired_no_dangling_edges"
+    },
+    {
+      "ordinal": 329,
+      "upstream_nodeid": "tests/test_languages.py::test_swift_extension_folds_onto_objc_class",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_swift_extension_folds_onto_objc_class"
+    },
+    {
+      "ordinal": 330,
+      "upstream_nodeid": "tests/test_languages.py::test_decldef_merge_does_not_merge_across_directories",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_decldef_merge_does_not_merge_across_directories"
+    },
+    {
+      "ordinal": 331,
+      "upstream_nodeid": "tests/test_languages.py::test_decldef_merge_does_not_merge_same_name_same_dir_distinct_files",
+      "rust_target": "language_parity",
+      "rust_test": "paired_headers_and_implementations::test_decldef_merge_does_not_merge_same_name_same_dir_distinct_files"
+    }
+  ]
+}

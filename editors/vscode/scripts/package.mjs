@@ -2,6 +2,7 @@ import { chmod, copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/p
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { artifactPaths, stageAgentArtifacts } from '../../../scripts/agent-artifacts.mjs';
 
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = path.resolve(extensionRoot, '..', '..');
@@ -15,9 +16,11 @@ const binDirectory = path.join(extensionRoot, 'bin');
 const destination = path.join(binDirectory, executableName);
 const thirdPartySource = path.join(repositoryRoot, 'THIRD_PARTY_LICENSES.html');
 const thirdPartyDestination = path.join(extensionRoot, 'THIRD_PARTY_LICENSES.html');
+const agentAssetsDestination = path.join(extensionRoot, 'agent-assets');
 const vsceCli = path.join(extensionRoot, 'node_modules', '@vscode', 'vsce', 'vsce');
 const packageJson = JSON.parse(await readFile(path.join(extensionRoot, 'package.json'), 'utf8'));
 let stagedThirdPartyLicenses = false;
+let stagedAgentAssets = false;
 
 try {
   if (!options.binary) {
@@ -44,6 +47,8 @@ try {
     await copyFile(thirdPartySource, thirdPartyDestination);
     stagedThirdPartyLicenses = true;
   }
+  await stageAgentArtifacts(agentAssetsDestination);
+  stagedAgentAssets = true;
 
   const output = options.out
     ? path.resolve(process.cwd(), options.out)
@@ -56,6 +61,7 @@ try {
   await verifyVsix(output, executableName);
 } finally {
   await rm(binDirectory, { recursive: true, force: true });
+  if (stagedAgentAssets) await rm(agentAssetsDestination, { recursive: true, force: true });
   if (stagedThirdPartyLicenses) await rm(thirdPartyDestination, { force: true });
 }
 
@@ -128,6 +134,10 @@ async function verifyVsix(vsixPath, expectedExecutable) {
     throw new Error(`${vsixPath} is missing ${executable} or it is unexpectedly small (${executableSize ?? 0} bytes)`);
   }
   for (const required of ['extension/bin/graphoxide.version', 'extension/THIRD_PARTY_LICENSES.html']) {
+    if (!entries.has(required)) throw new Error(`${vsixPath} is missing ${required}`);
+  }
+  for (const artifact of artifactPaths) {
+    const required = `extension/agent-assets/${artifact}`;
     if (!entries.has(required)) throw new Error(`${vsixPath} is missing ${required}`);
   }
   console.log(`[package] verified ${executable} in ${vsixPath} (${executableSize} bytes)`);

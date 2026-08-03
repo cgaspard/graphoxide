@@ -1,0 +1,995 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_watch.py::test_notify_only_creates_flag",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_notify_only_creates_flag"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_notify_only_creates_flag_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_notify_only_creates_flag_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_notify_only_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_notify_only_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_watched_extensions_includes_code",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_watched_extensions_includes_code"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_watched_extensions_includes_docs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_watched_extensions_includes_docs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_watched_extensions_includes_images",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_watched_extensions_includes_images"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_watched_extensions_excludes_noise",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_watched_extensions_excludes_noise"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_update_no_flag_returns_true",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_update_no_flag_returns_true"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_update_with_flag_returns_true_and_prints",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_update_with_flag_returns_true_and_prints"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_update_does_not_clear_flag",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_update_does_not_clear_flag"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_watch_raises_without_watchdog",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_watch_raises_without_watchdog"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_lock_writes_pid_with_newline",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_lock_writes_pid_with_newline"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_lock_removed_after_release",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_lock_inode_persists_after_release"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_lock_does_not_accumulate_pids_across_runs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_lock_does_not_accumulate_pids_across_runs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_graphify_root_preserves_relative_when_invoked_with_relative_path",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_graphify_root_preserves_relative_when_invoked_with_relative_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_writes_community_name",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_writes_community_name"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_drops_labels_whose_community_changed",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_drops_labels_whose_community_changed"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_keeps_a_visualization_when_over_the_viz_cap",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_keeps_a_visualization_when_over_the_viz_cap"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_update_rebuilds_with_nested_star_gitignore",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_update_rebuilds_with_nested_star_gitignore"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_update_discovers_newly_added_files_and_dirs",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_update_discovers_newly_added_files_and_dirs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_honors_persisted_excludes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_honors_persisted_excludes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_honors_persisted_no_gitignore",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_honors_persisted_no_gitignore"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_graphify_root_preserves_absolute_when_user_supplied",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_graphify_root_preserves_absolute_when_user_supplied"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_deleted_cwd_without_repo_root_returns_false",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_deleted_cwd_without_repo_root_returns_false"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_deleted_cwd_uses_graphify_repo_root",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_deleted_cwd_uses_graphify_repo_root"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_evicts_nodes_from_deleted_files",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_evicts_nodes_from_deleted_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_preserves_hyperedges_for_rebuilt_surviving_source[full-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_preserves_hyperedges_for_rebuilt_surviving_source_full_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_preserves_hyperedges_for_rebuilt_surviving_source[incremental-doc-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_preserves_hyperedges_for_rebuilt_surviving_source_incremental_doc_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_preserves_semantic_edges_from_reextracted_doc[full-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_preserves_semantic_edges_from_reextracted_doc_full_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_preserves_semantic_edges_from_reextracted_doc[incremental-doc-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_preserves_semantic_edges_from_reextracted_doc_incremental_doc_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_prunes_final_deleted_file[full-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_prunes_final_deleted_file_full_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_prunes_final_deleted_file[incremental-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_prunes_final_deleted_file_incremental_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_prunes_renamed_source_not_listed_by_hook",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_prunes_renamed_source_not_listed_by_hook"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_normalizes_preserved_source_paths",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_normalizes_preserved_source_paths"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_prunes_renamed_ast_backed_document",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_prunes_renamed_ast_backed_document"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_evicts_removed_symbol_from_surviving_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_evicts_removed_symbol_from_surviving_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_preupgrade_marker_less_node_one_cycle_lag",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_preupgrade_marker_less_node_one_cycle_lag"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_lock_non_blocking_does_not_clobber_holder",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_lock_non_blocking_does_not_clobber_holder"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_is_idempotent_when_cluster_ids_flap",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_is_idempotent_when_cluster_ids_flap"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_skips_cluster_when_topology_unchanged",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_skips_cluster_when_topology_unchanged"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_watch_handler_honors_graphifyignore",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_watch_handler_honors_graphifyignore"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_watch_loads_graphifyignore_once",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_watch_loads_graphifyignore_once"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_blocks_silent_shrink",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_blocks_silent_shrink"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_allows_force_override",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_allows_force_override"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_allows_explicit_deletions",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_allows_explicit_deletions"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_allows_no_existing_data",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_allows_no_existing_data"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_allows_shrink_within_rebuilt_sources",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_allows_shrink_within_rebuilt_sources"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_blocks_shrink_outside_rebuilt_sources",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_blocks_shrink_outside_rebuilt_sources"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_allows_growth",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_allows_growth"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_unlinks_tmp_on_refuse",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_unlinks_tmp_on_refuse"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_check_shrink_keeps_tmp_when_deletions_declared",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_check_shrink_keeps_tmp_when_deletions_declared"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_prunes_deleted_file_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_prunes_deleted_file_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_accepts_repo_relative_changed_path_for_subdir_root",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_accepts_repo_relative_changed_path_for_subdir_root"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_subdir_preserves_outside_ast_nodes[full-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_subdir_preserves_outside_ast_nodes_full_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_subdir_preserves_outside_ast_nodes[incremental-update]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_subdir_preserves_outside_ast_nodes_incremental_update"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_subdir_survives_absolute_to_relative_invocation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_subdir_survives_absolute_to_relative_invocation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_prunes_legacy_watch_relative_subdir_source",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_prunes_legacy_watch_relative_subdir_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_does_not_update_root_marker_when_write_is_refused",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_does_not_update_root_marker_when_write_is_refused"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_incremental_rename_preserves_symlink_source_path",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_incremental_rename_preserves_symlink_source_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_queue_and_drain_pending_round_trip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_queue_and_drain_pending_round_trip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_drain_pending_dedupes_and_skips_blank_lines",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_drain_pending_dedupes_and_skips_blank_lines"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_queue_pending_noop_on_empty_list",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_queue_pending_noop_on_empty_list"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_queues_on_lock_contention",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_queues_on_lock_contention"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_merges_pending_on_acquire",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_merges_pending_on_acquire"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_drains_late_arrivals",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_drains_late_arrivals"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_full_corpus_skips_pending_queue",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_full_corpus_skips_pending_queue"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_merge_changed_paths_dedupes_in_order",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_merge_changed_paths_dedupes_in_order"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_preserves_nodes_from_excluded_but_alive_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_preserves_nodes_from_excluded_but_alive_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_still_evicts_when_excluded_file_is_also_deleted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_still_evicts_when_excluded_file_is_also_deleted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_semantic_doc_not_double_represented_on_full_rebuild",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_semantic_doc_not_double_represented_on_full_rebuild"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_concept_only_semantic_doc_not_double_represented_on_full_rebuild",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_concept_only_semantic_doc_not_double_represented_on_full_rebuild"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_incremental_preserves_semantic_doc_nodes_and_edges[doc-only]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_incremental_preserves_semantic_doc_nodes_and_edges_doc_only"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_incremental_preserves_semantic_doc_nodes_and_edges[doc-plus-code]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_incremental_preserves_semantic_doc_nodes_and_edges_doc_plus_code"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_incremental_preserves_concept_only_semantic_doc_nodes_and_edges[doc-only]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_incremental_preserves_concept_only_semantic_doc_nodes_and_edges_doc_only"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_incremental_preserves_concept_only_semantic_doc_nodes_and_edges[doc-plus-code]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_incremental_preserves_concept_only_semantic_doc_nodes_and_edges_doc_plus_code"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_quick_scans_doc_without_semantic_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_quick_scans_doc_without_semantic_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_full_rebuild_preserves_semantic_backed_doc_ast_layer",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_full_rebuild_preserves_semantic_backed_doc_ast_layer"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_full_rebuild_regenerates_docs_with_legacy_unstamped_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_full_rebuild_regenerates_docs_with_legacy_unstamped_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_full_rebuild_drops_stale_ast_for_reextracted_code",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_full_rebuild_drops_stale_ast_for_reextracted_code"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_code_only_semantic_doc_not_double_represented_on_full_rebuild",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_code_only_semantic_doc_not_double_represented_on_full_rebuild"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_evicts_semantic_nodes_from_deleted_non_ast_source",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_evicts_semantic_nodes_from_deleted_non_ast_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_preserves_remote_source_across_repeated_updates",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_preserves_remote_source_across_repeated_updates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_incremental_preserves_present_non_ast_source",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_incremental_preserves_present_non_ast_source"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_refuses_overwrite_when_existing_graph_over_size_cap",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_refuses_overwrite_when_existing_graph_over_size_cap"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_refuses_overwrite_when_existing_graph_corrupt[no-cluster]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_refuses_overwrite_when_existing_graph_corrupt_no_cluster"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_refuses_overwrite_when_existing_graph_corrupt[clustered]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_refuses_overwrite_when_existing_graph_corrupt_clustered"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_force_does_not_clobber_unreadable_graph",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_force_does_not_clobber_unreadable_graph"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_readable_graph_still_preserves_semantic_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_readable_graph_still_preserves_semantic_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_inherits_directed_flag_clustered",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_inherits_directed_flag_clustered"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_inherits_directed_flag_no_cluster",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_inherits_directed_flag_no_cluster"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_keeps_undirected_graph_undirected",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_keeps_undirected_graph_undirected"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch.py::test_rebuild_code_fresh_build_defaults_undirected",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_rebuild_code_fresh_build_defaults_undirected"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch_manifest_location.py::test_manifest_lands_in_the_target_not_the_cwd[clustered]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_manifest_lands_in_the_target_not_the_cwd_clustered"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch_manifest_location.py::test_manifest_lands_in_the_target_not_the_cwd[no-cluster]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_manifest_lands_in_the_target_not_the_cwd_no_cluster"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch_manifest_location.py::test_second_run_reaches_the_same_topology_early_return",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_second_run_reaches_the_same_topology_early_return"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch_manifest_location.py::test_update_does_not_destroy_the_cwd_projects_own_manifest",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_update_does_not_destroy_the_cwd_projects_own_manifest"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch_manifest_location.py::test_relative_target_manifest_keys_stay_portable",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_relative_target_manifest_keys_stay_portable"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch_manifest_location.py::test_built_at_commit_comes_from_the_target_repo",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_built_at_commit_comes_from_the_target_repo"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_watch_manifest_location.py::test_relative_target_manifest_is_consumable_by_detect_incremental",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_relative_target_manifest_is_consumable_by_detect_incremental"
+        }
+      ]
+    }
+  ]
+}

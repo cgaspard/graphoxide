@@ -3,4 +3,5 @@ node_modules/
 .vscode-test/
 *.vsix
 bin/
+agent-assets/
 THIRD_PARTY_LICENSES.html

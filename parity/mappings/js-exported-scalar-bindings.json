@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_js_exported_scalar_bindings.py::test_exported_scalar_bindings_emit_nodes[.js]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_exported_scalar_bindings_emit_nodes"}]},
+    {"upstream":"tests/test_js_exported_scalar_bindings.py::test_exported_scalar_bindings_emit_nodes[.ts]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_exported_scalar_bindings_emit_nodes"}]},
+    {"upstream":"tests/test_js_exported_scalar_bindings.py::test_exported_scalar_fix_skips_unsupported_binding_patterns","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_exported_scalar_fix_skips_unsupported_binding_patterns"}]},
+    {"upstream":"tests/test_js_exported_scalar_bindings.py::test_exported_scalar_binding_satisfies_named_import_target","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_exported_scalar_binding_satisfies_named_import_target"}]}
+  ]
+}

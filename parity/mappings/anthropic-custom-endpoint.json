@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_anthropic_custom_endpoint.py::test_claude_defaults_without_env","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_claude_defaults_without_env"}]},
+    {"upstream":"tests/test_anthropic_custom_endpoint.py::test_claude_base_url_and_model_env_override","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_claude_base_url_and_model_env_override"}]}
+  ]
+}

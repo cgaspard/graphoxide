@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_import_self_loops.py::test_python_external_import_matching_current_basename_has_no_self_loop[src/contracting/stdlib/builtins.py-import builtins\\n]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_python_external_import_matching_current_basename_has_no_self_loop"}]},
+    {"upstream":"tests/test_import_self_loops.py::test_python_external_import_matching_current_basename_has_no_self_loop[playground/services/contracting.py-from contracting import constants\\n]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_python_external_import_matching_current_basename_has_no_self_loop"}]},
+    {"upstream":"tests/test_import_self_loops.py::test_rust_import_matching_current_basename_has_no_self_loop[packages/compiler/src/fixture.rs-mod tests { use crate::fixture::Fixture; }\\n]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_rust_import_matching_current_basename_has_no_self_loop"}]},
+    {"upstream":"tests/test_import_self_loops.py::test_rust_import_matching_current_basename_has_no_self_loop[packages/zk/src/poseidon.rs-use ark_crypto_primitives::sponge::poseidon::{PoseidonConfig, PoseidonSponge};\\n]","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_rust_import_matching_current_basename_has_no_self_loop"}]},
+    {"upstream":"tests/test_import_self_loops.py::test_recursive_call_self_loop_is_preserved","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_recursive_call_self_loop_is_preserved"}]}
+  ]
+}

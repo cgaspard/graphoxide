@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_replace_or_append_section.py::test_inline_reference_to_marker_is_not_treated_as_the_section",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_inline_reference_to_marker_is_not_treated_as_the_section"}]
+    },
+    {
+      "upstream": "tests/test_replace_or_append_section.py::test_real_section_is_replaced_in_place",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_real_section_is_replaced_in_place"}]
+    },
+    {
+      "upstream": "tests/test_replace_or_append_section.py::test_reinstall_is_idempotent",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_reinstall_is_idempotent"}]
+    },
+    {
+      "upstream": "tests/test_replace_or_append_section.py::test_append_when_no_real_heading",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_append_when_no_real_heading"}]
+    },
+    {
+      "upstream": "tests/test_replace_or_append_section.py::test_prefers_last_heading_when_duplicated",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_prefers_last_heading_when_duplicated"}]
+    }
+  ]
+}

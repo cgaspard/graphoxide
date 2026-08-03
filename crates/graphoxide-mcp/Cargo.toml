@@ -16,3 +16,9 @@ serde_json.workspace = true
 tracing.workspace = true
 rmcp.workspace = true
 tokio.workspace = true
+regex.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

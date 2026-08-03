@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_language_resolvers.py::test_default_registry_contains_swift_then_python","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_default_registry_contains_swift_then_python"}]},
+    {"upstream":"tests/test_language_resolvers.py::test_resolver_runs_only_when_suffix_present","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_resolver_runs_only_when_suffix_present"}]},
+    {"upstream":"tests/test_language_resolvers.py::test_resolvers_run_in_given_order","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_resolvers_run_in_given_order"}]},
+    {"upstream":"tests/test_language_resolvers.py::test_failing_resolver_is_isolated","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_failing_resolver_is_isolated"}]},
+    {"upstream":"tests/test_language_resolvers.py::test_resolver_mutates_edges_in_place","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_resolver_mutates_edges_in_place"}]}
+  ]
+}

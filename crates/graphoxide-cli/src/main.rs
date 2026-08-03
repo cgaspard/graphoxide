@@ -5,8 +5,10 @@
 
 mod site;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
-use std::{io::Write, path::PathBuf};
+use graphoxide_cli::watch as watch_service;
+use std::{fs, io::Write, path::PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -21,10 +23,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Headless extraction: AST parse a folder and write graphoxide-out/
+    /// Headless deterministic extraction into graphoxide-out/
     Extract {
+        #[arg(default_value = ".")]
         path: PathBuf,
-        /// Offline AST-only extraction (the Rust core's default)
+        /// Restrict extraction to code and configuration inputs
         #[arg(long)]
         code_only: bool,
         /// Skip clustering, write raw extraction only
@@ -33,6 +36,44 @@ enum Command {
         /// Full re-scan: skip the incremental manifest gate
         #[arg(long)]
         force: bool,
+        /// Include a read-only PostgreSQL catalog, optionally using this DSN.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        postgres: Option<String>,
+        /// Permit a known-incomplete extraction to bypass shrink protection.
+        #[arg(long)]
+        allow_partial: bool,
+        /// Emit extraction stage durations to stderr.
+        #[arg(long)]
+        timing: bool,
+        /// Place the managed graphoxide-out directory beneath this root.
+        #[arg(long, visible_alias = "output")]
+        out: Option<PathBuf>,
+        /// Exclude a path or ignore-style pattern; repeated flags replace the persisted set.
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Ignore VCS ignore files while continuing to honor .graphoxideignore/.graphifyignore.
+        #[arg(long)]
+        no_gitignore: bool,
+    },
+    /// Audit extraction and graph construction for silent loss or malformed facts
+    Audit {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit a machine-readable JSON report
+        #[arg(long)]
+        json: bool,
+        /// Exit unsuccessfully when extraction or graph construction loses facts
+        #[arg(long)]
+        strict: bool,
+        /// Bypass the incremental AST cache
+        #[arg(long)]
+        force: bool,
+    },
+    /// Inspect a graph/extraction JSON file for parallel-edge collapse risk
+    Diagnose {
+        /// Raw compatibility arguments: `multigraph [--graph PATH] [OPTIONS]`.
+        #[arg(allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
     },
     /// Re-extract code files and update the graph (no LLM needed)
     Update {
@@ -41,6 +82,9 @@ enum Command {
         /// Allow an intentional graph reduction after files or relationships are removed
         #[arg(long)]
         force: bool,
+        /// Preserve the raw, unclustered extraction shape.
+        #[arg(long)]
+        no_cluster: bool,
     },
     /// BFS traversal of graph.json for a question
     Query {
@@ -53,6 +97,9 @@ enum Command {
         /// Traverse depth-first instead of breadth-first
         #[arg(long)]
         dfs: bool,
+        /// Restrict traversal to a relationship context (call, import, type, structure)
+        #[arg(long = "context")]
+        contexts: Vec<String>,
     },
     /// Shortest path between two nodes
     Path {
@@ -78,6 +125,7 @@ enum Command {
         graph: PathBuf,
     },
     /// List the most connected nodes (architectural hubs)
+    #[command(alias = "god_nodes")]
     GodNodes {
         #[arg(long, default_value_t = 10)]
         top: usize,
@@ -86,16 +134,73 @@ enum Command {
         #[arg(long, default_value = "graphoxide-out/graph.json")]
         graph: PathBuf,
     },
+    /// Save a Q&A outcome into work memory for the next graph/reflection update
+    SaveResult {
+        #[arg(long)]
+        question: String,
+        #[arg(long, required_unless_present = "answer_file")]
+        answer: Option<String>,
+        /// Read a long or multiline answer from a UTF-8 file.
+        #[arg(long)]
+        answer_file: Option<PathBuf>,
+        #[arg(long = "type", default_value = "query")]
+        query_type: String,
+        #[arg(long, num_args = 0..)]
+        nodes: Vec<String>,
+        #[arg(long, value_parser = ["useful", "dead_end", "corrected"])]
+        outcome: Option<String>,
+        #[arg(long)]
+        correction: Option<String>,
+        #[arg(long, default_value = "graphoxide-out/memory")]
+        memory_dir: PathBuf,
+    },
+    /// Aggregate saved work-memory outcomes into deterministic lessons
+    Reflect {
+        #[arg(long, default_value = "graphoxide-out/memory")]
+        memory_dir: PathBuf,
+        #[arg(long, default_value = "graphoxide-out/reflections/LESSONS.md")]
+        out: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        #[arg(long)]
+        analysis: Option<PathBuf>,
+        #[arg(long)]
+        labels: Option<PathBuf>,
+        #[arg(long, default_value_t = 30.0)]
+        half_life_days: f64,
+        #[arg(long, default_value_t = 2)]
+        min_corroboration: usize,
+        /// Skip when the lessons file is already newer than every input.
+        #[arg(long)]
+        if_stale: bool,
+    },
     /// Rerun clustering on an existing graph.json
-    ClusterOnly { path: PathBuf },
+    ClusterOnly {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Compatibility flag: do not generate an HTML visualization.
+        #[arg(long)]
+        no_viz: bool,
+        /// Compatibility flag: retain deterministic/default labels.
+        #[arg(long)]
+        no_label: bool,
+    },
     /// Name graph communities through an OpenAI- or Anthropic-compatible HTTP endpoint
     Label {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
+        backend: Option<String>,
+        #[arg(long)]
         model: Option<String>,
         #[arg(long)]
         missing_only: bool,
+        #[arg(long, default_value_t = 4)]
+        max_concurrency: usize,
+        #[arg(long, default_value_t = graphoxide_graph::DEFAULT_BATCH_SIZE)]
+        batch_size: usize,
     },
     /// Generate GRAPH_REPORT.md from an existing graph
     Report {
@@ -104,13 +209,24 @@ enum Command {
         #[arg(long, default_value = "graphoxide-out/GRAPH_REPORT.md")]
         output: PathBuf,
     },
-    /// Export an existing graph as html, callflow-html, graphml, cypher, obsidian, or json
+    /// Export an existing graph as HTML, callflow HTML, GraphML, Cypher, wiki, Obsidian, or JSON
     Export {
-        #[arg(value_parser = ["html", "callflow-html", "graphml", "cypher", "obsidian", "json"])]
+        #[arg(value_parser = ["html", "callflow-html", "graphml", "cypher", "neo4j", "falkordb", "wiki", "obsidian", "json"])]
         format: String,
-        output: PathBuf,
-        #[arg(long, default_value = "graphoxide-out/graph.json")]
-        graph: PathBuf,
+        /// Output path, or the graph path for `callflow-html --output ...`.
+        positional: Option<PathBuf>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Custom Obsidian vault directory.
+        #[arg(long = "dir")]
+        directory: Option<PathBuf>,
+        /// Remove/skip the interactive visualization rather than rendering it.
+        #[arg(long)]
+        no_viz: bool,
+        #[arg(long, default_value_t = 15)]
+        max_sections: usize,
     },
     /// Measure query latency on an existing graph
     Benchmark {
@@ -124,7 +240,7 @@ enum Command {
     MergeGraphs {
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
-        #[arg(long)]
+        #[arg(long, alias = "out")]
         output: PathBuf,
         #[arg(long)]
         force: bool,
@@ -166,6 +282,31 @@ enum Command {
     },
     /// Watch a project and rebuild after source changes
     Watch { path: PathBuf },
+    /// Install a coding-agent skill and its project integration
+    Install {
+        /// Host name, accepted positionally for compatibility
+        platform: Option<String>,
+        /// Host name, accepted as an explicit flag
+        #[arg(long = "platform")]
+        platform_flag: Option<String>,
+        /// Install the skill into the current project instead of the user scope
+        #[arg(long)]
+        project: bool,
+        /// Make Claude's first un-oriented source read fail once per session
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Remove coding-agent integrations
+    Uninstall {
+        /// Host name, accepted positionally for compatibility; omit to remove all
+        platform: Option<String>,
+        /// Host name, accepted as an explicit flag
+        #[arg(long = "platform")]
+        platform_flag: Option<String>,
+        /// Remove only project-scoped artifacts
+        #[arg(long)]
+        project: bool,
+    },
     /// Install, remove, or inspect git hooks
     Hook {
         #[command(subcommand)]
@@ -176,10 +317,82 @@ enum Command {
         #[command(subcommand)]
         command: ClaudeCommand,
     },
+    /// Run `codebuddy install` or `codebuddy uninstall` integration management
+    #[command(name = "codebuddy")]
+    CodeBuddy {
+        #[command(subcommand)]
+        command: PlatformInstallCommand,
+    },
+    /// Install or remove the Devin skill at ~/.config/devin/skills/graphoxide
+    Devin {
+        #[command(subcommand)]
+        command: PlatformInstallCommand,
+    },
+    /// Run `agents install`/`uninstall`; `skills` is an equivalent alias
+    #[command(alias = "skills")]
+    Agents {
+        #[command(subcommand)]
+        command: PlatformInstallCommand,
+    },
+    /// Install or remove Codex integration
+    Codex {
+        #[command(subcommand)]
+        command: PlatformInstallCommand,
+    },
+    /// Install or remove Antigravity integration
+    Antigravity {
+        #[command(subcommand)]
+        command: PlatformInstallCommand,
+    },
+    /// Install or remove Amp integration
+    Amp {
+        #[command(subcommand)]
+        command: PlatformInstallCommand,
+    },
     /// Claude Code PreToolUse hook that nudges graph queries
-    HookGuard,
-    /// Start the MCP stdio server
-    Serve,
+    HookGuard {
+        /// Host hook contract: search, read, or gemini
+        mode: Option<String>,
+        /// Compatibility flag for Graphify's opt-in strict read guard
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Codex PreToolUse compatibility hook (recognized no-op)
+    HookCheck,
+    /// Internal: detach a supervised Git-hook rebuild
+    #[command(hide = true)]
+    HookLaunch {
+        mode: String,
+        root: PathBuf,
+        log: PathBuf,
+    },
+    /// Internal: supervise a Git-hook rebuild and enforce its timeout
+    #[command(hide = true)]
+    HookSupervise { mode: String, root: PathBuf },
+    /// Internal: execute a Git-hook rebuild
+    #[command(hide = true)]
+    HookRebuild { mode: String, root: PathBuf },
+    /// Start the MCP server over stdio or Streamable HTTP
+    Serve {
+        #[arg(default_value = "graphoxide-out/graph.json")]
+        graph: PathBuf,
+        #[arg(long, value_parser = ["stdio", "http"], default_value = "stdio")]
+        transport: String,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long = "path", default_value = "/mcp")]
+        mount_path: String,
+        #[arg(long)]
+        json_response: bool,
+        #[arg(long)]
+        stateless: bool,
+        #[arg(long, default_value_t = 3600.0)]
+        session_timeout: f64,
+    },
     /// Preview the Graphoxide website on localhost
     Site {
         /// Directory containing the static website
@@ -226,15 +439,107 @@ enum ClaudeCommand {
     Install {
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[arg(long)]
+        project: bool,
+        /// Make the first un-oriented source read fail once per session
+        #[arg(long)]
+        strict: bool,
     },
     Uninstall {
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[arg(long)]
+        project: bool,
     },
     Status {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum PlatformInstallCommand {
+    Install {
+        #[arg(long)]
+        project: bool,
+    },
+    Uninstall {
+        #[arg(long)]
+        project: bool,
+    },
+}
+
+fn flatten_extractions(
+    extractions: Vec<graphoxide_core::Extraction>,
+) -> graphoxide_core::Extraction {
+    let mut flattened = graphoxide_core::Extraction::default();
+    for extraction in extractions {
+        flattened.nodes.extend(extraction.nodes);
+        flattened.edges.extend(extraction.edges);
+        flattened.hyperedges.extend(extraction.hyperedges);
+    }
+    flattened
+}
+
+fn stale_local_sources(
+    graph: &graphoxide_core::KnowledgeGraph,
+    root: &std::path::Path,
+    live_sources: &[PathBuf],
+) -> Vec<PathBuf> {
+    use std::path::Component;
+
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let live = live_sources
+        .iter()
+        .map(|source| {
+            let source = if source.is_absolute() {
+                source.clone()
+            } else {
+                root.join(source)
+            };
+            fs::canonicalize(&source).unwrap_or(source)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut stale = std::collections::BTreeSet::new();
+    for source in graph
+        .nodes
+        .iter()
+        .map(|node| node.source_file.as_str())
+        .filter(|source| !source.is_empty())
+    {
+        if source.contains("://") || source.contains(":/") || source.contains(":\\") {
+            continue;
+        }
+        let source_path = std::path::Path::new(source);
+        let candidate = if source_path.is_absolute() {
+            if !source_path.starts_with(&root) {
+                continue;
+            }
+            source_path.to_path_buf()
+        } else {
+            if source_path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+            {
+                continue;
+            }
+            root.join(source_path)
+        };
+        let normalized = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if !live.contains(&normalized) {
+            stale.insert(candidate);
+        }
+    }
+    stale.into_iter().collect()
+}
+
+fn emit_extract_timing(enabled: bool, stage: &str, started: std::time::Instant) {
+    if enabled {
+        eprintln!(
+            "[graphoxide timing] {stage}: {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -243,59 +548,206 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Extract {
             path,
-            code_only: _,
+            code_only,
             no_cluster,
             force,
+            postgres,
+            allow_partial,
+            timing,
+            out,
+            exclude,
+            no_gitignore,
         } => {
-            let extractions = graphoxide_extract::extract_project_with_options(&path, force)?;
-            let output = path.join("graphoxide-out/graph.json");
+            let total_started = std::time::Instant::now();
+            let effective_force = graphoxide_cli::extract_cli::force_enabled(
+                force,
+                std::env::var("GRAPHOXIDE_FORCE").ok().as_deref(),
+                std::env::var("GRAPHIFY_FORCE").ok().as_deref(),
+            );
+            let output_directory = managed_output_directory(&path, out.as_deref());
+            let output = output_directory.join("graph.json");
+            let manifest_path = output_directory.join("manifest.json");
+            // A committed graph is a sufficient carry-forward baseline for an
+            // explicitly code-only rebuild. This preserves live semantic
+            // records when a fresh clone does not contain the manifest.
+            let incremental_mode =
+                !effective_force && output.is_file() && (manifest_path.is_file() || code_only);
+            if incremental_mode {
+                write_output("Incremental scan: reusing unchanged extraction cache entries.")?;
+            }
+            let persisted = watch_service::read_build_config(&output_directory);
+            let effective_excludes = if exclude.is_empty() {
+                persisted.excludes.clone()
+            } else {
+                exclude.clone()
+            };
+            let honor_gitignore = !no_gitignore && persisted.honor_gitignore;
+            let scan_started = std::time::Instant::now();
+            let scan = graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
+                &path,
+                effective_force,
+                &output_directory,
+                code_only,
+                &graphoxide_extract::detect::DetectOptions {
+                    extra_excludes: effective_excludes,
+                    output_dir: Some(output_directory.clone()),
+                    honor_gitignore,
+                    ..Default::default()
+                },
+            )?;
+            emit_extract_timing(timing, "detect/extract", scan_started);
+            let build_progress = graphoxide_cli::build_guard::BuildProgress::new(
+                scan.progress.total,
+                scan.progress.succeeded,
+            )?
+            .ensure_any_success("local extraction")?;
+            if code_only {
+                let skipped = scan
+                    .detection
+                    .files
+                    .iter()
+                    .filter(|(kind, _)| kind.as_str() != "code")
+                    .map(|(_, files)| files.len())
+                    .sum::<usize>();
+                write_output(&format!(
+                    "--code-only: skipping {skipped} non-code input(s)"
+                ))?;
+            }
+            for skipped in &scan.detection.skipped_sensitive {
+                eprintln!("skipped as potentially sensitive: {skipped}");
+            }
+            let mut extractions = scan.extractions;
+            let pending_manifest = scan.pending_manifest;
+            if let Some(dsn) = postgres.as_deref() {
+                extractions.push(graphoxide_extract::pg_introspect::introspect_postgres(
+                    (!dsn.is_empty()).then_some(dsn),
+                )?);
+            }
             let previous = graphoxide_core::read_graph(&output).ok();
+            let live_sources = scan
+                .detection
+                .files
+                .values()
+                .flatten()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            let prune_sources = previous
+                .as_ref()
+                .map(|graph| stale_local_sources(graph, &path, &live_sources))
+                .unwrap_or_default();
+            let build_started = std::time::Instant::now();
             if no_cluster {
-                if !graphoxide_core::write_raw_extractions_atomic(&output, &extractions, force)? {
-                    anyhow::bail!("refusing to overwrite a larger existing graph; pass --force after verifying the reduction");
+                graphoxide_graph::disambiguate_file_labels_in_extractions(&mut extractions);
+                if incremental_mode {
+                    let fresh = flatten_extractions(extractions);
+                    extractions = vec![graphoxide_graph::merge_raw_extraction(
+                        &fresh,
+                        &output,
+                        &prune_sources,
+                        Some(&path),
+                    )?];
+                }
+                extractions = vec![graphoxide_graph::dedupe_raw_extractions(&extractions)];
+                emit_extract_timing(timing, "build", build_started);
+                let outcome = graphoxide_cli::build_guard::commit_build(
+                    &output,
+                    graphoxide_cli::build_guard::BuildArtifact::Raw(&extractions),
+                    build_progress,
+                    allow_partial,
+                    || pending_manifest.commit(),
+                )?;
+                if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+                    anyhow::bail!("{outcome}");
                 }
                 let nodes: usize = extractions.iter().map(|e| e.nodes.len()).sum();
                 let edges: usize = extractions.iter().map(|e| e.edges.len()).sum();
-                save_build_config(&path, true)?;
-                return write_output(&format!(
+                save_build_config_in(
+                    &output_directory,
+                    true,
+                    (!exclude.is_empty()).then_some(exclude.as_slice()),
+                    no_gitignore.then_some(false),
+                )?;
+                write_output(&format!(
                     "Wrote {nodes} nodes and {edges} edges to {}",
                     output.display()
-                ));
+                ))?;
+                emit_extract_timing(timing, "total", total_started);
+                return Ok(());
             }
-            let mut graph = graphoxide_graph::build_graph(&extractions)?;
+            let mut graph = if incremental_mode {
+                graphoxide_graph::build_merge(&extractions, &output, &prune_sources, Some(&path))?
+            } else {
+                graphoxide_graph::build_graph(&extractions)?
+            };
             graphoxide_graph::cluster(&mut graph)?;
             if let Some(previous) = &previous {
                 graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
             }
-            if !graphoxide_core::write_graph_atomic(&output, &graph, force)? {
-                anyhow::bail!("refusing to overwrite a larger existing graph; pass --force after verifying the reduction");
+            emit_extract_timing(timing, "build", build_started);
+            let outcome = graphoxide_cli::build_guard::commit_build(
+                &output,
+                graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
+                build_progress,
+                allow_partial,
+                || pending_manifest.commit(),
+            )?;
+            if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+                anyhow::bail!("{outcome}");
             }
-            save_build_config(&path, false)?;
+            save_build_config_in(
+                &output_directory,
+                false,
+                (!exclude.is_empty()).then_some(exclude.as_slice()),
+                no_gitignore.then_some(false),
+            )?;
             write_output(&format!(
                 "Wrote {} nodes and {} edges to {}",
                 graph.nodes.len(),
                 graph.links.len(),
                 output.display()
-            ))
+            ))?;
+            emit_extract_timing(timing, "total", total_started);
+            Ok(())
         }
+        Command::Audit {
+            path,
+            json,
+            strict,
+            force,
+        } => run_audit(&path, json, strict, force),
+        Command::Diagnose { args } => run_diagnose(&args),
         Command::Query {
             question,
             budget,
             graph,
             dfs,
+            contexts,
         } => {
             let started = std::time::Instant::now();
+            let graph = resolve_managed_graph_path(graph);
             let graph_data = graphoxide_core::read_graph(&graph)?;
-            let result = if dfs {
-                graphoxide_query::query_graph_dfs(&graph_data, &question, 2, budget)
+            let (contexts, context_source) =
+                graphoxide_query::resolve_context_filters(&question, &contexts);
+            let mut result = if dfs {
+                graphoxide_query::query_graph_dfs_filtered(
+                    &graph_data,
+                    &question,
+                    2,
+                    budget,
+                    &contexts,
+                )
             } else {
-                graphoxide_query::query_graph(&graph_data, &question, 2, budget)
+                graphoxide_query::query_graph_filtered(&graph_data, &question, 2, budget, &contexts)
             };
+            if let Some(source) = context_source {
+                annotate_query_context(&mut result, &contexts, source);
+            }
             record_query("query", &question, &graph, &result, started.elapsed());
             write_output(&result)
         }
         Command::Path { a, b, graph } => {
             let started = std::time::Instant::now();
+            let graph = resolve_managed_graph_path(graph);
             let graph_data = graphoxide_core::read_graph(&graph)?;
             let result = graphoxide_query::shortest_path(&graph_data, &a, &b);
             record_query(
@@ -309,8 +761,11 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Explain { node, graph } => {
             let started = std::time::Instant::now();
+            let graph = resolve_managed_graph_path(graph);
             let graph_data = graphoxide_core::read_graph(&graph)?;
-            let result = graphoxide_query::explain(&graph_data, &node);
+            let overlay = load_learning_overlay(&graph);
+            let result =
+                graphoxide_query::explain_with_overlay(&graph_data, &node, overlay.as_ref());
             record_query("explain", &node, &graph, &result, started.elapsed());
             write_output(&result)
         }
@@ -329,55 +784,182 @@ fn main() -> anyhow::Result<()> {
         Command::GodNodes { top, json, graph } => {
             let graph = graphoxide_core::read_graph(graph)?;
             let nodes = graphoxide_query::god_nodes(&graph, top);
-            let output = if json {
-                #[derive(serde::Serialize)]
-                struct GodNode<'a> {
-                    id: &'a str,
-                    label: &'a str,
-                    degree: usize,
-                }
-                let values: Vec<_> = nodes
-                    .iter()
-                    .map(|(id, label, degree)| GodNode {
-                        id,
-                        label,
-                        degree: *degree,
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&values)?
-            } else {
-                let mut lines = vec!["God nodes (most connected):".to_owned()];
-                lines.extend(nodes.iter().enumerate().map(|(i, (_, label, degree))| {
-                    format!(
-                        "  {}. {} - {} edges",
-                        i + 1,
-                        graphoxide_core::sanitize_label(label),
-                        degree
-                    )
-                }));
-                lines.join("\n")
-            };
+            let output = format_god_nodes(&nodes, json)?;
             write_output(&output)
         }
-        Command::Update { path, force } => rebuild(&path, false, force),
-        Command::ClusterOnly { path } => {
-            let graph_path = if path.is_dir() {
-                path.join("graphoxide-out/graph.json")
+        Command::SaveResult {
+            question,
+            answer,
+            answer_file,
+            query_type,
+            nodes,
+            outcome,
+            correction,
+            memory_dir,
+        } => {
+            let answer = if let Some(path) = answer_file {
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("read answer file {}", path.display()))?
+                    .trim()
+                    .to_owned()
+            } else {
+                answer.ok_or_else(|| anyhow::anyhow!("--answer or --answer-file is required"))?
+            };
+            let output = graphoxide_core::save_query_result(
+                &question,
+                &answer,
+                &memory_dir,
+                &graphoxide_core::SaveResultOptions {
+                    query_type,
+                    source_nodes: nodes,
+                    outcome,
+                    correction,
+                    ..Default::default()
+                },
+            )?;
+            write_output(&format!("Saved to {}", output.display()))
+        }
+        Command::Reflect {
+            memory_dir,
+            out,
+            graph,
+            analysis,
+            labels,
+            half_life_days,
+            min_corroboration,
+            if_stale,
+        } => {
+            let graph = graph.or_else(|| {
+                let candidate =
+                    managed_output_directory(std::path::Path::new("."), None).join("graph.json");
+                candidate.exists().then_some(candidate)
+            });
+            let analysis = analysis.or_else(|| {
+                graph.as_ref().map(|path| {
+                    path.parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .join(".graphify_analysis.json")
+                })
+            });
+            let labels = labels.or_else(|| {
+                graph.as_ref().map(|path| {
+                    path.parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .join(".graphify_labels.json")
+                })
+            });
+            if if_stale
+                && graphoxide_core::lessons_fresh(
+                    &out,
+                    &memory_dir,
+                    graph.as_deref(),
+                    analysis.as_deref(),
+                    labels.as_deref(),
+                )
+            {
+                return write_output(&format!(
+                    "Lessons already up to date -> {} (skipped; omit --if-stale to force)",
+                    out.display()
+                ));
+            }
+            let (output, aggregate) = graphoxide_core::reflect(
+                &memory_dir,
+                &out,
+                &graphoxide_core::ReflectOptions {
+                    graph_path: graph,
+                    analysis_path: analysis,
+                    labels_path: labels,
+                    half_life_days,
+                    min_corroboration,
+                    ..Default::default()
+                },
+            )?;
+            write_output(&format!(
+                "Reflected {} memories ({} useful, {} dead ends, {} corrected) -> {}",
+                aggregate.total,
+                aggregate.counts.useful,
+                aggregate.counts.dead_end,
+                aggregate.counts.corrected,
+                output.display()
+            ))
+        }
+        Command::Update {
+            path,
+            force,
+            no_cluster,
+        } => rebuild(&path, no_cluster, force),
+        Command::ClusterOnly {
+            path,
+            graph: graph_override,
+            no_viz: _,
+            no_label,
+        } => {
+            let sidecar_directory = graph_override.as_ref().map_or_else(
+                || {
+                    if path.is_dir() {
+                        managed_output_directory(&path, None)
+                    } else {
+                        path.parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .to_path_buf()
+                    }
+                },
+                |graph| {
+                    let parent = graph.parent().unwrap_or_else(|| std::path::Path::new("."));
+                    if matches!(
+                        parent.file_name().and_then(|value| value.to_str()),
+                        Some("graphoxide-out" | "graphify-out")
+                    ) {
+                        parent.to_path_buf()
+                    } else {
+                        managed_output_directory(&path, None)
+                    }
+                },
+            );
+            let graph_path = if let Some(graph) = graph_override {
+                graph
+            } else if path.is_dir() {
+                managed_output_directory(&path, None).join("graph.json")
             } else {
                 path
             };
             let mut graph = graphoxide_core::read_graph(&graph_path)?;
-            let previous = graph.clone();
+            let mut previous = graph.clone();
+            let labels = load_community_labels(
+                graph_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            );
+            if !labels.is_empty() {
+                for node in &mut previous.nodes {
+                    if let Some(label) = node.community.and_then(|cid| labels.get(&cid)) {
+                        node.extra
+                            .insert("community_name".into(), label.clone().into());
+                    }
+                }
+            }
+            remove_placeholder_community_names(&mut previous);
             graphoxide_graph::cluster(&mut graph)?;
             graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, &previous);
             graphoxide_core::write_graph_atomic(&graph_path, &graph, true)?;
+            write_cluster_sidecars(&sidecar_directory, &graph, !no_label)?;
             write_output(&format!("Reclustered {} nodes", graph.nodes.len()))
         }
         Command::Label {
             path,
+            backend,
             model,
             missing_only,
-        } => label_communities(&path, model.as_deref(), missing_only),
+            max_concurrency,
+            batch_size,
+        } => label_communities(
+            &path,
+            backend.as_deref(),
+            model.as_deref(),
+            missing_only,
+            max_concurrency,
+            batch_size,
+        ),
         Command::Report { graph, output } => {
             let graph = graphoxide_core::read_graph(graph)?;
             let analysis = graphoxide_graph::analyze(&graph)?;
@@ -389,25 +971,21 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Export {
             format,
+            positional,
             output,
             graph,
-        } => {
-            let graph = graphoxide_core::read_graph(graph)?;
-            match format.as_str() {
-                "html" => write_text(&output, &graphoxide_export::render_html(&graph)?)?,
-                "callflow-html" => {
-                    write_text(&output, &graphoxide_export::render_callflow_html(&graph)?)?
-                }
-                "graphml" => write_text(&output, &graphoxide_export::render_graphml(&graph))?,
-                "cypher" => write_text(&output, &graphoxide_export::render_cypher(&graph))?,
-                "obsidian" => graphoxide_export::export_vault(&graph, &output)?,
-                "json" => {
-                    graphoxide_core::write_graph_atomic(&output, &graph, true)?;
-                }
-                _ => unreachable!(),
-            }
-            write_output(&format!("Wrote {}", output.display()))
-        }
+            directory,
+            no_viz,
+            max_sections,
+        } => run_export(
+            &format,
+            positional,
+            output,
+            graph,
+            directory,
+            no_viz,
+            max_sections,
+        ),
         Command::Benchmark {
             question,
             iterations,
@@ -429,16 +1007,12 @@ fn main() -> anyhow::Result<()> {
             output,
             force,
         } => {
-            let mut extractions = Vec::new();
+            let mut graphs = Vec::new();
             for input in inputs {
-                let graph = graphoxide_core::read_graph(input)?;
-                extractions.push(graphoxide_core::Extraction {
-                    nodes: graph.nodes,
-                    edges: graph.links,
-                    hyperedges: graph.hyperedges,
-                });
+                let graph = graphoxide_core::read_graph(&input)?;
+                graphs.push((input, graph));
             }
-            let graph = graphoxide_graph::build_graph(&extractions)?;
+            let graph = graphoxide_graph::merge_repository_graphs(graphs);
             if !graphoxide_core::write_graph_atomic(&output, &graph, force)? {
                 anyhow::bail!("refusing to shrink existing output; pass --force")
             }
@@ -477,16 +1051,605 @@ fn main() -> anyhow::Result<()> {
         } => merge_driver(&base, &ours, &theirs, output.as_deref()),
         Command::CheckUpdate { path } => check_update(&path),
         Command::Watch { path } => watch(path),
+        Command::Install {
+            platform,
+            platform_flag,
+            project,
+            strict,
+        } => install_agent_platform(platform, platform_flag, project, strict),
+        Command::Uninstall {
+            platform,
+            platform_flag,
+            project,
+        } => uninstall_agent_platform(platform, platform_flag, project),
         Command::Hook { command } => hook(command),
         Command::Claude { command } => claude(command),
-        Command::HookGuard => hook_guard(),
-        Command::Serve => graphoxide_mcp::serve(),
+        Command::CodeBuddy { command } => direct_codebuddy_platform(command),
+        Command::Devin { command } => direct_devin_platform(command),
+        Command::Agents { command } => direct_agents_platform(command),
+        Command::Codex { command } => {
+            direct_agent_platform(graphoxide_cli::install::Platform::Codex, command)
+        }
+        Command::Antigravity { command } => {
+            direct_agent_platform(graphoxide_cli::install::Platform::Antigravity, command)
+        }
+        Command::Amp { command } => {
+            direct_agent_platform(graphoxide_cli::install::Platform::Amp, command)
+        }
+        Command::HookGuard { mode, strict } => hook_guard(mode.as_deref(), strict),
+        Command::HookCheck => Ok(()),
+        Command::HookLaunch { mode, root, log } => {
+            graphoxide_cli::hooks::launch_detached(mode.parse()?, &root, &log)?;
+            Ok(())
+        }
+        Command::HookSupervise { mode, root } => {
+            graphoxide_cli::hooks::supervise(mode.parse()?, &root)
+        }
+        Command::HookRebuild { mode, root } => graphoxide_cli::hooks::rebuild(mode.parse()?, &root),
+        Command::Serve {
+            graph,
+            transport,
+            host,
+            port,
+            api_key,
+            mount_path,
+            json_response,
+            stateless,
+            session_timeout,
+        } => {
+            if transport == "stdio" {
+                graphoxide_mcp::serve_graph(graph)
+            } else {
+                let api_key = api_key.or_else(|| {
+                    std::env::var("GRAPHOXIDE_API_KEY")
+                        .ok()
+                        .or_else(|| std::env::var("GRAPHIFY_API_KEY").ok())
+                });
+                let session_timeout = (session_timeout > 0.0)
+                    .then(|| std::time::Duration::from_secs_f64(session_timeout));
+                graphoxide_mcp::http::serve_http(
+                    graph,
+                    host,
+                    port,
+                    graphoxide_mcp::http::HttpOptions {
+                        mount_path,
+                        api_key,
+                        stateless,
+                        json_response,
+                        session_timeout,
+                        max_project_contexts: graphoxide_mcp::http::max_server_contexts_from_env(),
+                    },
+                )
+            }
+        }
         Command::Site { path, port } => site::serve(&path, port),
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiagnoseCliOptions {
+    graph: PathBuf,
+    max_examples: usize,
+    directed: Option<bool>,
+    json: bool,
+    extract_path: Option<PathBuf>,
+}
+
+const DIAGNOSE_USAGE: &str = "Usage: graphoxide diagnose multigraph [--graph path] [--json] [--max-examples N] [--directed] [--undirected] [--extract-path path]";
+
+fn parse_diagnose_args(args: &[String]) -> anyhow::Result<DiagnoseCliOptions> {
+    if args.first().map(String::as_str) != Some("multigraph") {
+        anyhow::bail!(DIAGNOSE_USAGE);
+    }
+    let mut options = DiagnoseCliOptions {
+        graph: PathBuf::from("graphoxide-out/graph.json"),
+        max_examples: 5,
+        directed: None,
+        json: false,
+        extract_path: None,
+    };
+    let mut direction_flag = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--graph" => {
+                index += 1;
+                let Some(path) = args.get(index) else {
+                    anyhow::bail!("error: --graph requires a path");
+                };
+                options.graph = PathBuf::from(path);
+            }
+            "--json" => options.json = true,
+            "--max-examples" => {
+                index += 1;
+                let Some(raw) = args.get(index) else {
+                    anyhow::bail!("error: --max-examples requires an integer");
+                };
+                let value = raw
+                    .parse::<isize>()
+                    .map_err(|_| anyhow::anyhow!("error: --max-examples requires an integer"))?;
+                anyhow::ensure!(value >= 0, "error: --max-examples must be >= 0");
+                options.max_examples = value as usize;
+            }
+            "--directed" => {
+                anyhow::ensure!(
+                    direction_flag != Some("undirected"),
+                    "error: --directed and --undirected are mutually exclusive"
+                );
+                direction_flag = Some("directed");
+                options.directed = Some(true);
+            }
+            "--undirected" => {
+                anyhow::ensure!(
+                    direction_flag != Some("directed"),
+                    "error: --directed and --undirected are mutually exclusive"
+                );
+                direction_flag = Some("undirected");
+                options.directed = Some(false);
+            }
+            "--extract-path" => {
+                index += 1;
+                let Some(path) = args.get(index) else {
+                    anyhow::bail!("error: --extract-path requires a path");
+                };
+                options.extract_path = Some(PathBuf::from(path));
+            }
+            unknown => anyhow::bail!("error: unknown diagnose option {unknown}"),
+        }
+        index += 1;
+    }
+    Ok(options)
+}
+
+fn run_diagnose(args: &[String]) -> anyhow::Result<()> {
+    let options = parse_diagnose_args(args)?;
+    let graph = resolve_managed_graph_path(options.graph);
+    let summary = graphoxide_graph::diagnose_file(
+        graph,
+        options.directed,
+        options.max_examples,
+        options.extract_path.as_deref(),
+    )?;
+    let output = if options.json {
+        serde_json::to_string_pretty(&graphoxide_graph::format_diagnostic_json(&summary))?
+    } else {
+        graphoxide_graph::format_diagnostic_report(&summary)
+    };
+    write_output(&output)
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AuditInput {
+    extractions: usize,
+    nodes: usize,
+    edges: usize,
+    hyperedges: usize,
+    unresolved_calls: usize,
+    empty_extractions: usize,
+    anchor_only_files: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AuditFinding {
+    severity: &'static str,
+    code: &'static str,
+    source_file: String,
+    subject: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AuditReport {
+    root: String,
+    input: AuditInput,
+    findings: Vec<AuditFinding>,
+    build: graphoxide_graph::BuildReport,
+    strict_violations: usize,
+}
+
+fn run_audit(path: &std::path::Path, json: bool, strict: bool, force: bool) -> anyhow::Result<()> {
+    let extractions = graphoxide_extract::extract_project_with_options(path, force)?;
+    let (_, build) = graphoxide_graph::build_graph_with_report(&extractions)?;
+    let report = audit_report(path, &extractions, build);
+    let output = if json {
+        serde_json::to_string_pretty(&report)?
+    } else {
+        render_audit_report(&report)?
+    };
+    write_output(&output)?;
+    if strict && report.strict_violations > 0 {
+        anyhow::bail!(
+            "strict graph audit failed with {} conservation violation(s)",
+            report.strict_violations
+        )
+    }
+    Ok(())
+}
+
+fn audit_report(
+    root: &std::path::Path,
+    extractions: &[graphoxide_core::Extraction],
+    build: graphoxide_graph::BuildReport,
+) -> AuditReport {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut findings = Vec::new();
+    let mut all_ids = BTreeSet::new();
+    let mut declarations: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut empty_extractions = 0;
+    let mut anchor_only_files = Vec::new();
+
+    for (index, extraction) in extractions.iter().enumerate() {
+        let source_file = extraction
+            .nodes
+            .first()
+            .map(|node| node.source_file.as_str())
+            .or_else(|| {
+                extraction
+                    .edges
+                    .first()
+                    .map(|edge| edge.source_file.as_str())
+            })
+            .filter(|source| !source.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("<extraction:{index}>"));
+        if extraction.nodes.is_empty() && extraction.edges.is_empty() {
+            empty_extractions += 1;
+            findings.push(AuditFinding {
+                severity: "warning",
+                code: "empty_extraction",
+                source_file,
+                subject: "extractor emitted neither nodes nor edges".into(),
+            });
+            continue;
+        }
+
+        let mut local_ids = BTreeSet::new();
+        for node in &extraction.nodes {
+            if node.id.is_empty() {
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "empty_node_id",
+                    source_file: node.source_file.clone(),
+                    subject: node.label.clone(),
+                });
+                continue;
+            }
+            if !local_ids.insert(node.id.as_str()) {
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "duplicate_node_id_in_extraction",
+                    source_file: node.source_file.clone(),
+                    subject: node.id.clone(),
+                });
+            }
+            all_ids.insert(node.id.as_str());
+            declarations
+                .entry(node.id.as_str())
+                .or_default()
+                .push(node.source_file.as_str());
+            if node.label.trim().is_empty() {
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "empty_node_label",
+                    source_file: node.source_file.clone(),
+                    subject: node.id.clone(),
+                });
+            }
+            if node.source_file.trim().is_empty()
+                && node
+                    .extra
+                    .get("origin_file")
+                    .and_then(|value| value.as_str())
+                    .is_none_or(str::is_empty)
+            {
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "empty_node_source_file",
+                    source_file: source_file.clone(),
+                    subject: node.id.clone(),
+                });
+            }
+            if node.source_location.as_deref().is_some_and(|location| {
+                location
+                    .strip_prefix('L')
+                    .and_then(|line| line.parse::<usize>().ok())
+                    .is_none_or(|line| line == 0)
+            }) {
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "invalid_source_location",
+                    source_file: node.source_file.clone(),
+                    subject: format!("{} at {:?}", node.id, node.source_location),
+                });
+            }
+            let parse_error_count = node
+                .extra
+                .get("parse_error_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let missing_node_count = node
+                .extra
+                .get("missing_node_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let compatibility_count = node
+                .extra
+                .get("parser_compatibility_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let unclassified_parser_error = node
+                .extra
+                .get("parser_has_error")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+                && parse_error_count == 0
+                && missing_node_count == 0
+                && compatibility_count == 0;
+            if unclassified_parser_error || parse_error_count > 0 || missing_node_count > 0 {
+                let spans = node
+                    .extra
+                    .get("parse_error_spans")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "parser_errors",
+                    source_file: node.source_file.clone(),
+                    subject: if spans.is_empty() {
+                        format!(
+                            "{parse_error_count} error node(s), {missing_node_count} missing node(s)"
+                        )
+                    } else {
+                        format!(
+                            "{parse_error_count} error node(s), {missing_node_count} missing node(s): {spans}"
+                        )
+                    },
+                });
+            }
+            if compatibility_count > 0 {
+                let spans = node
+                    .extra
+                    .get("parser_compatibility_spans")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                findings.push(AuditFinding {
+                    severity: "warning",
+                    code: "parser_compatibility",
+                    source_file: node.source_file.clone(),
+                    subject: format!("{compatibility_count} known grammar ambiguity: {spans}"),
+                });
+            }
+        }
+        let only_file_anchor = extraction.nodes.len() == 1
+            && extraction.edges.is_empty()
+            && extraction.nodes[0]
+                .extra
+                .get("type")
+                .and_then(|value| value.as_str())
+                == Some("file");
+        if only_file_anchor {
+            anchor_only_files.push(source_file.clone());
+            findings.push(AuditFinding {
+                severity: "warning",
+                code: "anchor_only_file",
+                source_file,
+                subject: "only a file anchor was emitted".into(),
+            });
+        }
+    }
+
+    for (id, sources) in declarations {
+        if sources.len() > 1 {
+            findings.push(AuditFinding {
+                severity: "warning",
+                code: "duplicate_node_id_across_extractions",
+                source_file: sources.join(", "),
+                subject: id.into(),
+            });
+        }
+    }
+
+    let structural_relations = [
+        "contains",
+        "method",
+        "extends",
+        "implements",
+        "inherits",
+        "declares",
+    ];
+    for extraction in extractions {
+        for edge in &extraction.edges {
+            if edge.relation.trim().is_empty() {
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "empty_edge_relation",
+                    source_file: edge.source_file.clone(),
+                    subject: format!("{} -> {}", edge.true_source(), edge.true_target()),
+                });
+            }
+            if !all_ids.contains(edge.true_source()) {
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "unresolved_edge_source",
+                    source_file: edge.source_file.clone(),
+                    subject: edge.true_source().into(),
+                });
+            }
+            if !all_ids.contains(edge.true_target()) {
+                findings.push(AuditFinding {
+                    severity: if structural_relations.contains(&edge.relation.as_str()) {
+                        "error"
+                    } else {
+                        "warning"
+                    },
+                    code: if edge
+                        .extra
+                        .get("unresolved_call")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+                    {
+                        "unresolved_call"
+                    } else {
+                        "unresolved_edge_target"
+                    },
+                    source_file: edge.source_file.clone(),
+                    subject: format!("{} -> {}", edge.true_source(), edge.true_target()),
+                });
+            }
+        }
+    }
+    anchor_only_files.sort();
+    findings.sort_by(|left, right| {
+        (
+            left.severity,
+            left.code,
+            left.source_file.as_str(),
+            left.subject.as_str(),
+        )
+            .cmp(&(
+                right.severity,
+                right.code,
+                right.source_file.as_str(),
+                right.subject.as_str(),
+            ))
+    });
+
+    let finding_errors = findings
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .count();
+    let build_losses = build.node_drops.values().sum::<usize>()
+        + build.node_merges.values().sum::<usize>()
+        + build.edge_drops.values().sum::<usize>()
+        + build.hyperedge_drops.values().sum::<usize>();
+    AuditReport {
+        root: root.display().to_string(),
+        input: AuditInput {
+            extractions: extractions.len(),
+            nodes: extractions.iter().map(|item| item.nodes.len()).sum(),
+            edges: extractions.iter().map(|item| item.edges.len()).sum(),
+            hyperedges: extractions.iter().map(|item| item.hyperedges.len()).sum(),
+            unresolved_calls: extractions
+                .iter()
+                .flat_map(|item| &item.edges)
+                .filter(|edge| {
+                    edge.extra
+                        .get("unresolved_call")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+                })
+                .count(),
+            empty_extractions,
+            anchor_only_files,
+        },
+        findings,
+        build,
+        strict_violations: finding_errors + build_losses,
+    }
+}
+
+fn render_audit_report(report: &AuditReport) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    writeln!(output, "Graph audit: {}", report.root)?;
+    writeln!(
+        output,
+        "Input: {} files, {} nodes, {} edges, {} hyperedges",
+        report.input.extractions, report.input.nodes, report.input.edges, report.input.hyperedges
+    )?;
+    writeln!(
+        output,
+        "Output: {} nodes, {} edges, {} hyperedges",
+        report.build.output_nodes, report.build.output_edges, report.build.output_hyperedges
+    )?;
+    writeln!(
+        output,
+        "Signals: {} unresolved calls, {} empty extractions, {} anchor-only files",
+        report.input.unresolved_calls,
+        report.input.empty_extractions,
+        report.input.anchor_only_files.len()
+    )?;
+    if !report.build.node_drops.is_empty() {
+        writeln!(
+            output,
+            "Node drops: {}",
+            serde_json::to_string(&report.build.node_drops)?
+        )?;
+    }
+    if !report.build.node_merges.is_empty() {
+        writeln!(
+            output,
+            "Node merges: {}",
+            serde_json::to_string(&report.build.node_merges)?
+        )?;
+    }
+    if !report.build.edge_drops.is_empty() {
+        writeln!(
+            output,
+            "Edge drops: {}",
+            serde_json::to_string(&report.build.edge_drops)?
+        )?;
+    }
+    if !report.build.edge_repairs.is_empty() {
+        writeln!(
+            output,
+            "Edge repairs: {}",
+            serde_json::to_string(&report.build.edge_repairs)?
+        )?;
+    }
+    if !report.build.hyperedge_drops.is_empty() {
+        writeln!(
+            output,
+            "Hyperedge drops: {}",
+            serde_json::to_string(&report.build.hyperedge_drops)?
+        )?;
+    }
+    if !report.build.hyperedge_repairs.is_empty() {
+        writeln!(
+            output,
+            "Hyperedge repairs: {}",
+            serde_json::to_string(&report.build.hyperedge_repairs)?
+        )?;
+    }
+    writeln!(
+        output,
+        "Findings: {} (showing up to 20)",
+        report.findings.len()
+    )?;
+    for finding in report.findings.iter().take(20) {
+        writeln!(
+            output,
+            "- [{}] {} {}: {}",
+            finding.severity, finding.code, finding.source_file, finding.subject
+        )?;
+    }
+    if report.findings.len() > 20 {
+        writeln!(output, "- … {} more", report.findings.len() - 20)?;
+    }
+    writeln!(
+        output,
+        "Strict conservation violations: {}",
+        report.strict_violations
+    )?;
+    Ok(output.trim_end().to_owned())
+}
+
 fn watch(path: PathBuf) -> anyhow::Result<()> {
     use notify::{RecursiveMode, Watcher};
+    let filter = watch_service::WatchEventFilter::new(
+        &path,
+        watch_service::read_build_config(&path.join(watch_service::OUTPUT_DIRECTORY))
+            .honor_gitignore,
+    );
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(sender)?;
     watcher.watch(&path, RecursiveMode::Recursive)?;
@@ -495,7 +1658,11 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
         let Ok(first) = receiver.recv()? else {
             continue;
         };
-        let mut changed = relevant_watch_paths(&path, first.paths);
+        let mut changed = first
+            .paths
+            .into_iter()
+            .filter(|changed| filter.accepts(changed, changed.is_dir()))
+            .collect::<Vec<_>>();
         if changed.is_empty() {
             continue;
         }
@@ -512,7 +1679,11 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
             let timeout = deadline.saturating_duration_since(std::time::Instant::now());
             match receiver.recv_timeout(timeout) {
                 Ok(Ok(event)) => {
-                    let paths = relevant_watch_paths(&path, event.paths);
+                    let paths = event
+                        .paths
+                        .into_iter()
+                        .filter(|changed| filter.accepts(changed, changed.is_dir()))
+                        .collect::<Vec<_>>();
                     if !paths.is_empty() {
                         changed.extend(paths);
                         quiet_deadline =
@@ -528,212 +1699,144 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
         }
         changed.sort();
         changed.dedup();
-        if changed
+        let code_changes = changed
             .iter()
-            .any(|changed_path| graphoxide_extract::detect::is_supported_path(changed_path))
-        {
-            if let Err(error) = rebuild(&path, false, true) {
-                eprintln!("[graphoxide] rebuild failed: {error}");
+            .filter(|changed| {
+                graphoxide_extract::detect::classify_file(changed)
+                    == Some(graphoxide_extract::detect::FileType::Code)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !code_changes.is_empty() {
+            let options = watch_service::RebuildOptions {
+                changed_paths: Some(code_changes),
+                acquire_lock: true,
+                block_on_lock: false,
+                ..Default::default()
+            };
+            match watch_service::rebuild_project(&path, &options) {
+                Ok(result) => {
+                    for warning in result.warnings {
+                        eprintln!("[graphoxide watch] {warning}");
+                    }
+                    if result.status == watch_service::RebuildStatus::Queued {
+                        eprintln!("[graphoxide watch] rebuild already in progress; changes queued");
+                    }
+                }
+                Err(error) => eprintln!("[graphoxide] rebuild failed: {error}"),
             }
-        } else {
-            let flag = path.join("graphoxide-out/needs_update");
-            if let Some(parent) = flag.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(flag, b"")?;
+        }
+        if changed.iter().any(|changed| {
+            graphoxide_extract::detect::classify_file(changed)
+                != Some(graphoxide_extract::detect::FileType::Code)
+        }) {
+            watch_service::notify_only(&path)?;
         }
     }
 }
 
+#[cfg(test)]
 fn relevant_watch_paths(root: &std::path::Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths
         .into_iter()
         .filter(|changed_path| {
             let relative = changed_path.strip_prefix(root).unwrap_or(changed_path);
             !relative.components().any(|component| {
-                let component = component.as_os_str();
-                component == "graphoxide-out" || component == ".git"
+                matches!(
+                    component.as_os_str().to_str(),
+                    Some("graphoxide-out" | "graphify-out" | ".git")
+                )
             })
         })
         .collect()
 }
 
 fn check_update(path: &std::path::Path) -> anyhow::Result<()> {
-    if path.join("graphoxide-out/needs_update").is_file() {
-        write_output(&format!(
-            "[graphoxide check-update] Pending non-code changes in {}.\n[graphoxide check-update] Run `graphoxide update {}` to rebuild the offline graph.",
-            path.display(),
-            path.display()
-        ))
-    } else {
-        Ok(())
+    let notice = watch_service::check_update(path);
+    if let Some(message) = notice.message {
+        write_output(&format!("[graphoxide check-update] {message}"))?;
     }
+    Ok(())
 }
 
 fn label_communities(
     path: &std::path::Path,
+    backend: Option<&str>,
     model: Option<&str>,
     missing_only: bool,
+    max_concurrency: usize,
+    batch_size: usize,
 ) -> anyhow::Result<()> {
     let graph_path = if path.is_dir() {
-        path.join("graphoxide-out/graph.json")
+        managed_output_directory(path, None).join("graph.json")
     } else {
         path.to_path_buf()
     };
     let mut graph = graphoxide_core::read_graph(&graph_path)?;
-    let mut degree = std::collections::BTreeMap::<String, usize>::new();
-    for edge in &graph.links {
-        *degree.entry(edge.true_source().to_owned()).or_default() += 1;
-        *degree.entry(edge.true_target().to_owned()).or_default() += 1;
-    }
-    let mut communities = std::collections::BTreeMap::<i64, Vec<&graphoxide_core::Node>>::new();
+    let output = graph_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut existing = load_community_labels(output);
+    let mut communities = std::collections::BTreeMap::<i64, Vec<String>>::new();
     for node in &graph.nodes {
         if let Some(community) = node.community {
-            communities.entry(community).or_default().push(node);
+            communities
+                .entry(community)
+                .or_default()
+                .push(node.id.clone());
+            if let Some(label) = node
+                .extra
+                .get("community_name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|label| !is_placeholder_community_label(community, label))
+            {
+                existing
+                    .entry(community)
+                    .or_insert_with(|| label.to_owned());
+            }
         }
     }
     if missing_only {
-        communities.retain(|community, nodes| {
-            !nodes.iter().any(|node| {
-                node.extra
-                    .get("community_name")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|name| {
-                        !name.is_empty() && name != format!("Community {community}")
-                    })
-            })
+        communities.retain(|community, _| {
+            existing
+                .get(community)
+                .is_none_or(|label| is_placeholder_community_label(*community, label))
         });
     }
     if communities.is_empty() {
         return write_output("No communities need labels.");
     }
-    let mut rows = Vec::new();
-    for (community, nodes) in &mut communities {
-        nodes.sort_by(|a, b| {
-            degree
-                .get(&b.id)
-                .cmp(&degree.get(&a.id))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let labels = nodes
-            .iter()
-            .take(12)
-            .map(|node| graphoxide_core::sanitize_label(&node.label))
-            .collect::<Vec<_>>()
-            .join(", ");
-        rows.push(format!("{community}: {labels}"));
+    let Some(backend) = resolve_label_backend(backend) else {
+        return write_output(
+            "No LLM backend configured; keeping current community labels. Pass --backend or set an API key.",
+        );
+    };
+    let transport = LabelHttpTransport::new(&backend, model)?;
+    let mut options = graphoxide_graph::LabelingOptions::new(&backend);
+    options.model = model.map(str::to_owned);
+    options.max_concurrency = max_concurrency;
+    options.batch_size = batch_size;
+    options.allow_ollama_parallel =
+        std::env::var("GRAPHIFY_OLLAMA_PARALLEL").is_ok_and(|value| value.trim() == "1");
+    options.allow_claude_cli_parallel =
+        std::env::var("GRAPHIFY_CLAUDE_CLI_PARALLEL").is_ok_and(|value| value.trim() == "1");
+    let gods = graphoxide_graph::god_nodes(&graph, 10);
+    let (generated, usage) = graphoxide_graph::label_communities_with(
+        &graph,
+        &communities,
+        &gods,
+        &options,
+        |request| transport.call(request),
+    )?;
+    for (community, label) in generated {
+        existing.insert(community, label);
     }
-    let prompt = format!(
-        "Name each software-architecture community below with a concise 2-5 word noun phrase. Return only a JSON object mapping the numeric community id to its label.\n{}",
-        rows.join("\n")
-    );
-    let graphoxide_base = std::env::var("GRAPHOXIDE_LLM_BASE_URL").ok();
-    let openai_base = std::env::var("OPENAI_BASE_URL").ok();
-    let anthropic_base = std::env::var("ANTHROPIC_BASE_URL").ok();
-    let openai_key = std::env::var("OPENAI_API_KEY").ok();
-    let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let provider = std::env::var("GRAPHOXIDE_LLM_PROVIDER")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let use_anthropic = provider == "anthropic"
-        || (provider != "openai"
-            && graphoxide_base.is_none()
-            && openai_base.is_none()
-            && (anthropic_base.is_some() || (openai_key.is_none() && anthropic_key.is_some())));
-    let mut base = if use_anthropic {
-        graphoxide_base
-            .or(anthropic_base)
-            .unwrap_or_else(|| "https://api.anthropic.com/v1".into())
-    } else {
-        graphoxide_base
-            .or(openai_base)
-            .unwrap_or_else(|| "https://api.openai.com/v1".into())
-    };
-    let endpoint = if use_anthropic {
-        if !base.ends_with("/messages") {
-            base = format!("{}/messages", base.trim_end_matches('/'));
-        }
-        base
-    } else {
-        if !base.ends_with("/chat/completions") {
-            base = format!("{}/chat/completions", base.trim_end_matches('/'));
-        }
-        base
-    };
-    let model = model
-        .map(str::to_owned)
-        .or_else(|| std::env::var("GRAPHOXIDE_MODEL").ok())
-        .unwrap_or_else(|| {
-            if use_anthropic {
-                "claude-sonnet-4-20250514".into()
-            } else {
-                "gpt-4o-mini".into()
-            }
-        });
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?;
-    let mut request = if use_anthropic {
-        client.post(&endpoint).json(&serde_json::json!({
-            "model": model,
-            "max_tokens": 1024,
-            "temperature": 0,
-            "messages": [{"role":"user", "content":prompt}]
-        }))
-    } else {
-        client.post(&endpoint).json(&serde_json::json!({
-            "model": model,
-            "temperature": 0,
-            "messages": [{"role":"user", "content":prompt}]
-        }))
-    };
-    if use_anthropic {
-        request = request.header("anthropic-version", "2023-06-01");
-        if let Some(key) = anthropic_key {
-            request = request.header("x-api-key", key);
-        } else if !endpoint.contains("localhost") && !endpoint.contains("127.0.0.1") {
-            anyhow::bail!(
-                "ANTHROPIC_API_KEY is not set (or configure ANTHROPIC_BASE_URL for a local endpoint)"
-            )
-        }
-    } else if let Some(key) = openai_key {
-        request = request.bearer_auth(key);
-    } else if !endpoint.contains("localhost") && !endpoint.contains("127.0.0.1") {
-        anyhow::bail!(
-            "OPENAI_API_KEY is not set (or configure GRAPHOXIDE_LLM_BASE_URL for a local endpoint)"
-        )
-    }
-    let response = request
-        .send()?
-        .error_for_status()?
-        .json::<serde_json::Value>()?;
-    let content = response
-        .pointer("/choices/0/message/content")
-        .and_then(|value| value.as_str())
-        .or_else(|| {
-            response
-                .pointer("/content/0/text")
-                .and_then(|value| value.as_str())
-        })
-        .ok_or_else(|| anyhow::anyhow!("label endpoint returned no message content"))?;
-    let begin = content.find('{').unwrap_or(0);
-    let end = content
-        .rfind('}')
-        .map(|index| index + 1)
-        .unwrap_or(content.len());
-    let labels: serde_json::Value = serde_json::from_str(&content[begin..end])?;
-    let labels = labels
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("label response must be a JSON object"))?;
     let mut updated = 0;
     for node in &mut graph.nodes {
         let Some(community) = node.community else {
             continue;
         };
-        let Some(label) = labels
-            .get(&community.to_string())
-            .and_then(|value| value.as_str())
-        else {
+        let Some(label) = existing.get(&community) else {
             continue;
         };
         let label = graphoxide_core::sanitize_label(label);
@@ -743,473 +1846,509 @@ fn label_communities(
         }
     }
     graphoxide_core::write_graph_atomic(&graph_path, &graph, true)?;
+    write_community_label_sidecars(output, &existing)?;
     let analysis = graphoxide_graph::analyze(&graph)?;
-    let report_path = graph_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("GRAPH_REPORT.md");
+    let report_path = output.join("GRAPH_REPORT.md");
     write_text(
         &report_path,
         &graphoxide_export::render_report(&graph, &analysis),
     )?;
     write_output(&format!(
-        "Updated community labels on {updated} nodes and regenerated {}.",
-        report_path.display()
+        "Updated community labels on {updated} nodes and regenerated {} ({} input / {} output tokens).",
+        report_path.display(), usage.input, usage.output
     ))
 }
 
-fn claude(command: ClaudeCommand) -> anyhow::Result<()> {
-    let (action, root) = match command {
-        ClaudeCommand::Install { path } => ("install", path),
-        ClaudeCommand::Uninstall { path } => ("uninstall", path),
-        ClaudeCommand::Status { path } => ("status", path),
-    };
-    let marker_start = "<!-- graphoxide:start -->";
-    let marker_end = "<!-- graphoxide:end -->";
-    let claude_md = root.join("CLAUDE.md");
-    let settings_path = root.join(".claude/settings.json");
-    if action == "status" {
-        let markdown = std::fs::read_to_string(&claude_md)
-            .ok()
-            .is_some_and(|text| text.contains(marker_start));
-        let settings = std::fs::read_to_string(&settings_path)
-            .ok()
-            .is_some_and(|text| text.contains("graphoxide hook-guard"));
-        return write_output(if markdown && settings {
-            "Claude Code graphoxide integration installed."
-        } else {
-            "Claude Code graphoxide integration not installed."
-        });
-    }
-    if action == "install" {
-        let block = format!(
-            "{marker_start}\n## graphoxide\nFor codebase questions, run `graphoxide query \"<question>\"` before broad file searches. Rebuild with `graphoxide update .` after structural code changes.\n{marker_end}"
-        );
-        let mut markdown = std::fs::read_to_string(&claude_md).unwrap_or_default();
-        replace_managed_block(&mut markdown, marker_start, marker_end, &block);
-        write_text(&claude_md, &markdown)?;
+fn resolve_label_backend(explicit: Option<&str>) -> Option<String> {
+    explicit
+        .map(str::to_owned)
+        .or_else(|| std::env::var("GRAPHOXIDE_LLM_PROVIDER").ok())
+        .or_else(|| std::env::var("GRAPHIFY_LLM_PROVIDER").ok())
+        .or_else(|| {
+            [
+                ("gemini", &["GEMINI_API_KEY", "GOOGLE_API_KEY"][..]),
+                ("kimi", &["MOONSHOT_API_KEY"][..]),
+                ("claude", &["ANTHROPIC_API_KEY"][..]),
+                ("openai", &["OPENAI_API_KEY"][..]),
+                ("deepseek", &["DEEPSEEK_API_KEY"][..]),
+            ]
+            .into_iter()
+            .find_map(|(backend, keys)| {
+                keys.iter()
+                    .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()))
+                    .then(|| backend.to_owned())
+            })
+        })
+        .or_else(|| {
+            (std::env::var_os("OLLAMA_BASE_URL").is_some()
+                || std::env::var_os("OLLAMA_HOST").is_some())
+            .then(|| "ollama".to_owned())
+        })
+        .map(|backend| backend.to_ascii_lowercase())
+}
 
-        let mut settings: serde_json::Value = if settings_path.is_file() {
-            serde_json::from_str(&std::fs::read_to_string(&settings_path)?).map_err(|error| {
-                anyhow::anyhow!(
-                    "refusing to modify invalid {}: {error}",
-                    settings_path.display()
-                )
-            })?
-        } else {
-            serde_json::json!({})
+#[derive(Debug)]
+struct LabelHttpTransport {
+    client: reqwest::blocking::Client,
+    endpoint: String,
+    model: String,
+    key: Option<String>,
+    anthropic: bool,
+}
+
+impl LabelHttpTransport {
+    fn new(backend: &str, requested_model: Option<&str>) -> anyhow::Result<Self> {
+        let backend = match backend {
+            "anthropic" => "claude",
+            backend => backend,
         };
-        let executable = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("graphoxide"));
-        let command = shell_command(&executable, "hook-guard");
-        let hooks = settings
-            .as_object_mut()
-            .ok_or_else(|| {
-                anyhow::anyhow!("{} must contain a JSON object", settings_path.display())
-            })?
-            .entry("hooks")
-            .or_insert_with(|| serde_json::json!({}));
-        let hooks = hooks.as_object_mut().ok_or_else(|| {
-            anyhow::anyhow!("{}.hooks must be an object", settings_path.display())
-        })?;
-        let pre = hooks
-            .entry("PreToolUse")
-            .or_insert_with(|| serde_json::json!([]));
-        let pre = pre.as_array_mut().ok_or_else(|| {
-            anyhow::anyhow!(
-                "{}.hooks.PreToolUse must be an array",
-                settings_path.display()
+        let (base_key, default_base, key_names, model_key, default_model, anthropic) = match backend
+        {
+            "gemini" => (
+                "GEMINI_BASE_URL",
+                "https://generativelanguage.googleapis.com/v1beta/openai/",
+                &["GEMINI_API_KEY", "GOOGLE_API_KEY"][..],
+                "GRAPHIFY_GEMINI_MODEL",
+                "gemini-3-flash-preview",
+                false,
+            ),
+            "kimi" => (
+                "KIMI_BASE_URL",
+                "https://api.moonshot.ai/v1",
+                &["MOONSHOT_API_KEY"][..],
+                "GRAPHIFY_KIMI_MODEL",
+                "kimi-k2.6",
+                false,
+            ),
+            "claude" => (
+                "ANTHROPIC_BASE_URL",
+                "https://api.anthropic.com/v1",
+                &["ANTHROPIC_API_KEY"][..],
+                "ANTHROPIC_MODEL",
+                "claude-sonnet-4-6",
+                true,
+            ),
+            "openai" => (
+                "OPENAI_BASE_URL",
+                "https://api.openai.com/v1",
+                &["OPENAI_API_KEY"][..],
+                "GRAPHIFY_OPENAI_MODEL",
+                "gpt-4.1-mini",
+                false,
+            ),
+            "deepseek" => (
+                "DEEPSEEK_BASE_URL",
+                "https://api.deepseek.com",
+                &["DEEPSEEK_API_KEY"][..],
+                "GRAPHIFY_DEEPSEEK_MODEL",
+                "deepseek-v4-flash",
+                false,
+            ),
+            "ollama" => (
+                "OLLAMA_BASE_URL",
+                "http://localhost:11434/v1",
+                &["OLLAMA_API_KEY"][..],
+                "OLLAMA_MODEL",
+                "qwen2.5-coder:7b",
+                false,
+            ),
+            _ => anyhow::bail!("unsupported labeling backend {backend:?}"),
+        };
+        let base = std::env::var("GRAPHOXIDE_LLM_BASE_URL")
+            .ok()
+            .or_else(|| std::env::var(base_key).ok())
+            .unwrap_or_else(|| default_base.into());
+        let suffix = if anthropic {
+            "messages"
+        } else {
+            "chat/completions"
+        };
+        let endpoint = if base.trim_end_matches('/').ends_with(suffix) {
+            base.trim_end_matches('/').to_owned()
+        } else {
+            format!("{}/{suffix}", base.trim_end_matches('/'))
+        };
+        let key = key_names
+            .iter()
+            .find_map(|name| std::env::var(name).ok().filter(|key| !key.is_empty()));
+        let parsed = reqwest::Url::parse(&endpoint)?;
+        let loopback = parsed.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if key.is_none() && !loopback {
+            anyhow::bail!(
+                "none of {} is set for backend {backend:?}",
+                key_names.join(", ")
             )
-        })?;
-        pre.retain(|item| !item.to_string().contains("graphoxide hook-guard"));
-        for matcher in ["Bash|Grep", "Read|Glob"] {
-            pre.push(serde_json::json!({
-                "matcher": matcher,
-                "hooks": [{"type":"command", "command":command}]
-            }));
         }
-        write_text(
-            &settings_path,
-            &(serde_json::to_string_pretty(&settings)? + "\n"),
-        )?;
-        return write_output("Claude Code graphoxide integration installed.");
+        let model = requested_model
+            .map(str::to_owned)
+            .or_else(|| std::env::var(model_key).ok())
+            .or_else(|| std::env::var("GRAPHOXIDE_MODEL").ok())
+            .unwrap_or_else(|| default_model.into());
+        Ok(Self {
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()?,
+            endpoint,
+            model,
+            key,
+            anthropic,
+        })
     }
 
-    for target in [
-        claude_md,
-        root.join("CLAUDE.local.md"),
-        root.join(".claude/CLAUDE.local.md"),
-    ] {
-        if target.is_file() {
-            let mut markdown = std::fs::read_to_string(&target)?;
-            remove_managed_block(&mut markdown, marker_start, marker_end);
-            if markdown.trim().is_empty() {
-                std::fs::remove_file(target)?;
+    fn call(
+        &self,
+        request: &graphoxide_graph::LabelRequest,
+    ) -> anyhow::Result<graphoxide_graph::LabelResponse> {
+        let model = request.model.as_deref().unwrap_or(&self.model);
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": request.max_tokens,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": request.prompt}],
+        });
+        let mut builder = self.client.post(&self.endpoint).json(&body);
+        if self.anthropic {
+            builder = builder.header("anthropic-version", "2023-06-01");
+            if let Some(key) = &self.key {
+                builder = builder.header("x-api-key", key);
+            }
+        } else if let Some(key) = &self.key {
+            builder = builder.bearer_auth(key);
+        }
+        let response = builder
+            .send()?
+            .error_for_status()?
+            .json::<serde_json::Value>()?;
+        let content = response
+            .pointer("/choices/0/message/content")
+            .or_else(|| response.pointer("/content/0/text"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("label endpoint returned no message content"))?;
+        Ok(graphoxide_graph::LabelResponse {
+            content: content.to_owned(),
+            usage: graphoxide_graph::LabelUsage {
+                input: response
+                    .pointer("/usage/prompt_tokens")
+                    .or_else(|| response.pointer("/usage/input_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                output: response
+                    .pointer("/usage/completion_tokens")
+                    .or_else(|| response.pointer("/usage/output_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            },
+        })
+    }
+}
+
+fn install_agent_platform(
+    positional: Option<String>,
+    flagged: Option<String>,
+    project: bool,
+    strict: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        positional.is_none() || flagged.is_none(),
+        "specify the platform either positionally or with --platform, not both"
+    );
+    let platform: graphoxide_cli::install::Platform = positional
+        .or(flagged)
+        .unwrap_or_else(|| "claude".to_owned())
+        .parse()?;
+    let cwd = std::env::current_dir()?;
+    let context = graphoxide_cli::install::InstallContext::for_current_process(cwd, project)?;
+    graphoxide_cli::install::install_with_strict(platform, &context, strict)?;
+    write_output(&format!(
+        "Graphoxide {platform} integration installed ({} scope).",
+        if project { "project" } else { "user" }
+    ))
+}
+
+fn uninstall_agent_platform(
+    positional: Option<String>,
+    flagged: Option<String>,
+    project: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        positional.is_none() || flagged.is_none(),
+        "specify the platform either positionally or with --platform, not both"
+    );
+    let cwd = std::env::current_dir()?;
+    let context = graphoxide_cli::install::InstallContext::for_current_process(cwd, project)?;
+    if let Some(name) = positional.or(flagged) {
+        let platform = name.parse()?;
+        graphoxide_cli::install::uninstall(platform, &context)?;
+    } else {
+        graphoxide_cli::install::uninstall_all(&context)?;
+    }
+    write_output("Graphoxide integration removed.")
+}
+
+fn claude(command: ClaudeCommand) -> anyhow::Result<()> {
+    match command {
+        ClaudeCommand::Status { path } => {
+            let markdown = [path.join("CLAUDE.md"), path.join(".claude/CLAUDE.md")]
+                .iter()
+                .any(|candidate| {
+                    std::fs::read_to_string(candidate)
+                        .ok()
+                        .is_some_and(|text| text.lines().any(|line| line == "## graphoxide"))
+                });
+            let settings = std::fs::read_to_string(path.join(".claude/settings.json"))
+                .ok()
+                .is_some_and(|text| text.contains("graphoxide hook-guard"));
+            write_output(if markdown && settings {
+                "Claude Code graphoxide integration installed."
             } else {
-                write_text(&target, &markdown)?;
+                "Claude Code graphoxide integration not installed."
+            })
+        }
+        ClaudeCommand::Install {
+            path,
+            project,
+            strict,
+        } => {
+            let markdown = if project {
+                path.join("CLAUDE.md")
+            } else {
+                path.join(".claude/CLAUDE.md")
+            };
+            let already_configured = has_graphoxide_section(&markdown);
+            let context =
+                graphoxide_cli::install::InstallContext::for_current_process(path, project)?;
+            graphoxide_cli::install::install_with_strict(
+                graphoxide_cli::install::Platform::Claude,
+                &context,
+                strict,
+            )?;
+            write_output(if already_configured {
+                "Claude Code graphoxide integration already configured (no change)."
+            } else {
+                "Claude Code graphoxide integration installed."
+            })
+        }
+        ClaudeCommand::Uninstall { path, project } => {
+            let markdown_targets = [
+                path.join("CLAUDE.md"),
+                path.join("CLAUDE.local.md"),
+                path.join(".claude/CLAUDE.md"),
+                path.join(".claude/CLAUDE.local.md"),
+            ];
+            let had_markdown = markdown_targets.iter().any(|target| target.is_file());
+            let had_section = markdown_targets
+                .iter()
+                .any(|target| has_graphoxide_section(target));
+            let context =
+                graphoxide_cli::install::InstallContext::for_current_process(path, project)?;
+            graphoxide_cli::install::uninstall(
+                graphoxide_cli::install::Platform::Claude,
+                &context,
+            )?;
+            if had_section {
+                write_output("Claude Code graphoxide integration removed.")
+            } else if had_markdown {
+                write_output("Graphoxide section not found in CLAUDE.md; nothing to do.")
+            } else {
+                write_output("No CLAUDE.md found; nothing to do.")
             }
         }
     }
-    for target in [settings_path, root.join(".claude/settings.local.json")] {
-        if !target.is_file() {
-            continue;
-        }
-        let mut settings: serde_json::Value =
-            match serde_json::from_str(&std::fs::read_to_string(&target)?) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-        if let Some(pre) = settings
-            .get_mut("hooks")
-            .and_then(|value| value.get_mut("PreToolUse"))
-            .and_then(|value| value.as_array_mut())
-        {
-            pre.retain(|item| !item.to_string().contains("graphoxide hook-guard"));
-            write_text(&target, &(serde_json::to_string_pretty(&settings)? + "\n"))?;
-        }
-    }
-    write_output("Claude Code graphoxide integration removed.")
 }
 
-fn replace_managed_block(text: &mut String, start: &str, end: &str, block: &str) {
-    if let (Some(begin), Some(finish)) = (text.find(start), text.find(end)) {
-        let finish = finish + end.len();
-        text.replace_range(begin..finish, block);
+fn has_graphoxide_section(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|text| text.lines().any(|line| line == "## graphoxide"))
+}
+
+fn direct_agent_platform(
+    platform: graphoxide_cli::install::Platform,
+    command: PlatformInstallCommand,
+) -> anyhow::Result<()> {
+    let (installing, project) = match command {
+        PlatformInstallCommand::Install { project } => (true, project),
+        PlatformInstallCommand::Uninstall { project } => (false, project),
+    };
+    let context = graphoxide_cli::install::InstallContext::for_current_process(
+        std::env::current_dir()?,
+        project,
+    )?;
+    if installing {
+        graphoxide_cli::install::install(platform, &context)?;
+        write_output(&format!("Graphoxide {platform} integration installed."))
     } else {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(block);
-        text.push('\n');
+        graphoxide_cli::install::uninstall(platform, &context)?;
+        write_output(&format!("Graphoxide {platform} integration removed."))
     }
 }
 
-fn remove_managed_block(text: &mut String, start: &str, end: &str) {
-    if let (Some(begin), Some(finish)) = (text.find(start), text.find(end)) {
-        let mut finish = finish + end.len();
-        if text.as_bytes().get(finish) == Some(&b'\n') {
-            finish += 1;
-        }
-        text.replace_range(begin..finish, "");
-    }
-}
-
-fn shell_command(executable: &std::path::Path, argument: &str) -> String {
-    let raw = executable.to_string_lossy();
-    if raw.contains([' ', '\'', '"']) {
-        format!("'{}' {argument}", raw.replace('\'', "'\\''"))
+fn direct_agents_platform(command: PlatformInstallCommand) -> anyhow::Result<()> {
+    let (installing, project) = match command {
+        PlatformInstallCommand::Install { project } => (true, project),
+        PlatformInstallCommand::Uninstall { project } => (false, project),
+    };
+    let context = graphoxide_cli::install::InstallContext::for_current_process(
+        std::env::current_dir()?,
+        project,
+    )?;
+    if installing {
+        graphoxide_cli::install::agents_platform_install(&context)?;
+        write_output("Graphoxide agents integration installed.")
     } else {
-        format!("{raw} {argument}")
+        graphoxide_cli::install::agents_platform_uninstall(&context)?;
+        write_output("Graphoxide agents integration removed.")
+    }
+}
+
+fn direct_devin_platform(command: PlatformInstallCommand) -> anyhow::Result<()> {
+    let (installing, project) = match command {
+        PlatformInstallCommand::Install { project } => (true, project),
+        PlatformInstallCommand::Uninstall { project } => (false, project),
+    };
+    let context = graphoxide_cli::install::InstallContext::for_current_process(
+        std::env::current_dir()?,
+        project,
+    )?;
+    if installing {
+        let changed = graphoxide_cli::install::devin_platform_install(&context)?;
+        if !changed {
+            return write_output("Graphoxide Devin integration already configured (no change).");
+        }
+        if project {
+            write_output(
+                "Graphoxide Devin integration installed. Commit it with: git add .devin .windsurf",
+            )
+        } else {
+            write_output("Graphoxide Devin integration installed.")
+        }
+    } else if graphoxide_cli::install::devin_platform_uninstall(&context)? {
+        write_output("Graphoxide Devin integration removed.")
+    } else {
+        write_output("Graphoxide Devin integration has nothing to remove.")
+    }
+}
+
+fn direct_codebuddy_platform(command: PlatformInstallCommand) -> anyhow::Result<()> {
+    let (installing, project) = match command {
+        PlatformInstallCommand::Install { project } => (true, project),
+        PlatformInstallCommand::Uninstall { project } => (false, project),
+    };
+    let context = graphoxide_cli::install::InstallContext::for_current_process(
+        std::env::current_dir()?,
+        project,
+    )?;
+    if installing {
+        let changed = graphoxide_cli::install::codebuddy_platform_install(&context)?;
+        write_output(if changed {
+            "Graphoxide CodeBuddy integration installed."
+        } else {
+            "Graphoxide CodeBuddy integration already configured (no change)."
+        })
+    } else {
+        graphoxide_cli::install::codebuddy_platform_uninstall(&context)?;
+        write_output("Graphoxide CodeBuddy integration removed.")
     }
 }
 
 fn hook(command: HookCommand) -> anyhow::Result<()> {
-    let (action, path) = match command {
-        HookCommand::Install { path } => ("install", path),
-        HookCommand::Uninstall { path } => ("uninstall", path),
-        HookCommand::Status { path } => ("status", path),
-    };
-    let hooks = git_hooks_dir(&path).unwrap_or_else(|| path.join(".git/hooks"));
-    let targets = [hooks.join("post-commit"), hooks.join("post-checkout")];
-    match action {
-        "install" => {
-            std::fs::create_dir_all(&hooks)?;
+    let message = match command {
+        HookCommand::Install { path } => {
             let executable =
                 std::env::current_exe().unwrap_or_else(|_| PathBuf::from("graphoxide"));
-            let block = format!(
-                "# graphoxide:start\n{} . >/dev/null 2>&1 &\n# graphoxide:end\n",
-                shell_command(&executable, "update")
-            );
-            for target in &targets {
-                install_hook_block(target, &block)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))?;
-                }
-            }
-            let driver = format!("{} %O %A %B", shell_command(&executable, "merge-driver"));
-            let _ = std::process::Command::new("git")
-                .args([
-                    "config",
-                    "merge.graphoxide.name",
-                    "Graphoxide graph union merge",
-                ])
-                .current_dir(&path)
-                .status();
-            let _ = std::process::Command::new("git")
-                .args(["config", "merge.graphoxide.driver", &driver])
-                .current_dir(&path)
-                .status();
-            ensure_line(
-                &path.join(".gitattributes"),
-                "graphoxide-out/graph.json merge=graphoxide",
-            )?;
-            write_output("Graphoxide git hooks installed.")
+            graphoxide_cli::hooks::install(&path, &executable)?
         }
-        "uninstall" => {
-            for target in &targets {
-                if target.exists() {
-                    remove_hook_block(target)?;
-                }
-            }
-            let _ = std::process::Command::new("git")
-                .args(["config", "--unset", "merge.graphoxide.driver"])
-                .current_dir(&path)
-                .status();
-            remove_line(
-                &path.join(".gitattributes"),
-                "graphoxide-out/graph.json merge=graphoxide",
-            )?;
-            let _ = std::process::Command::new("git")
-                .args(["config", "--unset", "merge.graphoxide.name"])
-                .current_dir(&path)
-                .status();
-            write_output("Graphoxide git hooks removed.")
-        }
-        _ => {
-            let installed = targets.iter().all(|p| p.exists());
-            write_output(if installed {
-                "Graphoxide git hooks installed."
-            } else {
-                "Graphoxide git hooks not installed."
-            })
-        }
-    }
+        HookCommand::Uninstall { path } => graphoxide_cli::hooks::uninstall(&path)?,
+        HookCommand::Status { path } => graphoxide_cli::hooks::status(&path),
+    };
+    write_output(&message)
 }
 
-fn git_hooks_dir(root: &std::path::Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-path", "hooks"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_owned()))
-}
+fn hook_guard(mode: Option<&str>, strict: bool) -> anyhow::Result<()> {
+    use std::io::Read;
+    use std::io::Write as _;
 
-fn install_hook_block(path: &std::path::Path, block: &str) -> anyhow::Result<()> {
-    let mut existing = std::fs::read_to_string(path).unwrap_or_else(|_| "#!/bin/sh\n".into());
-    if let (Some(start), Some(end)) = (
-        existing.find("# graphoxide:start"),
-        existing.find("# graphoxide:end"),
-    ) {
-        let end = end + "# graphoxide:end".len();
-        existing.replace_range(start..end, block.trim_end());
-    } else {
-        if !existing.ends_with('\n') {
-            existing.push('\n');
-        }
-        existing.push_str(block);
-    }
-    write_text(path, &existing)
-}
-
-fn remove_hook_block(path: &std::path::Path) -> anyhow::Result<()> {
-    let mut existing = std::fs::read_to_string(path)?;
-    if let (Some(start), Some(end)) = (
-        existing.find("# graphoxide:start"),
-        existing.find("# graphoxide:end"),
-    ) {
-        let mut end = end + "# graphoxide:end".len();
-        if existing.as_bytes().get(end) == Some(&b'\n') {
-            end += 1;
-        }
-        existing.replace_range(start..end, "");
-        if existing.trim() == "#!/bin/sh" {
-            std::fs::remove_file(path)?;
-        } else {
-            write_text(path, &existing)?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_line(path: &std::path::Path, line: &str) -> anyhow::Result<()> {
-    let mut text = std::fs::read_to_string(path).unwrap_or_default();
-    if !text.lines().any(|existing| existing.trim() == line) {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str(line);
-        text.push('\n');
-        write_text(path, &text)?;
-    }
-    Ok(())
-}
-
-fn remove_line(path: &std::path::Path, line: &str) -> anyhow::Result<()> {
-    if !path.is_file() {
+    let mode = mode.unwrap_or_default();
+    if !matches!(mode, "search" | "read" | "gemini") {
         return Ok(());
     }
-    let text = std::fs::read_to_string(path)?;
-    let filtered = text
-        .lines()
-        .filter(|existing| existing.trim() != line)
-        .collect::<Vec<_>>()
-        .join("\n");
-    if filtered.trim().is_empty() {
-        std::fs::remove_file(path)?;
-    } else {
-        write_text(path, &(filtered + "\n"))?;
+    let mut input = Vec::new();
+    if mode != "gemini" && std::io::stdin().read_to_end(&mut input).is_err() {
+        return Ok(());
     }
-    Ok(())
-}
-
-fn hook_guard() -> anyhow::Result<()> {
-    use std::io::Read;
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-    let value: serde_json::Value = match serde_json::from_str(&input) {
-        Ok(value) => value,
-        Err(_) => return write_output("{}"),
-    };
-    let tool = value
-        .get("tool_input")
-        .and_then(|v| v.as_object())
-        .or_else(|| value.as_object());
-    let input = tool
-        .map(|t| {
-            ["prompt", "command", "pattern", "path", "file_path"]
-                .iter()
-                .filter_map(|key| t.get(*key).and_then(|v| v.as_str()))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default();
-    let graph = PathBuf::from("graphoxide-out/graph.json");
-    let stamp = PathBuf::from("graphoxide-out/cache/last_query_stamp");
-    let stamp_fresh = stamp
-        .metadata()
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|time| time.elapsed().ok())
-        .is_some_and(|age| age < std::time::Duration::from_secs(300));
-    let lower = input.to_lowercase().replace('\\', "/");
-    let should_nudge = graph.is_file()
-        && !stamp_fresh
-        && !lower.contains("graphoxide-out/")
-        && !input.is_empty()
-        && [
-            "code",
-            "function",
-            "class",
-            "architecture",
-            "call",
-            "import",
-            "impact",
-            "where",
-            "grep",
-            "rg ",
-            "find ",
-            ".rs",
-            ".py",
-            ".ts",
-            ".go",
-            ".java",
-        ]
-        .iter()
-        .any(|term| lower.contains(term));
-    let output = if should_nudge {
-        serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Use graphoxide query first to inspect the project knowledge graph before searching files broadly."}})
-    } else {
-        serde_json::json!({})
-    };
-    write_output(&serde_json::to_string(&output)?)
+    let output = graphoxide_cli::hook_guard::evaluate_strict(
+        mode,
+        &input,
+        &graphoxide_cli::hook_guard::GuardContext::for_current_process(),
+        strict,
+    );
+    if output.is_empty() {
+        return Ok(());
+    }
+    match std::io::stdout().lock().write_all(output.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn rebuild(path: &std::path::Path, no_cluster: bool, force: bool) -> anyhow::Result<()> {
-    let Some(_lock) = RebuildLock::acquire(path)? else {
-        return write_output("A rebuild is already running; changes were queued.");
-    };
-    loop {
-        let extractions = graphoxide_extract::extract_project(path)?;
-        let output = path.join("graphoxide-out/graph.json");
-        let previous = graphoxide_core::read_graph(&output).ok();
-        if no_cluster {
-            if !graphoxide_core::write_raw_extractions_atomic(&output, &extractions, force)? {
-                anyhow::bail!("refusing to overwrite a larger existing graph; pass --force after verifying the reduction")
-            }
-            save_build_config(path, no_cluster)?;
-            return write_output(&format!("Wrote raw extraction to {}", output.display()));
+    let result = watch_service::rebuild_project(
+        path,
+        &watch_service::RebuildOptions {
+            force,
+            no_cluster,
+            acquire_lock: true,
+            block_on_lock: true,
+            ..Default::default()
+        },
+    )?;
+    for warning in &result.warnings {
+        eprintln!("[graphoxide update] {warning}");
+    }
+    match result.status {
+        watch_service::RebuildStatus::Rebuilt => {
+            let graph = graphoxide_core::read_graph(&result.graph_path)?;
+            write_output(&format!(
+                "Wrote {} nodes and {} edges to {}",
+                graph.nodes.len(),
+                graph.links.len(),
+                result.graph_path.display()
+            ))
         }
-        let mut graph = graphoxide_graph::build_graph(&extractions)?;
-        graphoxide_graph::cluster(&mut graph)?;
-        if let Some(previous) = &previous {
-            graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
+        watch_service::RebuildStatus::Unchanged => {
+            write_output("No code-graph topology changes detected; outputs left untouched.")
         }
-        if !graphoxide_core::write_graph_atomic(&output, &graph, force)? {
-            anyhow::bail!("refusing to overwrite a larger existing graph; pass --force after verifying the reduction")
+        watch_service::RebuildStatus::NoTrackedChanges => {
+            write_output("No tracked code files in change set; nothing to rebuild.")
         }
-        save_build_config(path, no_cluster)?;
-        let needs_update = path.join("graphoxide-out/needs_update");
-        if needs_update.is_file() {
-            std::fs::remove_file(needs_update)?;
+        watch_service::RebuildStatus::Queued => {
+            write_output("A rebuild is already running; changes were queued.")
         }
-        let pending = path.join("graphoxide-out/pending-changes");
-        if pending.is_file() {
-            std::fs::remove_file(&pending)?;
-            eprintln!("[graphoxide] changes arrived during rebuild; rebuilding once more");
-            continue;
-        }
-        return write_output(&format!(
-            "Wrote {} nodes and {} edges to {}",
-            graph.nodes.len(),
-            graph.links.len(),
-            output.display()
-        ));
+        watch_service::RebuildStatus::RefusedShrink => anyhow::bail!(
+            "refusing to overwrite a smaller graph because the loss is not explained by rebuilt or deleted sources; pass --force after verifying the reduction"
+        ),
     }
 }
 
-struct RebuildLock {
-    path: PathBuf,
-}
-
-impl RebuildLock {
-    fn acquire(root: &std::path::Path) -> anyhow::Result<Option<Self>> {
-        let out = root.join("graphoxide-out");
-        std::fs::create_dir_all(&out)?;
-        let path = out.join("rebuild.lock");
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                writeln!(file, "{}", std::process::id())?;
-                let pending = out.join("pending-changes");
-                if pending.is_file() {
-                    std::fs::remove_file(pending)?;
-                }
-                Ok(Some(Self { path }))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::fs::write(out.join("pending-changes"), b"")?;
-                Ok(None)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-}
-impl Drop for RebuildLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-fn save_build_config(root: &std::path::Path, no_cluster: bool) -> anyhow::Result<()> {
-    write_text(
-        &root.join("graphoxide-out/.graphoxide_build.json"),
-        &serde_json::to_string_pretty(&serde_json::json!({
-            "code_only": true,
-            "cluster": !no_cluster,
-            "version": env!("CARGO_PKG_VERSION")
-        }))?,
-    )
+fn save_build_config_in(
+    output_directory: &std::path::Path,
+    no_cluster: bool,
+    excludes: Option<&[String]>,
+    honor_gitignore: Option<bool>,
+) -> anyhow::Result<()> {
+    watch_service::write_build_config_with_cluster(
+        output_directory,
+        excludes,
+        honor_gitignore,
+        Some(!no_cluster),
+    )?;
+    Ok(())
 }
 
 fn global_graph(roots: &[PathBuf], output: &std::path::Path, force: bool) -> anyhow::Result<()> {
@@ -1539,53 +2678,16 @@ fn record_query(
         std::fs::write(stamp, b"")?;
         Ok(())
     })();
-    let _ = (|| -> anyhow::Result<()> {
-        let enabled = |name: &str| {
-            std::env::var(name)
-                .ok()
-                .is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
-        };
-        if enabled("GRAPHOXIDE_QUERY_LOG_DISABLE") {
-            return Ok(());
-        }
-        let path = match std::env::var("GRAPHOXIDE_QUERY_LOG") {
-            Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
-            _ if enabled("GRAPHOXIDE_QUERY_LOG_ENABLE") => {
-                let Some(home) = std::env::var_os("HOME") else {
-                    return Ok(());
-                };
-                PathBuf::from(home).join(".cache/graphoxide-queries.log")
-            }
-            _ => return Ok(()),
-        };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let parts: Vec<_> = result.split_whitespace().collect();
-        let nodes = parts.windows(3).find_map(|w| {
-            (w[1] == "nodes" && w[2] == "found")
-                .then(|| w[0].parse::<usize>().ok())
-                .flatten()
-        });
-        let mut value = serde_json::json!({
-            "ts_unix_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
-            "kind": kind,
-            "question": question,
-            "corpus": graph.display().to_string(),
-            "nodes_returned": nodes,
-            "result_chars": result.len(),
-            "duration_ms": duration.as_secs_f64() * 1000.0
-        });
-        if enabled("GRAPHOXIDE_QUERY_LOG_RESPONSES") {
-            value["response"] = result.into();
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(file, "{}", serde_json::to_string(&value)?)?;
-        Ok(())
-    })();
+    graphoxide_query::log_query_from_env(&graphoxide_query::QueryLogRecord {
+        kind,
+        question,
+        corpus: graph,
+        result: Some(result),
+        duration_ms: Some(duration.as_secs_f64() * 1000.0),
+        mode: None,
+        depth: None,
+        nodes_returned: None,
+    });
 }
 
 fn write_text(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
@@ -1598,6 +2700,241 @@ fn write_text(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn managed_output_directory(
+    root: &std::path::Path,
+    explicit_root: Option<&std::path::Path>,
+) -> PathBuf {
+    if let Some(explicit_root) = explicit_root {
+        return explicit_root.join("graphoxide-out");
+    }
+    let configured = std::env::var_os("GRAPHOXIDE_OUT")
+        .or_else(|| std::env::var_os("GRAPHIFY_OUT"))
+        .map(PathBuf::from);
+    match configured {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => root.join(path),
+        None => root.join("graphoxide-out"),
+    }
+}
+
+fn resolve_managed_graph_path(graph: PathBuf) -> PathBuf {
+    if graph == std::path::Path::new("graphoxide-out/graph.json") {
+        managed_output_directory(std::path::Path::new("."), None).join("graph.json")
+    } else {
+        graph
+    }
+}
+
+fn load_community_labels(directory: &std::path::Path) -> std::collections::BTreeMap<i64, String> {
+    for name in [".graphoxide_labels.json", ".graphify_labels.json"] {
+        let Ok(bytes) = std::fs::read(directory.join(name)) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let object = value
+            .get("labels")
+            .or_else(|| value.get("communities"))
+            .unwrap_or(&value)
+            .as_object();
+        if let Some(object) = object {
+            let labels = object
+                .iter()
+                .filter_map(|(key, value)| {
+                    let community = key.parse().ok()?;
+                    let label = value.as_str().map(str::to_owned).or_else(|| {
+                        value
+                            .get("label")
+                            .or_else(|| value.get("name"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })?;
+                    Some((community, label))
+                })
+                .collect();
+            return labels;
+        }
+    }
+    std::collections::BTreeMap::new()
+}
+
+fn is_placeholder_community_label(community: i64, label: &str) -> bool {
+    label.trim().is_empty() || label.trim() == format!("Community {community}")
+}
+
+fn remove_placeholder_community_names(graph: &mut graphoxide_core::KnowledgeGraph) {
+    for node in &mut graph.nodes {
+        let placeholder = node.community.is_some_and(|community| {
+            node.extra
+                .get("community_name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|label| is_placeholder_community_label(community, label))
+        });
+        if placeholder {
+            node.extra.remove("community_name");
+        }
+    }
+}
+
+fn write_community_label_sidecars(
+    output: &std::path::Path,
+    labels: &std::collections::BTreeMap<i64, String>,
+) -> anyhow::Result<()> {
+    let labels = labels
+        .iter()
+        .map(|(community, label)| (community.to_string(), label))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for name in [".graphoxide_labels.json", ".graphify_labels.json"] {
+        graphoxide_core::write_json_atomic(output.join(name), &labels, true)?;
+    }
+    Ok(())
+}
+
+fn write_cluster_sidecars(
+    output: &std::path::Path,
+    graph: &graphoxide_core::KnowledgeGraph,
+    persist_labels: bool,
+) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    std::fs::create_dir_all(output)?;
+    let communities = graphoxide_export::communities_from_graph(graph);
+    let analysis = graphoxide_graph::analyze(graph)?;
+    let cohesion: BTreeMap<_, _> = communities
+        .keys()
+        .map(|community| (community.to_string(), 0.0_f64))
+        .collect();
+    let analysis_value = serde_json::json!({
+        "communities": communities.iter().map(|(community, members)| (community.to_string(), members)).collect::<BTreeMap<_, _>>(),
+        "cohesion": cohesion,
+        "gods": analysis.god_nodes,
+        "surprises": analysis.surprising_connections,
+        "questions": analysis.suggested_questions,
+    });
+    for name in [".graphoxide_analysis.json", ".graphify_analysis.json"] {
+        graphoxide_core::write_json_atomic(output.join(name), &analysis_value, true)?;
+    }
+    if persist_labels {
+        write_community_label_sidecars(
+            output,
+            &graphoxide_export::community_labels_from_graph(graph),
+        )?;
+    }
+    let report = graphoxide_export::render_report(graph, &graphoxide_graph::analyze(graph)?);
+    graphoxide_core::write_text_atomic(output.join("GRAPH_REPORT.md"), &report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_export(
+    format: &str,
+    positional: Option<PathBuf>,
+    requested_output: Option<PathBuf>,
+    requested_graph: Option<PathBuf>,
+    requested_directory: Option<PathBuf>,
+    no_viz: bool,
+    max_sections: usize,
+) -> anyhow::Result<()> {
+    let managed = managed_output_directory(std::path::Path::new("."), None);
+    let positional_is_graph = format == "callflow-html"
+        && requested_output.is_some()
+        && requested_graph.is_none()
+        && positional.is_some();
+    let graph_path = requested_graph
+        .or_else(|| positional_is_graph.then(|| positional.clone()).flatten())
+        .unwrap_or_else(|| managed.join("graph.json"));
+    let default_output = match format {
+        "html" => managed.join("graph.html"),
+        "callflow-html" => managed.join("callflow.html"),
+        "graphml" => managed.join("graph.graphml"),
+        "cypher" | "neo4j" | "falkordb" => managed.join("cypher.txt"),
+        "wiki" => managed.join("wiki"),
+        "obsidian" => managed.join("obsidian"),
+        "json" => managed.join("graph-copy.json"),
+        _ => unreachable!("clap validates export formats"),
+    };
+    let output = requested_directory
+        .or(requested_output)
+        .or_else(|| (!positional_is_graph).then_some(positional).flatten())
+        .unwrap_or(default_output);
+
+    if format == "html" && no_viz {
+        if output.is_file() {
+            std::fs::remove_file(&output)?;
+        }
+        return write_output(&format!(
+            "Visualization disabled; removed {}",
+            output.display()
+        ));
+    }
+
+    let graph = graphoxide_core::read_graph(&graph_path)?;
+    match format {
+        "html" => {
+            let labels = load_community_labels(
+                graph_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            );
+            let options = graphoxide_export::HtmlOptions {
+                community_labels: labels,
+                ..Default::default()
+            };
+            write_text(
+                &output,
+                &graphoxide_export::render_html_with_options(&graph, &options)?,
+            )?;
+        }
+        "callflow-html" => {
+            let sidecar_directory = graph_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let labels = load_community_labels(sidecar_directory);
+            let report = std::fs::read_to_string(sidecar_directory.join("GRAPH_REPORT.md"))
+                .unwrap_or_default();
+            graphoxide_export::write_callflow_html(
+                &graph,
+                &output,
+                &labels,
+                &report,
+                max_sections,
+            )?;
+            return write_output(&format!("callflow HTML written to {}", output.display()));
+        }
+        "graphml" => graphoxide_export::write_graphml(&graph, &output)?,
+        "cypher" | "neo4j" | "falkordb" => {
+            write_text(&output, &graphoxide_export::render_cypher(&graph))?
+        }
+        "wiki" => graphoxide_export::export_wiki(&graph, &output)?,
+        "obsidian" => {
+            let mut communities = graphoxide_export::communities_from_graph(&graph);
+            if communities.is_empty() && !graph.nodes.is_empty() {
+                communities.insert(0, graph.nodes.iter().map(|node| node.id.clone()).collect());
+            }
+            let labels = load_community_labels(
+                graph_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            );
+            let options = graphoxide_export::VaultOptions {
+                community_labels: labels.clone(),
+                ..Default::default()
+            };
+            graphoxide_export::export_vault_with_options(&graph, &communities, &output, &options)?;
+            graphoxide_export::export_canvas(
+                &graph,
+                &communities,
+                &output.join("graph.canvas"),
+                &labels,
+            )?;
+        }
+        "json" => {
+            graphoxide_export::export_graph_json(&graph, &output, true)?;
+        }
+        _ => unreachable!("clap validates export formats"),
+    }
+    write_output(&format!("Wrote {}", output.display()))
+}
+
 fn write_output(output: &str) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout().lock();
     match writeln!(stdout, "{output}") {
@@ -1607,11 +2944,107 @@ fn write_output(output: &str) -> anyhow::Result<()> {
     }
 }
 
+fn annotate_query_context(output: &mut String, contexts: &[String], source: &str) {
+    if contexts.is_empty() {
+        return;
+    }
+    let annotation = format!("Context: {} ({source})", contexts.join(", "));
+    if let Some(header_end) = output.find('\n') {
+        output.insert_str(header_end, &format!(" | {annotation}"));
+    } else {
+        output.push_str(&format!("\n{annotation}"));
+    }
+}
+
+fn format_god_nodes(nodes: &[(String, String, usize)], json: bool) -> anyhow::Result<String> {
+    if json {
+        #[derive(serde::Serialize)]
+        struct GodNode<'a> {
+            id: &'a str,
+            label: &'a str,
+            degree: usize,
+        }
+        let values: Vec<_> = nodes
+            .iter()
+            .map(|(id, label, degree)| GodNode {
+                id,
+                label,
+                degree: *degree,
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&values)?);
+    }
+    let mut lines = vec!["God nodes (most connected):".to_owned()];
+    lines.extend(nodes.iter().enumerate().map(|(index, (_, label, degree))| {
+        format!(
+            "  {}. {} - {} edges",
+            index + 1,
+            graphoxide_core::sanitize_label(label),
+            degree
+        )
+    }));
+    Ok(lines.join("\n"))
+}
+
+fn load_learning_overlay(
+    graph_path: &std::path::Path,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    serde_json::to_value(graphoxide_core::load_learning_overlay(graph_path))
+        .ok()?
+        .as_object()
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{relevant_watch_paths, Cli, Command};
+    use super::{
+        annotate_query_context, audit_report, format_god_nodes, load_learning_overlay,
+        relevant_watch_paths, Cli, Command,
+    };
     use clap::Parser;
     use std::path::{Path, PathBuf};
+
+    fn god_test_graph() -> graphoxide_core::KnowledgeGraph {
+        let node = |id: &str, label: &str, source: &str| graphoxide_core::Node {
+            id: id.into(),
+            label: label.into(),
+            file_type: "code".into(),
+            source_file: source.into(),
+            source_location: Some("L1".into()),
+            community: None,
+            extra: Default::default(),
+        };
+        let mut graph = graphoxide_core::KnowledgeGraph {
+            nodes: vec![
+                node("hub", "Auth", "auth.py"),
+                node("file", "auth.py", "auth.py"),
+            ],
+            ..Default::default()
+        };
+        for index in 0..4 {
+            let id = format!("caller{index}");
+            graph
+                .nodes
+                .push(node(&id, &format!("c{index}()"), &format!("m{index}.py")));
+            graph.links.push(graphoxide_core::Edge {
+                source: id,
+                target: "hub".into(),
+                relation: "calls".into(),
+                confidence: graphoxide_core::Confidence::Extracted,
+                source_file: String::new(),
+                extra: Default::default(),
+            });
+        }
+        graph.links.push(graphoxide_core::Edge {
+            source: "file".into(),
+            target: "hub".into(),
+            relation: "contains".into(),
+            confidence: graphoxide_core::Confidence::Extracted,
+            source_file: String::new(),
+            extra: Default::default(),
+        });
+        graph
+    }
 
     #[test]
     fn watch_paths_exclude_generated_graph_and_git_events() {
@@ -1648,5 +3081,267 @@ mod tests {
         let cli = Cli::try_parse_from(["graphoxide", "update", ".", "--force"])
             .expect("parse update --force");
         assert!(matches!(cli.command, Command::Update { force: true, .. }));
+    }
+
+    #[test]
+    fn audit_accepts_json_strict_and_cache_bypass() {
+        let cli =
+            Cli::try_parse_from(["graphoxide", "audit", ".", "--json", "--strict", "--force"])
+                .expect("parse audit flags");
+        assert!(matches!(
+            cli.command,
+            Command::Audit {
+                json: true,
+                strict: true,
+                force: true,
+                ..
+            }
+        ));
+    }
+
+    fn assert_pathless_postgres(arguments: &[&str], expected_no_cluster: bool) {
+        let cli = Cli::try_parse_from(arguments).expect("parse pathless PostgreSQL extract");
+        match cli.command {
+            Command::Extract {
+                path,
+                postgres,
+                no_cluster,
+                ..
+            } => {
+                assert_eq!(path, PathBuf::from("."));
+                assert_eq!(postgres.as_deref(), Some("test-dsn"));
+                assert_eq!(no_cluster, expected_no_cluster);
+            }
+            _ => panic!("expected extract command"),
+        }
+    }
+
+    #[test]
+    fn test_pathless_postgres_extract_initializes_empty_detection_clustered_space() {
+        assert_pathless_postgres(&["graphoxide", "extract", "--postgres", "test-dsn"], false);
+    }
+
+    #[test]
+    fn test_pathless_postgres_extract_initializes_empty_detection_clustered_equals() {
+        assert_pathless_postgres(&["graphoxide", "extract", "--postgres=test-dsn"], false);
+    }
+
+    #[test]
+    fn test_pathless_postgres_extract_initializes_empty_detection_no_cluster_space() {
+        assert_pathless_postgres(
+            &[
+                "graphoxide",
+                "extract",
+                "--postgres",
+                "test-dsn",
+                "--no-cluster",
+            ],
+            true,
+        );
+    }
+
+    #[test]
+    fn test_pathless_postgres_extract_initializes_empty_detection_no_cluster_equals() {
+        assert_pathless_postgres(
+            &[
+                "graphoxide",
+                "extract",
+                "--postgres=test-dsn",
+                "--no-cluster",
+            ],
+            true,
+        );
+    }
+
+    #[test]
+    fn audit_accounts_for_unresolved_call_facts() {
+        let extraction: graphoxide_core::Extraction = serde_json::from_value(serde_json::json!({
+            "nodes": [{
+                "id": "caller",
+                "label": "caller()",
+                "file_type": "code",
+                "source_file": "a.js",
+                "source_location": "L1",
+                "type": "function"
+            }],
+            "edges": [{
+                "source": "caller",
+                "target": "__graphoxide_call_missing",
+                "relation": "calls",
+                "confidence": "INFERRED",
+                "source_file": "a.js",
+                "unresolved_call": true,
+                "callee": "missing",
+                "member_call": false
+            }]
+        }))
+        .expect("audit fixture");
+        let (_, build) =
+            graphoxide_graph::build_graph_with_report(std::slice::from_ref(&extraction))
+                .expect("build audit fixture");
+
+        let report = audit_report(Path::new("."), &[extraction], build);
+
+        assert_eq!(report.input.unresolved_calls, 1);
+        assert!(report.strict_violations > 0);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unresolved_call"));
+        assert_eq!(report.build.dropped_edge_count(), 1);
+        assert!(report.build.edges_accounted_for());
+    }
+
+    #[test]
+    fn query_cli_accepts_repeated_explicit_contexts() {
+        let cli = Cli::try_parse_from([
+            "graphoxide",
+            "query",
+            "extract",
+            "--context",
+            "call",
+            "--context",
+            "import",
+        ])
+        .expect("parse query contexts");
+        assert!(matches!(
+            cli.command,
+            Command::Query { contexts, .. } if contexts == ["call", "import"]
+        ));
+    }
+
+    #[test]
+    fn query_cli_context_annotation_matches_upstream_contract() {
+        let mut output = "Traversal: BFS depth=2\n\nNODE extract".to_owned();
+        annotate_query_context(&mut output, &["call".into()], "explicit");
+        assert!(output.contains("Context: call (explicit)"));
+        assert!(output.contains("NODE extract"));
+    }
+
+    #[test]
+    fn test_god_nodes_cli_text_output() {
+        let nodes = graphoxide_query::god_nodes(&god_test_graph(), 10);
+        let output = format_god_nodes(&nodes, false).expect("text god-node output");
+        assert!(output.contains("God nodes (most connected):"));
+        assert!(output.contains("Auth"));
+        assert!(output.contains("edges"));
+        assert!(!output.contains("auth.py"));
+    }
+
+    #[test]
+    fn test_god_nodes_cli_underscore_alias() {
+        let cli =
+            Cli::try_parse_from(["graphoxide", "god_nodes"]).expect("underscore god-nodes alias");
+        assert!(matches!(cli.command, Command::GodNodes { .. }));
+    }
+
+    #[test]
+    fn test_god_nodes_cli_top_limits() {
+        let graph = god_test_graph();
+        let nodes = graphoxide_query::god_nodes(&graph, 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            format_god_nodes(&nodes, false)
+                .unwrap()
+                .matches(" edges")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_god_nodes_cli_json() {
+        let output = format_god_nodes(&[("hub".into(), "Auth".into(), 5)], true)
+            .expect("JSON god-node output");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(value[0]["id"], "hub");
+        assert_eq!(value[0]["label"], "Auth");
+        assert_eq!(value[0]["degree"], 5);
+    }
+
+    #[test]
+    fn test_god_nodes_cli_missing_graph_errors() {
+        let missing = std::env::temp_dir().join(format!(
+            "graphoxide-missing-god-nodes-{}-graph.json",
+            std::process::id()
+        ));
+        let error = graphoxide_core::read_graph(&missing).expect_err("missing graph must fail");
+        assert!(error.to_string().to_lowercase().contains("not found"));
+    }
+
+    #[test]
+    fn learning_overlay_marks_a_vanished_source_stale() {
+        let directory = std::env::temp_dir().join(format!(
+            "graphoxide-learning-overlay-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("create overlay fixture directory");
+        let graph = directory.join("graph.json");
+        std::fs::write(&graph, "{}").expect("write graph marker");
+        std::fs::write(
+            directory.join(".graphify_learning.json"),
+            r#"{"nodes":{"validate":{"source_file":"missing.py","code_fingerprint":"deadbeef"}}}"#,
+        )
+        .expect("write overlay");
+        let overlay = load_learning_overlay(&graph).expect("load overlay");
+        assert_eq!(overlay["validate"]["stale"], true);
+        std::fs::remove_file(directory.join(".graphify_learning.json")).expect("remove overlay");
+        std::fs::remove_file(graph).expect("remove graph marker");
+        std::fs::remove_dir(directory).expect("remove overlay fixture directory");
+    }
+
+    #[test]
+    fn serve_cli_defaults_to_stdio_and_the_managed_graph() {
+        let cli = Cli::try_parse_from(["graphoxide", "serve"]).expect("parse serve defaults");
+        assert!(matches!(
+            cli.command,
+            Command::Serve {
+                graph,
+                transport,
+                host,
+                port: 8080,
+                ..
+            } if graph == std::path::Path::new("graphoxide-out/graph.json")
+                && transport == "stdio"
+                && host == "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn serve_cli_exposes_streamable_http_controls() {
+        let cli = Cli::try_parse_from([
+            "graphoxide",
+            "serve",
+            "g.json",
+            "--transport",
+            "http",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+            "--api-key",
+            "secret",
+            "--path",
+            "/graph",
+            "--json-response",
+            "--stateless",
+        ])
+        .expect("parse HTTP serve flags");
+        assert!(matches!(
+            cli.command,
+            Command::Serve {
+                graph,
+                transport,
+                port: 9000,
+                api_key: Some(key),
+                mount_path,
+                json_response: true,
+                stateless: true,
+                ..
+            } if graph == std::path::Path::new("g.json")
+                && transport == "http"
+                && key == "secret"
+                && mount_path == "/graph"
+        ));
     }
 }

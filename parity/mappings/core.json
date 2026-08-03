@@ -1,0 +1,1555 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_text_atomic_writes_and_leaves_no_tmp",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_text_atomic_writes_and_leaves_no_tmp"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_text_atomic_preserves_existing_on_failure",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_text_atomic_preserves_existing_on_failure"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_text_atomic_preserves_existing_mode",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_text_atomic_preserves_existing_mode"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_text_atomic_new_file_respects_umask",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_text_atomic_new_file_respects_umask"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_text_atomic_writes_through_symlink",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_text_atomic_writes_through_symlink"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_json_atomic_roundtrip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_json_atomic_roundtrip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_to_json_writes_atomically_no_tmp_leftover",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "to_json_writes_atomically_no_tmp_leftover"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_save_manifest_writes_atomically",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "save_manifest_writes_atomically"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_text_atomic_windows_permission_fallback",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_text_atomic_windows_permission_fallback"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_atomic_writes.py::test_write_json_atomic_ensure_ascii_false_preserves_utf8",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "write_json_atomic_ensure_ascii_false_preserves_utf8"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_update_preserves_hyperedges_of_unchanged_files",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "update_preserves_hyperedges_of_unchanged_files"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_update_without_root_still_preserves_hyperedges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "update_without_root_still_preserves_hyperedges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_deleted_file_hyperedges_are_pruned",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "deleted_file_hyperedges_are_pruned"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_prune_without_root_removes_ghost_nodes_via_grandparent_fallback",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "prune_without_root_removes_ghost_nodes_via_grandparent_fallback"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_prune_without_root_uses_graphify_root_marker",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "prune_without_root_uses_graphoxide_root_marker"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_prune_matches_across_symlinked_root",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "prune_matches_across_symlinked_root"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_reextracted_file_in_prune_sources_is_not_deleted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "reextracted_file_in_prune_sources_is_not_deleted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_genuine_deletion_still_prunes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "genuine_deletion_still_prunes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_prune_matches_node_stored_absolute_against_relative_delete",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "prune_matches_node_stored_absolute_against_relative_delete"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_build_merge_hyperedges_and_prune.py::test_prune_reextracted_absolute_node_not_deleted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "prune_reextracted_absolute_node_not_deleted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_confidence.py::test_extracted_edges_have_score_1",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "extracted_edges_have_score_1"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_confidence.py::test_inferred_edges_score_in_range",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "inferred_edges_score_in_range"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_confidence.py::test_ambiguous_edges_score_at_most_04",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "ambiguous_edges_score_at_most_04"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_confidence.py::test_confidence_score_round_trip",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "confidence_score_round_trip"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_confidence.py::test_to_json_defaults_missing_confidence_score",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "to_json_defaults_missing_confidence_score"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_confidence.py::test_report_shows_avg_confidence_for_inferred",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "report_shows_avg_confidence_for_inferred"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_confidence.py::test_report_inferred_tag_with_score",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "report_inferred_tag_with_score"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_corrupt_graph_json.py::test_build_merge_corrupt_graph_raises_runtimeerror",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "build_merge_corrupt_graph_raises_actionable_error"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_corrupt_graph_json.py::test_affected_load_graph_corrupt_raises_runtimeerror",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "affected_load_graph_corrupt_raises_actionable_error"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_corrupt_graph_json.py::test_diagnostics_read_corrupt_raises_runtimeerror",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "diagnostics_read_corrupt_raises_actionable_error"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_corrupt_graph_json.py::test_valid_graph_still_loads",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-graph",
+          "id": "valid_graph_still_loads"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_from_json_stores_hyperedges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_from_json_stores_hyperedges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_from_json_relativizes_hyperedge_source_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_from_json_relativizes_hyperedge_source_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_from_json_no_hyperedges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_from_json_no_hyperedges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_from_json_missing_hyperedges_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_from_json_missing_hyperedges_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_attach_hyperedges_adds_new",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "attach_hyperedges_adds_new"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_attach_hyperedges_deduplicates",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "attach_hyperedges_deduplicates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_attach_hyperedges_multiple_different_ids",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "attach_hyperedges_multiple_different_ids"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_attach_hyperedges_skips_entry_without_id",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "attach_hyperedges_skips_entry_without_id"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_to_json_includes_hyperedges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "to_json_includes_hyperedges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_to_json_hyperedges_empty_when_none",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "to_json_hyperedges_empty_when_none"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_hyperedges_roundtrip_via_json_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "hyperedges_roundtrip_via_json_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_report_includes_hyperedges_section",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "report_includes_hyperedges_section"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_report_includes_hyperedge_node_list",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "report_includes_hyperedge_node_list"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_report_skips_hyperedges_section_when_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "report_skips_hyperedges_section_when_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_report_skips_hyperedges_section_when_key_missing",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "report_skips_hyperedges_section_when_key_missing"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_normalizes_member_aliases_to_nodes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_normalizes_member_aliases_to_nodes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_dedups_alias_members_preserving_order",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_dedups_alias_members_preserving_order"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_canonical_nodes_wins_over_alias",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_canonical_nodes_wins_over_alias"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_rekeys_alias_keyed_hyperedge_members",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_rekeys_alias_keyed_hyperedge_members"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_hypergraph.py::test_build_warns_once_per_aliased_hyperedge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-export",
+          "id": "build_reports_once_per_aliased_hyperedge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[Session_ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_session_validate_token"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[session.validate-token]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_punctuation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[foo__bar..baz]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_repeated_separators"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[  Leading_Trailing__  ]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_leading_trailing"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[A/B\\\\C]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_path_separators"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[MixedCASE]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_mixed_case"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[caf\\xe9]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_composed_accent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[cafe\\u0301]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_decomposed_accent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[\\u65e5\\u672c\\u8a9e\\u30af\\u30e9\\u30b9]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_cjk"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[\\u041a\\u0438\\u0440\\u0438\\u043b\\u043b\\u0438\\u0446\\u0430]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_cyrillic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[na\\xefve_\\xdcber]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_mixed_accented_latin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[x_c1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_chunk_like_suffix"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[__dunder__]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_dunder"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_matches_normalize_id[tab\\tnewline\\nspace ]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_matches_whitespace_runs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[Session_ValidateToken]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_session_validate_token"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[session.validate-token]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_punctuation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[foo__bar..baz]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_repeated_separators"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[  Leading_Trailing__  ]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_leading_trailing"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[A/B\\\\C]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_path_separators"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[MixedCASE]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_mixed_case"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[caf\\xe9]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_composed_accent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[cafe\\u0301]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_decomposed_accent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[\\u65e5\\u672c\\u8a9e\\u30af\\u30e9\\u30b9]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_cjk"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[\\u041a\\u0438\\u0440\\u0438\\u043b\\u043b\\u0438\\u0446\\u0430]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_cyrillic"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[na\\xefve_\\xdcber]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_mixed_accented_latin"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[x_c1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_chunk_like_suffix"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[__dunder__]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_dunder"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalize_id_is_idempotent[tab\\tnewline\\nspace ]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "idempotent_whitespace_runs"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_make_id_joins_then_normalizes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "make_id_joins_then_normalizes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_unicode_identifiers_do_not_collapse_to_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "unicode_identifiers_do_not_collapse_to_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_normalized_ids_are_safe_node_ids",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "normalized_ids_are_safe_node_ids"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_both_callers_share_one_implementation",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "all_rust_callers_share_one_implementation"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_property_make_id_equals_normalize_id",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "property_make_id_equals_normalize_id"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_id_normalization_contract.py::test_property_normalize_id_idempotent",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "property_normalize_id_idempotent"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_skips_chunk_with_path_escape_id",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_skips_chunk_with_path_escape_id"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_fails_closed_when_every_chunk_is_invalid",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_fails_closed_when_every_chunk_is_invalid"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_accepts_valid_empty_chunk",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_accepts_valid_empty_chunk"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_fails_closed_without_chunk_arguments",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_fails_closed_without_chunk_arguments"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_fails_closed_on_unmatched_glob",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_fails_closed_on_unmatched_glob"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_accepts_synonym_file_type",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_accepts_synonym_file_type"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_accepts_unicode_id",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_accepts_unicode_id"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_validate_semantic_fragment_accepts_synonyms_and_unicode",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_semantic_fragment_accepts_synonyms_and_unicode"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_validate_semantic_fragment_still_blocks_path_escape",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_semantic_fragment_still_blocks_path_escape"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_merge_chunks_validation.py::test_merge_chunks_merges_valid_chunks",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "merge_chunks_merges_valid_chunks"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_url_accepts_http",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_url_accepts_http"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_url_accepts_https",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_url_accepts_https"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_url_rejects_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_url_rejects_file"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_url_rejects_ftp",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_url_rejects_ftp"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_url_rejects_data",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_url_rejects_data"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_url_rejects_empty_scheme",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_url_rejects_empty_scheme"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_safe_fetch_rejects_file_url",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "safe_fetch_rejects_file_url"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_safe_fetch_rejects_ftp_url",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "safe_fetch_rejects_ftp_url"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_safe_fetch_returns_bytes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "safe_fetch_returns_bytes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_safe_fetch_raises_on_non_2xx",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "safe_fetch_raises_on_non_2xx"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_safe_fetch_raises_on_size_exceeded",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "safe_fetch_raises_on_size_exceeded"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_safe_fetch_text_decodes_utf8",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "safe_fetch_text_decodes_utf8"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_safe_fetch_text_replaces_bad_bytes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "safe_fetch_text_replaces_bad_bytes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_graph_path_allows_inside_base",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_graph_path_allows_inside_base"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_graph_path_blocks_traversal",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_graph_path_blocks_traversal"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_graph_path_requires_base_exists",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_graph_path_requires_base_exists"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_graph_path_raises_if_file_missing",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_graph_path_raises_if_file_missing"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_graph_path_default_base_discovers_output_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_graph_path_default_base_discovers_output_dir"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_validate_graph_path_default_base_honours_graphify_out_override",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "validate_graph_path_default_base_honours_output_override"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_label_passthrough_html_chars",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_label_passthrough_html_chars"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_label_strips_control_chars",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_label_strips_control_chars"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_label_caps_at_256",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_label_caps_at_256"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_label_safe_passthrough",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_label_safe_passthrough"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_label_none_returns_empty",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_label_none_returns_empty"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_graph_size_cap_default_is_512_mib",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "graph_size_cap_default_is_512_mib"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_default_when_unset",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_default_when_unset"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_default_when_blank",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_default_when_blank"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_plain_integer",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_plain_integer"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_mb_suffix_is_binary",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_mb_suffix_is_binary"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_gb_suffix_is_binary",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_gb_suffix_is_binary"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_suffix_is_case_insensitive",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_suffix_is_case_insensitive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_tolerates_space_before_suffix",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_tolerates_space_before_suffix"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_unparseable_falls_back[not-a-number]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_rejects_not_a_number"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_unparseable_falls_back[1.5GB]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_rejects_fraction"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_unparseable_falls_back[0x10]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_rejects_hex"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_unparseable_falls_back[640KB]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_rejects_kb"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_nonpositive_falls_back[0]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_rejects_zero"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_nonpositive_falls_back[-1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_rejects_negative_one"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_max_graph_bytes_nonpositive_falls_back[-4GB]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "max_graph_bytes_rejects_negative_gb"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_graph_size_cap_under_limit_returns_none",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "graph_size_cap_under_limit_returns_none"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_graph_size_cap_over_limit_raises",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "graph_size_cap_over_limit_raises"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_graph_size_cap_error_message_includes_size_and_cap",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "graph_size_cap_error_message_includes_size_and_cap"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_graph_size_cap_at_boundary_passes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "graph_size_cap_at_boundary_passes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_graph_size_cap_missing_file_silently_returns",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "graph_size_cap_missing_file_silently_returns"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_graph_size_cap_unreadable_directory_silently_returns",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "graph_size_cap_unreadable_path_silently_returns"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_string_strips_control_chars",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_string_strips_control_chars"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_string_escapes_html",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_string_escapes_html"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_string_escapes_quotes",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_string_escapes_quotes"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_string_caps_length",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_string_caps_length"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_string_coerces_non_string",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_string_coerces_non_string"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_value_preserves_simple_types",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_value_preserves_simple_types"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_value_recurses_into_dict",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_value_recurses_into_dict"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_value_recurses_into_list",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_value_recurses_into_list"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_value_caps_list_length",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_value_caps_list_length"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_value_converts_tuple_to_list",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_value_converts_tuple_to_list"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_none_returns_empty_dict",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_none_returns_empty_dict"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_drops_empty_key",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_drops_empty_key"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_sanitizes_keys",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_sanitizes_keys"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_recursive_nested",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_recursive_nested"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_security.py::test_sanitize_metadata_bool_not_coerced_to_int",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-core",
+          "id": "sanitize_metadata_bool_not_coerced_to_int"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_indirect_call_nested_closure_shadow.py::test_untracked_arrow_param_shadow_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_untracked_arrow_param_shadow_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_call_nested_closure_shadow.py::test_untracked_arrow_genuine_reference_still_emits_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_untracked_arrow_genuine_reference_still_emits_indirect_call"}]},
+    {"upstream":"tests/test_indirect_call_nested_closure_shadow.py::test_double_nested_untracked_closures_shadow_compounds","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_double_nested_untracked_closures_shadow_compounds"}]},
+    {"upstream":"tests/test_indirect_call_nested_closure_shadow.py::test_tracked_const_arrow_param_shadow_still_emits_no_indirect_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_tracked_const_arrow_param_shadow_still_emits_no_indirect_call"}]},
+    {"upstream":"tests/test_indirect_call_nested_closure_shadow.py::test_affected_excludes_shadowed_untracked_closure_caller","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_affected_excludes_shadowed_untracked_closure_caller"}]},
+    {"upstream":"tests/test_indirect_call_nested_closure_shadow.py::test_untracked_arrow_param_shadow_stable_on_warm_cache","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_untracked_arrow_param_shadow_stable_on_warm_cache"}]}
+  ]
+}

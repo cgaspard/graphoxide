@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_python_decorators.py::test_module_level_function_decorator","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_level_function_decorator"}]},
+    {"upstream":"tests/test_python_decorators.py::test_same_file_decorator_resolves_to_local_definition","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_same_file_decorator_resolves_to_local_definition"}]},
+    {"upstream":"tests/test_python_decorators.py::test_decorator_with_arguments","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_decorator_with_arguments"}]},
+    {"upstream":"tests/test_python_decorators.py::test_attribute_decorator_targets_the_symbol_not_the_module","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_attribute_decorator_targets_the_symbol_not_the_module"}]},
+    {"upstream":"tests/test_python_decorators.py::test_stacked_decorators_all_emit","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_stacked_decorators_all_emit"}]},
+    {"upstream":"tests/test_python_decorators.py::test_decorated_method_owner_is_class_qualified","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_decorated_method_owner_is_class_qualified"}]},
+    {"upstream":"tests/test_python_decorators.py::test_property_still_class_qualified","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_property_still_class_qualified"}]},
+    {"upstream":"tests/test_python_decorators.py::test_decorated_class","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_decorated_class"}]},
+    {"upstream":"tests/test_python_decorators.py::test_stdlib_class_decorator_emits_no_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_stdlib_class_decorator_emits_no_edge"}]},
+    {"upstream":"tests/test_python_decorators.py::test_builtin_method_decorators_emit_no_edge_or_stub","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_builtin_method_decorators_emit_no_edge_or_stub"}]},
+    {"upstream":"tests/test_python_decorators.py::test_functools_wraps_does_not_rewire_onto_local_wraps","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_functools_wraps_does_not_rewire_onto_local_wraps"}]},
+    {"upstream":"tests/test_python_decorators.py::test_undecorated_function_emits_no_decorator_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_undecorated_function_emits_no_decorator_edge"}]}
+  ]
+}

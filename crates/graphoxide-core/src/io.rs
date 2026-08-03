@@ -1,20 +1,70 @@
 //! Safe graph.json loading and writing.
 
 use crate::{Confidence, Extraction, KnowledgeGraph};
-use std::{fs, io::Write, path::Path};
+use serde::Serialize;
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-const DEFAULT_MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
+/// Default graph-load memory cap (512 MiB), matching upstream Graphify.
+pub const DEFAULT_MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn read_graph(path: impl AsRef<Path>) -> anyhow::Result<KnowledgeGraph> {
+    read_graph_with_cap(path, max_graph_bytes())
+}
+
+/// Read a graph with an explicit byte cap. This makes embedders and tests able
+/// to impose a tighter policy without mutating process-global environment.
+pub fn read_graph_with_cap(path: impl AsRef<Path>, cap: u64) -> anyhow::Result<KnowledgeGraph> {
     let path = path.as_ref();
-    let size = fs::metadata(path)?.len();
-    let cap = max_graph_bytes();
+    let size = fs::metadata(path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!("graph file not found: {}", path.display())
+            } else {
+                anyhow::anyhow!("Cannot read graph file {}: {error}", path.display())
+            }
+        })?
+        .len();
     anyhow::ensure!(
         size <= cap,
         "graph file {} is {size} bytes, exceeds {cap}-byte cap",
         path.display()
     );
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    let bytes = fs::read(path)
+        .map_err(|error| anyhow::anyhow!("Cannot read graph file {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "Cannot read graph file {}: {error}. The file may be corrupted; regenerate or rebuild it",
+            path.display()
+        )
+    })
+}
+
+/// Read an arbitrary JSON object with the same size cap and actionable corruption
+/// diagnostics as graph loading.
+pub fn read_json_object(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let path = path.as_ref();
+    check_graph_file_size_cap(path)?;
+    let bytes = fs::read(path)
+        .map_err(|error| anyhow::anyhow!("Cannot parse {}: {error}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "Cannot parse {}: {error}. The file may be corrupted; regenerate or rebuild it",
+            path.display()
+        )
+    })?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("diagnostic input {} must be a JSON object", path.display()))
 }
 
 pub fn write_graph_atomic(
@@ -88,25 +138,119 @@ pub fn write_raw_extractions_atomic(
 }
 
 fn atomic_value(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec_pretty(value)?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    write_json_atomic(path, value, true)
+}
+
+/// Atomically write UTF-8 text, preserving an existing destination's mode and
+/// writing through a destination symlink instead of replacing the link itself.
+pub fn write_text_atomic(path: impl AsRef<Path>, text: &str) -> anyhow::Result<()> {
+    atomic_write(
+        path.as_ref(),
+        |file| file.write_all(text.as_bytes()),
+        replace_file,
+    )
+}
+
+/// Test/embedding hook for simulating a replace failure without weakening the
+/// production writer's atomicity guarantees.
+#[doc(hidden)]
+pub fn write_text_atomic_with_replacer<R>(
+    path: impl AsRef<Path>,
+    text: &str,
+    replace: R,
+) -> anyhow::Result<()>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    atomic_write(
+        path.as_ref(),
+        |file| file.write_all(text.as_bytes()),
+        replace,
+    )
+}
+
+/// Atomically serialize JSON. `pretty` controls indentation; serde_json emits
+/// non-ASCII text as UTF-8 rather than replacing it with `\\uXXXX` escapes.
+pub fn write_json_atomic(
+    path: impl AsRef<Path>,
+    value: &impl Serialize,
+    pretty: bool,
+) -> anyhow::Result<()> {
+    atomic_write(
+        path.as_ref(),
+        |file| {
+            if pretty {
+                serde_json::to_writer_pretty(file, value).map_err(std::io::Error::other)
+            } else {
+                serde_json::to_writer(file, value).map_err(std::io::Error::other)
+            }
+        },
+        replace_file,
+    )
+}
+
+fn atomic_write<W, R>(path: &Path, write: W, replace: R) -> anyhow::Result<()>
+where
+    W: FnOnce(&mut fs::File) -> std::io::Result<()>,
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let destination = resolve_destination(path)?;
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let name = path
+    let name = destination
         .file_name()
-        .and_then(|v| v.to_str())
+        .and_then(|value| value.to_str())
         .unwrap_or("graph.json");
-    let temp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let mut temporary = None;
+    let mut file = None;
+    for _ in 0..128 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(opened) => {
+                temporary = Some(candidate);
+                file = Some(opened);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let temporary = temporary.ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not allocate a unique temporary file beside {}",
+            destination.display()
+        )
+    })?;
+    let mut file = file.expect("temporary path and file are created together");
     let result = (|| -> anyhow::Result<()> {
-        let mut file = fs::File::create(&temp)?;
-        file.write_all(&bytes)?;
+        if let Ok(metadata) = fs::metadata(&destination) {
+            fs::set_permissions(&temporary, metadata.permissions())?;
+        }
+        write(&mut file)?;
         file.sync_all()?;
-        replace_file(&temp, path)?;
+        drop(file);
+        replace(&temporary, &destination)?;
         Ok(())
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn resolve_destination(path: &Path) -> std::io::Result<PathBuf> {
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return fs::canonicalize(path);
+    }
+    Ok(path.to_path_buf())
 }
 
 /// Replace `destination` with a fully-written temporary file.
@@ -119,19 +263,14 @@ pub fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()>
         Err(rename_error) => {
             #[cfg(windows)]
             {
-                fs::copy(temporary, destination).map_err(|copy_error| {
+                permission_fallback(temporary, destination).map_err(|copy_error| {
                     std::io::Error::new(
                         copy_error.kind(),
                         format!(
                             "rename failed ({rename_error}); copy fallback failed: {copy_error}"
                         ),
                     )
-                })?;
-                fs::OpenOptions::new()
-                    .write(true)
-                    .open(destination)?
-                    .sync_all()?;
-                fs::remove_file(temporary)
+                })
             }
             #[cfg(not(windows))]
             {
@@ -139,6 +278,18 @@ pub fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()>
             }
         }
     }
+}
+
+/// Copy, sync, and delete a completed temporary file. This is the Windows
+/// fallback when atomic replace is blocked by a transient destination lock.
+#[doc(hidden)]
+pub fn permission_fallback(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::copy(temporary, destination)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(destination)?
+        .sync_all()?;
+    fs::remove_file(temporary)
 }
 
 fn prepare_for_export(value: &mut serde_json::Value) {
@@ -191,25 +342,58 @@ fn strip_diacritics(value: &str) -> String {
     value.nfd().filter(|ch| !is_combining_mark(*ch)).collect()
 }
 
-fn max_graph_bytes() -> u64 {
-    let Ok(raw) = std::env::var("GRAPHOXIDE_MAX_GRAPH_BYTES") else {
+/// Return the effective graph size cap. Graphoxide's variable takes precedence;
+/// the upstream variable remains accepted for compatibility with existing setups.
+pub fn max_graph_bytes() -> u64 {
+    let raw = std::env::var("GRAPHOXIDE_MAX_GRAPH_BYTES")
+        .ok()
+        .or_else(|| std::env::var("GRAPHIFY_MAX_GRAPH_BYTES").ok());
+    parse_max_graph_bytes(raw.as_deref())
+}
+
+/// Parse the graph cap's plain-byte, MB, or GB form using binary multipliers.
+pub fn parse_max_graph_bytes(raw: Option<&str>) -> u64 {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
         return DEFAULT_MAX_GRAPH_BYTES;
     };
-    let raw = raw.trim();
-    if let Some(gb) = raw.strip_suffix("GB").or_else(|| raw.strip_suffix("gb")) {
-        return gb
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .and_then(|v| v.checked_mul(1024 * 1024 * 1024))
-            .unwrap_or(DEFAULT_MAX_GRAPH_BYTES);
-    }
-    raw.parse().unwrap_or(DEFAULT_MAX_GRAPH_BYTES)
+    let text = raw.to_ascii_uppercase();
+    let (number, multiplier) = if let Some(value) = text.strip_suffix("GB") {
+        (value.trim(), 1024_u64 * 1024 * 1024)
+    } else if let Some(value) = text.strip_suffix("MB") {
+        (value.trim(), 1024_u64 * 1024)
+    } else {
+        (text.trim(), 1)
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .and_then(|value| value.checked_mul(multiplier))
+        .unwrap_or(DEFAULT_MAX_GRAPH_BYTES)
+}
+
+/// Reject a readable graph file strictly larger than the configured cap. A
+/// missing or unreadable file is left to the caller's existence/read error.
+pub fn check_graph_file_size_cap(path: impl AsRef<Path>) -> anyhow::Result<()> {
+    check_graph_file_size_cap_with(path.as_ref(), max_graph_bytes())
+}
+
+/// Explicit-cap form used by callers that impose a tighter policy.
+pub fn check_graph_file_size_cap_with(path: &Path, cap: u64) -> anyhow::Result<()> {
+    let Ok(size) = fs::metadata(path).map(|metadata| metadata.len()) else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        size <= cap,
+        "graph file {} is {size} bytes, exceeds {cap}-byte cap",
+        path.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_for_export;
+    use super::{check_graph_file_size_cap_with, prepare_for_export};
 
     #[test]
     fn export_restores_direction_and_backfills_fields() {
@@ -230,5 +414,21 @@ mod tests {
         assert!(value["links"][0].get("_src").is_none());
         assert!(value["links"][0].get("target_file").is_none());
         assert!(value.get("graph").is_some());
+    }
+
+    #[test]
+    fn test_query_cli_rejects_oversized_graph() {
+        let path = std::env::temp_dir().join(format!(
+            "graphoxide-oversized-graph-{}-{}.json",
+            std::process::id(),
+            super::TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, br#"{\"nodes\":[],\"links\":[]}"#)
+            .expect("write oversized graph fixture");
+        let error = check_graph_file_size_cap_with(&path, 16).expect_err("must enforce byte cap");
+        std::fs::remove_file(&path).expect("remove oversized graph fixture");
+        let message = error.to_string();
+        assert!(message.contains("exceeds"));
+        assert!(message.contains("byte cap"));
     }
 }

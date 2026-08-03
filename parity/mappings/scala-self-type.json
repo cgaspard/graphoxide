@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_scala_self_type.py::test_self_type_simple_type_emits_requires","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_self_type_simple_type_emits_requires"}]},
+    {"upstream":"tests/test_scala_self_type.py::test_self_type_compound_with_emits_requires_for_each_member","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_self_type_compound_with_emits_requires_for_each_member"}]},
+    {"upstream":"tests/test_scala_self_type.py::test_self_type_structural_refinement_emits_requires_for_base_only","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_self_type_structural_refinement_emits_requires_for_base_only"}]},
+    {"upstream":"tests/test_scala_self_type.py::test_self_type_binder_only_emits_no_requires_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_self_type_binder_only_emits_no_requires_edge"}]},
+    {"upstream":"tests/test_scala_self_type.py::test_class_without_self_type_emits_no_requires_edge","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_without_self_type_emits_no_requires_edge"}]},
+    {"upstream":"tests/test_scala_self_type.py::test_self_type_coexists_with_unrelated_extends","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_self_type_coexists_with_unrelated_extends"}]},
+    {"upstream":"tests/test_scala_self_type.py::test_requires_edges_carry_no_context","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_requires_edges_carry_no_context"}]},
+    {"upstream":"tests/test_scala_self_type.py::test_affected_includes_self_type_dependents","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_affected_includes_self_type_dependents"}]}
+  ]
+}

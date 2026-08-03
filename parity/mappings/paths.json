@@ -1,0 +1,355 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[tests/foo.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[src/tests/foo.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[test/foo.go]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[spec/foo.rb]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[specs/foo.rb]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[app/__tests__/foo.js]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[a/b/TESTS/foo.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[src/test_service.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[pkg/service_test.go]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[src/service.test.ts]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[src/service.spec.ts]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[src/service_spec.rb]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[ps/Module.Tests.ps1]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[java/FooTest.java]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[java/FooTests.java]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[cs/FooTests.cs]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[src\\\\tests\\\\foo.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_positive[src\\\\service_test.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_positive"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[latest.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[contest.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/contest.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/greatest/x.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/service.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[lib/helper.go]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/attestation.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/testimony.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/contest/x.py]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/greatest.cs]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[src/protest.java]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_is_test_path_negative[config/manifest.json]",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_is_test_path_negative"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_disambiguate_drops_test_candidate_for_nontest_call_site",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_disambiguate_drops_test_candidate_for_nontest_call_site"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_disambiguate_bails_on_two_nontest_candidates",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_disambiguate_bails_on_two_nontest_candidates"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_disambiguate_test_call_site_prefers_test_local",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_disambiguate_test_call_site_prefers_test_local"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_paths.py::test_disambiguate_path_proximity_same_dir",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-query",
+          "id": "path_classification::tests::test_disambiguate_path_proximity_same_dir"
+        }
+      ]
+    }
+  ]
+}

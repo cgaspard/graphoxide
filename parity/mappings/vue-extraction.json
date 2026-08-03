@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_vue_extraction.py::test_vue_is_in_code_extensions","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_vue_is_in_code_extensions"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_mask_preserves_line_numbers_and_blanks_markup","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_mask_preserves_line_numbers_and_blanks_markup"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_script_setup_ts_static_imports_resolve","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_script_setup_ts_static_imports_resolve"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_script_setup_extracts_symbols_with_correct_lines","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_script_setup_extracts_symbols_with_correct_lines"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_typed_props_reference_imported_type","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_typed_props_reference_imported_type"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_two_script_blocks_both_parsed","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_two_script_blocks_both_parsed"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_dynamic_import_recovered","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_dynamic_import_recovered"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_plain_js_script_block","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_plain_js_script_block"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_template_only_file_does_not_crash","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_template_only_file_does_not_crash"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_whole_file_to_js_grammar_would_extract_nothing","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_whole_file_to_js_grammar_would_extract_nothing"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_vue_joins_cross_file_symbol_resolution","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_vue_joins_cross_file_symbol_resolution"}]},
+    {"upstream":"tests/test_vue_extraction.py::test_generic_component_open_tag_with_angle_brackets","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_generic_component_open_tag_with_angle_brackets"}]}
+  ]
+}

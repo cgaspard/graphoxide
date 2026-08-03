@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ts_namespace.py::test_namespace_is_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_namespace_is_node"}]},
+    {"upstream":"tests/test_ts_namespace.py::test_module_keyword_is_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_module_keyword_is_node"}]},
+    {"upstream":"tests/test_ts_namespace.py::test_nested_namespace_name","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_nested_namespace_name"}]},
+    {"upstream":"tests/test_ts_namespace.py::test_namespace_members_still_extracted","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_namespace_members_still_extracted"}]},
+    {"upstream":"tests/test_ts_namespace.py::test_ambient_string_module_quotes_stripped","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ambient_string_module_quotes_stripped"}]},
+    {"upstream":"tests/test_ts_namespace.py::test_namespace_node_not_emitted_in_js","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_namespace_node_not_emitted_in_js"}]}
+  ]
+}

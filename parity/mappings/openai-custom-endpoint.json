@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_openai_custom_endpoint.py::test_openai_defaults_without_env","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_openai_defaults_without_env"}]},
+    {"upstream":"tests/test_openai_custom_endpoint.py::test_openai_base_url_and_model_env_override","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_openai_base_url_and_model_env_override"}]},
+    {"upstream":"tests/test_openai_custom_endpoint.py::test_graphify_openai_model_wins_over_openai_model","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_graphify_openai_model_wins_over_openai_model"}]}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_backend_extras.py::test_anthropic_extra_exists","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_anthropic_backend_is_compiled_in"}]},
+    {"upstream":"tests/test_backend_extras.py::test_anthropic_in_all_extra","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_anthropic_is_in_all_builtin_backends"}]},
+    {"upstream":"tests/test_backend_extras.py::test_backend_pkg_hint_points_at_uv_tool_and_extra","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_backend_dependency_error_names_the_required_environment_key"}]}
+  ]
+}

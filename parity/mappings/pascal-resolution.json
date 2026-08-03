@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_pascal_resolution.py::test_single_file_extraction_reports_unresolved_inherited_call","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_single_file_extraction_reports_unresolved_inherited_call"}]},
+    {"upstream":"tests/test_pascal_resolution.py::test_calls_resolve_across_files_via_inherits_chain","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_calls_resolve_across_files_via_inherits_chain"}]},
+    {"upstream":"tests/test_pascal_resolution.py::test_cross_file_calls_do_not_cross_unrelated_classes","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cross_file_calls_do_not_cross_unrelated_classes"}]},
+    {"upstream":"tests/test_pascal_resolution.py::test_pascal_resolver_registered","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pascal_resolver_registered"}]}
+  ]
+}

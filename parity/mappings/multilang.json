@@ -1,0 +1,535 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_multilang.py::test_ts_finds_class",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_finds_class"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_ts_finds_methods",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_finds_methods"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_ts_finds_function",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_finds_function"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_ts_emits_calls",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_emits_calls"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_ts_calls_are_extracted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_calls_are_extracted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_ts_import_edges_have_import_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_import_edges_have_import_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_ts_call_edges_have_call_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_call_edges_have_call_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_ts_no_dangling_edges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "typescript::test_ts_no_dangling_edges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_finds_struct",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_finds_struct"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_finds_methods",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_finds_methods"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_finds_constructor",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_finds_constructor"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_emits_calls",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_emits_calls"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_has_extracted_calls",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_has_extracted_calls"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_import_edges_have_import_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_import_edges_have_import_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_call_edges_have_call_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_call_edges_have_call_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_no_dangling_edges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_no_dangling_edges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_embeds_struct_field",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_embeds_struct_field"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_interface_embedding_emits_embeds",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_interface_embedding_emits_embeds"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_struct_named_field_emits_field_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_struct_named_field_emits_field_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_method_parameter_return_contexts",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_method_parameter_return_contexts"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_go_method_declaration_emits_refs_only_when_name_present",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "go::test_go_method_declaration_emits_refs_only_when_name_present"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_finds_struct",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_finds_struct"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_finds_impl_methods",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_finds_impl_methods"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_finds_function",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_finds_function"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_emits_calls",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_emits_calls"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_calls_are_extracted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_calls_are_extracted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_import_edges_have_import_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_import_edges_have_import_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_call_edges_have_call_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_call_edges_have_call_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_no_dangling_edges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_no_dangling_edges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_trait_impl_emits_implements",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_trait_impl_emits_implements"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_supertrait_emits_inherits",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_supertrait_emits_inherits"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_enum_variant_references",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_enum_variant_references"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_struct_field_emits_field_context",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_struct_field_emits_field_context"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_tuple_struct_field_references",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_tuple_struct_field_references"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_method_parameter_return_and_generic_contexts",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_method_parameter_return_and_generic_contexts"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_rust_no_cross_crate_spurious_edges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "rust::test_rust_no_cross_crate_spurious_edges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_extract_dispatches_all_languages",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "dispatch_cache::test_extract_dispatches_all_languages"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_cache_hit_returns_same_result",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "dispatch_cache::test_cache_hit_returns_same_result"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_cache_miss_after_file_change",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "dispatch_cache::test_cache_miss_after_file_change"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_finds_tables",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_finds_tables"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_finds_view",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_finds_view"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_finds_function",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_finds_function"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_emits_foreign_key_edge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_emits_foreign_key_edge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_emits_reads_from_edge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_emits_reads_from_edge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_no_dangling_edges",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_no_dangling_edges"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_cross_file_fk_resolves_and_never_leaks_scan_path",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_cross_file_fk_resolves_and_never_leaks_scan_path"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_alter_table_fk_edge",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_alter_table_fk_edge"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_schema_qualified_names",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_schema_qualified_names"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_schema_qualified_alter_fk",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_schema_qualified_alter_fk"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_plpgsql_functions_survive_parse_errors",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_plpgsql_functions_survive_parse_errors"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_plpgsql_clean_function_not_double_emitted",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_plpgsql_clean_function_not_double_emitted"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_quoted_plpgsql_routines_are_recovered",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_quoted_plpgsql_routines_are_recovered"
+        }
+      ]
+    },
+    {
+      "upstream": "tests/test_multilang.py::test_sql_quoted_plpgsql_file_stays_clean",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "sql::test_sql_quoted_plpgsql_file_stays_clean"
+        }
+      ]
+    }
+  ]
+}

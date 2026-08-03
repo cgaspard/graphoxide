@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {
+      "upstream": "tests/test_google_workspace.py::test_read_google_shortcut_doc_id",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_read_google_shortcut_doc_id"}]
+    },
+    {
+      "upstream": "tests/test_google_workspace.py::test_read_google_shortcut_extracts_id_from_url",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_read_google_shortcut_extracts_id_from_url"}]
+    },
+    {
+      "upstream": "tests/test_google_workspace.py::test_convert_gdoc_to_markdown_sidecar",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_convert_gdoc_to_markdown_sidecar"}]
+    },
+    {
+      "upstream": "tests/test_google_workspace.py::test_convert_gsheet_uses_xlsx_markdown_callback",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_convert_gsheet_uses_xlsx_markdown_callback"}]
+    },
+    {
+      "upstream": "tests/test_google_workspace.py::test_run_gws_export_uses_output_directory_as_cwd",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_run_gws_export_uses_output_directory_as_cwd"}]
+    },
+    {
+      "upstream": "tests/test_google_workspace.py::test_run_gws_export_does_not_send_resource_key_as_query_param",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_run_gws_export_does_not_send_resource_key_as_query_param"}]
+    },
+    {
+      "upstream": "tests/test_google_workspace.py::test_google_workspace_enabled_env",
+      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_google_workspace_enabled_env"}]
+    }
+  ]
+}

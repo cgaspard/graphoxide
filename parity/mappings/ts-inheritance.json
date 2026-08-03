@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ts_inheritance.py::test_interface_extends_same_file","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_interface_extends_same_file"}]},
+    {"upstream":"tests/test_ts_inheritance.py::test_interface_extends_multiple_same_file","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_interface_extends_multiple_same_file"}]},
+    {"upstream":"tests/test_ts_inheritance.py::test_class_extends_same_file","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_extends_same_file"}]},
+    {"upstream":"tests/test_ts_inheritance.py::test_interface_extends_generic_base_same_file","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_interface_extends_generic_base_same_file"}]},
+    {"upstream":"tests/test_ts_inheritance.py::test_interface_extends_imported","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_interface_extends_imported"}]},
+    {"upstream":"tests/test_ts_inheritance.py::test_imported_class_extends_still_works","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_imported_class_extends_still_works"}]},
+    {"upstream":"tests/test_ts_inheritance.py::test_class_implements_same_file_interface","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_class_implements_same_file_interface"}]}
+  ]
+}

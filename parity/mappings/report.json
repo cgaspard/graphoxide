@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_report.py::test_report_contains_header","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_contains_header"}]},
+    {"upstream":"tests/test_report.py::test_report_contains_corpus_check","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_contains_corpus_check"}]},
+    {"upstream":"tests/test_report.py::test_report_contains_god_nodes","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_contains_god_nodes"}]},
+    {"upstream":"tests/test_report.py::test_report_contains_surprising_connections","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_contains_surprising_connections"}]},
+    {"upstream":"tests/test_report.py::test_report_contains_communities","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_contains_communities"}]},
+    {"upstream":"tests/test_report.py::test_report_contains_ambiguous_section","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_contains_ambiguous_section"}]},
+    {"upstream":"tests/test_report.py::test_report_shows_token_cost","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_shows_token_cost"}]},
+    {"upstream":"tests/test_report.py::test_report_shows_raw_cohesion_scores","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_shows_raw_cohesion_scores"}]},
+    {"upstream":"tests/test_report.py::test_report_work_memory_section_present_with_overlay_and_dead_ends","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_work_memory_section_present_with_overlay_and_dead_ends"}]},
+    {"upstream":"tests/test_report.py::test_report_work_memory_section_absent_without_overlay","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_work_memory_section_absent_without_overlay"}]},
+    {"upstream":"tests/test_report.py::test_import_cycles_section_present_for_code_corpus","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_import_cycles_section_present_for_code_corpus"}]},
+    {"upstream":"tests/test_report.py::test_import_cycles_section_absent_for_documents_only_corpus","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_import_cycles_section_absent_for_documents_only_corpus"}]},
+    {"upstream":"tests/test_report.py::test_report_hubs_are_plain_text_by_default","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_hubs_are_plain_text_by_default"}]},
+    {"upstream":"tests/test_report.py::test_report_hubs_use_wikilinks_when_obsidian","targets":[{"runner":"rust","package":"graphoxide-export","id":"test_report_hubs_use_wikilinks_when_obsidian"}]}
+  ]
+}

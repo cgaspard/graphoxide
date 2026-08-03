@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_transcribe.py::test_video_extensions_set","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_video_extensions_set"}]},
+    {"upstream":"tests/test_transcribe.py::test_build_whisper_prompt_no_nodes","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_build_whisper_prompt_no_nodes"}]},
+    {"upstream":"tests/test_transcribe.py::test_build_whisper_prompt_env_override","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_build_whisper_prompt_env_override"}]},
+    {"upstream":"tests/test_transcribe.py::test_build_whisper_prompt_returns_topic_string","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_build_whisper_prompt_returns_topic_string"}]},
+    {"upstream":"tests/test_transcribe.py::test_build_whisper_prompt_nodes_without_labels","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_build_whisper_prompt_nodes_without_labels"}]},
+    {"upstream":"tests/test_transcribe.py::test_transcribe_uses_cache","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_transcribe_uses_cache"}]},
+    {"upstream":"tests/test_transcribe.py::test_transcribe_force_reruns","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_transcribe_force_reruns"}]},
+    {"upstream":"tests/test_transcribe.py::test_transcribe_missing_faster_whisper","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_transcribe_missing_faster_whisper"}]},
+    {"upstream":"tests/test_transcribe.py::test_transcribe_all_empty","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_transcribe_all_empty"}]},
+    {"upstream":"tests/test_transcribe.py::test_transcribe_all_uses_cache","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_transcribe_all_uses_cache"}]},
+    {"upstream":"tests/test_transcribe.py::test_transcribe_all_skips_failed","targets":[{"runner":"rust","package":"graphoxide-cli","id":"test_transcribe_all_skips_failed"}]}
+  ]
+}

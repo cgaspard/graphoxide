@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_manifest_ingest.py::test_manifests_classify_as_code_not_document","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_manifests_classify_as_code_not_document"}]},
+    {"upstream":"tests/test_manifest_ingest.py::test_apm_parses_name_and_deps","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_apm_parses_name_and_deps"}]},
+    {"upstream":"tests/test_manifest_ingest.py::test_pyproject_parses_pep508_deps","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pyproject_parses_pep508_deps"}]},
+    {"upstream":"tests/test_manifest_ingest.py::test_gomod_parses_module_and_requires","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_gomod_parses_module_and_requires"}]},
+    {"upstream":"tests/test_manifest_ingest.py::test_pom_parses_artifact_and_deps","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pom_parses_artifact_and_deps"}]},
+    {"upstream":"tests/test_manifest_ingest.py::test_apm_dependency_collapses_to_single_canonical_node","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_apm_dependency_collapses_to_single_canonical_node"}]},
+    {"upstream":"tests/test_manifest_ingest.py::test_external_dependency_edge_pruned_not_orphaned","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_external_dependency_edge_pruned_not_orphaned"}]},
+    {"upstream":"tests/test_manifest_ingest.py::test_malformed_manifest_does_not_crash","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_malformed_manifest_does_not_crash"}]}
+  ]
+}

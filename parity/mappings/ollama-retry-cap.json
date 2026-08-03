@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_ollama_retry_cap.py::test_ollama_defaults_to_zero_sdk_retries","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_defaults_to_zero_sdk_retries"}]},
+    {"upstream":"tests/test_ollama_retry_cap.py::test_ollama_honors_explicit_max_retries","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_ollama_honors_explicit_max_retries"}]},
+    {"upstream":"tests/test_ollama_retry_cap.py::test_cloud_backend_keeps_default_retries","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_cloud_backend_keeps_default_retries"}]},
+    {"upstream":"tests/test_ollama_retry_cap.py::test_api_timeout_is_passed_to_client","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_api_timeout_is_passed_to_client"}]}
+  ]
+}

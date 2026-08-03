@@ -43,9 +43,12 @@ plain strings. Keep each item on one line; nested YAML is not supported.
    node scripts/render-release-notes.mjs <version>
    ```
 
-4. Commit the release, create `v<version>`, and push the tag. Odd minor versions
-   publish to the Marketplace pre-release channel; even minor versions publish
-   as stable. A semver suffix such as `-rc.1` remains GitHub-only.
+4. Commit and push the release to the default branch, then wait for CI to pass on
+   that exact commit. Create `v<version>` on the same commit and push the tag. The
+   release workflow independently verifies the exact-SHA CI result before any
+   build or publication starts. Odd minor versions publish to the Marketplace
+   pre-release channel; even minor versions publish as stable. A semver suffix
+   such as `-rc.1` remains GitHub-only.
 
 The tag workflow attaches versioned and stable-name mirrors of all CLI and VSIX
 assets plus `SHA256SUMS` to the GitHub Release.

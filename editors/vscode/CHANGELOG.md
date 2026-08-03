@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0
+
+- Accounted for all 3,978 pinned Graphify v0.9.32 cases across the CLI and
+  extension surface: 3,975 verified parity mappings and 3 reviewed expected
+  divergences.
+- Expanded multi-language extraction and resolution while preventing unsafe
+  cross-runtime identity collisions.
+- Added graph-first incremental updates, partial-build guards, portable caches,
+  and deterministic stale-source pruning.
+- Bundled the matching standalone binary and 133 generated agent integration
+  artifacts in every platform-specific VSIX.
+- Added a live Graphify-versus-Graphoxide differential release gate.
+
 ## 0.1.1
 
 - JavaScript and TypeScript graphs now include exported declarations and

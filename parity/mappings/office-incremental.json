@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "mappings": [
+    {"upstream":"tests/test_office_incremental.py::test_modified_docx_reconverts_sidecar","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_modified_docx_reconverts_sidecar"}]},
+    {"upstream":"tests/test_office_incremental.py::test_unchanged_docx_sidecar_not_rewritten","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_unchanged_docx_sidecar_not_rewritten"}]}
+  ]
+}
