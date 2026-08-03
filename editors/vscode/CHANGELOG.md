@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — 2026-08-03
+## 0.4.1 — 2026-08-03
 
 - Added opt-in AI community naming for OpenAI, LM Studio, Ollama,
   OpenAI-compatible endpoints, and Anthropic, with local model discovery,

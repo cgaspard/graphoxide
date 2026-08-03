@@ -1,4 +1,4 @@
-version: 0.4.0
+version: 0.4.1
 date: 2026-08-03
 highlights:
   - Make local community labeling reliable for slow or reasoning-capable LM Studio and Ollama models.

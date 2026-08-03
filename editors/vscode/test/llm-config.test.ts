@@ -153,13 +153,22 @@ test('discovers LM Studio and Ollama models from their native endpoints', () => 
 });
 
 test('trusted executable candidates exclude configured, PATH, and installed-extension escape paths', () => {
-  const installed = trustedExecutableCandidates('/Users/example/.vscode/extensions/cgaspard.graphoxide-vscode-0.2.0', 'darwin');
-  assert.deepEqual(installed, ['/Users/example/.vscode/extensions/cgaspard.graphoxide-vscode-0.2.0/bin/graphoxide']);
+  const executable = process.platform === 'win32' ? 'graphoxide.exe' : 'graphoxide';
+  const installedExtension = path.resolve(
+    path.parse(process.cwd()).root,
+    'Users',
+    'example',
+    '.vscode',
+    'extensions',
+    'cgaspard.graphoxide-vscode-0.4.1',
+  );
+  const installed = trustedExecutableCandidates(installedExtension, process.platform);
+  assert.deepEqual(installed, [path.join(installedExtension, 'bin', executable)]);
 
   const sourceExtension = path.resolve(process.cwd());
   const sourceCandidates = trustedExecutableCandidates(sourceExtension, process.platform);
   assert.ok(sourceCandidates.every(path.isAbsolute));
-  assert.equal(sourceCandidates[0], path.join(sourceExtension, 'bin', process.platform === 'win32' ? 'graphoxide.exe' : 'graphoxide'));
+  assert.equal(sourceCandidates[0], path.join(sourceExtension, 'bin', executable));
   assert.equal(sourceCandidates.some((candidate) => candidate.includes('/usr/local/bin')), false);
   assert.equal(sourceCandidates.some((candidate) => candidate.includes('workspace-controlled')), false);
   assert.equal(sourceCandidates.length, 3);
