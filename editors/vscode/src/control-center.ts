@@ -50,6 +50,7 @@ interface IntegrationRow {
 const CONTROL_CENTER_COMMANDS = new Set([
   'graphoxide.initialize',
   'graphoxide.update',
+  'graphoxide.rebuild',
   'graphoxide.openGraph',
   'graphoxide.openGraphFile',
   'graphoxide.enableWorkspace',
@@ -221,6 +222,7 @@ export class ControlCenterPanel implements vscode.Disposable {
         workspace: folder ? { name: folder.name, path: folder.uri.fsPath, trusted: vscode.workspace.isTrusted } : null,
         graph: {
           status: graphState?.error ? 'error' : model ? 'ready' : 'missing',
+          exists: graphState?.graphFileExists ?? false,
           path: graphState?.graphUri.fsPath ?? (folder ? this.services.store.graphUri(folder).fsPath : null),
           error: graphState?.error ?? null,
           nodes: model?.snapshot.nodes.length ?? 0,
@@ -406,17 +408,20 @@ export class ControlCenterPanel implements vscode.Disposable {
       bindActions(); updateDisabled();
     }
     function graphCard(state) {
-      const graph = state.graph; const ready = graph.status === 'ready';
+      const graph = state.graph; const ready = graph.status === 'ready'; const exists = graph.exists;
       const status = ready ? badge('Ready', 'good') : graph.status === 'error' ? badge('Error', 'bad') : badge('Not built', 'warn');
       const path = graph.path ? '<button class="link" data-path="' + escapeHtml(graph.path) + '" title="Open graph file">' + escapeHtml(graph.path) + '</button>' : 'No workspace';
       const updated = graph.modified ? new Date(graph.modified).toLocaleString() : 'Not available';
       const problem = graph.error ? '<div class="error" role="status">' + escapeHtml(graph.error) + '</div>' : '';
       const actions = ready
-        ? command('graphoxide.openGraph', 'Open graph', false, false) + command('graphoxide.update', 'Update graph', true, false) + command('graphoxide.openGraphFile', 'Open graph.json', true, false)
-        : command('graphoxide.initialize', 'Extract workspace', false, !state.workspace);
+        ? command('graphoxide.update', 'Update incrementally', false, false) + command('graphoxide.rebuild', 'Full rebuild…', true, false) + command('graphoxide.openGraph', 'Open graph', true, false) + command('graphoxide.openGraphFile', 'Open graph.json', true, false)
+        : exists
+          ? command('graphoxide.rebuild', 'Full rebuild…', false, !state.workspace) + command('graphoxide.openGraphFile', 'Open graph.json', true, false)
+          : command('graphoxide.initialize', 'Build graph', false, !state.workspace);
       return '<section class="card" aria-labelledby="graph-heading"><div class="card-head"><div><h2 id="graph-heading">Workspace graph</h2><p class="muted">' + escapeHtml(state.workspace ? state.workspace.name : 'Open a workspace to get started') + '</p></div>' + status + '</div>' + problem
         + '<div class="metrics"><div class="metric"><strong>' + graph.nodes + '</strong><span>Nodes</span></div><div class="metric"><strong>' + graph.edges + '</strong><span>Edges</span></div><div class="metric"><strong>' + graph.communities + '</strong><span>Communities</span></div></div>'
-        + '<dl><dt>Graph path</dt><dd>' + path + '</dd><dt>Last updated</dt><dd>' + escapeHtml(updated) + '</dd>' + (graph.builtAtCommit ? '<dt>Source commit</dt><dd>' + escapeHtml(graph.builtAtCommit) + '</dd>' : '') + '</dl><div class="actions">' + actions + '</div></section>';
+        + '<dl><dt>Graph path</dt><dd>' + path + '</dd><dt>Last updated</dt><dd>' + escapeHtml(updated) + '</dd>' + (graph.builtAtCommit ? '<dt>Source commit</dt><dd>' + escapeHtml(graph.builtAtCommit) + '</dd>' : '') + '</dl>'
+        + '<p class="detail">Incremental update refreshes the existing graph. Full rebuild rescans every supported input and replaces the generated graph.</p><div class="actions">' + actions + '</div></section>';
     }
     function managedCard(state) {
       const value = state.managed; const label = value.enabled ? 'Enabled' : 'Disabled';

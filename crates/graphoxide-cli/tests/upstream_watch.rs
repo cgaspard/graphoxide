@@ -1,3 +1,4 @@
+use filetime::{set_file_mtime, FileTime};
 use graphoxide_cli::watch::*;
 use graphoxide_core::{Confidence, Edge, KnowledgeGraph, Node};
 use serde_json::{json, Value};
@@ -45,6 +46,17 @@ fn write(path: impl AsRef<Path>, text: &str) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, text).unwrap();
+}
+
+fn rewrite_with_new_mtime(path: impl AsRef<Path>, text: &str) {
+    let path = path.as_ref();
+    let previous = FileTime::from_last_modification_time(&fs::metadata(path).unwrap());
+    write(path, text);
+    set_file_mtime(
+        path,
+        FileTime::from_unix_time(previous.unix_seconds().saturating_add(2), 0),
+    )
+    .unwrap();
 }
 
 fn node(id: &str, source: &str, ast: bool) -> Node {
@@ -840,6 +852,144 @@ fn test_rebuild_code_skips_cluster_when_topology_unchanged() {
 }
 
 #[test]
+fn test_manual_incremental_no_change_reports_unchanged_with_telemetry() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("a.py"), "def alpha():\n    return 1\n");
+    write(temp.path().join("b.py"), "def beta():\n    return 2\n");
+    assert_eq!(build(temp.path(), true).status, RebuildStatus::Rebuilt);
+
+    let mut opts = options(temp.path(), true);
+    opts.scope = RebuildScope::Incremental;
+    let result = rebuild_project(temp.path(), &opts).unwrap();
+
+    assert_eq!(result.status, RebuildStatus::Unchanged);
+    assert_eq!(result.scope, RebuildScope::Incremental);
+    assert_eq!(result.stats.detected_files, 2);
+    assert_eq!(result.stats.processed_files, 0);
+    assert_eq!(result.stats.changed_files, 0);
+    assert_eq!(result.stats.unchanged_files, 2);
+    assert_eq!(result.stats.deleted_files, 0);
+    assert_eq!(result.stats.nodes, graph(temp.path()).nodes.len());
+    assert_eq!(result.stats.edges, graph(temp.path()).links.len());
+    assert!(result.timings.total_ms >= result.timings.detect_ms);
+    let timings = serde_json::to_value(&result.timings).unwrap();
+    for field in [
+        "detect_ms",
+        "extract_ms",
+        "build_ms",
+        "cluster_ms",
+        "write_ms",
+        "total_ms",
+    ] {
+        assert!(timings[field].as_u64().is_some(), "missing integer {field}");
+    }
+}
+
+#[test]
+fn test_manual_incremental_processes_only_the_changed_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let changed = temp.path().join("a.py");
+    write(&changed, "def alpha():\n    return 1\n");
+    write(temp.path().join("b.py"), "def beta():\n    return 2\n");
+    assert!(build(temp.path(), true).succeeded());
+    rewrite_with_new_mtime(
+        &changed,
+        "def alpha():\n    return 1\n\ndef added():\n    return alpha()\n",
+    );
+
+    let mut opts = options(temp.path(), true);
+    opts.scope = RebuildScope::Incremental;
+    let result = rebuild_project(temp.path(), &opts).unwrap();
+
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert_eq!(result.scope, RebuildScope::Incremental);
+    assert_eq!(result.stats.detected_files, 2);
+    assert_eq!(result.stats.processed_files, 1);
+    assert_eq!(result.stats.changed_files, 1);
+    assert_eq!(result.stats.unchanged_files, 1);
+    assert_eq!(result.stats.deleted_files, 0);
+    assert!(sources(&graph(temp.path())).contains("b.py"));
+}
+
+#[test]
+fn test_manual_incremental_prunes_a_deleted_file_without_reextracting_unchanged_files() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("keep.py"), "def keep():\n    return 1\n");
+    write(temp.path().join("drop.py"), "def drop():\n    return 2\n");
+    assert!(build(temp.path(), true).succeeded());
+    fs::remove_file(temp.path().join("drop.py")).unwrap();
+
+    let mut opts = options(temp.path(), true);
+    opts.scope = RebuildScope::Incremental;
+    let result = rebuild_project(temp.path(), &opts).unwrap();
+
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert_eq!(result.scope, RebuildScope::Incremental);
+    assert_eq!(result.stats.detected_files, 1);
+    assert_eq!(result.stats.processed_files, 0);
+    assert_eq!(result.stats.changed_files, 0);
+    assert_eq!(result.stats.unchanged_files, 1);
+    assert_eq!(result.stats.deleted_files, 1);
+    assert!(!sources(&graph(temp.path())).contains("drop.py"));
+}
+
+#[test]
+fn test_manual_incremental_without_a_baseline_falls_back_to_full() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("app.py"), "def app():\n    return 1\n");
+    let mut opts = options(temp.path(), true);
+    opts.scope = RebuildScope::Incremental;
+
+    let result = rebuild_project(temp.path(), &opts).unwrap();
+
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert_eq!(result.scope, RebuildScope::Full);
+    assert_eq!(result.stats.detected_files, 1);
+    assert_eq!(result.stats.processed_files, 1);
+    assert!(result.stats.nodes > 0);
+}
+
+#[test]
+fn test_explicit_watch_change_without_a_baseline_builds_the_full_corpus() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("a.py"), "def alpha():\n    return 1\n");
+    write(temp.path().join("b.py"), "def beta():\n    return 2\n");
+    let mut opts = options(temp.path(), true);
+    opts.changed_paths = Some(vec![PathBuf::from("a.py")]);
+
+    let result = rebuild_project(temp.path(), &opts).unwrap();
+
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert_eq!(result.scope, RebuildScope::Full);
+    assert_eq!(result.stats.detected_files, 2);
+    assert_eq!(result.stats.processed_files, 2);
+    let source = sources(&graph(temp.path()));
+    assert!(source.contains("a.py"));
+    assert!(source.contains("b.py"));
+}
+
+#[test]
+fn test_watch_cli_rejects_an_ancestor_output_before_reporting_readiness() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    write(root.join("app.py"), "def app():\n    return 1\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_graphoxide"))
+        .arg("watch")
+        .arg(&root)
+        .env("GRAPHOXIDE_OUT", temp.path())
+        .env_remove("GRAPHIFY_OUT")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Watching"));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("watched project root or one of its ancestors"));
+    assert!(!temp.path().join(NEEDS_UPDATE).exists());
+}
+
+#[test]
 fn test_watch_handler_honors_graphifyignore() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join(".hidden-parent/corpus");
@@ -851,6 +1001,44 @@ fn test_watch_handler_honors_graphifyignore() {
     assert!(!filter.accepts(&root.join("node_modules/junk.js"), false));
     assert!(!filter.accepts(&root.join("build/out.py"), false));
     assert!(filter.accepts(&root.join("app.py"), false));
+}
+
+#[test]
+fn test_watch_handler_ignores_a_custom_output_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("custom-output");
+    let filter = WatchEventFilter::with_output_directory(temp.path(), true, Some(&output));
+
+    assert!(!filter.accepts(&output.join("graph.json"), false));
+    assert!(!filter.accepts(&output.join("manifest.json"), false));
+    assert!(filter.accepts(&temp.path().join("app.py"), false));
+}
+
+#[test]
+fn test_watch_handler_does_not_ignore_sources_when_output_is_an_ancestor() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    write(root.join("app.py"), "def app():\n    return 1\n");
+    let filter = WatchEventFilter::with_output_directory(&root, true, Some(temp.path()));
+
+    assert!(filter.accepts(&root.join("app.py"), false));
+}
+
+#[test]
+fn test_rebuild_rejects_output_at_or_above_the_watch_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    write(root.join("app.py"), "def app():\n    return 1\n");
+
+    for output in [root.clone(), temp.path().to_path_buf()] {
+        let mut opts = options(&root, true);
+        opts.output_directory = Some(output);
+        let error = rebuild_project(&root, &opts).unwrap_err().to_string();
+
+        assert!(error.contains("watched project root or one of its ancestors"));
+    }
+    assert!(!root.join("graph.json").exists());
+    assert!(!temp.path().join("graph.json").exists());
 }
 
 #[test]
@@ -1421,6 +1609,9 @@ fn test_rebuild_code_queues_on_lock_contention() {
     opts.changed_paths = Some(vec!["a.py".into(), "b.py".into()]);
     let result = rebuild_project(temp.path(), &opts).unwrap();
     assert_eq!(result.status, RebuildStatus::Queued);
+    assert_eq!(result.scope, RebuildScope::Incremental);
+    assert_eq!(result.stats, RebuildStats::default());
+    assert!(result.timings.total_ms >= result.timings.detect_ms);
     assert_eq!(
         fs::read_to_string(out.join(PENDING_CHANGES))
             .unwrap()
@@ -1459,6 +1650,15 @@ fn test_rebuild_code_drains_late_arrivals() {
     let temp = tempfile::tempdir().unwrap();
     write(temp.path().join("own.py"), "def own():\n    return 1\n");
     write(temp.path().join("late.py"), "def late():\n    return 2\n");
+    assert!(build(temp.path(), true).succeeded());
+    write(
+        temp.path().join("own.py"),
+        "def own():\n    return 1\n\ndef own_added():\n    return own()\n",
+    );
+    write(
+        temp.path().join("late.py"),
+        "def late():\n    return 2\n\ndef late_added():\n    return late()\n",
+    );
     let mut opts = options(temp.path(), true);
     opts.acquire_lock = true;
     opts.changed_paths = Some(vec!["own.py".into()]);
@@ -1469,8 +1669,115 @@ fn test_rebuild_code_drains_late_arrivals() {
     })
     .unwrap();
     assert_eq!(result.passes, 2);
+    assert_eq!(result.scope, RebuildScope::Incremental);
+    assert_eq!(result.stats.detected_files, 2);
+    assert_eq!(result.stats.processed_files, 2);
+    assert_eq!(result.stats.changed_files, 2);
+    assert_eq!(result.stats.unchanged_files, 0);
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert!(result.stats.nodes > 0);
+    assert!(result.timings.total_ms >= result.timings.extract_ms);
     let source = sources(&graph(temp.path()));
     assert!(source.contains("own.py") && source.contains("late.py"));
+}
+
+#[test]
+fn test_rebuild_code_deduplicates_file_stats_across_passes() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("own.py"), "def own():\n    return 1\n");
+    write(
+        temp.path().join("steady.py"),
+        "def steady():\n    return 2\n",
+    );
+    assert!(build(temp.path(), true).succeeded());
+    write(
+        temp.path().join("own.py"),
+        "def own():\n    return 1\n\ndef added():\n    return own()\n",
+    );
+
+    let mut opts = options(temp.path(), true);
+    opts.acquire_lock = true;
+    opts.changed_paths = Some(vec![PathBuf::from("own.py")]);
+    let result = rebuild_project_with_observer(temp.path(), &opts, |pass, out| {
+        if pass == 1 {
+            queue_pending(out, &[PathBuf::from("own.py")]).unwrap();
+        }
+    })
+    .unwrap();
+
+    assert_eq!(result.passes, 2);
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert_eq!(result.stats.detected_files, 2);
+    assert_eq!(result.stats.processed_files, 1);
+    assert_eq!(result.stats.changed_files, 1);
+    assert_eq!(result.stats.unchanged_files, 1);
+}
+
+#[test]
+fn test_late_irrelevant_pass_does_not_mask_a_completed_rebuild() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("own.py"), "def own():\n    return 1\n");
+    write(temp.path().join("notes.txt"), "not structurally indexed\n");
+    assert!(build(temp.path(), true).succeeded());
+    write(
+        temp.path().join("own.py"),
+        "def own():\n    return 1\n\ndef own_added():\n    return own()\n",
+    );
+    let mut opts = options(temp.path(), true);
+    opts.acquire_lock = true;
+    opts.changed_paths = Some(vec![PathBuf::from("own.py")]);
+
+    let result = rebuild_project_with_observer(temp.path(), &opts, |pass, out| {
+        if pass == 1 {
+            queue_pending(out, &[PathBuf::from("notes.txt")]).unwrap();
+        }
+    })
+    .unwrap();
+
+    assert_eq!(result.passes, 2);
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert_eq!(result.stats.detected_files, 1);
+    assert_eq!(result.stats.processed_files, 1);
+    assert_eq!(result.stats.changed_files, 1);
+    assert_eq!(result.stats.unchanged_files, 0);
+    assert_eq!(result.stats.deleted_files, 0);
+}
+
+#[test]
+fn test_rebuild_result_serde_round_trip_excludes_private_aggregation_state() {
+    let result = RebuildResult {
+        status: RebuildStatus::Rebuilt,
+        scope: RebuildScope::Incremental,
+        graph_path: PathBuf::from("out/graph.json"),
+        manifest_path: PathBuf::from("out/manifest.json"),
+        passes: 2,
+        clustered: true,
+        warnings: vec!["example warning".into()],
+        stats: RebuildStats {
+            detected_files: 2,
+            processed_files: 1,
+            changed_files: 1,
+            unchanged_files: 1,
+            deleted_files: 0,
+            nodes: 3,
+            edges: 2,
+        },
+        timings: RebuildTimings {
+            detect_ms: 1,
+            extract_ms: 2,
+            build_ms: 3,
+            cluster_ms: 4,
+            write_ms: 5,
+            total_ms: 15,
+        },
+    };
+
+    let encoded = serde_json::to_value(&result).unwrap();
+    assert!(encoded.get("file_sets").is_none());
+    assert_eq!(
+        serde_json::from_value::<RebuildResult>(encoded).unwrap(),
+        result
+    );
 }
 
 #[test]

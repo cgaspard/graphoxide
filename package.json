@@ -4,6 +4,8 @@
   "version": "0.0.0",
   "scripts": {
     "prepare": "husky",
+    "benchmark:graph-build": "node scripts/benchmark-graph-build.mjs",
+    "test:benchmark": "node --test scripts/benchmark-graph-build.test.mjs",
     "verify:pre-push": "node scripts/verify.mjs --pre-push",
     "verify:release": "node scripts/verify.mjs --release"
   },

@@ -43,6 +43,7 @@ export async function run(): Promise<void> {
   await verifySaveAndWatchUpdates(api, folder, enabled.graphPath!);
   await verifyAiProviders(api, enabled.graphPath!);
   await verifyControlCenter();
+  await verifyCustomOutputMaintenance(api, folder);
 
   const finalStatus = await api.status();
   assert.equal(finalStatus.enabled, true);
@@ -363,6 +364,51 @@ async function verifySaveAndWatchUpdates(api: GraphoxideExtensionApi, folder: vs
   await poll(async () => !(await api.status()).watching, 'watch process to stop');
 }
 
+async function verifyCustomOutputMaintenance(api: GraphoxideExtensionApi, folder: vscode.WorkspaceFolder): Promise<void> {
+  const configuration = vscode.workspace.getConfiguration('graphoxide', folder.uri);
+  const defaultGraph = path.join(folder.uri.fsPath, 'graphoxide-out', 'graph.json');
+  await configuration.update('graphPath', 'custom-output/graph.json', vscode.ConfigurationTarget.WorkspaceFolder);
+  const graphPath = path.join(folder.uri.fsPath, 'custom-output', 'graph.json');
+
+  await vscode.commands.executeCommand('graphoxide.initialize');
+  await poll(() => graphContains(graphPath, 'checkout'), 'custom-output graph build', 30000);
+
+  await api.configureFreshness('save');
+  await appendAndSave(
+    vscode.Uri.joinPath(folder.uri, 'cartograph', 'inventory.py'),
+    '\n\ndef e2e_custom_save_marker() -> str:\n    return "custom-save"\n',
+  );
+  await poll(() => graphContains(graphPath, 'e2e_custom_save_marker'), 'custom-output save update', 30000);
+
+  await api.configureFreshness('watch');
+  await poll(async () => (await api.status()).watching, 'custom-output watch process to start');
+  await appendAndSave(
+    vscode.Uri.joinPath(folder.uri, 'cartograph', 'payments.py'),
+    '\n\ndef e2e_custom_watch_marker() -> str:\n    return "custom-watch"\n',
+  );
+  await poll(() => graphContains(graphPath, 'e2e_custom_watch_marker'), 'custom-output watch update', 30000);
+
+  assert.equal(await graphContains(defaultGraph, 'e2e_custom_save_marker'), false);
+  assert.equal(await graphContains(defaultGraph, 'e2e_custom_watch_marker'), false);
+
+  await configuration.update('graphPath', 'graphoxide-out/graph.json', vscode.ConfigurationTarget.WorkspaceFolder);
+  let observedStoppedWatch = false;
+  await poll(async () => {
+    const status = await api.status();
+    if (!status.watching) observedStoppedWatch = true;
+    return observedStoppedWatch && status.watching && status.graphPath === defaultGraph;
+  }, 'watch process to restart with the changed graph path', 30000, 10);
+  await appendAndSave(
+    vscode.Uri.joinPath(folder.uri, 'cartograph', 'audit.py'),
+    '\n\ndef e2e_changed_graph_path_marker() -> str:\n    return "changed-graph-path"\n',
+  );
+  await poll(() => graphContains(defaultGraph, 'e2e_changed_graph_path_marker'), 'restarted watch update', 30000);
+  assert.equal(await graphContains(graphPath, 'e2e_changed_graph_path_marker'), false);
+
+  await api.configureFreshness('manual');
+  await poll(async () => !(await api.status()).watching, 'restarted watch process to stop');
+}
+
 async function appendAndSave(uri: vscode.Uri, text: string): Promise<void> {
   const document = await vscode.workspace.openTextDocument(uri);
   const edit = new vscode.WorkspaceEdit();
@@ -380,11 +426,11 @@ async function graphContains(graphPath: string, marker: string): Promise<boolean
   }
 }
 
-async function poll(check: () => boolean | Promise<boolean>, description: string, timeout = 10000): Promise<void> {
+async function poll(check: () => boolean | Promise<boolean>, description: string, timeout = 10000, interval = 100): Promise<void> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, interval));
   }
   assert.fail(`Timed out waiting for ${description}.`);
 }

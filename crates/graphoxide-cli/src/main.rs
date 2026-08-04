@@ -45,6 +45,9 @@ enum Command {
         /// Emit extraction stage durations to stderr.
         #[arg(long)]
         timing: bool,
+        /// Emit one machine-readable build report to stdout.
+        #[arg(long)]
+        json: bool,
         /// Place the managed graphoxide-out directory beneath this root.
         #[arg(long, visible_alias = "output")]
         out: Option<PathBuf>,
@@ -85,6 +88,9 @@ enum Command {
         /// Preserve the raw, unclustered extraction shape.
         #[arg(long)]
         no_cluster: bool,
+        /// Emit one machine-readable build report to stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// BFS traversal of graph.json for a question
     Query {
@@ -536,12 +542,44 @@ fn stale_local_sources(
     stale.into_iter().collect()
 }
 
-fn emit_extract_timing(enabled: bool, stage: &str, started: std::time::Instant) {
-    if enabled {
+fn emit_build_report(
+    report: &graphoxide_cli::build_telemetry::BuildTelemetry,
+    json: bool,
+    timing: bool,
+    human: &str,
+) -> anyhow::Result<()> {
+    if timing {
+        let stages = &report.stages_ms;
+        let mut stage_values = match report.operation {
+            graphoxide_cli::build_telemetry::BuildOperation::Extract => vec![
+                ("detect/extract", stages.scan_extract),
+                ("build", stages.build),
+            ],
+            graphoxide_cli::build_telemetry::BuildOperation::Update => vec![
+                ("detect", stages.detect),
+                ("extract", stages.extract),
+                ("build", stages.build),
+            ],
+        };
+        if report.graph.clustered {
+            stage_values.push(("cluster", stages.cluster));
+        }
+        stage_values.push(("write", stages.write));
+        for (stage, milliseconds) in stage_values {
+            eprintln!(
+                "[graphoxide timing] {stage}: {}",
+                graphoxide_cli::build_telemetry::format_elapsed(milliseconds)
+            );
+        }
         eprintln!(
-            "[graphoxide timing] {stage}: {:.3}s",
-            started.elapsed().as_secs_f64()
+            "[graphoxide timing] total: {}",
+            graphoxide_cli::build_telemetry::format_elapsed(report.elapsed_ms)
         );
+    }
+    if json {
+        write_output(&serde_json::to_string(report)?)
+    } else {
+        write_output(human)
     }
 }
 
@@ -557,6 +595,7 @@ fn main() -> anyhow::Result<()> {
             postgres,
             allow_partial,
             timing,
+            json,
             out,
             exclude,
             no_gitignore,
@@ -575,9 +614,20 @@ fn main() -> anyhow::Result<()> {
             // records when a fresh clone does not contain the manifest.
             let incremental_mode =
                 !effective_force && output.is_file() && (manifest_path.is_file() || code_only);
-            if incremental_mode {
+            if incremental_mode && !json {
                 write_output("Incremental scan: reusing unchanged extraction cache entries.")?;
             }
+            let mode = if incremental_mode {
+                graphoxide_cli::build_telemetry::BuildMode::Incremental
+            } else {
+                graphoxide_cli::build_telemetry::BuildMode::Full
+            };
+            let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
+                graphoxide_cli::build_telemetry::BuildOperation::Extract,
+                mode,
+                graphoxide_cli::build_telemetry::BuildStatus::Rebuilt,
+                output.clone(),
+            );
             let persisted = watch_service::read_build_config(&output_directory);
             let effective_excludes = if exclude.is_empty() {
                 persisted.excludes.clone()
@@ -598,7 +648,16 @@ fn main() -> anyhow::Result<()> {
                     ..Default::default()
                 },
             )?;
-            emit_extract_timing(timing, "detect/extract", scan_started);
+            telemetry.stages_ms.scan_extract =
+                graphoxide_cli::build_telemetry::elapsed_millis(scan_started);
+            telemetry.files.detected = scan.detection.total_files;
+            telemetry.files.processed = scan.progress.succeeded;
+            telemetry.files.unclassified = scan.detection.unclassified.len();
+            telemetry.files.sensitive = scan.detection.skipped_sensitive.len();
+            telemetry.warnings.extend(scan.detection.warning.clone());
+            telemetry
+                .warnings
+                .extend(scan.detection.walk_errors.iter().cloned());
             let build_progress = graphoxide_cli::build_guard::BuildProgress::new(
                 scan.progress.total,
                 scan.progress.succeeded,
@@ -612,9 +671,12 @@ fn main() -> anyhow::Result<()> {
                     .filter(|(kind, _)| kind.as_str() != "code")
                     .map(|(_, files)| files.len())
                     .sum::<usize>();
-                write_output(&format!(
-                    "--code-only: skipping {skipped} non-code input(s)"
-                ))?;
+                telemetry.files.skipped = telemetry.files.skipped.saturating_add(skipped);
+                if !json {
+                    write_output(&format!(
+                        "--code-only: skipping {skipped} non-code input(s)"
+                    ))?;
+                }
             }
             for skipped in &scan.detection.skipped_sensitive {
                 eprintln!("skipped as potentially sensitive: {skipped}");
@@ -651,7 +713,9 @@ fn main() -> anyhow::Result<()> {
                     )?];
                 }
                 extractions = vec![graphoxide_graph::dedupe_raw_extractions(&extractions)];
-                emit_extract_timing(timing, "build", build_started);
+                telemetry.stages_ms.build =
+                    graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+                let write_started = std::time::Instant::now();
                 let outcome = graphoxide_cli::build_guard::commit_build(
                     &output,
                     graphoxide_cli::build_guard::BuildArtifact::Raw(&extractions),
@@ -670,23 +734,35 @@ fn main() -> anyhow::Result<()> {
                     (!exclude.is_empty()).then_some(exclude.as_slice()),
                     no_gitignore.then_some(false),
                 )?;
-                write_output(&format!(
-                    "Wrote {nodes} nodes and {edges} edges to {}",
-                    output.display()
-                ))?;
-                emit_extract_timing(timing, "total", total_started);
-                return Ok(());
+                telemetry.stages_ms.write =
+                    graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+                telemetry.elapsed_ms =
+                    graphoxide_cli::build_telemetry::elapsed_millis(total_started);
+                telemetry.graph.nodes = nodes;
+                telemetry.graph.edges = edges;
+                telemetry.graph.clustered = false;
+                let human = format!(
+                    "Wrote {nodes} nodes and {edges} edges to {} in {}",
+                    output.display(),
+                    graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
+                );
+                return emit_build_report(&telemetry, json, timing, &human);
             }
             let mut graph = if incremental_mode {
                 graphoxide_graph::build_merge(&extractions, &output, &prune_sources, Some(&path))?
             } else {
                 graphoxide_graph::build_graph(&extractions)?
             };
+            telemetry.stages_ms.build =
+                graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+            let cluster_started = std::time::Instant::now();
             graphoxide_graph::cluster(&mut graph)?;
             if let Some(previous) = &previous {
                 graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
             }
-            emit_extract_timing(timing, "build", build_started);
+            telemetry.stages_ms.cluster =
+                graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
+            let write_started = std::time::Instant::now();
             let outcome = graphoxide_cli::build_guard::commit_build(
                 &output,
                 graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
@@ -703,14 +779,20 @@ fn main() -> anyhow::Result<()> {
                 (!exclude.is_empty()).then_some(exclude.as_slice()),
                 no_gitignore.then_some(false),
             )?;
-            write_output(&format!(
-                "Wrote {} nodes and {} edges to {}",
+            telemetry.stages_ms.write =
+                graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+            telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(total_started);
+            telemetry.graph.nodes = graph.nodes.len();
+            telemetry.graph.edges = graph.links.len();
+            telemetry.graph.clustered = true;
+            let human = format!(
+                "Wrote {} nodes and {} edges to {} in {}",
                 graph.nodes.len(),
                 graph.links.len(),
-                output.display()
-            ))?;
-            emit_extract_timing(timing, "total", total_started);
-            Ok(())
+                output.display(),
+                graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
+            );
+            emit_build_report(&telemetry, json, timing, &human)
         }
         Command::Audit {
             path,
@@ -890,7 +972,8 @@ fn main() -> anyhow::Result<()> {
             path,
             force,
             no_cluster,
-        } => rebuild(&path, no_cluster, force),
+            json,
+        } => rebuild(&path, no_cluster, force, json),
         Command::ClusterOnly {
             path,
             graph: graph_override,
@@ -1650,10 +1733,12 @@ fn render_audit_report(report: &AuditReport) -> anyhow::Result<String> {
 
 fn watch(path: PathBuf) -> anyhow::Result<()> {
     use notify::{RecursiveMode, Watcher};
-    let filter = watch_service::WatchEventFilter::new(
+    let output_directory = managed_output_directory(&path, None);
+    watch_service::validate_watch_output_directory(&path, &output_directory)?;
+    let filter = watch_service::WatchEventFilter::with_output_directory(
         &path,
-        watch_service::read_build_config(&path.join(watch_service::OUTPUT_DIRECTORY))
-            .honor_gitignore,
+        watch_service::read_build_config(&output_directory).honor_gitignore,
+        Some(&output_directory),
     );
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(sender)?;
@@ -1715,6 +1800,7 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
         if !code_changes.is_empty() {
             let options = watch_service::RebuildOptions {
                 changed_paths: Some(code_changes),
+                output_directory: Some(output_directory.clone()),
                 acquire_lock: true,
                 block_on_lock: false,
                 ..Default::default()
@@ -1735,7 +1821,7 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
             graphoxide_extract::detect::classify_file(changed)
                 != Some(graphoxide_extract::detect::FileType::Code)
         }) {
-            watch_service::notify_only(&path)?;
+            watch_service::notify_only_in(&output_directory)?;
         }
     }
 }
@@ -1757,7 +1843,8 @@ fn relevant_watch_paths(root: &std::path::Path, paths: Vec<PathBuf>) -> Vec<Path
 }
 
 fn check_update(path: &std::path::Path) -> anyhow::Result<()> {
-    let notice = watch_service::check_update(path);
+    let output_directory = managed_output_directory(path, None);
+    let notice = watch_service::check_update_in(path, &output_directory);
     if let Some(message) = notice.message {
         write_output(&format!("[graphoxide check-update] {message}"))?;
     }
@@ -2356,10 +2443,17 @@ fn hook_guard(mode: Option<&str>, strict: bool) -> anyhow::Result<()> {
     }
 }
 
-fn rebuild(path: &std::path::Path, no_cluster: bool, force: bool) -> anyhow::Result<()> {
+fn rebuild(
+    path: &std::path::Path,
+    no_cluster: bool,
+    force: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let result = watch_service::rebuild_project(
         path,
         &watch_service::RebuildOptions {
+            scope: watch_service::RebuildScope::Incremental,
+            output_directory: Some(managed_output_directory(path, None)),
             force,
             no_cluster,
             acquire_lock: true,
@@ -2370,28 +2464,88 @@ fn rebuild(path: &std::path::Path, no_cluster: bool, force: bool) -> anyhow::Res
     for warning in &result.warnings {
         eprintln!("[graphoxide update] {warning}");
     }
-    match result.status {
+    let mode = match result.scope {
+        watch_service::RebuildScope::Full => graphoxide_cli::build_telemetry::BuildMode::Full,
+        watch_service::RebuildScope::Incremental => {
+            graphoxide_cli::build_telemetry::BuildMode::Incremental
+        }
+    };
+    let status = match result.status {
         watch_service::RebuildStatus::Rebuilt => {
-            let graph = graphoxide_core::read_graph(&result.graph_path)?;
-            write_output(&format!(
-                "Wrote {} nodes and {} edges to {}",
-                graph.nodes.len(),
-                graph.links.len(),
-                result.graph_path.display()
-            ))
+            graphoxide_cli::build_telemetry::BuildStatus::Rebuilt
         }
         watch_service::RebuildStatus::Unchanged => {
-            write_output("No code-graph topology changes detected; outputs left untouched.")
+            graphoxide_cli::build_telemetry::BuildStatus::Unchanged
         }
         watch_service::RebuildStatus::NoTrackedChanges => {
-            write_output("No tracked code files in change set; nothing to rebuild.")
+            graphoxide_cli::build_telemetry::BuildStatus::NoTrackedChanges
         }
         watch_service::RebuildStatus::Queued => {
-            write_output("A rebuild is already running; changes were queued.")
+            graphoxide_cli::build_telemetry::BuildStatus::Queued
         }
-        watch_service::RebuildStatus::RefusedShrink => anyhow::bail!(
+        watch_service::RebuildStatus::RefusedShrink => {
+            graphoxide_cli::build_telemetry::BuildStatus::RefusedShrink
+        }
+    };
+    let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
+        graphoxide_cli::build_telemetry::BuildOperation::Update,
+        mode,
+        status,
+        result.graph_path.clone(),
+    );
+    telemetry.elapsed_ms = result.timings.total_ms;
+    telemetry.stages_ms.detect = result.timings.detect_ms;
+    telemetry.stages_ms.extract = result.timings.extract_ms;
+    telemetry.stages_ms.build = result.timings.build_ms;
+    telemetry.stages_ms.cluster = result.timings.cluster_ms;
+    telemetry.stages_ms.write = result.timings.write_ms;
+    telemetry.files.detected = result.stats.detected_files;
+    telemetry.files.processed = result.stats.processed_files;
+    telemetry.files.changed = result.stats.changed_files;
+    telemetry.files.unchanged = result.stats.unchanged_files;
+    telemetry.files.deleted = result.stats.deleted_files;
+    telemetry.graph.nodes = result.stats.nodes;
+    telemetry.graph.edges = result.stats.edges;
+    telemetry.graph.clustered = result.clustered;
+    telemetry.passes = result.passes;
+    telemetry.warnings = result.warnings.clone();
+    if result.status != watch_service::RebuildStatus::RefusedShrink {
+        if let Ok(graph) = graphoxide_core::read_graph(&result.graph_path) {
+            telemetry.graph.nodes = graph.nodes.len();
+            telemetry.graph.edges = graph.links.len();
+            telemetry.graph.clustered = graph.nodes.iter().any(|node| node.community.is_some());
+        }
+    }
+    let elapsed = graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms);
+    let human = match result.status {
+        watch_service::RebuildStatus::Rebuilt => {
+            format!(
+                "Wrote {} nodes and {} edges to {} in {elapsed}",
+                telemetry.graph.nodes,
+                telemetry.graph.edges,
+                result.graph_path.display()
+            )
+        }
+        watch_service::RebuildStatus::Unchanged => {
+            format!("No code-graph topology changes detected in {elapsed}; outputs left untouched.")
+        }
+        watch_service::RebuildStatus::NoTrackedChanges => {
+            format!("No tracked code files in change set; nothing to rebuild ({elapsed}).")
+        }
+        watch_service::RebuildStatus::Queued => {
+            format!("A rebuild is already running; changes were queued in {elapsed}.")
+        }
+        watch_service::RebuildStatus::RefusedShrink => String::new(),
+    };
+    if result.status == watch_service::RebuildStatus::RefusedShrink {
+        if json {
+            emit_build_report(&telemetry, true, false, "")?;
+        }
+        anyhow::bail!(
             "refusing to overwrite a smaller graph because the loss is not explained by rebuilt or deleted sources; pass --force after verifying the reduction"
-        ),
+        )
+    } else {
+        emit_build_report(&telemetry, json, false, &human)
     }
 }
 

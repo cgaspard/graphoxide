@@ -355,6 +355,16 @@ fn test_update_no_cluster_writes_raw_graph() {
 }
 
 #[test]
+fn test_update_writes_to_graphify_out_env() {
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("sample.py"), "def f():\n    return 1\n").unwrap();
+    let result = run_with_out(tmp.path(), &["update", ".", "--no-cluster"], "custom-out");
+    assert!(result.status.success(), "{}", text(&result.stderr));
+    assert!(tmp.path().join("custom-out/graph.json").is_file());
+    assert!(!tmp.path().join("graphoxide-out/graph.json").exists());
+}
+
+#[test]
 fn test_cluster_only_creates_output_dir_when_missing() {
     let tmp = tempdir().unwrap();
     let output = make_graph(tmp.path());

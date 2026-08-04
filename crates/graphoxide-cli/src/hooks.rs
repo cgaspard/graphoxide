@@ -593,6 +593,7 @@ pub fn rebuild(mode: HookMode, root: &Path) -> Result<()> {
         root,
         &crate::watch::RebuildOptions {
             changed_paths,
+            output_directory: crate::watch::output_directory_from_env(root),
             force,
             acquire_lock: true,
             block_on_lock: false,

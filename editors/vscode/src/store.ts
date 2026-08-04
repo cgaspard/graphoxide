@@ -1,10 +1,18 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { graphBuildOutputDirectory } from './build';
 import { GraphModel, GraphNode, parseGraphJson } from './graph';
+
+export interface ManagedGraphOutput {
+  readonly graphUri: vscode.Uri;
+  readonly outputDirectory: string;
+  readonly environment: Readonly<{ GRAPHOXIDE_OUT: string }>;
+}
 
 export interface GraphState {
   readonly folder: vscode.WorkspaceFolder;
   readonly graphUri: vscode.Uri;
+  readonly graphFileExists: boolean;
   readonly model?: GraphModel;
   readonly error?: string;
   readonly modified?: number;
@@ -56,27 +64,34 @@ export class GraphStore implements vscode.Disposable {
     return path.isAbsolute(configured) ? vscode.Uri.file(configured) : vscode.Uri.joinPath(folder.uri, ...configured.split(/[\\/]/u));
   }
 
+  managedOutput(folder: vscode.WorkspaceFolder): ManagedGraphOutput {
+    const graphUri = this.graphUri(folder);
+    const outputDirectory = graphBuildOutputDirectory(folder.uri.fsPath, graphUri.fsPath);
+    return { graphUri, outputDirectory, environment: { GRAPHOXIDE_OUT: outputDirectory } };
+  }
+
   async load(folder?: vscode.WorkspaceFolder): Promise<GraphState | undefined> {
     const target = folder ?? this.stateValue?.folder ?? await this.preferredFolder(false);
     if (!target) {
       this.setState(undefined);
       return undefined;
     }
-    const folderChanged = this.stateValue?.folder.uri.toString() !== target.uri.toString();
     const graphUri = this.graphUri(target);
+    const watchedGraphChanged = this.stateValue?.folder.uri.toString() !== target.uri.toString()
+      || this.stateValue?.graphUri.toString() !== graphUri.toString();
     try {
       const [bytes, stat] = await Promise.all([vscode.workspace.fs.readFile(graphUri), vscode.workspace.fs.stat(graphUri)]);
       const model = new GraphModel(parseGraphJson(new TextDecoder().decode(bytes)));
-      const next = { folder: target, graphUri, model, modified: stat.mtime };
+      const next = { folder: target, graphUri, graphFileExists: true, model, modified: stat.mtime };
       this.setState(next);
-      if (folderChanged) this.resetWatcher(target);
+      if (watchedGraphChanged) this.resetWatcher(target);
       return next;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const missing = /FileNotFound|ENOENT|EntryNotFound/u.test(message);
-      const next = { folder: target, graphUri, error: missing ? undefined : message };
+      const next = { folder: target, graphUri, graphFileExists: !missing, error: missing ? undefined : message };
       this.setState(next);
-      if (folderChanged) this.resetWatcher(target);
+      if (watchedGraphChanged) this.resetWatcher(target);
       return next;
     }
   }
@@ -84,8 +99,8 @@ export class GraphStore implements vscode.Disposable {
   async chooseNode(options: { title: string; placeHolder?: string; nodes?: readonly GraphNode[] }): Promise<GraphNode | undefined> {
     const model = this.stateValue?.model;
     if (!model) {
-      await vscode.window.showInformationMessage('Extract this workspace before selecting a graph node.', 'Extract').then(async (choice) => {
-        if (choice === 'Extract') await vscode.commands.executeCommand('graphoxide.initialize');
+      await vscode.window.showInformationMessage('Build this workspace graph before selecting a graph node.', 'Build Graph').then(async (choice) => {
+        if (choice === 'Build Graph') await vscode.commands.executeCommand('graphoxide.initialize');
       });
       return undefined;
     }
@@ -111,6 +126,7 @@ export class GraphStore implements vscode.Disposable {
     this.stateValue = state;
     this.changeEmitter.fire(state);
     void vscode.commands.executeCommand('setContext', 'graphoxide.hasGraph', Boolean(state?.model));
+    void vscode.commands.executeCommand('setContext', 'graphoxide.hasGraphFile', Boolean(state?.graphFileExists));
   }
 
   private resetWatcher(folder?: vscode.WorkspaceFolder): void {

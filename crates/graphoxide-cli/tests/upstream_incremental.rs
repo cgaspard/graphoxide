@@ -1,3 +1,4 @@
+use filetime::{set_file_mtime, FileTime};
 use graphoxide_core::{make_id, Extraction};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, fs, path::Path, process::Command};
@@ -381,6 +382,78 @@ fn test_update_prunes_a_removed_imports_edge() {
                 .as_str()
                 .is_some_and(|source| source.ends_with("a.py"))
     }));
+}
+
+#[test]
+fn test_update_json_reports_no_change_then_one_file_incremental_work() {
+    let fixture = TempDir::new().unwrap();
+    let project = fixture.path().join("project");
+    let changed = project.join("a.py");
+    write(&changed, "def alpha():\n    return 1\n");
+    write(&project.join("b.py"), "def beta():\n    return 2\n");
+    let first = run(
+        fixture.path(),
+        &[
+            "extract",
+            project.to_str().unwrap(),
+            "--code-only",
+            "--no-cluster",
+        ],
+    );
+    assert!(first.status.success(), "{}", output_text(&first));
+
+    let unchanged = run(
+        fixture.path(),
+        &[
+            "update",
+            project.to_str().unwrap(),
+            "--no-cluster",
+            "--json",
+        ],
+    );
+    assert!(unchanged.status.success(), "{}", output_text(&unchanged));
+    let unchanged: Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert_eq!(unchanged["operation"], "update");
+    assert_eq!(unchanged["mode"], "incremental");
+    assert_eq!(unchanged["status"], "unchanged");
+    assert_eq!(unchanged["files"]["detected"], 2);
+    assert_eq!(unchanged["files"]["processed"], 0);
+    assert_eq!(unchanged["files"]["changed"], 0);
+    assert_eq!(unchanged["files"]["unchanged"], 2);
+    assert!(unchanged["elapsed_ms"].as_u64().is_some());
+    assert!(unchanged["stages_ms"]["detect"].as_u64().is_some());
+
+    let previous = FileTime::from_last_modification_time(&fs::metadata(&changed).unwrap());
+    fs::write(
+        &changed,
+        "def alpha():\n    return 1\n\ndef added():\n    return alpha()\n",
+    )
+    .unwrap();
+    set_file_mtime(
+        &changed,
+        FileTime::from_unix_time(previous.unix_seconds().saturating_add(2), 0),
+    )
+    .unwrap();
+
+    let updated = run(
+        fixture.path(),
+        &[
+            "update",
+            project.to_str().unwrap(),
+            "--no-cluster",
+            "--json",
+        ],
+    );
+    assert!(updated.status.success(), "{}", output_text(&updated));
+    let updated: Value = serde_json::from_slice(&updated.stdout).unwrap();
+    assert_eq!(updated["operation"], "update");
+    assert_eq!(updated["mode"], "incremental");
+    assert_eq!(updated["status"], "rebuilt");
+    assert_eq!(updated["files"]["detected"], 2);
+    assert_eq!(updated["files"]["processed"], 1);
+    assert_eq!(updated["files"]["changed"], 1);
+    assert_eq!(updated["files"]["unchanged"], 1);
+    assert!(updated["graph"]["nodes"].as_u64().unwrap() > 0);
 }
 
 fn flatten(extractions: Vec<Extraction>) -> Extraction {

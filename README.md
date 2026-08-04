@@ -89,9 +89,19 @@ graphoxide extract . --code-only --force
 
 # Write the upstream-compatible raw extraction without build/clustering
 graphoxide extract . --code-only --no-cluster
+
+# Emit one JSON build report for automation
+graphoxide extract . --code-only --json
 ```
 
 `--force` also permits replacing an existing graph with a smaller one. Use it intentionally if files were removed or ignore rules changed.
+
+Successful builds report elapsed time. Add `--timing` to `extract` for
+human-readable stage durations on stderr, or `--json` to either `extract` or
+`update` for a single stdout object containing the operation mode and status,
+stage durations, file counts, graph totals, output path, and warnings. Timing is
+never written into `graph.json`, so telemetry does not affect deterministic
+graph output.
 
 ### 2. Query the graph
 
@@ -148,6 +158,9 @@ Use the incremental update after changing code:
 
 ```bash
 graphoxide update .
+
+# The same update report as structured JSON
+graphoxide update . --json
 ```
 
 If files or relationships were intentionally removed, allow the resulting graph

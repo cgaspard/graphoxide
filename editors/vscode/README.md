@@ -112,6 +112,9 @@ Useful commands include:
 
 | Command | Purpose |
 | --- | --- |
+| `Graphoxide: Build Graph` | Create the initial graph when this workspace has no graph file |
+| `Graphoxide: Update Graph (Incremental)` | Refresh an existing valid graph while preserving its baseline |
+| `Graphoxide: Rebuild Graph (Full)` | Rescan every supported input and replace an existing generated graph after confirmation |
 | `Graphoxide: Query Graph` | Ask a natural-language structural question using offline graph traversal |
 | `Graphoxide: Explain Node` | Describe a symbol and its immediate relationships |
 | `Graphoxide: Find Path Between Nodes` | Find the shortest connection between two symbols |
@@ -129,6 +132,12 @@ Keyboard shortcuts:
 
 ## Keep the graph current
 
+Use **Graphoxide: Update Graph (Incremental)** for routine manual maintenance of
+an existing valid graph. Use **Graphoxide: Rebuild Graph (Full)** when you need a
+clean rescan, or when an existing `graph.json` cannot be loaded. A full rebuild
+requires confirmation. If watch mode is running, Graphoxide stops it before the
+rebuild and leaves it stopped so it cannot race the replacement build.
+
 Managed workspaces remember one freshness policy. Continuous watch incrementally
 rebuilds while the workspace is open, update-on-save performs a debounced update,
 and manual mode changes nothing in the background. Use **Graphoxide: Configure
@@ -137,9 +146,16 @@ mode is active. Managed automatic refreshes accept intentional graph reductions,
 so deleting or consolidating code cannot leave the graph permanently stale behind
 the CLI shrink guard.
 
+Builds and automatic updates honor `graphoxide.graphPath`. The configured path
+must end in `graph.json` and place that file in a dedicated output directory; the
+extension refuses to use the workspace root or one of its ancestors as that
+output directory.
+
 For smaller projects, **Graphoxide: Update On Save** can run a debounced update whenever a source document is saved. It is disabled by default. Watch mode is more efficient for sustained editing sessions.
 
-All spawned commands are argument-safe, run without a shell, support cancellation where applicable, and stream diagnostics to the Graphoxide output channel.
+Graph build and update commands require a trusted workspace. All spawned commands
+are argument-safe, run without a shell, support cancellation where applicable,
+and stream diagnostics to the Graphoxide output channel.
 
 ## Improve community names with an LLM
 
@@ -236,9 +252,9 @@ Settings that identify files are scoped per workspace, so multi-root workspaces 
 
 **The binary cannot be found:** Set **Graphoxide: Binary Path** to the absolute path returned by `which graphoxide` (macOS/Linux) or `where graphoxide` (Windows), then run **Refresh Graph**. AI labeling intentionally requires the packaged binary or a build from this repository and does not use that setting.
 
-**The graph is empty or missing:** Run **Extract Workspace**. If the repository already has a graph, verify **Graphoxide: Graph Path**.
+**The graph is empty or missing:** Run **Graphoxide: Build Graph**. If the repository already has a graph, verify **Graphoxide: Graph Path**.
 
-**A graph fails to load:** Open **View → Output → Graphoxide** for the validation error. The parser accepts both built graphs using `links` and raw graphs using `edges`.
+**A graph fails to load:** Open **View → Output → Graphoxide** for the validation error, then use **Graphoxide: Rebuild Graph (Full)** if the generated file should be replaced. The parser accepts both built graphs using `links` and raw graphs using `edges`.
 
 **A source node does not open:** Graph paths must be repository-relative. For safety, absolute paths and paths containing `..` are never opened from graph data.
 

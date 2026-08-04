@@ -63,18 +63,27 @@
     "commands": [
       {
         "command": "graphoxide.initialize",
-        "title": "Graphoxide: Extract Workspace",
-        "icon": "$(play)"
+        "title": "Graphoxide: Build Graph",
+        "icon": "$(play)",
+        "enablement": "!graphoxide.hasGraphFile"
       },
       {
         "command": "graphoxide.update",
-        "title": "Graphoxide: Update Graph",
-        "icon": "$(refresh)"
+        "title": "Graphoxide: Update Graph (Incremental)",
+        "icon": "$(refresh)",
+        "enablement": "graphoxide.hasGraph"
+      },
+      {
+        "command": "graphoxide.rebuild",
+        "title": "Graphoxide: Rebuild Graph (Full)",
+        "icon": "$(sync)",
+        "enablement": "graphoxide.hasGraphFile"
       },
       {
         "command": "graphoxide.startWatch",
         "title": "Graphoxide: Start Watch Mode",
-        "icon": "$(eye)"
+        "icon": "$(eye)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "graphoxide.stopWatch",
@@ -316,7 +325,7 @@
           "type": "string",
           "default": "graphoxide-out/graph.json",
           "scope": "resource",
-          "description": "Graph path, relative to the workspace folder unless absolute."
+          "description": "Graph path, relative to the workspace folder unless absolute. Build and automatic update controls require the file name graph.json inside a dedicated output directory that is neither the workspace root nor one of its ancestors."
         },
         "graphoxide.defaultTokenBudget": {
           "type": "integer",

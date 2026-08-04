@@ -1,6 +1,7 @@
 //! Reusable CLI services.
 
 pub mod build_guard;
+pub mod build_telemetry;
 pub mod extract_cli;
 pub mod google_workspace;
 pub mod hook_guard;
