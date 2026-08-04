@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5 — 2026-08-04
+
+- Replaced the Marketplace icon with the web’s orange Graphoxide graph-cube mark
+  and added clear gallery-safe padding around it.
+
 ## 0.4.4 — 2026-08-04
 
 - Added a new Graphoxide identity across the Marketplace icon, activity bar, and

@@ -1,0 +1,9 @@
+version: 0.4.5
+date: 2026-08-04
+highlights:
+  - Align the Marketplace icon with the Graphoxide website mark.
+added: []
+changed:
+  - Use a gallery-safe padded orange graph-cube icon in all VS Code packages.
+fixed: []
+removed: []

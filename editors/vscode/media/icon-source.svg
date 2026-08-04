@@ -1,33 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
   <title id="title">Graphoxide</title>
-  <desc id="desc">An oxide-orange engineered graph ring bonded with a blue oxygen pair.</desc>
-  <defs>
-    <linearGradient id="oxide" x1="18" y1="16" x2="97" y2="108" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#ff944f"/>
-      <stop offset=".55" stop-color="#f17845"/>
-      <stop offset="1" stop-color="#c84a2f"/>
-    </linearGradient>
-    <linearGradient id="oxygen" x1="89" y1="39" x2="108" y2="89" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#65b9ff"/>
-      <stop offset="1" stop-color="#2e7fd0"/>
-    </linearGradient>
-  </defs>
-
-  <rect width="128" height="128" rx="27" fill="#0b1014"/>
+  <desc id="desc">The Graphoxide graph-cube mark in oxide orange.</desc>
+  <rect width="128" height="128" rx="27" fill="#07090a"/>
   <rect x="1" y="1" width="126" height="126" rx="26" fill="none" stroke="#ffffff" stroke-opacity=".08"/>
-
-  <!-- The open machined ring evokes Rust without reproducing its gear mark. -->
-  <path d="M87.5 22.5A46 46 0 1 0 87.5 105.5" fill="none" stroke="url(#oxide)" stroke-width="16" stroke-linecap="square"/>
-  <path d="M55 9h18v13H55zM8 55h14v18H8zM55 106h18v13H55z" fill="url(#oxide)"/>
-
-  <!-- A compact three-vertex topology lives inside the engineered ring. -->
-  <path d="m48 41-17 23 17 23" fill="none" stroke="#f6c3a5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="48" cy="41" r="7" fill="#0b1014" stroke="#f6c3a5" stroke-width="5"/>
-  <circle cx="31" cy="64" r="7" fill="#0b1014" stroke="#f6c3a5" stroke-width="5"/>
-  <circle cx="48" cy="87" r="7" fill="#0b1014" stroke="#f6c3a5" stroke-width="5"/>
-
-  <!-- The paired circles are a compact O₂ bond and close the ring visually. -->
-  <path d="M99 60v8" stroke="url(#oxygen)" stroke-width="6" stroke-linecap="round"/>
-  <circle cx="99" cy="49" r="10" fill="#0b1014" stroke="url(#oxygen)" stroke-width="7"/>
-  <circle cx="99" cy="79" r="10" fill="#0b1014" stroke="url(#oxygen)" stroke-width="7"/>
+  <g fill="none" stroke="#ff7845" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M35 42.75 64 25l29 17.75v35.5L64 96 35 78.25z"/>
+    <circle cx="35" cy="42.75" r="7.5" fill="#07090a"/>
+    <circle cx="93" cy="42.75" r="7.5" fill="#07090a"/>
+    <circle cx="64" cy="96" r="7.5" fill="#07090a"/>
+    <circle cx="64" cy="60" r="10" fill="#ff7845"/>
+    <path d="m40.75 46.75 14.75 9M87.25 46.75l-14.75 9M64 70v18.5"/>
+  </g>
 </svg>
