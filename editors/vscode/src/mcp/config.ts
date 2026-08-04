@@ -6,14 +6,6 @@ export interface ServerInvocation {
   readonly cwd?: string;
 }
 
-export function invocationForScope(
-  projectInvocation: ServerInvocation,
-  userInvocation: ServerInvocation,
-  scope: 'user' | 'project',
-): ServerInvocation {
-  return scope === 'user' ? userInvocation : projectInvocation;
-}
-
 export interface McpJsonEntry {
   readonly type: 'stdio';
   readonly command: string;
@@ -59,6 +51,12 @@ export function mcpJsonEntryMatches(value: unknown, invocation: ServerInvocation
     && stringArrayEquals(value.args, invocation.args);
 }
 
+/** The executable recorded in an .mcp.json entry, whatever else it carries. */
+export function mcpJsonEntryCommand(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  return typeof value.command === 'string' && value.command ? value.command : undefined;
+}
+
 export function readMcpJsonEntry(content: string | undefined): unknown {
   if (content === undefined) return undefined;
   const document = parseJsonObject(content);
@@ -91,6 +89,13 @@ export function openCodeEntryMatches(value: unknown, invocation: ServerInvocatio
   return value.type === 'local'
     && value.enabled !== false
     && stringArrayEquals(value.command, [invocation.command, ...invocation.args]);
+}
+
+/** The executable leading an OpenCode entry's command array. */
+export function openCodeEntryCommand(value: unknown): string | undefined {
+  if (!isRecord(value) || !Array.isArray(value.command)) return undefined;
+  const [executable] = value.command as unknown[];
+  return typeof executable === 'string' && executable ? executable : undefined;
 }
 
 export function readOpenCodeEntry(content: string | undefined): unknown {

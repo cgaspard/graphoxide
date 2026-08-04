@@ -6,7 +6,9 @@ import { ControlCenterPanel } from './control-center';
 import { GraphNode } from './graph';
 import { AiLabelingService, AiLabelingTestConfiguration } from './llm/service';
 import { ManagedWorkspaceService } from './managed';
+import { repairAbandonedRegistrations } from './mcp/installers';
 import { GraphoxideMcpProvider } from './mcp/provider';
+import { resolvedInvocation } from './mcp/runtime';
 import { GraphStore } from './store';
 import { communityFromArgument, GraphExplorerProvider, nodeFromArgument, ResultsProvider } from './tree';
 import { GraphVisualizer } from './visualizer';
@@ -100,6 +102,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, false);
   statusBar.show();
   void managed.start();
+  void repairRegistrations(context, cli);
   return {
     version: 1,
     ...(context.extensionMode !== vscode.ExtensionMode.Production ? {
@@ -128,6 +131,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
 
 export function deactivate(): void {
   // VS Code disposes everything registered in the extension context.
+}
+
+/**
+ * Repair registrations pointing at an extension directory a past upgrade removed.
+ * Best effort and silent when there is nothing to fix, so a routine activation
+ * stays quiet; failures are logged rather than surfaced because the user did not
+ * ask for this and the Control Center still reports the entry as stale.
+ */
+async function repairRegistrations(context: vscode.ExtensionContext, cli: GraphoxideCli): Promise<void> {
+  try {
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const invocation = await resolvedInvocation(folder, context);
+      const repaired = await repairAbandonedRegistrations({ folder, invocation });
+      if (repaired.length === 0) continue;
+      cli.output.info(`Repaired Graphoxide MCP registrations in ${folder.name} left behind by an extension update: ${repaired.join(', ')}.`);
+    }
+  } catch (error) {
+    cli.output.warn(`Could not repair Graphoxide MCP registrations: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function registerCommands(context: vscode.ExtensionContext, services: ExtensionServices): vscode.Disposable[] {

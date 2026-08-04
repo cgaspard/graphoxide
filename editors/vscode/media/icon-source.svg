@@ -1,15 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Graphoxide</title>
+  <desc id="desc">An oxide-orange engineered graph ring bonded with a blue oxygen pair.</desc>
   <defs>
-    <linearGradient id="g" x1="20" y1="14" x2="110" y2="118" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#f48a52"/>
-      <stop offset="1" stop-color="#9f3148"/>
+    <linearGradient id="oxide" x1="18" y1="16" x2="97" y2="108" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff944f"/>
+      <stop offset=".55" stop-color="#f17845"/>
+      <stop offset="1" stop-color="#c84a2f"/>
+    </linearGradient>
+    <linearGradient id="oxygen" x1="89" y1="39" x2="108" y2="89" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#65b9ff"/>
+      <stop offset="1" stop-color="#2e7fd0"/>
     </linearGradient>
   </defs>
-  <rect width="128" height="128" rx="25" fill="#171a21"/>
-  <path d="M64 27 28 89h72L64 27Z" fill="none" stroke="url(#g)" stroke-width="10" stroke-linejoin="round"/>
-  <circle cx="64" cy="27" r="13" fill="#f48a52"/>
-  <circle cx="28" cy="89" r="13" fill="#c24f4f"/>
-  <circle cx="100" cy="89" r="13" fill="#9f3148"/>
-  <circle cx="64" cy="68" r="10" fill="#f2c078"/>
-  <path d="M64 39v19M39 83l17-10M89 83 72 73" stroke="#f2c078" stroke-width="6" stroke-linecap="round"/>
+
+  <rect width="128" height="128" rx="27" fill="#0b1014"/>
+  <rect x="1" y="1" width="126" height="126" rx="26" fill="none" stroke="#ffffff" stroke-opacity=".08"/>
+
+  <!-- The open machined ring evokes Rust without reproducing its gear mark. -->
+  <path d="M87.5 22.5A46 46 0 1 0 87.5 105.5" fill="none" stroke="url(#oxide)" stroke-width="16" stroke-linecap="square"/>
+  <path d="M55 9h18v13H55zM8 55h14v18H8zM55 106h18v13H55z" fill="url(#oxide)"/>
+
+  <!-- A compact three-vertex topology lives inside the engineered ring. -->
+  <path d="m48 41-17 23 17 23" fill="none" stroke="#f6c3a5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="48" cy="41" r="7" fill="#0b1014" stroke="#f6c3a5" stroke-width="5"/>
+  <circle cx="31" cy="64" r="7" fill="#0b1014" stroke="#f6c3a5" stroke-width="5"/>
+  <circle cx="48" cy="87" r="7" fill="#0b1014" stroke="#f6c3a5" stroke-width="5"/>
+
+  <!-- The paired circles are a compact O₂ bond and close the ring visually. -->
+  <path d="M99 60v8" stroke="url(#oxygen)" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="99" cy="49" r="10" fill="#0b1014" stroke="url(#oxygen)" stroke-width="7"/>
+  <circle cx="99" cy="79" r="10" fill="#0b1014" stroke="url(#oxygen)" stroke-width="7"/>
 </svg>

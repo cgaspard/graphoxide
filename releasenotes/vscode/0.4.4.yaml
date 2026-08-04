@@ -1,0 +1,12 @@
+version: 0.4.4
+date: 2026-08-04
+highlights:
+  - Ship the new Rust, graph, and oxygen Graphoxide icon across VS Code and the website.
+added:
+  - Show old all-project MCP entries only as removable legacy registrations.
+changed:
+  - Present the current workspace MCP registration first and use it as the sole installation option.
+fixed:
+  - Keep externally configured project MCP servers valid after an extension update.
+removed:
+  - Remove all-project installation controls from the Graphoxide Control Center.

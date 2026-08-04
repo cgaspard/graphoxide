@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.4 — 2026-08-04
+
+- Added a new Graphoxide identity across the Marketplace icon, activity bar, and
+  website favicon.
+- Made external MCP installation project-only, placing the current workspace at
+  the top of each integration and retaining legacy global entries only for safe
+  removal.
+- Made project MCP registrations survive extension upgrades by persisting the
+  bundled binary through VS Code global storage and repairing abandoned entries.
+
 ## 0.4.3 — 2026-08-03
 
 - Fixed workspace graphification failures caused by valid JSON-with-comments

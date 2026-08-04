@@ -16,8 +16,8 @@ import {
   installerById,
   integrationReports,
 } from './mcp/installers';
-import { invocationForScope, ServerInvocation } from './mcp/config';
-import { resolvedInvocation, trustedMcpInvocation } from './mcp/runtime';
+import { ServerInvocation } from './mcp/config';
+import { resolvedInvocation } from './mcp/runtime';
 import { GraphStore } from './store';
 
 interface ControlCenterMessage {
@@ -137,22 +137,23 @@ export class ControlCenterPanel implements vscode.Disposable {
 
   private async manageIntegration(action: 'install' | 'uninstall', id: string, scope: InstallScope): Promise<void> {
     const installer = installerById(id);
-    if (!installer || !installer.scopes.includes(scope)) return;
+    if (!installer || (scope === 'project' ? !installer.scopes.includes(scope) : action !== 'uninstall')) return;
     const folder = this.services.store.state?.folder ?? await this.services.store.preferredFolder(false);
-    const invocation = await resolvedInvocation(folder, this.context.extensionUri);
-    const userInvocation = trustedMcpInvocation(this.context.extensionUri);
-    const installerContext = { folder, invocation, userInvocation };
+    const invocation = await resolvedInvocation(folder, this.context);
+    const installerContext = { folder, invocation };
     const status = await installer.status(installerContext);
-    const scopeStatus = scope === 'user' ? status.user : status.project;
+    const scopeStatus = scope === 'user' ? status.legacyUser : status.project;
     if (!scopeStatus) return;
-    const target = scope === 'user' ? 'all projects (user scope)' : 'this project';
+    if (scope === 'user' && !scopeStatus.configured) return;
+    const target = scope === 'user' ? 'the legacy all-project registration' : 'this project';
     const operation = action === 'uninstall'
       ? 'Remove'
       : scopeStatus.configured
         ? 'Update'
         : 'Install';
-    const selectedInvocation = invocationForScope(invocation, userInvocation, scope);
-    const detail = `${scopeStatus.configPath}\n\nCommand: ${formatInvocation(selectedInvocation)}\n\nOnly Graphoxide's MCP entry is changed; other configuration is preserved.`;
+    const detail = scope === 'user'
+      ? `${scopeStatus.configPath}\n\nThis removes only the legacy Graphoxide entry. Other configuration is preserved.`
+      : `${scopeStatus.configPath}\n\nCommand: ${formatInvocation(invocation)}\n\nOnly Graphoxide's MCP entry is changed; other configuration is preserved.`;
     const choice = await (action === 'uninstall'
       ? vscode.window.showWarningMessage(
           `Remove Graphoxide MCP from ${installer.displayName} for ${target}?`,
@@ -194,9 +195,8 @@ export class ControlCenterPanel implements vscode.Disposable {
       const graphState = reloadGraph && folder
         ? await this.services.store.load(folder)
         : this.services.store.state;
-      const invocation = await resolvedInvocation(folder, this.context.extensionUri);
-      const userInvocation = trustedMcpInvocation(this.context.extensionUri);
-      const reports = await integrationReports({ folder, invocation, userInvocation });
+      const invocation = await resolvedInvocation(folder, this.context);
+      const reports = await integrationReports({ folder, invocation });
       const rows: IntegrationRow[] = reports.map(({ installer, status }) => ({
         id: installer.id,
         name: installer.displayName,
@@ -360,7 +360,7 @@ export class ControlCenterPanel implements vscode.Disposable {
     .native { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 13px; padding: 13px; border: 1px solid var(--vscode-panel-border); border-radius: 7px; }
     .integrations { display: grid; gap: 11px; }
     .integration { padding: 14px; border: 1px solid var(--vscode-panel-border); border-radius: 7px; }
-    .scope-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 12px; }
+    .scope-grid { display: grid; grid-template-columns: 1fr; gap: 9px; margin-top: 12px; }
     .scope { min-width: 0; padding: 11px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; background: var(--vscode-sideBar-background); }
     .scope-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; } .scope .detail { min-height: 17px; margin: 5px 0 0; font-size: 11px; }
     .scope .path { margin: 7px 0 0; font: 11px var(--vscode-editor-font-family); overflow-wrap: anywhere; }
@@ -442,8 +442,8 @@ export class ControlCenterPanel implements vscode.Disposable {
     function mcpCard(state) {
       const nativeState = state.mcp.nativeEnabled ? badge('Active', 'good') : badge('Inactive', '');
       const rows = state.mcp.rows.map(integrationCard).join('');
-      return '<section class="card wide" aria-labelledby="mcp-heading"><div class="card-head"><div><h2 id="mcp-heading">MCP integrations</h2><p class="muted">Connect Graphoxide tools to coding assistants at project or user scope.</p></div>' + badge(state.mcp.configuredScopes + ' installed', state.mcp.configuredScopes ? 'good' : '') + '</div>'
-        + '<p class="section-intro">Project scope travels with this workspace and is easier to audit. User scope applies to every project. Installers preserve unrelated configuration and always ask before changes.</p>'
+      return '<section class="card wide" aria-labelledby="mcp-heading"><div class="card-head"><div><h2 id="mcp-heading">MCP integrations</h2><p class="muted">Connect this workspace’s Graphoxide graph to coding assistants.</p></div>' + badge(state.mcp.configuredScopes + ' installed', state.mcp.configuredScopes ? 'good' : '') + '</div>'
+        + '<p class="section-intro">Each project registration starts a local stdio server in this workspace, so it reads this project’s graphoxide-out/graph.json. All-project installation is no longer offered. A legacy global entry appears only so you can remove it safely.</p>'
         + '<div class="native"><div><h3>VS Code native MCP</h3><p class="detail">Provided directly by this extension when managed workspace mode is enabled. No config file is edited.</p><p class="path">' + escapeHtml(state.mcp.invocation) + '</p></div>' + nativeState + '</div>'
         + '<div class="integrations">' + rows + '</div></section>';
     }
@@ -452,16 +452,17 @@ export class ControlCenterPanel implements vscode.Disposable {
       return '<article class="integration"><div class="card-head"><div><h3>' + escapeHtml(row.name) + '</h3><p class="detail">' + escapeHtml(row.description) + '</p></div>' + badge(row.detected ? 'Detected' : 'Not detected', row.detected ? 'good' : '') + '</div><div class="scope-grid">' + scopes.map(scope => scopeCard(row, scope)).join('') + '</div></article>';
     }
     function scopeCard(row, scope) {
-      const title = scope.scope === 'project' ? 'This project' : 'All projects';
-      const subtitle = scope.scope === 'project' ? 'Project scope' : 'User scope';
-      const state = scope.stale ? 'Update needed' : scope.configured ? 'Installed' : 'Not installed';
-      const tone = scope.stale ? 'warn' : scope.configured ? 'good' : '';
+      const legacy = scope.scope === 'user';
+      const title = legacy ? 'Legacy all-project registration' : 'This project';
+      const subtitle = legacy ? 'Removal only' : 'Project scope';
+      const state = legacy ? 'Remove recommended' : scope.stale ? 'Update needed' : scope.configured ? 'Installed' : 'Not installed';
+      const tone = legacy || scope.stale ? 'warn' : scope.configured ? 'good' : '';
       let actions = '';
       if (scope.configured) {
-        if (scope.stale) actions += '<button data-action="install" data-id="' + escapeHtml(row.id) + '" data-scope="' + scope.scope + '"' + (!row.detected ? ' disabled' : '') + '>Update</button>';
+        if (!legacy && scope.stale) actions += '<button data-action="install" data-id="' + escapeHtml(row.id) + '" data-scope="' + scope.scope + '"' + (!row.detected ? ' disabled' : '') + '>Update</button>';
         actions += '<button class="secondary" data-action="uninstall" data-id="' + escapeHtml(row.id) + '" data-scope="' + scope.scope + '">Remove</button>';
         actions += '<button class="secondary" data-path="' + escapeHtml(scope.configPath) + '">Open config</button>';
-      } else {
+      } else if (!legacy) {
         actions = '<button data-action="install" data-id="' + escapeHtml(row.id) + '" data-scope="' + scope.scope + '"' + (!row.detected ? ' disabled' : '') + '>Install</button>';
       }
       return '<div class="scope"><div class="scope-head"><div><h3>' + title + '</h3><span class="detail">' + subtitle + '</span></div>' + badge(state, tone) + '</div><p class="path">' + escapeHtml(scope.configPath) + '</p><p class="detail">' + escapeHtml(scope.detail || '') + '</p><div class="actions">' + actions + '</div></div>';
@@ -485,8 +486,9 @@ function formatInvocation(invocation: ServerInvocation): string {
 function scopeRows(scopes: readonly InstallScope[], status: IntegrationStatus): ScopeRow[] {
   const rows: ScopeRow[] = [];
   for (const scope of scopes) {
-    const value = scope === 'user' ? status.user : status.project;
+    const value = scope === 'user' ? status.legacyUser : status.project;
     if (value) rows.push({ scope, ...value });
   }
+  if (status.legacyUser.configured) rows.push({ scope: 'user', ...status.legacyUser });
   return rows;
 }

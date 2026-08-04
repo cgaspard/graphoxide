@@ -1,0 +1,13 @@
+{
+  "name": "graphoxide-repository-tools",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "prepare": "husky",
+    "verify:pre-push": "node scripts/verify.mjs --pre-push",
+    "verify:release": "node scripts/verify.mjs --release"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

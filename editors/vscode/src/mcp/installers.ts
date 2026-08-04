@@ -7,9 +7,9 @@ import * as vscode from 'vscode';
 import {
   MCP_SERVER_KEY,
   ServerInvocation,
-  desiredMcpJsonEntry,
-  invocationForScope,
+  mcpJsonEntryCommand,
   mcpJsonEntryMatches,
+  openCodeEntryCommand,
   openCodeEntryMatches,
   readMcpJsonEntry,
   readOpenCodeEntry,
@@ -20,6 +20,7 @@ import {
 } from './config';
 import { codexInvocationMatches, readCodexInvocation, removeCodexInvocation, upsertCodexInvocation } from './toml';
 import { commandDetected, resolveExecutable } from './runtime';
+import { isAbandonedExtensionBinary } from './stable-binary';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,16 +36,14 @@ export interface ScopeStatus {
 
 export interface IntegrationStatus {
   readonly detected: boolean;
-  readonly user: ScopeStatus;
+  readonly legacyUser: ScopeStatus;
   readonly project?: ScopeStatus;
 }
 
 export interface InstallerContext {
   readonly folder?: vscode.WorkspaceFolder;
-  /** Workspace-aware invocation used only for project-scope registrations. */
+  /** Workspace-aware invocation persisted only in project-scope registrations. */
   readonly invocation: ServerInvocation;
-  /** Extension-controlled invocation safe to persist across all projects. */
-  readonly userInvocation: ServerInvocation;
 }
 
 export interface InstallResult {
@@ -76,38 +75,62 @@ export async function integrationReports(context: InstallerContext): Promise<rea
   return installers.map((installer, index) => ({ installer, status: statuses[index]! }));
 }
 
+/**
+ * Rewrite project registrations whose executable belongs to an extension
+ * directory that no longer exists. Releases before the binary was linked to a
+ * version-independent path recorded the versioned directory instead, and VS Code
+ * deletes that directory on upgrade, so those entries fail to start and nothing
+ * else will ever fix them. Returns the integrations that were repaired.
+ */
+export async function repairAbandonedRegistrations(context: InstallerContext): Promise<readonly string[]> {
+  if (!context.folder) return [];
+  const repaired: string[] = [];
+  for (const { installer, status } of await integrationReports(context)) {
+    if (!status.project?.configured || !status.project.stale) continue;
+    const command = await persistedProjectCommand(installer.id, status.project.configPath);
+    if (!command || !isAbandonedExtensionBinary(command)) continue;
+    const result = await installer.install(context, 'project');
+    if (result.ok) repaired.push(installer.displayName);
+  }
+  return repaired;
+}
+
+/** The executable a project config currently records, in that client's format. */
+async function persistedProjectCommand(id: IntegrationId, file: string): Promise<string | undefined> {
+  try {
+    const content = await readOptional(file);
+    if (content === undefined) return undefined;
+    if (id === 'claude-code') return mcpJsonEntryCommand(readMcpJsonEntry(content));
+    if (id === 'opencode') return openCodeEntryCommand(readOpenCodeEntry(content));
+    return readCodexInvocation(content)?.command;
+  } catch {
+    // Unparseable config: leave it for the user rather than rewriting blind.
+    return undefined;
+  }
+}
+
 class ClaudeCodeInstaller implements IntegrationInstaller {
   readonly id = 'claude-code' as const;
   readonly displayName = 'Claude Code';
-  readonly description = 'User scope uses Claude Code’s MCP registry; project scope writes the shared .mcp.json file.';
-  readonly scopes = ['user', 'project'] as const;
+  readonly description = 'Writes Graphoxide to this project’s shared .mcp.json file.';
+  readonly scopes = ['project'] as const;
 
   async status(context: InstallerContext): Promise<IntegrationStatus> {
     const detected = Boolean(vscode.extensions.getExtension('anthropic.claude-code')) || await commandDetected('claude');
     const userPath = path.join(os.homedir(), '.claude.json');
-    const user = await claudeUserStatus(
+    const legacyUser = await claudeLegacyUserStatus(
       userPath,
-      context.userInvocation,
       !detected ? 'Claude Code was not detected.' : undefined,
     );
     const project = context.folder
       ? await mcpJsonStatus(path.join(context.folder.uri.fsPath, '.mcp.json'), context.invocation, 'Shared with the project; Claude asks for trust before first use.')
       : undefined;
-    return { detected, user, ...(project ? { project } : {}) };
+    return { detected, legacyUser, ...(project ? { project } : {}) };
   }
 
   async install(context: InstallerContext, scope: InstallScope): Promise<InstallResult> {
-    if (scope === 'project') return installMcpJsonProject(context);
-    const executable = await resolveExecutable('claude');
-    if (!executable) return { ok: false, message: 'The Claude Code CLI was not found on PATH.' };
-    const entry = desiredMcpJsonEntry(context.userInvocation);
-    await execFileAsync(executable, ['mcp', 'remove', '--scope', 'user', MCP_SERVER_KEY], { timeout: 15000 }).catch(() => undefined);
-    try {
-      await execFileAsync(executable, ['mcp', 'add-json', '--scope', 'user', MCP_SERVER_KEY, JSON.stringify(entry)], { timeout: 15000 });
-      return { ok: true, message: 'Registered Graphoxide for Claude Code at user scope.' };
-    } catch (error) {
-      return failedCommand('Claude Code registration failed', error);
-    }
+    if (scope !== 'project') return projectOnly();
+    return installMcpJsonProject(context);
   }
 
   async uninstall(context: InstallerContext, scope: InstallScope): Promise<InstallResult> {
@@ -116,7 +139,7 @@ class ClaudeCodeInstaller implements IntegrationInstaller {
     if (!executable) return { ok: false, message: 'The Claude Code CLI was not found on PATH.' };
     try {
       await execFileAsync(executable, ['mcp', 'remove', '--scope', 'user', MCP_SERVER_KEY], { timeout: 15000 });
-      return { ok: true, message: 'Removed Graphoxide from Claude Code user scope.' };
+      return { ok: true, message: 'Removed the legacy all-project Graphoxide registration from Claude Code.' };
     } catch (error) {
       return failedCommand('Claude Code removal failed', error);
     }
@@ -126,28 +149,29 @@ class ClaudeCodeInstaller implements IntegrationInstaller {
 class CodexInstaller implements IntegrationInstaller {
   readonly id = 'codex' as const;
   readonly displayName = 'Codex';
-  readonly description = 'Edits only [mcp_servers.graphoxide] in Codex config.toml while preserving all other settings and comments.';
-  readonly scopes = ['user', 'project'] as const;
+  readonly description = 'Edits only this project’s [mcp_servers.graphoxide] table while preserving other settings and comments.';
+  readonly scopes = ['project'] as const;
 
   async status(context: InstallerContext): Promise<IntegrationStatus> {
     const detected = Boolean(vscode.extensions.getExtension('openai.chatgpt')) || await commandDetected('codex');
     const userPath = path.join(codexHome(), 'config.toml');
-    const user = await codexStatus(userPath, context.userInvocation, !detected ? 'Codex was not detected.' : undefined);
+    const legacyUser = await codexLegacyStatus(userPath, !detected ? 'Codex was not detected.' : undefined);
     const project = context.folder
       ? await codexStatus(path.join(context.folder.uri.fsPath, '.codex', 'config.toml'), context.invocation, 'Project config is loaded only after Codex trusts this repository.')
       : undefined;
-    return { detected, user, ...(project ? { project } : {}) };
+    return { detected, legacyUser, ...(project ? { project } : {}) };
   }
 
   async install(context: InstallerContext, scope: InstallScope): Promise<InstallResult> {
+    if (scope !== 'project') return projectOnly();
     const file = codexPath(context, scope);
     if (!file) return noWorkspace();
     try {
       const existing = await readOptional(file) ?? '';
       const edit = upsertCodexInvocation(
         existing,
-        invocationForScope(context.invocation, context.userInvocation, scope),
-        scope === 'project',
+        context.invocation,
+        true,
       );
       await writeFile(file, edit.content);
       return { ok: true, message: `${edit.existed ? 'Updated' : 'Added'} [mcp_servers.graphoxide] in ${file}.` };
@@ -174,26 +198,27 @@ class CodexInstaller implements IntegrationInstaller {
 class OpenCodeInstaller implements IntegrationInstaller {
   readonly id = 'opencode' as const;
   readonly displayName = 'OpenCode';
-  readonly description = 'Adds a local Graphoxide server to OpenCode’s user or project opencode.json.';
-  readonly scopes = ['user', 'project'] as const;
+  readonly description = 'Adds a local Graphoxide server to this project’s opencode.json.';
+  readonly scopes = ['project'] as const;
 
   async status(context: InstallerContext): Promise<IntegrationStatus> {
     const detected = await commandDetected('opencode');
     const userPath = openCodeUserPath();
-    const user = await openCodeStatus(userPath, context.userInvocation, !detected ? 'OpenCode was not detected.' : undefined);
+    const legacyUser = await openCodeLegacyStatus(userPath, !detected ? 'OpenCode was not detected.' : undefined);
     const project = context.folder
       ? await openCodeStatus(path.join(context.folder.uri.fsPath, 'opencode.json'), context.invocation)
       : undefined;
-    return { detected, user, ...(project ? { project } : {}) };
+    return { detected, legacyUser, ...(project ? { project } : {}) };
   }
 
   async install(context: InstallerContext, scope: InstallScope): Promise<InstallResult> {
+    if (scope !== 'project') return projectOnly();
     const file = openCodePath(context, scope);
     if (!file) return noWorkspace();
     try {
       const edit = upsertOpenCode(
         await readOptional(file),
-        invocationForScope(context.invocation, context.userInvocation, scope),
+        context.invocation,
       );
       await writeFile(file, edit.content);
       return { ok: true, message: `${edit.existed ? 'Updated' : 'Added'} Graphoxide in ${file}.` };
@@ -252,12 +277,26 @@ async function mcpJsonStatus(file: string, invocation: ServerInvocation, detail?
   }
 }
 
-async function claudeUserStatus(file: string, invocation: ServerInvocation, detail?: string): Promise<ScopeStatus> {
+async function claudeLegacyUserStatus(file: string, detail?: string): Promise<ScopeStatus> {
   try {
     const entry = readClaudeUserEntry(await readOptional(file));
     return {
       configured: entry !== undefined,
-      stale: entry !== undefined && !mcpJsonEntryMatches(entry, invocation),
+      stale: false,
+      configPath: file,
+      ...(detail ? { detail } : {}),
+    };
+  } catch (error) {
+    return invalidStatus(file, error);
+  }
+}
+
+async function codexLegacyStatus(file: string, detail?: string): Promise<ScopeStatus> {
+  try {
+    const content = await readOptional(file);
+    return {
+      configured: content !== undefined && readCodexInvocation(content) !== undefined,
+      stale: false,
       configPath: file,
       ...(detail ? { detail } : {}),
     };
@@ -280,6 +319,19 @@ async function openCodeStatus(file: string, invocation: ServerInvocation, detail
   try {
     const entry = readOpenCodeEntry(await readOptional(file));
     return { configured: entry !== undefined, stale: entry !== undefined && !openCodeEntryMatches(entry, invocation), configPath: file, ...(detail ? { detail } : {}) };
+  } catch (error) {
+    return invalidStatus(file, error);
+  }
+}
+
+async function openCodeLegacyStatus(file: string, detail?: string): Promise<ScopeStatus> {
+  try {
+    return {
+      configured: readOpenCodeEntry(await readOptional(file)) !== undefined,
+      stale: false,
+      configPath: file,
+      ...(detail ? { detail } : {}),
+    };
   } catch (error) {
     return invalidStatus(file, error);
   }
@@ -335,6 +387,10 @@ function invalidStatus(file: string, error: unknown): ScopeStatus {
 
 function noWorkspace(): InstallResult {
   return { ok: false, message: 'No workspace folder is open.' };
+}
+
+function projectOnly(): InstallResult {
+  return { ok: false, message: 'Graphoxide MCP registrations are project-scoped. Open a workspace and install Graphoxide for that project.' };
 }
 
 function failedFile(file: string, error: unknown): InstallResult {

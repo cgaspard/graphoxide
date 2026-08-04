@@ -330,8 +330,10 @@ async function verifyProjectInstallers(
     const context = {
       folder,
       invocation,
-      userInvocation: { command: invocation.command, args: ['serve'] },
     };
+    assert.deepEqual(installer.scopes, ['project'], `${id} unexpectedly exposes an all-project install scope.`);
+    const rejected = await installer.install(context, 'user');
+    assert.equal(rejected.ok, false, `${id} accepted an all-project registration.`);
     const installed = await installer.install(context, 'project');
     assert.equal(installed.ok, true, installed.message);
     const status = await installer.status(context);

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  invocationForScope,
   mcpJsonEntryMatches,
   openCodeEntryMatches,
   readMcpJsonEntry,
@@ -23,16 +22,6 @@ const invocation = {
   args: ['--profile', 'team one', 'serve'],
   cwd: '/work/example',
 } as const;
-
-test('keeps all-project MCP registrations independent of workspace invocation settings', () => {
-  const userInvocation = {
-    command: '/Applications/Graphoxide.app/bin/graphoxide',
-    args: ['serve'],
-  } as const;
-  assert.equal(invocationForScope(invocation, userInvocation, 'project'), invocation);
-  assert.equal(invocationForScope(invocation, userInvocation, 'user'), userInvocation);
-  assert.equal(invocationForScope(invocation, userInvocation, 'user').cwd, undefined);
-});
 
 test('edits only Graphoxide in a shared .mcp.json document', () => {
   const original = JSON.stringify({ project: 'kept', mcpServers: { existing: { command: 'other' } } });

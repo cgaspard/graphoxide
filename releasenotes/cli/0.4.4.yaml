@@ -1,0 +1,12 @@
+version: 0.4.4
+date: 2026-08-04
+highlights:
+  - Make external MCP registrations reliably survive VS Code extension upgrades.
+added:
+  - Repair abandoned project MCP registrations that point at a removed extension version.
+changed:
+  - Persist the bundled MCP executable through VS Code global storage when it is written to project configuration.
+fixed:
+  - Keep project MCP clients working after VS Code removes the prior versioned extension directory.
+removed:
+  - Remove new all-project MCP installation in favor of isolated project registrations.

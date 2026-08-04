@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { GraphoxideCli } from './cli';
 import { integrationReports } from './mcp/installers';
-import { resolvedInvocation, trustedMcpInvocation } from './mcp/runtime';
+import { resolvedInvocation } from './mcp/runtime';
 import { GraphStore } from './store';
 
 export type FreshnessMode = 'watch' | 'save' | 'manual';
@@ -173,11 +173,10 @@ export class ManagedWorkspaceService implements vscode.Disposable {
   }
 
   private async detectUnconfiguredTools(folder: vscode.WorkspaceFolder): Promise<string[]> {
-    const invocation = await resolvedInvocation(folder, this.context.extensionUri);
-    const userInvocation = trustedMcpInvocation(this.context.extensionUri);
-    const reports = await integrationReports({ folder, invocation, userInvocation });
+    const invocation = await resolvedInvocation(folder, this.context);
+    const reports = await integrationReports({ folder, invocation });
     return reports
-      .filter(({ status }) => status.detected && !status.user.configured && !status.project?.configured)
+      .filter(({ status }) => status.detected && !status.project?.configured)
       .map(({ installer }) => installer.displayName);
   }
 

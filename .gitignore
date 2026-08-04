@@ -8,6 +8,8 @@
 # graphoxide's own output when run on itself
 /graphoxide-out
 /editors/vscode/bin/
+/node_modules/
+/editors/vscode/*.vsix
 
 # Editors / OS
 .DS_Store

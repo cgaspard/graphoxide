@@ -5,8 +5,19 @@ import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { trustedExecutableCandidates } from '../llm/config';
 import { ServerInvocation } from './config';
+import { bundledBinary, ensureStableBinary, executableName } from './stable-binary';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The subset of `vscode.ExtensionContext` needed to resolve a binary path that
+ * outlives this extension release. Declared structurally so callers can pass the
+ * context straight through.
+ */
+export interface ExtensionPaths {
+  readonly extensionUri: vscode.Uri;
+  readonly globalStorageUri: vscode.Uri;
+}
 
 export function configuredInvocation(folder?: vscode.WorkspaceFolder): ServerInvocation {
   const configuration = vscode.workspace.getConfiguration('graphoxide', folder?.uri);
@@ -39,27 +50,34 @@ export function trustedExtensionInvocation(
   return { command, args: [], cwd: folder.uri.fsPath };
 }
 
-/**
- * Resolve the workspace-independent invocation persisted by user-scope MCP
- * installers. Workspace binary settings, extra arguments, cwd, overrides, and
- * PATH are deliberately excluded because this registration applies globally.
- */
-export function trustedMcpInvocation(extensionUri: vscode.Uri): ServerInvocation {
-  const command = trustedExecutable(extensionUri);
-  if (!command) {
-    throw new Error(
-      'User-scope MCP registration requires the Graphoxide executable bundled with this extension or built in this repository. '
-      + 'Workspace binary settings, extra arguments, environment overrides, and PATH are not used for all-project registrations.',
-    );
-  }
-  return { command, args: ['serve'] };
-}
-
-export async function resolvedInvocation(folder?: vscode.WorkspaceFolder, extensionUri?: vscode.Uri): Promise<ServerInvocation> {
-  if (extensionUri) return extensionInvocation(extensionUri, folder);
+export async function resolvedInvocation(folder?: vscode.WorkspaceFolder, paths?: ExtensionPaths): Promise<ServerInvocation> {
+  if (paths) return persistableInvocation(paths, folder);
   const configured = configuredInvocation(folder);
   const command = await resolveExecutable(configured.command) ?? configured.command;
   return { ...configured, command };
+}
+
+/**
+ * Invocation safe to write into another tool's configuration file. Identical to
+ * `extensionInvocation` except that the bundled binary is reported through a
+ * version-independent link, because the external clients that read these files
+ * cannot re-resolve the path after an extension upgrade moves it.
+ */
+export function persistableInvocation(paths: ExtensionPaths, folder?: vscode.WorkspaceFolder): ServerInvocation {
+  const invocation = extensionInvocation(paths.extensionUri, folder);
+  return { ...invocation, command: stableCommand(paths, invocation.command) };
+}
+
+/**
+ * Redirect only the bundled binary. An explicit `binaryPath`, a PATH hit, a
+ * `GRAPHOXIDE_BINARY` override, and a repository build all live outside the
+ * versioned extension directory already, so they are left exactly as resolved.
+ */
+function stableCommand(paths: ExtensionPaths, command: string): string {
+  const bundled = bundledBinary(paths.extensionUri.fsPath, process.platform);
+  if (path.normalize(command) !== path.normalize(bundled)) return command;
+  const stableDir = path.join(paths.globalStorageUri.fsPath, 'bin');
+  return ensureStableBinary(paths.extensionUri.fsPath, stableDir, process.platform)?.path ?? command;
 }
 
 export function resolveGraphoxideExecutable(
@@ -68,7 +86,7 @@ export function resolveGraphoxideExecutable(
   folder?: vscode.WorkspaceFolder,
 ): string {
   if (configured !== 'graphoxide') return resolveConfiguredPath(configured, folder);
-  const executable = process.platform === 'win32' ? 'graphoxide.exe' : 'graphoxide';
+  const executable = executableName(process.platform);
   const override = process.env.GRAPHOXIDE_BINARY?.trim();
   const candidates = [
     override,
