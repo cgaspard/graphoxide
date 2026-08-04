@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { graphBuildDecision, GraphBuildOperation, workspaceGraphMutationAllowed } from './build';
 import { GraphoxideCli } from './cli';
 import { GraphCodeLensProvider } from './codelens';
 import { ControlCenterPanel } from './control-center';
@@ -64,6 +65,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   const mcpProvider = new GraphoxideMcpProvider(context, (folder) => managed.isEnabled(folder));
   const services: ExtensionServices = { store, cli, explorer, results, visualizer, statusBar, managed, aiLabeling };
   const codeLens = new GraphCodeLensProvider(store);
+  let graphPathReload = Promise.resolve();
 
   context.subscriptions.push(
     store,
@@ -85,7 +87,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
     cli.onDidChangeWatch(() => updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, cli.watching)),
     managed.onDidChangeEnablement(() => mcpProvider.refresh()),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('graphoxide.graphPath')) void store.initialize();
+      const folder = store.state?.folder;
+      if (event.affectsConfiguration('graphoxide.graphPath')
+        && (!folder || event.affectsConfiguration('graphoxide.graphPath', folder.uri))) {
+        graphPathReload = graphPathReload
+          .then(() => reloadGraphPathConfiguration(store, cli))
+          .catch((error: unknown) => handleError(error));
+      }
       if (event.affectsConfiguration('graphoxide.codeLens.enabled')) codeLens.refresh();
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -98,6 +106,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
 
   await vscode.commands.executeCommand('setContext', 'graphoxide.hasResults', false);
   await vscode.commands.executeCommand('setContext', 'graphoxide.watching', false);
+  await vscode.commands.executeCommand('setContext', 'graphoxide.hasGraphFile', false);
   await store.initialize();
   updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, false);
   statusBar.show();
@@ -133,6 +142,15 @@ export function deactivate(): void {
   // VS Code disposes everything registered in the extension context.
 }
 
+async function reloadGraphPathConfiguration(store: GraphStore, cli: GraphoxideCli): Promise<void> {
+  const previousFolder = store.state?.folder ?? await store.preferredFolder(false);
+  const restartWatch = cli.watchActive;
+  if (restartWatch) await cli.stopWatchAndWait();
+  await store.initialize();
+  const folder = store.state?.folder ?? previousFolder;
+  if (restartWatch && folder) await cli.startWatch(folder, store.managedOutput(folder).environment);
+}
+
 /**
  * Repair registrations pointing at an extension directory a past upgrade removed.
  * Best effort and silent when there is nothing to fix, so a routine activation
@@ -159,27 +177,12 @@ function registerCommands(context: vscode.ExtensionContext, services: ExtensionS
   const openControlCenter = (): void => ControlCenterPanel.show(context, { store, cli, managed, aiLabeling });
 
   return [
-    command('graphoxide.initialize', async () => {
-      const folder = await requireFolder(store);
-      if (!folder) return;
-      const replacingCurrent = store.state?.folder.uri.toString() === folder.uri.toString() && Boolean(store.state?.model);
-      const force = replacingCurrent
-        ? await vscode.window.showWarningMessage('Replace the existing Graphoxide graph?', { modal: true }, 'Replace')
-        : 'Replace';
-      if (force !== 'Replace') return;
-      await cli.run({ title: 'Graphoxide: extracting workspace…', folder, args: ['extract', folder.uri.fsPath, ...(replacingCurrent ? ['--force'] : [])] });
-      await store.load(folder);
-      void vscode.window.showInformationMessage('Graphoxide extraction complete.');
-    }),
-    command('graphoxide.update', async () => {
-      const folder = await requireFolder(store);
-      if (!folder) return;
-      await cli.run({ title: 'Graphoxide: updating graph…', folder, args: ['update', folder.uri.fsPath] });
-      await store.load(folder);
-    }),
+    command('graphoxide.initialize', () => runGraphBuild('build', services)),
+    command('graphoxide.update', () => runGraphBuild('update', services)),
+    command('graphoxide.rebuild', () => runGraphBuild('rebuild', services)),
     command('graphoxide.startWatch', async () => {
       const folder = await requireFolder(store);
-      if (folder) await cli.startWatch(folder);
+      if (folder) await cli.startWatch(folder, store.managedOutput(folder).environment);
     }),
     command('graphoxide.stopWatch', () => cli.stopWatch()),
     command('graphoxide.refresh', async () => {
@@ -197,7 +200,7 @@ function registerCommands(context: vscode.ExtensionContext, services: ExtensionS
       visualizer.show(model, undefined, 'beside');
     }),
     command('graphoxide.openGraphFile', async () => {
-      if (!store.state?.model) return missingGraph();
+      if (!store.state?.graphFileExists) return missingGraph();
       await vscode.window.showTextDocument(store.state.graphUri, { preview: true });
     }),
     command('graphoxide.query', async () => {
@@ -344,11 +347,64 @@ function registerCommands(context: vscode.ExtensionContext, services: ExtensionS
   ];
 }
 
+async function runGraphBuild(operation: GraphBuildOperation, services: ExtensionServices): Promise<void> {
+  const folder = await requireFolder(services.store);
+  if (!folder) return;
+  if (!workspaceGraphMutationAllowed(vscode.workspace.isTrusted)) {
+    void vscode.window.showWarningMessage('Trust this workspace before building or updating its Graphoxide graph.');
+    return;
+  }
+
+  const state = await services.store.load(folder);
+  let environment: Readonly<{ GRAPHOXIDE_OUT: string }>;
+  try {
+    environment = services.store.managedOutput(folder).environment;
+  } catch (error) {
+    void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    return;
+  }
+  const decision = graphBuildDecision(operation, folder.uri.fsPath, {
+    graphFileExists: state?.graphFileExists === true,
+    hasValidBaseline: Boolean(state?.model),
+  });
+  if (decision.kind === 'blocked') {
+    const choice = await vscode.window.showInformationMessage(decision.message, decision.suggestedLabel);
+    if (choice === decision.suggestedLabel) await vscode.commands.executeCommand(decision.suggestedCommand);
+    return;
+  }
+
+  if (operation === 'rebuild') {
+    const confirmation = await vscode.window.showWarningMessage(
+      `Fully rebuild the Graphoxide graph for “${folder.name}”?`,
+      {
+        modal: true,
+        detail: 'This performs a full rescan of every supported input and replaces the existing generated graph after a successful build. Source files are not changed.',
+      },
+      'Full Rebuild',
+    );
+    if (confirmation !== 'Full Rebuild') return;
+    const stoppedWatch = await services.cli.stopWatchAndWait();
+    if (stoppedWatch) {
+      void vscode.window.showInformationMessage('Graphoxide watch mode was stopped before the full rebuild. Restart it when you are ready.');
+    }
+  }
+
+  await services.cli.run({
+    title: decision.progressTitle,
+    folder,
+    args: decision.args,
+    environment,
+  });
+  await services.store.load(folder);
+  void vscode.window.showInformationMessage(decision.completionMessage);
+}
+
 function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
   let timer: NodeJS.Timeout | undefined;
   let running = false;
   let pending = false;
   const update = async (): Promise<void> => {
+    if (!workspaceGraphMutationAllowed(vscode.workspace.isTrusted)) return;
     if (running) {
       pending = true;
       return;
@@ -357,7 +413,14 @@ function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
     if (!folder) return;
     running = true;
     try {
-      await services.cli.run({ title: 'Graphoxide: updating after save…', folder, args: ['update', folder.uri.fsPath, '--force'], showProgress: false, cancellable: false });
+      await services.cli.run({
+        title: 'Graphoxide: updating after save…',
+        folder,
+        args: ['update', folder.uri.fsPath, '--force'],
+        showProgress: false,
+        cancellable: false,
+        environment: services.store.managedOutput(folder).environment,
+      });
       await services.store.load(folder);
     } catch (error) {
       handleError(error);
@@ -370,12 +433,20 @@ function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
     }
   };
   return vscode.workspace.onDidSaveTextDocument((document) => {
+    if (!workspaceGraphMutationAllowed(vscode.workspace.isTrusted)) return;
     const state = services.store.state;
     const configured = vscode.workspace.getConfiguration('graphoxide', document.uri).get<boolean>('updateOnSave', false);
     const managed = state ? services.managed.freshness(state.folder) === 'save' : false;
     if (!state || (!configured && !managed)) return;
     const relative = safeRelativePath(state.folder.uri.fsPath, document.uri.fsPath);
-    if (!relative || relative.startsWith('graphoxide-out/')) return;
+    if (!relative) return;
+    try {
+      const outputRelative = path.relative(services.store.managedOutput(state.folder).outputDirectory, document.uri.fsPath);
+      if (!outputRelative || (!outputRelative.startsWith(`..${path.sep}`) && outputRelative !== '..' && !path.isAbsolute(outputRelative))) return;
+    } catch (error) {
+      handleError(error);
+      return;
+    }
     if (timer) clearTimeout(timer);
     const delay = vscode.workspace.getConfiguration('graphoxide', document.uri).get<number>('updateOnSaveDelay', 1200);
     timer = setTimeout(() => void update(), delay);
@@ -389,7 +460,7 @@ async function requireFolder(store: GraphStore): Promise<vscode.WorkspaceFolder 
 }
 
 function missingGraph(): void {
-  void vscode.window.showInformationMessage('No Graphoxide graph was found.', 'Extract workspace').then(async (choice) => {
+  void vscode.window.showInformationMessage('No valid Graphoxide graph was found.', 'Build Graph').then(async (choice) => {
     if (choice) await vscode.commands.executeCommand('graphoxide.initialize');
   });
 }

@@ -744,6 +744,8 @@ fn test_extract_timing_flag_emits_stage_timings() {
     assert_success(&timed);
     let stderr = String::from_utf8_lossy(&timed.stderr);
     assert!(stderr.contains("[graphoxide timing] detect/extract:"));
+    assert!(stderr.contains("[graphoxide timing] build:"));
+    assert!(stderr.contains("[graphoxide timing] write:"));
     assert!(stderr.contains("[graphoxide timing] total:"));
 
     let plain_root = fixture.path().join("plain");
@@ -759,6 +761,42 @@ fn test_extract_timing_flag_emits_stage_timings() {
     );
     assert_success(&plain);
     assert!(!String::from_utf8_lossy(&plain.stderr).contains("graphoxide timing"));
+}
+
+#[test]
+fn test_extract_json_emits_one_structured_build_report() {
+    let fixture = TempDir::new().unwrap();
+    let project = fixture.path().join("project");
+    code_corpus(&project);
+    let output_root = fixture.path().join("telemetry");
+    let output = run(
+        fixture.path(),
+        &[
+            "extract",
+            project.to_str().unwrap(),
+            "--no-cluster",
+            "--out",
+            output_root.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_success(&output);
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(stdout.trim()).expect("one valid JSON report");
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["operation"], "extract");
+    assert_eq!(report["mode"], "full");
+    assert_eq!(report["status"], "rebuilt");
+    assert_eq!(report["files"]["detected"], 1);
+    assert_eq!(report["files"]["processed"], 1);
+    assert!(report["graph"]["nodes"].as_u64().unwrap() > 0);
+    assert!(report["graph"]["edges"].as_u64().is_some());
+    assert_eq!(report["graph"]["clustered"], false);
+    assert!(report["elapsed_ms"].as_u64().is_some());
+    assert!(report["stages_ms"]["scan_extract"].as_u64().is_some());
+    assert!(!stdout.contains("Wrote"));
+    assert!(!stdout.contains("Incremental scan"));
 }
 
 fn two_file_corpus(root: &Path) -> PathBuf {

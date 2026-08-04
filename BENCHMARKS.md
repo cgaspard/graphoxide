@@ -1,47 +1,109 @@
-# Benchmarks
+# Graph build benchmarks
 
-Measured 2026-08-01 on an Apple M5 Max (18 logical CPUs), macOS Darwin 25.5.0, Rust 1.95, release profile (`lto = "thin"`, one codegen unit). The Python oracle is the committed `upstream/` checkout executed from its `uv` environment.
+Graphoxide includes a reproducible local benchmark for a fresh graph build and
+a one-file incremental update. The benchmark records observations; it does not
+enforce a performance threshold or claim that one machine's timings apply to
+another environment.
 
-## Reference corpus
+## Run the baseline
 
-The corpus is the upstream Graphify project's own `graphify/` package: 80 Python source files. Both implementations ran code-only forced extraction into fresh temporary directories.
+From the repository root:
 
-| Measurement | Python | Rust | Result |
-|---|---:|---:|---:|
-| Full extract/build/cluster wall time | 5.40 s | 1.45 s | Rust 3.72× faster |
-| Cached structural update | — | 1.19 s | deterministic no-change rebuild |
-| Raw nodes | 2,174 | 2,174 | exact count and ID set |
-| Raw edges | 4,985 | 4,908 | Rust −1.54% |
-| Built nodes | 2,168 | 2,162 | Rust −0.28% |
-| Built edges | 4,351 | 4,300 | Rust −1.17% |
-
-The raw relation difference is concentrated in conservative call/import resolution. Structural containment, method, inheritance, rationale, and import-from counts match; Python emits a small number of additional ambiguous/indirect relationships.
-
-Python's test environment did not include optional `graspologic`, so it used its NetworkX Louvain fallback (105 communities). Rust always uses the pinned `network_partitions` Leiden implementation required by the port contract (125 communities on the Rust-built graph); those partition counts are intentionally not treated as an algorithm-parity comparison.
-
-## Query startup
-
-Twenty independent CLI processes queried a roughly 2.1k-node graph with `how does extraction resolve calls`; stdout/stderr were discarded. Values below are wall-clock process latency.
-
-| Executable | Median | Mean | Minimum |
-|---|---:|---:|---:|
-| Upstream Python Graphify query | 123.949 ms | 128.162 ms | 123.065 ms |
-| Rust Graphoxide query | 19.940 ms | 20.071 ms | 18.773 ms |
-
-Rust median cold-query latency is 6.22× lower. The Rust in-process `benchmark` command completed 1,000 full ranked/traversal queries in 8,205.709 ms (8.206 ms/query); this deliberately includes index construction for each independent query call.
-
-## Determinism and artifacts
-
-Two consecutive `graphoxide update` runs produced the identical SHA-256:
-
-```text
-5ce67b016f25e9f82fc51d9e29195e9006bf116bbc73b6b92b81044002e1844c
+```bash
+npm --silent run benchmark:graph-build
 ```
 
-Release binary sizes on this machine:
+The runner builds the release binary before collecting samples, so compilation
+is not included in any timed region. It defaults to five independent samples
+and prints one JSON report. The `--silent` npm flag keeps command-wrapper text
+out of standard output; build failures are reported on standard error.
 
-| Binary | Size |
-|---|---:|
-| `graphoxide` | 27 MiB |
+Change the sample count or use a previously built binary and another fixture:
 
-Numbers are local engineering measurements, not universal claims; filesystem cache state, optional Python clustering dependencies, CPU, linker, and corpus shape all affect results.
+```bash
+npm --silent run benchmark:graph-build -- --runs 10
+
+node scripts/benchmark-graph-build.mjs \
+  --runs 5 \
+  --binary target/release/graphoxide \
+  --fixture parity/corpora/language-matrix
+```
+
+Run `node scripts/benchmark-graph-build.mjs --help` for the supported options.
+The default maximum of 100 samples keeps accidental runs bounded.
+
+## Baseline fixture
+
+The default fixture is [`parity/corpora/language-matrix`](parity/corpora/language-matrix).
+It contains 33 files and exercises multiple compiled and deterministic fallback
+extractors. Its complete input-tree digest is pinned by the parity corpus suite:
+
+```text
+1b0e49b8bbac8a7414a38bb36b6e52b4259e66d04cbc5b2e5663e93a88adf0ef
+```
+
+The digest covers every relative path, directory, and file byte, including
+negative-control inputs that Graphoxide does not structurally index. The
+benchmark reports the digest it actually measured, so results from different
+fixture revisions are distinguishable.
+
+Every sample receives a fresh temporary copy of the fixture. After the full
+build, the runner appends a deterministic `GraphoxideBenchmarkMutation`
+declaration to `jvm/app/Runner.java` in that copy only. The checked-in fixture is
+never modified. A custom fixture uses the same preferred path when present, or
+the first source file with a built-in deterministic mutation strategy in
+normalized path order.
+
+## Measured operations
+
+Each independent sample performs these operations:
+
+1. Copy the fixture into a new temporary directory. This setup is not timed.
+2. Time a fresh-output build:
+
+   ```bash
+   graphoxide extract . --force --json
+   ```
+
+3. Apply the deterministic one-file mutation. This setup is not timed.
+4. Time the incremental update against the graph created in step 2:
+
+   ```bash
+   graphoxide update . --json
+   ```
+
+5. Remove the temporary sample directory.
+
+The report retains two timing domains for both operations:
+
+- `external_wall_ms` measures the child process from launch through exit and
+  therefore includes process startup.
+- `reported_elapsed_ms` is the CLI's top-level `elapsed_ms` value and describes
+  the work measured inside Graphoxide.
+
+Raw CLI reports are preserved under every sample. Separate min, median, and max
+summaries are computed for external and CLI-reported timings. The runner rejects
+a successful command that does not produce one parseable JSON object with a
+finite, non-negative `elapsed_ms`, the expected operation/mode/status, and—for
+the incremental sample—exactly one processed changed file.
+
+The JSON also records the fixture digest, Git commit and dirty state, binary
+digest, Graphoxide and Rust versions, Node version, operating system,
+architecture, CPU model/count, and memory size.
+
+## Interpreting results
+
+The benchmark creates a fresh Graphoxide output and extraction cache for every
+full-build sample, but it does not flush or control operating-system filesystem
+caches. Call this a **fresh-output build**, not a cold build.
+
+Only compare results when the commit, fixture digest, command shape, release
+profile, toolchain, and environment are materially equivalent. Background
+load, filesystem state, virtualization, thermal behavior, and sample count can
+all change measured durations. Keep raw reports with any analysis and describe
+the environment; do not turn these local observations into universal latency or
+speedup claims.
+
+Timing values are intentionally excluded from CI pass/fail decisions. CI runs
+only the benchmark runner's deterministic argument, digest, JSON-validation,
+mutation, and summary tests.

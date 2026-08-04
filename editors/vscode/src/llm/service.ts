@@ -228,19 +228,16 @@ export class AiLabelingService {
     let state = await this.store.load(folder);
     if (!state?.model) {
       const choice = await vscode.window.showInformationMessage(
-        'Extract this workspace before naming its communities with AI.',
-        'Extract workspace',
+        'Build this workspace graph before naming its communities with AI.',
+        'Build Graph',
       );
-      if (choice !== 'Extract workspace') return;
-      const graphUri = state?.graphUri ?? this.store.graphUri(folder);
-      if (path.basename(graphUri.fsPath) !== 'graph.json') {
-        throw new Error('Automatic extraction requires Graphoxide: Graph Path to end in graph.json. Extract the configured graph before labeling it.');
-      }
+      if (choice !== 'Build Graph') return;
+      const output = this.store.managedOutput(folder);
       await this.cli.run({
-        title: 'Graphoxide: extracting workspace…',
+        title: 'Graphoxide: building graph…',
         folder,
         args: ['extract', folder.uri.fsPath],
-        environment: { GRAPHOXIDE_OUT: path.dirname(graphUri.fsPath) },
+        environment: output.environment,
       });
       state = await this.store.load(folder);
     }

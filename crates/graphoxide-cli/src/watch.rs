@@ -20,6 +20,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     process::Command,
+    time::Instant,
 };
 
 pub const OUTPUT_DIRECTORY: &str = "graphoxide-out";
@@ -158,7 +159,11 @@ pub fn is_watched_extension(extension: &str) -> bool {
 }
 
 pub fn notify_only(root: &Path) -> anyhow::Result<PathBuf> {
-    let flag = root.join(OUTPUT_DIRECTORY).join(NEEDS_UPDATE);
+    notify_only_in(&root.join(OUTPUT_DIRECTORY))
+}
+
+pub fn notify_only_in(output_directory: &Path) -> anyhow::Result<PathBuf> {
+    let flag = output_directory.join(NEEDS_UPDATE);
     if let Some(parent) = flag.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -173,7 +178,11 @@ pub struct UpdateNotice {
 }
 
 pub fn check_update(root: &Path) -> UpdateNotice {
-    let pending = root.join(OUTPUT_DIRECTORY).join(NEEDS_UPDATE).is_file();
+    check_update_in(root, &root.join(OUTPUT_DIRECTORY))
+}
+
+pub fn check_update_in(root: &Path, output_directory: &Path) -> UpdateNotice {
+    let pending = output_directory.join(NEEDS_UPDATE).is_file();
     UpdateNotice {
         pending,
         message: pending.then(|| {
@@ -184,6 +193,19 @@ pub fn check_update(root: &Path) -> UpdateNotice {
             )
         }),
     }
+}
+
+pub fn output_directory_from_env(root: &Path) -> Option<PathBuf> {
+    std::env::var_os("GRAPHOXIDE_OUT")
+        .or_else(|| std::env::var_os("GRAPHIFY_OUT"))
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
 }
 
 /// Injectable availability check used by callers that make notification
@@ -432,17 +454,30 @@ pub fn resolve_watch_context(
 pub struct WatchEventFilter {
     lexical_root: PathBuf,
     root: PathBuf,
+    output_directory: Option<PathBuf>,
     patterns: Vec<detect::IgnorePattern>,
 }
 
 impl WatchEventFilter {
     pub fn new(root: &Path, honor_gitignore: bool) -> Self {
+        Self::with_output_directory(root, honor_gitignore, None)
+    }
+
+    pub fn with_output_directory(
+        root: &Path,
+        honor_gitignore: bool,
+        output_directory: Option<&Path>,
+    ) -> Self {
         let lexical_root = root.to_path_buf();
         let root = fs::canonicalize(root).unwrap_or_else(|_| lexical_root.clone());
         let patterns = detect::load_ignore_patterns(&root, honor_gitignore);
+        let output_directory = output_directory.map(|output| {
+            canonicalize_with_missing_tail(output).unwrap_or_else(|_| output.to_path_buf())
+        });
         Self {
             lexical_root,
             root,
+            output_directory,
             patterns,
         }
     }
@@ -452,6 +487,13 @@ impl WatchEventFilter {
             .strip_prefix(&self.lexical_root)
             .map(|relative| self.root.join(relative))
             .unwrap_or_else(|_| path.to_path_buf());
+        if self
+            .output_directory
+            .as_ref()
+            .is_some_and(|output| output.starts_with(&self.root) && anchored.starts_with(output))
+        {
+            return false;
+        }
         if is_directory || detect::is_ignored(&anchored, &self.root, &self.patterns) {
             return false;
         }
@@ -531,6 +573,23 @@ fn canonicalize_with_missing_tail(path: &Path) -> std::io::Result<PathBuf> {
         canonical.push(component);
     }
     Ok(canonical)
+}
+
+/// Reject an output directory that contains the watched source tree.
+///
+/// Such a configuration would either suppress every source event or allow
+/// generated markers and graph artifacts to land above the project boundary.
+pub fn validate_watch_output_directory(
+    watch_root: &Path,
+    output_directory: &Path,
+) -> anyhow::Result<()> {
+    let watch_root = canonicalize_with_missing_tail(watch_root)?;
+    let output_directory = canonicalize_with_missing_tail(output_directory)?;
+    anyhow::ensure!(
+        !watch_root.starts_with(&output_directory),
+        "managed output directory must not be the watched project root or one of its ancestors"
+    );
+    Ok(())
 }
 
 fn absolute_identity(path: &Path, root: &Path) -> Option<PathBuf> {
@@ -992,9 +1051,21 @@ pub fn commit_candidate(
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebuildScope {
+    #[default]
+    Full,
+    Incremental,
+}
+
 #[derive(Debug, Clone)]
 pub struct RebuildOptions {
     pub changed_paths: Option<Vec<PathBuf>>,
+    pub scope: RebuildScope,
+    /// Override the managed output directory while keeping source identities
+    /// anchored to `watch_path`.
+    pub output_directory: Option<PathBuf>,
     pub follow_symlinks: bool,
     pub force: bool,
     pub no_cluster: bool,
@@ -1010,6 +1081,8 @@ impl Default for RebuildOptions {
     fn default() -> Self {
         Self {
             changed_paths: None,
+            scope: RebuildScope::Full,
+            output_directory: None,
             follow_symlinks: false,
             force: false,
             no_cluster: false,
@@ -1025,7 +1098,8 @@ impl Default for RebuildOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RebuildStatus {
     Rebuilt,
     Unchanged,
@@ -1034,14 +1108,52 @@ pub enum RebuildStatus {
     RefusedShrink,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebuildStats {
+    pub detected_files: usize,
+    pub processed_files: usize,
+    pub changed_files: usize,
+    pub unchanged_files: usize,
+    pub deleted_files: usize,
+    pub nodes: usize,
+    pub edges: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebuildTimings {
+    pub detect_ms: u64,
+    pub extract_ms: u64,
+    pub build_ms: u64,
+    pub cluster_ms: u64,
+    pub write_ms: u64,
+    pub total_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RebuildFileSets {
+    current: BTreeSet<PathBuf>,
+    processed: BTreeSet<PathBuf>,
+    changed: BTreeSet<PathBuf>,
+    deleted: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebuildResult {
     pub status: RebuildStatus,
+    pub scope: RebuildScope,
     pub graph_path: PathBuf,
     pub manifest_path: PathBuf,
     pub passes: usize,
     pub clustered: bool,
     pub warnings: Vec<String>,
+    pub stats: RebuildStats,
+    pub timings: RebuildTimings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RebuildPass {
+    result: RebuildResult,
+    file_sets: RebuildFileSets,
 }
 
 impl RebuildResult {
@@ -1051,6 +1163,98 @@ impl RebuildResult {
             RebuildStatus::Rebuilt | RebuildStatus::Unchanged | RebuildStatus::NoTrackedChanges
         )
     }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn requested_rebuild_scope(options: &RebuildOptions) -> RebuildScope {
+    if options.changed_paths.is_some() {
+        RebuildScope::Incremental
+    } else {
+        options.scope
+    }
+}
+
+fn merge_rebuild_results(mut aggregate: RebuildPass, next: RebuildPass) -> RebuildPass {
+    aggregate.result.status = match (aggregate.result.status, next.result.status) {
+        (RebuildStatus::RefusedShrink, _) | (_, RebuildStatus::RefusedShrink) => {
+            RebuildStatus::RefusedShrink
+        }
+        (RebuildStatus::Rebuilt, _) | (_, RebuildStatus::Rebuilt) => RebuildStatus::Rebuilt,
+        (RebuildStatus::Unchanged, _) | (_, RebuildStatus::Unchanged) => RebuildStatus::Unchanged,
+        (RebuildStatus::NoTrackedChanges, _) | (_, RebuildStatus::NoTrackedChanges) => {
+            RebuildStatus::NoTrackedChanges
+        }
+        _ => RebuildStatus::Queued,
+    };
+    if next.result.scope == RebuildScope::Full {
+        aggregate.result.scope = RebuildScope::Full;
+    }
+    aggregate.result.graph_path = next.result.graph_path;
+    aggregate.result.manifest_path = next.result.manifest_path;
+    aggregate.result.passes = next.result.passes;
+    aggregate.result.clustered |= next.result.clustered;
+    for warning in next.result.warnings {
+        if !aggregate.result.warnings.contains(&warning) {
+            aggregate.result.warnings.push(warning);
+        }
+    }
+    aggregate.file_sets.current = next.file_sets.current;
+    aggregate
+        .file_sets
+        .processed
+        .extend(next.file_sets.processed);
+    aggregate.file_sets.changed.extend(next.file_sets.changed);
+    aggregate.file_sets.deleted.extend(next.file_sets.deleted);
+    aggregate.result.stats.detected_files = next.result.stats.detected_files;
+    aggregate.result.stats.processed_files = aggregate.file_sets.processed.len();
+    aggregate.result.stats.changed_files = aggregate.file_sets.changed.len();
+    let changed_in_final_corpus = aggregate
+        .file_sets
+        .changed
+        .intersection(&aggregate.file_sets.current)
+        .count();
+    aggregate.result.stats.unchanged_files = aggregate
+        .result
+        .stats
+        .detected_files
+        .saturating_sub(changed_in_final_corpus.min(aggregate.result.stats.detected_files));
+    aggregate.result.stats.deleted_files = aggregate.file_sets.deleted.len();
+    aggregate.result.stats.nodes = next.result.stats.nodes;
+    aggregate.result.stats.edges = next.result.stats.edges;
+    aggregate.result.timings.detect_ms = aggregate
+        .result
+        .timings
+        .detect_ms
+        .saturating_add(next.result.timings.detect_ms);
+    aggregate.result.timings.extract_ms = aggregate
+        .result
+        .timings
+        .extract_ms
+        .saturating_add(next.result.timings.extract_ms);
+    aggregate.result.timings.build_ms = aggregate
+        .result
+        .timings
+        .build_ms
+        .saturating_add(next.result.timings.build_ms);
+    aggregate.result.timings.cluster_ms = aggregate
+        .result
+        .timings
+        .cluster_ms
+        .saturating_add(next.result.timings.cluster_ms);
+    aggregate.result.timings.write_ms = aggregate
+        .result
+        .timings
+        .write_ms
+        .saturating_add(next.result.timings.write_ms);
+    aggregate.result.timings.total_ms = aggregate
+        .result
+        .timings
+        .total_ms
+        .saturating_add(next.result.timings.total_ms);
+    aggregate
 }
 
 pub fn rebuild_project(
@@ -1068,13 +1272,24 @@ pub fn rebuild_project_with_observer<F>(
 where
     F: FnMut(usize, &Path),
 {
-    let context = resolve_watch_context(
+    let total_started = Instant::now();
+    let mut context = resolve_watch_context(
         watch_path,
         options.invocation_cwd.as_deref(),
         options.repo_root_fallback.as_deref(),
     )?;
+    if let Some(output_directory) = options.output_directory.as_deref() {
+        context.output = if output_directory.is_absolute() {
+            canonicalize_with_missing_tail(output_directory)?
+        } else {
+            canonicalize_with_missing_tail(&context.project_root.join(output_directory))?
+        };
+    }
+    validate_watch_output_directory(&context.watch_root, &context.output)?;
     if !options.acquire_lock {
-        return rebuild_once(&context, options, options.changed_paths.as_deref(), 1);
+        let mut result = rebuild_once(&context, options, options.changed_paths.as_deref(), 1)?;
+        result.result.timings.total_ms = elapsed_millis(total_started);
+        return Ok(result.result);
     }
     if let Some(changed) = options.changed_paths.as_deref() {
         if !options.block_on_lock {
@@ -1084,11 +1299,17 @@ where
     let Some(_guard) = RebuildLockGuard::acquire(&context.output, options.block_on_lock)? else {
         return Ok(RebuildResult {
             status: RebuildStatus::Queued,
+            scope: requested_rebuild_scope(options),
             graph_path: context.output.join("graph.json"),
             manifest_path: context.output.join("manifest.json"),
             passes: 0,
             clustered: false,
             warnings: Vec::new(),
+            stats: RebuildStats::default(),
+            timings: RebuildTimings {
+                total_ms: elapsed_millis(total_started),
+                ..RebuildTimings::default()
+            },
         });
     };
     let merged = if let Some(changed) = options.changed_paths.as_deref() {
@@ -1106,11 +1327,13 @@ where
             if late.is_empty() {
                 break;
             }
-            result = rebuild_once(&context, options, Some(&late), pass)?;
+            let next = rebuild_once(&context, options, Some(&late), pass)?;
+            result = merge_rebuild_results(result, next);
             after_pass(pass, &context.output);
         }
     }
-    Ok(result)
+    result.result.timings.total_ms = elapsed_millis(total_started);
+    Ok(result.result)
 }
 
 fn ast_document(path: &Path) -> bool {
@@ -1124,17 +1347,15 @@ fn ast_document(path: &Path) -> bool {
     )
 }
 
-fn detected_ast_files(detection: &DetectResult) -> Vec<PathBuf> {
-    let mut files = detection
-        .files
+fn detected_ast_files_in(files_by_type: &detect::DetectedFiles) -> Vec<PathBuf> {
+    let mut files = files_by_type
         .get(FileType::Code.as_str())
         .into_iter()
         .flatten()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     files.extend(
-        detection
-            .files
+        files_by_type
             .get(FileType::Document.as_str())
             .into_iter()
             .flatten()
@@ -1144,6 +1365,24 @@ fn detected_ast_files(detection: &DetectResult) -> Vec<PathBuf> {
     files.sort();
     files.dedup();
     files
+}
+
+fn detected_ast_files(detection: &DetectResult) -> Vec<PathBuf> {
+    detected_ast_files_in(&detection.files)
+}
+
+fn usable_incremental_manifest(path: &Path) -> bool {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, Value>>(&bytes).ok())
+        .is_some()
+}
+
+#[derive(Debug, Default)]
+struct IncrementalSelection {
+    changed: Vec<PathBuf>,
+    unchanged: usize,
+    deleted: Vec<PathBuf>,
 }
 
 fn path_equivalent(left: &Path, right: &Path) -> bool {
@@ -1438,25 +1677,68 @@ fn clear_needs_update(out: &Path) -> anyhow::Result<()> {
     }
 }
 
+fn finish_rebuild_result(
+    mut result: RebuildResult,
+    file_sets: RebuildFileSets,
+    total_started: Instant,
+) -> RebuildPass {
+    result.timings.total_ms = elapsed_millis(total_started);
+    RebuildPass { result, file_sets }
+}
+
 fn rebuild_once(
     context: &WatchContext,
     options: &RebuildOptions,
     changed_paths: Option<&[PathBuf]>,
     pass: usize,
-) -> anyhow::Result<RebuildResult> {
+) -> anyhow::Result<RebuildPass> {
+    let total_started = Instant::now();
     let graph_path = context.output.join("graph.json");
     let manifest_path = context.output.join("manifest.json");
+    let existing = load_existing(&graph_path, options.max_graph_bytes)?;
+    let derive_incremental_paths = changed_paths.is_none()
+        && options.scope == RebuildScope::Incremental
+        && existing.is_some()
+        && usable_incremental_manifest(&manifest_path);
+    let use_explicit_changed_paths = changed_paths.is_some() && existing.is_some();
+    let scope = if use_explicit_changed_paths || derive_incremental_paths {
+        RebuildScope::Incremental
+    } else {
+        RebuildScope::Full
+    };
+    let mut stats = RebuildStats::default();
+    let mut timings = RebuildTimings::default();
     let config = read_build_config(&context.output);
-    let detection = detect::detect(
-        &context.watch_root,
-        &DetectOptions {
-            follow_symlinks: options.follow_symlinks,
-            extra_excludes: config.excludes.clone(),
-            honor_gitignore: config.honor_gitignore,
-            output_dir: Some(context.output.clone()),
-            ..Default::default()
-        },
-    )?;
+    let detect_options = DetectOptions {
+        follow_symlinks: options.follow_symlinks,
+        extra_excludes: config.excludes.clone(),
+        honor_gitignore: config.honor_gitignore,
+        output_dir: Some(context.output.clone()),
+        ..Default::default()
+    };
+    let detect_started = Instant::now();
+    let mut incremental_selection = None;
+    let detection = if derive_incremental_paths {
+        let incremental = detect::detect_incremental(
+            &context.watch_root,
+            &manifest_path,
+            &detect_options,
+            ManifestKind::Ast,
+        )?;
+        incremental_selection = Some(IncrementalSelection {
+            changed: detected_ast_files_in(&incremental.new_files),
+            unchanged: detected_ast_files_in(&incremental.unchanged_files).len(),
+            deleted: incremental
+                .deleted_files
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+        });
+        incremental.detection
+    } else {
+        detect::detect(&context.watch_root, &detect_options)?
+    };
+    timings.detect_ms = elapsed_millis(detect_started);
     if !detection.walk_errors.is_empty() {
         let preview = detection
             .walk_errors
@@ -1477,16 +1759,28 @@ fn rebuild_once(
         );
     }
     let ast_files = detected_ast_files(&detection);
-    let existing = load_existing(&graph_path, options.max_graph_bytes)?;
+    stats.detected_files = ast_files.len();
+    if let Some(selection) = &incremental_selection {
+        stats.changed_files = selection.changed.len();
+        stats.unchanged_files = selection.unchanged;
+        stats.deleted_files = selection.deleted.len();
+    }
     if ast_files.is_empty() && existing.is_none() {
-        return Ok(RebuildResult {
-            status: RebuildStatus::NoTrackedChanges,
-            graph_path,
-            manifest_path,
-            passes: pass,
-            clustered: false,
-            warnings: Vec::new(),
-        });
+        return Ok(finish_rebuild_result(
+            RebuildResult {
+                status: RebuildStatus::NoTrackedChanges,
+                scope,
+                graph_path,
+                manifest_path,
+                passes: pass,
+                clustered: false,
+                warnings: Vec::new(),
+                stats,
+                timings,
+            },
+            RebuildFileSets::default(),
+            total_started,
+        ));
     }
     let source_paths = StoredSourcePaths::new(
         existing.as_ref(),
@@ -1495,9 +1789,25 @@ fn rebuild_once(
         &context.watch_root,
     );
     let semantic_docs = semantic_doc_sources(existing.as_ref(), &ast_files, &source_paths);
+    let current_sources = ast_files
+        .iter()
+        .filter_map(|path| absolute_identity(path, &context.project_root))
+        .collect::<BTreeSet<_>>();
     let mut deleted_sources = BTreeSet::new();
     let mut targets: Vec<PathBuf> = Vec::new();
-    if let Some(changed) = changed_paths {
+    let mut automatic_paths = Vec::new();
+    if let Some(selection) = &incremental_selection {
+        automatic_paths.extend(selection.changed.iter().cloned());
+        automatic_paths.extend(selection.deleted.iter().cloned());
+    }
+    let effective_changed_paths = if use_explicit_changed_paths {
+        changed_paths
+    } else {
+        incremental_selection
+            .as_ref()
+            .map(|_| automatic_paths.as_slice())
+    };
+    if let Some(changed) = effective_changed_paths {
         for raw in changed {
             let candidates =
                 changed_path_candidates(raw, &context.project_root, &context.watch_root);
@@ -1532,15 +1842,34 @@ fn rebuild_once(
                 }
             }
         }
-        if targets.is_empty() && deleted_sources.is_empty() {
-            return Ok(RebuildResult {
-                status: RebuildStatus::NoTrackedChanges,
-                graph_path,
-                manifest_path,
-                passes: pass,
-                clustered: false,
-                warnings: Vec::new(),
-            });
+        if incremental_selection.is_none() {
+            stats.changed_files = targets.len();
+            stats.unchanged_files = ast_files.len().saturating_sub(targets.len());
+            stats.deleted_files = deleted_sources.len();
+        }
+        if targets.is_empty() && deleted_sources.is_empty() && incremental_selection.is_none() {
+            if let Some(existing) = &existing {
+                stats.nodes = existing.nodes.len();
+                stats.edges = existing.links.len();
+            }
+            return Ok(finish_rebuild_result(
+                RebuildResult {
+                    status: RebuildStatus::NoTrackedChanges,
+                    scope,
+                    graph_path,
+                    manifest_path,
+                    passes: pass,
+                    clustered: false,
+                    warnings: Vec::new(),
+                    stats,
+                    timings,
+                },
+                RebuildFileSets {
+                    current: current_sources.clone(),
+                    ..RebuildFileSets::default()
+                },
+                total_started,
+            ));
         }
     } else {
         targets = ast_files
@@ -1552,10 +1881,6 @@ fn rebuild_once(
             .cloned()
             .collect();
     }
-    let current_sources = ast_files
-        .iter()
-        .filter_map(|path| absolute_identity(path, &context.project_root))
-        .collect::<BTreeSet<_>>();
     let mut excluded_alive = BTreeSet::new();
     if let Some(existing) = &existing {
         for node in &existing.nodes {
@@ -1589,6 +1914,63 @@ fn rebuild_once(
         .iter()
         .filter_map(|path| absolute_identity(path, &context.project_root))
         .collect::<BTreeSet<_>>();
+    let changed_sources = incremental_selection.as_ref().map_or_else(
+        || {
+            if scope == RebuildScope::Incremental && changed_paths.is_some() {
+                rebuilt_sources.clone()
+            } else {
+                BTreeSet::new()
+            }
+        },
+        |selection| {
+            selection
+                .changed
+                .iter()
+                .filter_map(|path| absolute_identity(path, &context.project_root))
+                .collect()
+        },
+    );
+    let file_sets = RebuildFileSets {
+        current: current_sources.clone(),
+        processed: rebuilt_sources.clone(),
+        changed: changed_sources,
+        deleted: deleted_sources.clone(),
+    };
+    stats.processed_files = file_sets.processed.len();
+    stats.changed_files = file_sets.changed.len();
+    stats.deleted_files = file_sets.deleted.len();
+    if scope == RebuildScope::Incremental {
+        let changed_in_current = file_sets.changed.intersection(&file_sets.current).count();
+        stats.unchanged_files = stats
+            .detected_files
+            .saturating_sub(changed_in_current.min(stats.detected_files));
+    }
+    if incremental_selection.is_some() && targets.is_empty() && deleted_sources.is_empty() {
+        if let Some(existing) = &existing {
+            stats.nodes = existing.nodes.len();
+            stats.edges = existing.links.len();
+        }
+        let write_started = Instant::now();
+        full_scan_manifest(&detection, context)?;
+        clear_needs_update(&context.output)?;
+        timings.write_ms = elapsed_millis(write_started);
+        return Ok(finish_rebuild_result(
+            RebuildResult {
+                status: RebuildStatus::Unchanged,
+                scope,
+                graph_path,
+                manifest_path,
+                passes: pass,
+                clustered: false,
+                warnings,
+                stats,
+                timings,
+            },
+            file_sets,
+            total_started,
+        ));
+    }
+    let extract_started = Instant::now();
     let mut chunks = if targets.is_empty() {
         Vec::new()
     } else {
@@ -1603,12 +1985,14 @@ fn rebuild_once(
     for (chunk, target) in chunks.iter_mut().zip(&targets) {
         rewrite_extraction_source(chunk, target, &context.project_root);
     }
+    timings.extract_ms = elapsed_millis(extract_started);
+    let build_started = Instant::now();
     let fresh = flatten(chunks);
     let merged = reconcile_graph(
         existing.as_ref(),
         fresh,
         &ReconcileEvidence {
-            full_rebuild: changed_paths.is_none(),
+            full_rebuild: scope == RebuildScope::Full,
             current_sources,
             rebuilt_sources: rebuilt_sources.clone(),
             deleted_sources: deleted_sources.clone(),
@@ -1630,35 +2014,50 @@ fn rebuild_once(
             .extra
             .insert("built_at_commit".into(), commit.into());
     }
+    timings.build_ms = elapsed_millis(build_started);
+    stats.nodes = candidate.nodes.len();
+    stats.edges = candidate.links.len();
     if existing
         .as_ref()
         .is_some_and(|existing| same_topology(existing, &candidate))
     {
+        let write_started = Instant::now();
         full_scan_manifest(&detection, context)?;
         clear_needs_update(&context.output)?;
-        return Ok(RebuildResult {
-            status: RebuildStatus::Unchanged,
-            graph_path,
-            manifest_path,
-            passes: pass,
-            clustered: false,
-            warnings,
-        });
+        timings.write_ms = elapsed_millis(write_started);
+        return Ok(finish_rebuild_result(
+            RebuildResult {
+                status: RebuildStatus::Unchanged,
+                scope,
+                graph_path,
+                manifest_path,
+                passes: pass,
+                clustered: false,
+                warnings,
+                stats,
+                timings,
+            },
+            file_sets,
+            total_started,
+        ));
     }
     let mut labels = BTreeMap::new();
     let mut signatures = BTreeMap::new();
     if !options.no_cluster {
+        let cluster_started = Instant::now();
         graphoxide_graph::cluster(&mut candidate)?;
         if let Some(existing) = &existing {
             graphoxide_graph::remap_communities_to_previous(&mut candidate, existing);
         }
         (labels, signatures) = apply_stable_labels(&mut candidate, &context.output);
+        timings.cluster_ms = elapsed_millis(cluster_started);
     }
     let rebuilt_for_guard = rebuilt_sources
         .iter()
         .chain(&deleted_sources)
         .map(|identity| source_paths.stored(identity))
         .collect::<BTreeSet<_>>();
+    let write_started = Instant::now();
     let committed = commit_candidate(
         &context.output,
         existing.as_ref(),
@@ -1672,14 +2071,22 @@ fn rebuild_once(
         },
     )?;
     if !committed {
-        return Ok(RebuildResult {
-            status: RebuildStatus::RefusedShrink,
-            graph_path,
-            manifest_path,
-            passes: pass,
-            clustered: !options.no_cluster,
-            warnings,
-        });
+        timings.write_ms = elapsed_millis(write_started);
+        return Ok(finish_rebuild_result(
+            RebuildResult {
+                status: RebuildStatus::RefusedShrink,
+                scope,
+                graph_path,
+                manifest_path,
+                passes: pass,
+                clustered: !options.no_cluster,
+                warnings,
+                stats,
+                timings,
+            },
+            file_sets,
+            total_started,
+        ));
     }
     // The graph is now accepted. Publish the full-corpus manifest before
     // derived reports so a report/rendering failure cannot leave a new graph
@@ -1700,12 +2107,20 @@ fn rebuild_once(
     for name in [BUILD_CONFIG, COMPAT_BUILD_CONFIG] {
         graphoxide_core::write_json_atomic(context.output.join(name), &persisted, false)?;
     }
-    Ok(RebuildResult {
-        status: RebuildStatus::Rebuilt,
-        graph_path,
-        manifest_path,
-        passes: pass,
-        clustered: !options.no_cluster,
-        warnings,
-    })
+    timings.write_ms = elapsed_millis(write_started);
+    Ok(finish_rebuild_result(
+        RebuildResult {
+            status: RebuildStatus::Rebuilt,
+            scope,
+            graph_path,
+            manifest_path,
+            passes: pass,
+            clustered: !options.no_cluster,
+            warnings,
+            stats,
+            timings,
+        },
+        file_sets,
+        total_started,
+    ))
 }

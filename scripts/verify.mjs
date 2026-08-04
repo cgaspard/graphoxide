@@ -16,6 +16,7 @@ const vscode = path.join(root, 'editors', 'vscode');
 run('cargo', ['fmt', '--all', '--', '--check']);
 run('cargo', ['clippy', '--workspace', '--all-targets', '--', '-D', 'warnings']);
 run('cargo', ['test', '--workspace', '--no-fail-fast', '--locked']);
+run('node', ['--test', 'scripts/benchmark-graph-build.test.mjs']);
 run('npm', ['run', 'check'], vscode);
 run('node', ['scripts/agent-artifacts.mjs', '--check']);
 run('node', ['scripts/render-release-notes.mjs', '--current', '--check']);

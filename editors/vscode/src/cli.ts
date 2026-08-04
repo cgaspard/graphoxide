@@ -1,5 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import * as vscode from 'vscode';
+import { workspaceGraphMutationAllowed } from './build';
 import { EnvironmentOverlay, overlayEnvironment, shouldUseTrustedExecutable } from './llm/config';
 import { extensionInvocation, trustedExtensionInvocation } from './mcp/runtime';
 
@@ -31,6 +32,10 @@ export class GraphoxideCli implements vscode.Disposable {
 
   get watching(): boolean {
     return Boolean(this.watchProcess) && this.watchReady;
+  }
+
+  get watchActive(): boolean {
+    return Boolean(this.watchProcess) || Boolean(this.watchStart);
   }
 
   async run(options: RunOptions): Promise<RunResult> {
@@ -106,7 +111,11 @@ export class GraphoxideCli implements vscode.Disposable {
     }
   }
 
-  async startWatch(folder: vscode.WorkspaceFolder): Promise<void> {
+  async startWatch(folder: vscode.WorkspaceFolder, environment: EnvironmentOverlay): Promise<void> {
+    if (!workspaceGraphMutationAllowed(vscode.workspace.isTrusted)) {
+      void vscode.window.showWarningMessage('Trust this workspace before starting Graphoxide watch mode.');
+      return;
+    }
     if (this.watching) {
       void vscode.window.showInformationMessage('Graphoxide watch mode is already running.');
       return;
@@ -116,8 +125,12 @@ export class GraphoxideCli implements vscode.Disposable {
     const executable = invocation.command;
     const args = [...invocation.args.slice(0, -1), 'watch', folder.uri.fsPath];
     this.output.info(`$ ${executable} ${args.map(formatArgument).join(' ')}`);
-    this.watchStart = new Promise<void>((resolve, reject) => {
-      const child = spawn(executable, args, { cwd: folder.uri.fsPath, env: process.env, shell: false });
+    const watchStart = new Promise<void>((resolve, reject) => {
+      const child = spawn(executable, args, {
+        cwd: folder.uri.fsPath,
+        env: overlayEnvironment(process.env, environment),
+        shell: false,
+      });
       this.watchProcess = child;
       let startupOutput = '';
       let startupSettled = false;
@@ -162,10 +175,11 @@ export class GraphoxideCli implements vscode.Disposable {
         if (!startupSettled) settleStartup(new Error(`watch mode exited before it was ready (code ${code ?? 'unknown'})`));
       });
     });
+    this.watchStart = watchStart;
     try {
-      await this.watchStart;
+      await watchStart;
     } finally {
-      this.watchStart = undefined;
+      if (this.watchStart === watchStart) this.watchStart = undefined;
     }
   }
 
@@ -177,6 +191,43 @@ export class GraphoxideCli implements vscode.Disposable {
     child.kill('SIGTERM');
     this.watchEmitter.fire(false);
     void vscode.commands.executeCommand('setContext', 'graphoxide.watching', false);
+  }
+
+  async stopWatchAndWait(): Promise<boolean> {
+    const watchStart = this.watchStart;
+    const child = this.watchProcess;
+    if (child) {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const onClose = (): void => settle();
+        const onError = (error: Error): void => settle(error);
+        const timeout = setTimeout(() => settle(new Error('watch mode did not stop within 5 seconds')), 5000);
+        const settle = (error?: Error): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          child.removeListener('close', onClose);
+          child.removeListener('error', onError);
+          if (error) reject(error);
+          else resolve();
+        };
+        child.once('close', onClose);
+        child.once('error', onError);
+        const running = child.exitCode === null && child.signalCode === null;
+        if (running && !child.kill('SIGTERM') && child.exitCode === null && child.signalCode === null) {
+          settle(new Error('watch mode could not be signalled to stop'));
+        }
+      });
+    }
+    if (watchStart) {
+      try {
+        await watchStart;
+      } catch {
+        // Stopping during startup rejects the readiness promise by design.
+      }
+    }
+    if (!child) return false;
+    return true;
   }
 
   openServerTerminal(folder: vscode.WorkspaceFolder): void {
