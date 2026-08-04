@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 — 2026-08-04
+
+- Added explicit initial-build, incremental-update, and confirmed full-rebuild
+  commands with consistent custom-output handling and workspace-trust guards.
+- Added stable graph-build telemetry and elapsed timing to CLI-backed operations.
+- Hardened live watch restarts when graph paths change and covered custom-output
+  build, save, and watch transitions in Extension Host E2E tests.
+
 ## 0.4.5 — 2026-08-04
 
 - Replaced the Marketplace icon with the web’s orange Graphoxide graph-cube mark

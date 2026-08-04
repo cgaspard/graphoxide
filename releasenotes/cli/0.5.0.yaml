@@ -1,0 +1,12 @@
+version: 0.5.0
+date: 2026-08-04
+highlights:
+  - Make graph build cost visible with structured telemetry and true incremental rebuilds.
+added:
+  - Emit stable JSON build reports for extract and update with elapsed and stage timing, file work counts, graph totals, output paths, and warnings.
+  - Add a reproducible, digest-pinned full-versus-incremental benchmark runner with raw samples and environment metadata.
+changed:
+  - Process only affected structural files during manual updates and watch rebuilds when a usable graph baseline exists.
+fixed:
+  - Fall back to a safe full rebuild when no usable baseline exists and reject output directories that could overwrite watched source trees.
+removed: []

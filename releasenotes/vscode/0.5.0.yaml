@@ -1,0 +1,11 @@
+version: 0.5.0
+date: 2026-08-04
+highlights:
+  - Make initial builds, incremental updates, and full rebuilds explicit and safe in VS Code.
+added:
+  - Add distinct Build Graph, Update Graph (Incremental), and confirmed Rebuild Graph (Full) commands.
+changed:
+  - Honor the configured graph output for manual builds, managed refreshes, update-on-save, watch mode, and AI community labeling.
+fixed:
+  - Restart active watchers safely after graph-path changes and enforce workspace trust and output-boundary checks for graph mutations.
+removed: []
