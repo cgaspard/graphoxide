@@ -15,12 +15,9 @@ use std::{
 };
 
 /// Stable, case-sensitive basenames recognized as MCP configuration files.
-pub const MCP_CONFIG_FILENAMES: [&str; 4] = [
-    ".mcp.json",
-    "claude_desktop_config.json",
-    "mcp.json",
-    "mcp_servers.json",
-];
+///
+/// Shared with the file extractor so both paths recognize the same documents.
+pub use graphoxide_core::mcp_config::MCP_CONFIG_FILENAMES;
 
 const MAX_BYTES: u64 = 1_048_576;
 const MAX_SERVERS_PER_FILE: usize = 200;
@@ -70,11 +67,7 @@ pub fn config_extractor_for_path(path: &Path) -> ConfigExtractorKind {
     }
 }
 
-pub fn is_mcp_config_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| MCP_CONFIG_FILENAMES.contains(&name))
-}
+pub use graphoxide_core::mcp_config::is_mcp_config_path;
 
 /// Parse one MCP configuration without retaining secret values.
 pub fn extract_mcp_config(path: &Path) -> McpConfigResult {
@@ -106,16 +99,7 @@ pub fn extract_mcp_config(path: &Path) -> McpConfigResult {
     let Some(root) = document.as_object() else {
         return McpConfigResult::error("mcp_ingest: root is not an object");
     };
-    let servers = root
-        .get("mcpServers")
-        .and_then(serde_json::Value::as_object)
-        .or_else(|| {
-            root.get("mcp")
-                .and_then(serde_json::Value::as_object)
-                .and_then(|mcp| mcp.get("servers"))
-                .and_then(serde_json::Value::as_object)
-        });
-    let Some(servers) = servers else {
+    let Some(servers) = graphoxide_core::mcp_config::mcp_server_map(root) else {
         return McpConfigResult::error("mcp_ingest: no mcpServers map");
     };
 
@@ -626,6 +610,26 @@ mod tests {
         assert!(result
             .error
             .is_some_and(|error| error.contains("no mcpServers map")));
+    }
+
+    /// VS Code writes `.vscode/mcp.json` with the server map at the root under
+    /// `servers`. Missing it silently dropped every VS Code-registered server
+    /// from the graph (#4).
+    #[test]
+    fn vscode_root_servers_shape() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = write_json(
+            directory.path(),
+            "mcp.json",
+            serde_json::json!({
+                "inputs": [],
+                "servers": {"y": {"type": "stdio", "command": "node", "args": ["dist/index.js"]}}
+            }),
+        );
+        let result = extract_mcp_config(&path);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(labels_by_kind(&result, "mcp_server").contains("y"));
+        assert!(labels_by_kind(&result, "mcp_command").contains("node"));
     }
 
     #[test]

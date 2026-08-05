@@ -8,6 +8,7 @@ pub mod file_slice;
 pub mod ids;
 pub mod io;
 pub mod jsonc;
+pub mod mcp_config;
 pub mod model;
 pub mod reflect;
 pub mod security;
@@ -29,6 +30,7 @@ pub use io::{
     write_text_atomic, write_text_atomic_with_replacer, DEFAULT_MAX_GRAPH_BYTES,
 };
 pub use jsonc::{parse_jsonc, parse_jsonc_slice};
+pub use mcp_config::{is_mcp_config_path, mcp_server_map, MCP_CONFIG_FILENAMES};
 pub use model::{
     coerce_non_string_ids, normalize_graph_value, Confidence, Edge, Extraction, KnowledgeGraph,
     Node,

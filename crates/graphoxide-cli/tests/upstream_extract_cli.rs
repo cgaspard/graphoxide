@@ -699,6 +699,8 @@ fn test_extract_accepts_vscode_jsonc_in_the_parallel_project_path() {
     assert!(sources(fixture.path()).contains("auth.py"));
 }
 
+/// A malformed file is skipped and named by its relative path; the rest of the
+/// corpus still gets a graph (#4).
 #[test]
 fn test_extract_reports_the_relative_path_for_malformed_jsonc() {
     let fixture = TempDir::new().unwrap();
@@ -712,16 +714,14 @@ fn test_extract_reports_the_relative_path_for_malformed_jsonc() {
     );
 
     let output = run(fixture.path(), &["extract", ".", "--no-cluster"]);
+    assert_success(&output);
+    let report = combined(&output);
+    assert!(report.contains("skipped .vscode/tasks.json"), "{report}");
     assert!(
-        !output.status.success(),
-        "malformed JSONC unexpectedly passed"
+        !report.contains(&fixture.path().to_string_lossy().to_string()),
+        "report leaked the absolute fixture path: {report}"
     );
-    let error = combined(&output);
-    assert!(error.contains("extract .vscode/tasks.json"), "{error}");
-    assert!(
-        !error.contains(&fixture.path().to_string_lossy().to_string()),
-        "error leaked the absolute fixture path: {error}"
-    );
+    assert!(sources(fixture.path()).contains("auth.py"));
 }
 
 #[test]

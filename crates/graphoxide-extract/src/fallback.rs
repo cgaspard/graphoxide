@@ -1,7 +1,11 @@
 //! Regex and structured-data extraction for languages without a compiled grammar.
 
 use anyhow::Context as _;
-use graphoxide_core::{make_id, sanitize_label, Confidence, Edge, Extraction, Node};
+use graphoxide_core::{
+    make_id,
+    mcp_config::{is_mcp_config_path, mcp_server_map},
+    sanitize_label, Confidence, Edge, Extraction, Node,
+};
 use regex::Regex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -190,19 +194,15 @@ pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction
     })
 }
 
-const MCP_CONFIG_FILENAMES: &[&str] = &[
-    ".mcp.json",
-    "claude_desktop_config.json",
-    "mcp.json",
-    "mcp_servers.json",
-];
-
-fn is_mcp_config_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| MCP_CONFIG_FILENAMES.contains(&name))
-}
-
+/// Extract an MCP configuration, degrading to generic JSON when the document
+/// turns out not to be one.
+///
+/// The recognised basenames — `mcp.json` above all — are common enough that a
+/// project may use them for something else entirely. A document that does not
+/// carry a server map is therefore ordinary JSON, not a malformed MCP config:
+/// treating it as an error would abort the whole repository scan over one
+/// unrelated file (#4). Genuine faults (oversized or unparsable input) are
+/// still reported.
 fn extract_mcp_config(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     const MAX_BYTES: u64 = 1_048_576;
     const MAX_SERVERS: usize = 200;
@@ -211,19 +211,18 @@ fn extract_mcp_config(path: &Path, source_file: &str) -> anyhow::Result<Extracti
     let text = fs::read_to_string(path)?;
     let document = graphoxide_core::parse_jsonc(&text)
         .with_context(|| format!("parse MCP configuration {source_file}"))?;
-    let root = document
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("mcp config root is not an object"))?;
-    let servers = root
-        .get("mcpServers")
-        .and_then(serde_json::Value::as_object)
-        .or_else(|| {
-            root.get("mcp")
-                .and_then(serde_json::Value::as_object)
-                .and_then(|mcp| mcp.get("servers"))
-                .and_then(serde_json::Value::as_object)
-        })
-        .ok_or_else(|| anyhow::anyhow!("mcp config has no mcpServers map"))?;
+    let Some(root) = document.as_object() else {
+        tracing::warn!(
+            "{source_file}: mcp config root is not an object; indexing as generic JSON instead"
+        );
+        return crate::json_config::extract_json_config(path, source_file);
+    };
+    let Some(servers) = mcp_server_map(root) else {
+        tracing::warn!(
+            "{source_file}: mcp config has no server map; indexing as generic JSON instead"
+        );
+        return crate::json_config::extract_json_config(path, source_file);
+    };
 
     let stem = Path::new(source_file)
         .with_extension("")

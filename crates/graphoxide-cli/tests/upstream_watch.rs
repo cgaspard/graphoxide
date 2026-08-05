@@ -1834,6 +1834,44 @@ fn test_rebuild_code_preserves_nodes_from_excluded_but_alive_file() {
     assert!(labels(&graph(temp.path())).contains("brainstorm.md"));
 }
 
+/// A file that stops being extractable must not take its existing graph
+/// records down with it, and must not stop the rest of the pass (#4).
+#[test]
+fn test_rebuild_keeps_records_from_a_file_that_no_longer_extracts() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("auth.py"), "def login():\n    pass\n");
+    write(
+        temp.path().join("tsconfig.json"),
+        r#"{"extends": "./base.json"}"#,
+    );
+    assert!(build(temp.path(), true).succeeded());
+    assert!(labels(&graph(temp.path())).contains("tsconfig.json"));
+
+    write(temp.path().join("tsconfig.json"), "{\"extends\": [broken\n");
+    write(
+        temp.path().join("auth.py"),
+        "def login():\n    pass\n\n\ndef logout():\n    pass\n",
+    );
+    let mut opts = options(temp.path(), true);
+    opts.changed_paths = Some(vec!["auth.py".into(), "tsconfig.json".into()]);
+    let result = rebuild_project(temp.path(), &opts).unwrap();
+
+    assert!(result.succeeded());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("skipped") && warning.contains("tsconfig.json")),
+        "{:?}",
+        result.warnings
+    );
+    let labels = labels(&graph(temp.path()));
+    // The healthy file's new symbol landed...
+    assert!(labels.contains("logout()"), "{labels:?}");
+    // ...and the unextractable file kept the records it already had.
+    assert!(labels.contains("tsconfig.json"), "{labels:?}");
+}
+
 #[test]
 fn test_rebuild_code_still_evicts_when_excluded_file_is_also_deleted() {
     let temp = tempfile::tempdir().unwrap();

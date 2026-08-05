@@ -102,14 +102,18 @@ pub fn extract_project_with_options_and_output_filtered(
 pub struct ProjectExtractionResult {
     pub extractions: Vec<graphoxide_core::Extraction>,
     pub detection: detect::DetectResult,
+    /// One entry per file that could not be read or extracted.
+    pub warnings: Vec<String>,
 }
 
 /// Completion evidence for a project extraction attempt.
 ///
 /// A filesystem walk error represents work that could not be enumerated, so it
 /// contributes one unsuccessful unit even though there is no path to extract.
-/// Successful returns otherwise contain one completed unit per dispatched file;
-/// an extractor error aborts before a result is produced.
+/// A file that could not be read or extracted contributes one unsuccessful unit
+/// too: it is skipped with a warning rather than aborting the scan, so a single
+/// malformed input cannot cost a whole repository its graph. Every remaining
+/// dispatched file contributes one completed unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectExtractionProgress {
     pub total: usize,
@@ -152,7 +156,51 @@ pub struct DeferredProjectExtractionResult {
     pub extractions: Vec<graphoxide_core::Extraction>,
     pub detection: detect::DetectResult,
     pub progress: ProjectExtractionProgress,
+    /// One entry per file that could not be read or extracted.
+    pub warnings: Vec<String>,
     pub pending_manifest: PendingProjectManifest,
+}
+
+/// One file's contribution to a project scan: its extraction plus the manifest
+/// evidence that dates it.
+///
+/// Returned as an error only for faults specific to this file, so the caller
+/// can record the failure and continue with the rest of the corpus.
+type ProjectExtractionRow = (String, graphoxide_core::Extraction, f64, String);
+
+fn extract_one_project_file(
+    path: &std::path::Path,
+    relative: &str,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+) -> anyhow::Result<ProjectExtractionRow> {
+    use md5::Digest as _;
+    let bytes = std::fs::read(path)?;
+    let cached = (!force)
+        .then(|| cache::ast_cache_get_from_output(managed_output_dir, relative, &bytes))
+        .flatten();
+    let extraction = if let Some(cached) = cached {
+        cached
+    } else {
+        // The caller names the file in the context it attaches to this error.
+        let extracted = engine::extract_as(path, relative)?;
+        // The cache is an optimization: a failed write costs the next scan
+        // some time, not this scan its result.
+        if let Err(error) =
+            cache::ast_cache_put_to_output(managed_output_dir, relative, &bytes, &extracted)
+        {
+            tracing::warn!("{relative}: caching the extraction failed: {error:#}");
+        }
+        extracted
+    };
+    let metadata = std::fs::metadata(path)?;
+    let mtime = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let hash = format!("{:x}", md5::Md5::digest(&bytes));
+    Ok((relative.to_owned(), extraction, mtime, hash))
 }
 
 fn normalized_project_key(
@@ -215,6 +263,7 @@ impl DeferredProjectExtractionResult {
         let Self {
             extractions,
             detection,
+            warnings,
             pending_manifest,
             ..
         } = self;
@@ -222,6 +271,7 @@ impl DeferredProjectExtractionResult {
         Ok(ProjectExtractionResult {
             extractions,
             detection,
+            warnings,
         })
     }
 }
@@ -256,7 +306,6 @@ pub fn extract_project_with_scan_options_deferred_manifest(
     code_only: bool,
     detect_options: &detect::DetectOptions,
 ) -> anyhow::Result<DeferredProjectExtractionResult> {
-    use md5::Digest as _;
     use rayon::prelude::*;
     let managed_output_dir = if managed_output_dir.is_absolute() {
         managed_output_dir.to_path_buf()
@@ -281,7 +330,10 @@ pub fn extract_project_with_scan_options_deferred_manifest(
     files.dedup();
     let total_work = files.len().saturating_add(detection.walk_errors.len());
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let rows: anyhow::Result<Vec<_>> = files
+    // One unreadable or unextractable file must not abort the scan. Each
+    // failure becomes a warning and one unsuccessful unit of progress, which
+    // the build guard already interprets as an incomplete build.
+    let outcomes: Vec<anyhow::Result<_>> = files
         .par_iter()
         .map(|path| {
             let relative = path
@@ -291,31 +343,31 @@ pub fn extract_project_with_scan_options_deferred_manifest(
                     |_| normalized_project_key(path, &resolved_root, root),
                     |relative| normalized_project_key(relative, &resolved_root, root),
                 );
-            let bytes = std::fs::read(path)?;
-            let extraction = if !force {
-                cache::ast_cache_get_from_output(&managed_output_dir, &relative, &bytes)
-            } else {
-                None
-            };
-            let extraction = if let Some(cached) = extraction {
-                cached
-            } else {
-                let extracted = engine::extract_as(path, &relative)
-                    .with_context(|| format!("extract {relative}"))?;
-                cache::ast_cache_put_to_output(&managed_output_dir, &relative, &bytes, &extracted)?;
-                extracted
-            };
-            let metadata = std::fs::metadata(path)?;
-            let mtime = metadata
-                .modified()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64();
-            let hash = format!("{:x}", md5::Md5::digest(&bytes));
-            Ok((relative, extraction, mtime, hash))
+            extract_one_project_file(path, &relative, force, &managed_output_dir)
+                .with_context(|| format!("skipped {relative}"))
         })
         .collect();
-    let rows = rows?;
+    let mut rows = Vec::with_capacity(outcomes.len());
+    let mut warnings = Vec::new();
+    let mut failures: Vec<anyhow::Error> = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(row) => rows.push(row),
+            Err(error) => {
+                let warning = format!("{error:#}");
+                tracing::warn!("{warning}");
+                warnings.push(warning);
+                failures.push(error);
+            }
+        }
+    }
+    // Individual bad files are tolerated; a corpus in which nothing at all
+    // could be extracted is a broken backend, not an empty success.
+    if rows.is_empty() {
+        if let Some(first) = failures.into_iter().next() {
+            return Err(first);
+        }
+    }
     let succeeded = rows.len();
     let previous = normalized_previous_manifest(
         &cache::load_manifest_from_output(&managed_output_dir),
@@ -368,6 +420,7 @@ pub fn extract_project_with_scan_options_deferred_manifest(
             total: total_work,
             succeeded,
         },
+        warnings,
         pending_manifest: PendingProjectManifest {
             output_directory: managed_output_dir,
             entries: manifest,
@@ -377,8 +430,16 @@ pub fn extract_project_with_scan_options_deferred_manifest(
 
 #[derive(Debug, Clone)]
 pub struct ExtractFilesResult {
+    /// One extraction per input that was successfully processed, in input
+    /// order. Skipped inputs produce no entry, so callers pairing extractions
+    /// with their inputs must filter `skipped` out of the input list first.
     pub extractions: Vec<graphoxide_core::Extraction>,
     pub warnings: Vec<String>,
+    /// Inputs that could not be read or extracted, exactly as they were passed.
+    ///
+    /// A caller holding a previous graph uses this to keep those files' records
+    /// rather than treating them as rebuilt-to-nothing.
+    pub skipped: Vec<std::path::PathBuf>,
     pub key_root: std::path::PathBuf,
     pub managed_output_dir: std::path::PathBuf,
 }
@@ -496,6 +557,11 @@ where
     let previous = cache::load_manifest_from_output(&managed_output_dir);
     let mut rows = Vec::with_capacity(files.len());
     let mut warnings = Vec::new();
+    // A per-file fault is tolerated, but a fault on every dispatched file is
+    // evidence of a broken extraction backend rather than of bad inputs, and
+    // must not be reported as an empty success.
+    let mut failures: Vec<anyhow::Error> = Vec::new();
+    let mut skipped: Vec<std::path::PathBuf> = Vec::new();
     let mut missing_extractors = std::collections::BTreeMap::<String, usize>::new();
     for original in files {
         let path = std::fs::canonicalize(original).unwrap_or_else(|_| original.clone());
@@ -504,7 +570,18 @@ where
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        let bytes = std::fs::read(&path)?;
+        // A file-specific fault costs that file, not the run.
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let warning = format!("skipped {relative}: {error}");
+                tracing::warn!("{warning}");
+                warnings.push(warning);
+                failures.push(anyhow::Error::new(error).context(format!("read {relative}")));
+                skipped.push(original.clone());
+                continue;
+            }
+        };
         let cached = (!force)
             .then(|| cache::ast_cache_get_from_output(&managed_output_dir, &relative, &bytes))
             .flatten();
@@ -512,7 +589,17 @@ where
             cached
         } else {
             let extracted =
-                extractor(&path, &relative).with_context(|| format!("extract {relative}"))?;
+                match extractor(&path, &relative).with_context(|| format!("extract {relative}")) {
+                    Ok(extracted) => extracted,
+                    Err(error) => {
+                        let warning = format!("skipped {relative}: {error:#}");
+                        tracing::warn!("{warning}");
+                        warnings.push(warning);
+                        failures.push(error);
+                        skipped.push(original.clone());
+                        continue;
+                    }
+                };
             if extracted.nodes.is_empty() {
                 if detect::classify_file(&path) == Some(detect::FileType::Code)
                     && !engine::has_ast_extractor(&path)
@@ -529,23 +616,38 @@ where
                         relative
                     ));
                 }
-            } else {
-                cache::ast_cache_put_to_output(&managed_output_dir, &relative, &bytes, &extracted)?;
+            } else if let Err(error) =
+                cache::ast_cache_put_to_output(&managed_output_dir, &relative, &bytes, &extracted)
+            {
+                tracing::warn!("{relative}: caching the extraction failed: {error:#}");
             }
             extracted
         };
-        let metadata = std::fs::metadata(&path)?;
-        let mtime = metadata
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        let mtime = match std::fs::metadata(&path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
+            Err(error) => {
+                let warning = format!("skipped {relative}: {error}");
+                tracing::warn!("{warning}");
+                warnings.push(warning);
+                failures.push(anyhow::Error::new(error).context(format!("stat {relative}")));
+                skipped.push(original.clone());
+                continue;
+            }
+        };
         let hash = if extraction.nodes.is_empty() {
             String::new()
         } else {
             format!("{:x}", md5::Md5::digest(&bytes))
         };
         rows.push((relative, extraction, mtime, hash));
+    }
+    if rows.is_empty() {
+        if let Some(first) = failures.into_iter().next() {
+            return Err(first);
+        }
     }
     if !missing_extractors.is_empty() {
         let summary = missing_extractors
@@ -584,6 +686,7 @@ where
         result: ExtractFilesResult {
             extractions,
             warnings,
+            skipped,
             key_root,
             managed_output_dir: managed_output_dir.clone(),
         },
