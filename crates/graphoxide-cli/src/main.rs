@@ -658,6 +658,10 @@ fn main() -> anyhow::Result<()> {
             telemetry
                 .warnings
                 .extend(scan.detection.walk_errors.iter().cloned());
+            telemetry.warnings.extend(scan.warnings.iter().cloned());
+            for warning in &scan.warnings {
+                eprintln!("{warning}");
+            }
             let build_progress = graphoxide_cli::build_guard::BuildProgress::new(
                 scan.progress.total,
                 scan.progress.succeeded,

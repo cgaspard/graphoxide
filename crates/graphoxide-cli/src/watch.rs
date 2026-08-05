@@ -1902,7 +1902,7 @@ fn rebuild_once(
             }
         }
     }
-    let warnings = if excluded_alive.is_empty() {
+    let mut warnings = if excluded_alive.is_empty() {
         Vec::new()
     } else {
         vec![format!(
@@ -1910,6 +1910,46 @@ fn rebuild_once(
             excluded_alive.len()
         )]
     };
+    // Extract before deciding what counts as rebuilt. A file that could not be
+    // extracted must not be reported as rebuilt-to-nothing, or reconciliation
+    // would delete the records it still has in the existing graph.
+    let extract_started = Instant::now();
+    let mut chunks = Vec::new();
+    let mut skipped: Vec<PathBuf> = Vec::new();
+    if !targets.is_empty() {
+        match graphoxide_extract::extract_files_deferred_manifest(
+            &targets,
+            Some(&context.watch_root),
+            true,
+        ) {
+            Ok(prepared) => {
+                let extracted = prepared.discard_manifest();
+                // Skipped files are reported, not swallowed: `graphoxide update`
+                // is where a user first learns a file could not be indexed.
+                warnings.extend(extracted.warnings);
+                skipped = extracted.skipped;
+                chunks = extracted.extractions;
+            }
+            Err(error) => {
+                // Nothing in this pass could be extracted. An incremental pass
+                // holds a previous graph, so it reports the fault and keeps
+                // that graph rather than refusing to run at all.
+                warnings.push(format!("skipped {} file(s): {error:#}", targets.len()));
+                skipped = targets.clone();
+            }
+        }
+    }
+    timings.extract_ms = elapsed_millis(extract_started);
+    let targets = targets
+        .into_iter()
+        .filter(|target| !skipped.contains(target))
+        .collect::<Vec<_>>();
+    if !skipped.is_empty() {
+        warnings.push(format!(
+            "fail-closed: kept graph records from {} file(s) that could not be extracted this pass",
+            skipped.len()
+        ));
+    }
     let rebuilt_sources = targets
         .iter()
         .filter_map(|path| absolute_identity(path, &context.project_root))
@@ -1970,22 +2010,9 @@ fn rebuild_once(
             total_started,
         ));
     }
-    let extract_started = Instant::now();
-    let mut chunks = if targets.is_empty() {
-        Vec::new()
-    } else {
-        graphoxide_extract::extract_files_deferred_manifest(
-            &targets,
-            Some(&context.watch_root),
-            true,
-        )?
-        .discard_manifest()
-        .extractions
-    };
     for (chunk, target) in chunks.iter_mut().zip(&targets) {
         rewrite_extraction_source(chunk, target, &context.project_root);
     }
-    timings.extract_ms = elapsed_millis(extract_started);
     let build_started = Instant::now();
     let fresh = flatten(chunks);
     let merged = reconcile_graph(
