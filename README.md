@@ -259,7 +259,7 @@ workflows, managed graph freshness, report/export commands, and MCP integration.
 Install the packaged extension for your platform from this checkout, for example:
 
 ```bash
-code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.5.0.vsix
+code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.6.0.vsix
 ```
 
 Then open a repository and accept the first-open **Enable Graphoxide** prompt.

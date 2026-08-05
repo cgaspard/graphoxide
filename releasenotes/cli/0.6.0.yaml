@@ -1,0 +1,12 @@
+version: 0.6.0
+date: 2026-08-05
+highlights:
+  - Keep one unreadable or unrecognised file from costing a repository its graph, and promote the 0.5 build-telemetry and incremental-rebuild work to the stable channel.
+added: []
+changed:
+  - Skip a file that cannot be read or extracted with a warning instead of aborting the scan, and report every skipped file in build output.
+fixed:
+  - Recognize the VS Code mcp.json layout, which keeps its server map at the document root under servers, instead of failing the scan and dropping its servers.
+  - Index a file named mcp.json that carries no MCP server map as ordinary JSON rather than rejecting it as a malformed configuration.
+  - Keep the graph records of a file that stops extracting during an incremental update instead of reconciling them away.
+removed: []

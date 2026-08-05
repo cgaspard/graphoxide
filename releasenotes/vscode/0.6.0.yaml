@@ -1,0 +1,10 @@
+version: 0.6.0
+date: 2026-08-05
+highlights:
+  - Index workspaces that register MCP servers through VS Code, and bring the 0.5 build, update, and rebuild commands to the stable channel.
+added: []
+changed:
+  - Report files skipped during a build or update instead of failing the whole operation.
+fixed:
+  - Build and update workspaces containing a .vscode/mcp.json file, which previously failed every managed refresh with an extraction error.
+removed: []

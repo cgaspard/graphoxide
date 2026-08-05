@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 — 2026-08-05
+
+- Fixed builds and updates failing outright in workspaces containing a
+  `.vscode/mcp.json` file, whose server map lives at the document root under
+  `servers` and was previously treated as a malformed MCP configuration.
+- Indexed a `mcp.json` carrying no MCP server map as ordinary JSON instead of
+  rejecting it, and reported files skipped during a build or update rather than
+  failing the whole operation.
+- Preserved the graph records of a file that stops extracting during an
+  incremental update instead of reconciling them away.
+- Promoted the 0.5 build, update, and full-rebuild commands, build telemetry,
+  and incremental rebuilds to the stable channel.
+
 ## 0.5.0 — 2026-08-04
 
 - Added explicit initial-build, incremental-update, and confirmed full-rebuild
