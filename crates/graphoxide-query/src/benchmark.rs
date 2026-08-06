@@ -1,7 +1,7 @@
 //! Token-reduction benchmark compatible with upstream `graphify.benchmark`.
 
 use crate::query::query_terms;
-use graphoxide_core::{check_graph_file_size_cap_with, read_graph, KnowledgeGraph};
+use graphoxide_core::{read_graph_with_cap, KnowledgeGraph};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -203,8 +203,7 @@ pub fn run_benchmark(
     max_bytes: u64,
 ) -> anyhow::Result<BenchmarkResult> {
     let graph_path = graph_path.as_ref();
-    check_graph_file_size_cap_with(graph_path, max_bytes)?;
-    let graph = read_graph(graph_path)?;
+    let graph = read_graph_with_cap(graph_path, max_bytes)?;
     Ok(benchmark_graph(&graph, corpus_words, questions))
 }
 

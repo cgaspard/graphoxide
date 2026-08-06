@@ -1,8 +1,9 @@
 //! Persistent cross-repository graph composition.
 
-use graphoxide_core::{read_graph_with_cap, write_graph_atomic, write_json_atomic, KnowledgeGraph};
+use graphoxide_core::{
+    read_graph_capped, read_graph_with_cap, write_graph_atomic, write_json_atomic, KnowledgeGraph,
+};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -82,12 +83,11 @@ impl GlobalGraphStore {
     ) -> anyhow::Result<GlobalAddResult> {
         anyhow::ensure!(!repo_tag.is_empty(), "repo tag cannot be empty");
         let source_path = source_path.as_ref();
-        graphoxide_core::check_graph_file_size_cap_with(source_path, self.max_graph_bytes)?;
         let canonical_source = source_path.canonicalize().map_err(|error| {
             anyhow::anyhow!("graph not found: {}: {error}", source_path.display())
         })?;
-        let bytes = std::fs::read(&canonical_source)?;
-        let source_hash = hex::encode(Sha256::digest(&bytes))[..16].to_owned();
+        let source = read_graph_capped(&canonical_source, self.max_graph_bytes)?;
+        let source_hash = hex::encode(source.sha256)[..16].to_owned();
         let source_text = canonical_source.display().to_string();
         let mut manifest = self.load_manifest()?;
         let warning = manifest.repos.get(repo_tag).and_then(|record| {
@@ -111,8 +111,7 @@ impl GlobalGraphStore {
             });
         }
 
-        let source_graph = read_graph_with_cap(&canonical_source, self.max_graph_bytes)?;
-        let prefixed = prefix_graph_for_global(&source_graph, repo_tag);
+        let prefixed = prefix_graph_for_global(&source.graph, repo_tag);
         let prefixed_edge_count = prefixed.links.len();
         let mut global = self.load_graph()?;
         let nodes_removed = prune_repo_from_graph(&mut global, repo_tag);

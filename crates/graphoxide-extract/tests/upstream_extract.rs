@@ -509,7 +509,11 @@ fn test_collect_files_follows_symlinked_directory() {
     )
     .unwrap();
     assert_eq!(no.files.get("code").map(Vec::len), Some(1));
-    assert_eq!(yes.files.get("code").map(Vec::len), Some(2));
+    assert_eq!(yes.files.get("code").map(Vec::len), Some(1));
+    assert!(yes.files["code"]
+        .iter()
+        .any(|path| path.ends_with("real/lib.py")));
+    assert!(!yes.files["code"].iter().any(|path| path.contains("linked")));
 }
 
 #[test]
@@ -1405,21 +1409,28 @@ fn test_extract_json_import_and_extends_targets_are_real_nodes() {
 }
 
 #[test]
-fn test_extract_json_large_file_skipped() {
+fn test_extract_json_large_file_is_a_bounded_structured_diagnostic() {
     let project = Project::new();
     let path = project.path("package.json");
     fs::write(&path, vec![b' '; 1_048_577]).unwrap();
-    assert!(extract(&path)
-        .unwrap_err()
-        .to_string()
-        .contains("too large"));
+    let result = extract(&path).expect("large generic JSON is a diagnostic, not a crash");
+    let root = result.nodes.first().expect("structured diagnostic root");
+    assert_eq!(
+        root.extra
+            .get("structured_format")
+            .and_then(serde_json::Value::as_str),
+        Some("json")
+    );
+    assert!(root.extra.contains_key("structured_diagnostics"));
 }
 
 #[test]
-fn test_extract_json_handles_invalid_json() {
+fn test_extract_json_handles_invalid_json_as_a_structured_diagnostic() {
     let project = Project::new();
     let path = project.write("package.json", "{invalid");
-    assert!(extract(&path).is_err());
+    let result = extract(&path).expect("malformed generic JSON is contained");
+    let root = result.nodes.first().expect("structured diagnostic root");
+    assert!(root.extra.contains_key("structured_diagnostics"));
 }
 
 #[test]
@@ -1434,17 +1445,29 @@ fn test_extract_json_no_self_loops() {
 }
 
 #[test]
-fn test_extract_json_data_file_skipped() {
+fn test_extract_json_data_file_is_structurally_indexed() {
     let project = Project::new();
     project.write("records.json", r#"{"users":[{"id":1}]}"#);
-    assert!(project.single("records.json").nodes.is_empty());
+    let result = project.single("records.json");
+    assert!(result.nodes.iter().any(|node| {
+        node.extra
+            .get("structured_format")
+            .and_then(serde_json::Value::as_str)
+            == Some("json")
+    }));
 }
 
 #[test]
-fn test_extract_json_top_level_array_skipped() {
+fn test_extract_json_top_level_array_is_structurally_indexed() {
     let project = Project::new();
     project.write("records.json", "[1,2,3]");
-    assert!(project.single("records.json").nodes.is_empty());
+    let result = project.single("records.json");
+    assert!(result.nodes.iter().any(|node| {
+        node.extra
+            .get("structured_format")
+            .and_then(serde_json::Value::as_str)
+            == Some("json")
+    }));
 }
 
 #[test]
@@ -2073,6 +2096,34 @@ fn test_python_relative_import_out_of_root_target_id_is_portable() {
     assert!(imports
         .iter()
         .all(|edge| !edge.true_target().contains(marker.as_ref())));
+}
+
+#[test]
+fn test_python_relative_import_underflow_cannot_bind_root_collision() {
+    let project = Project::new();
+    project.write("foo.py", "def x():\n    return 1\n");
+    project.write("pkg/main.py", "from ...foo import x\n");
+    project.write("pkg/valid.py", "from ..foo import x\n");
+
+    let result = project.selected(&["foo.py", "pkg/main.py", "pkg/valid.py"]);
+    let root_foo = result
+        .nodes
+        .iter()
+        .find(|node| {
+            node.source_file == "foo.py"
+                && node.extra.get("type").and_then(|value| value.as_str()) == Some("file")
+        })
+        .expect("root foo file");
+
+    assert!(!result
+        .edges
+        .iter()
+        .any(|edge| edge.source_file == "pkg/main.py" && edge.relation == "imports_from"));
+    assert!(result.edges.iter().any(|edge| {
+        edge.source_file == "pkg/valid.py"
+            && edge.relation == "imports_from"
+            && edge.true_target() == root_foo.id
+    }));
 }
 
 #[test]

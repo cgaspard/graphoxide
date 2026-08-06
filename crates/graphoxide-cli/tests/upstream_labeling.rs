@@ -124,21 +124,21 @@ fn serve_once_after(
                 break;
             }
             request.extend_from_slice(&buffer[..count]);
-            if body_start.is_none() {
-                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                    let start = index + 4;
-                    let raw_headers = String::from_utf8_lossy(&request[..index]);
-                    for line in raw_headers.lines().skip(1) {
-                        let Some((name, value)) = line.split_once(':') else {
-                            continue;
-                        };
-                        headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
-                    }
-                    content_length = headers
-                        .get("content-length")
-                        .and_then(|value| value.parse::<usize>().ok());
-                    body_start = Some(start);
+            if body_start.is_none()
+                && let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let start = index + 4;
+                let raw_headers = String::from_utf8_lossy(&request[..index]);
+                for line in raw_headers.lines().skip(1) {
+                    let Some((name, value)) = line.split_once(':') else {
+                        continue;
+                    };
+                    headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
                 }
+                content_length = headers
+                    .get("content-length")
+                    .and_then(|value| value.parse::<usize>().ok());
+                body_start = Some(start);
             }
             if body_start
                 .zip(content_length)

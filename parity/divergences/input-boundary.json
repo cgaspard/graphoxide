@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "divergences": [
+    {
+      "upstream": "tests/test_detect.py::test_detect_follows_symlinked_directory",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_follows_symlinked_directory"
+        }
+      ],
+      "reason": "Graphoxide deduplicates followed directory aliases by physical target and retains the real path once, while Graphify emits both spellings."
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_follows_symlinked_file",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_follows_symlinked_file"
+        }
+      ],
+      "reason": "Graphoxide deduplicates followed file aliases by physical target and retains the real path once, while Graphify emits both spellings."
+    },
+    {
+      "upstream": "tests/test_detect.py::test_detect_incremental_propagates_follow_symlinks",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_incremental_propagates_follow_symlinks"
+        }
+      ],
+      "reason": "Graphoxide keeps one real-path incremental row per physical target when symlink following is enabled, while Graphify retains the alias row too."
+    },
+    {
+      "upstream": "tests/test_extract.py::test_collect_files_follows_symlinked_directory",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_collect_files_follows_symlinked_directory"
+        }
+      ],
+      "reason": "Graphoxide returns each physical source once under explicit symlink following, while Graphify returns both the real and alias paths."
+    }
+  ]
+}

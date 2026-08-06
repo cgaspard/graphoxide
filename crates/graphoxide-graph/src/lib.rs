@@ -17,6 +17,7 @@ pub mod minhash;
 pub mod multigraph_compat;
 mod provenance;
 pub mod raw;
+pub mod streaming;
 
 pub use analyze::{
     analyze, file_category, find_import_cycles, god_nodes, graph_diff, is_concept_node,
@@ -70,4 +71,13 @@ pub use provenance::origin_is_structural;
 pub use raw::{
     build_graph_from_value, canonicalize_extraction, dedupe_raw_edges, dedupe_raw_extractions,
     dedupe_raw_nodes, edge_data, edge_datas, IngestReport,
+};
+pub use streaming::{
+    build_graph_from_fact_batches, build_graph_from_fact_batches_with_root, sort_fact_batches,
+    ClusterResourceError, ClusterResourceLimits, FactBatch, FactBatchError, FactBatchKey,
+    FactBatchLimits, FactBatchMergeLimits, FactBatchOrderError, FactBatchRunBuilder,
+    FactBatchRunError, FactBatchRunLimits, FactBatchRunStore, FactBatchRunStoreError, FactKind,
+    MergedFactBatchRuns, OrderedFactBatchRun, StagedGraphOutput, DEFAULT_FACT_BATCH_MAX_BYTES,
+    DEFAULT_FACT_BATCH_MAX_FACTS, DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
+    DEFAULT_FACT_RUN_MAX_BATCHES, DEFAULT_FACT_RUN_MAX_BYTES,
 };

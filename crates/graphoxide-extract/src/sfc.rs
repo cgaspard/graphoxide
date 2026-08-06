@@ -36,7 +36,6 @@ impl Kind {
 }
 
 pub(crate) struct PreparedSource {
-    pub original: Vec<u8>,
     pub parser: Vec<u8>,
     pub language: &'static str,
 }
@@ -115,17 +114,26 @@ fn parser_language(kind: Kind, declared: Option<&str>) -> &'static str {
 }
 
 pub(crate) fn prepare(path: &Path) -> anyhow::Result<Option<PreparedSource>> {
+    let original = fs::read(path)?;
+    prepare_bytes(path, &original)
+}
+
+/// Prepare a single-file component from source bytes already supplied by the
+/// I/O plane. The only allocated parser view is the required masked SFC
+/// buffer; the original source remains borrowed by the caller.
+pub(crate) fn prepare_bytes(
+    path: &Path,
+    original: &[u8],
+) -> anyhow::Result<Option<PreparedSource>> {
     let Some(kind) = Kind::for_path(path) else {
         return Ok(None);
     };
-    let original = fs::read(path)?;
-    let source = String::from_utf8_lossy(&original);
+    let source = String::from_utf8_lossy(original);
     let (parser, declared) = match kind {
         Kind::Astro => (mask_astro(&source), None),
         Kind::Vue | Kind::Svelte => mask_script_blocks(&source),
     };
     Ok(Some(PreparedSource {
-        original,
         parser,
         language: parser_language(kind, declared.as_deref()),
     }))
@@ -142,6 +150,13 @@ pub fn mask_vue_non_script(source: &str) -> (String, Option<String>) {
 
 /// Return only executable regions for project-level import/export parsing.
 pub(crate) fn resolution_source(path: &Path, source: &str) -> Option<String> {
+    resolution_source_bytes(path, source)
+}
+
+/// Byte-only counterpart of [`resolution_source`] for the isolated project
+/// resolver. The source is already admitted by the I/O plane, and this helper
+/// deliberately does not inspect the physical path beyond its extension.
+pub(crate) fn resolution_source_bytes(path: &Path, source: &str) -> Option<String> {
     let kind = Kind::for_path(path)?;
     let masked = match kind {
         Kind::Astro => mask_astro(source),
@@ -191,15 +206,23 @@ fn imports(masked: &str, original: &str) -> BTreeSet<ImportSpec> {
             dynamic: false,
         });
     }
-    let dynamic = Regex::new(r#"import\s*\(\s*['"]([^'"]+)['"]\s*\)"#)
-        .expect("valid SFC dynamic import regex");
-    for capture in dynamic.captures_iter(original) {
-        let whole = capture.get(0).expect("dynamic import has a whole match");
-        result.insert(ImportSpec {
-            line: line_number(original, whole.start()),
-            specifier: capture[1].into(),
-            dynamic: true,
-        });
+    for dynamic in [
+        Regex::new(r#"import\s*\(\s*['"]([^'"]+)['"]\s*\)"#),
+        Regex::new(r#"import\s*\(\s*`([^`]+)`\s*\)"#),
+    ]
+    .map(|regex| regex.expect("valid SFC dynamic import regex"))
+    {
+        for capture in dynamic.captures_iter(original) {
+            if capture[1].contains("${") {
+                continue;
+            }
+            let whole = capture.get(0).expect("dynamic import has a whole match");
+            result.insert(ImportSpec {
+                line: line_number(original, whole.start()),
+                specifier: capture[1].into(),
+                dynamic: true,
+            });
+        }
     }
     result
 }
@@ -275,13 +298,6 @@ fn logical_target(physical: &Path, source_file: &str, target: &Path) -> String {
         }
     }
     normalized_text(&preserve_importer_spelling(physical, target))
-}
-
-fn unresolved_relative(source_file: &str, specifier: &str) -> String {
-    let base = Path::new(source_file)
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
-    normalized_text(&normalize_path(&base.join(specifier)))
 }
 
 fn file_identity(path: &str, preserve_extension: bool) -> String {
@@ -360,32 +376,44 @@ pub(crate) fn augment_imports(
     });
 
     for fact in facts {
-        let resolved = crate::js_resolution::resolve_import_path(&fact.specifier, path);
-        let (target, target_file, unresolved_local) = if let Some(resolved) = resolved {
+        let classification =
+            crate::js_resolution::classify_es_module_specifier(source_file, &fact.specifier);
+        let resolved =
+            crate::js_resolution::resolve_import_path(&fact.specifier, path, source_file);
+        let (target, target_file, unresolved_source) = if let Some(resolved) = resolved {
             let logical = logical_target(path, source_file, &resolved);
             (
                 file_identity(&logical, Path::new(source_file).is_absolute()),
                 Some(logical),
-                false,
-            )
-        } else if fact.specifier.starts_with('.') {
-            let logical = unresolved_relative(source_file, &fact.specifier);
-            (
-                file_identity(&logical, Path::new(source_file).is_absolute()),
                 None,
-                true,
             )
         } else {
-            (make_id(&["ref", &fact.specifier]), None, false)
+            match classification {
+                crate::js_resolution::EsModuleSpecifier::ProjectRelative(logical) => (
+                    file_identity(&logical, Path::new(source_file).is_absolute()),
+                    None,
+                    Some(logical),
+                ),
+                crate::js_resolution::EsModuleSpecifier::Bare => {
+                    (make_id(&["ref", &fact.specifier]), None, None)
+                }
+                crate::js_resolution::EsModuleSpecifier::Unsafe => (
+                    make_id(&["ref", "unsafe", source_file, &fact.specifier]),
+                    None,
+                    None,
+                ),
+            }
         };
         if target.is_empty() || target == file_id {
             continue;
         }
-        if unresolved_local && extraction.nodes.iter().all(|node| node.id != target) {
+        if let Some(unresolved_source) = unresolved_source
+            && extraction.nodes.iter().all(|node| node.id != target)
+        {
             extraction.nodes.push(unresolved_stub(
                 target.clone(),
                 &fact.specifier,
-                unresolved_relative(source_file, &fact.specifier),
+                unresolved_source,
                 fact.line,
             ));
         }

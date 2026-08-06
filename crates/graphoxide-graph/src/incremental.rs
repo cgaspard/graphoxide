@@ -3,11 +3,25 @@
 use crate::provenance::origin_is_structural;
 use crate::{build_graph_with_options, build_graph_with_options_and_root, BuildOptions};
 use anyhow::Context;
-use graphoxide_core::{read_graph, read_graph_with_cap, Edge, Extraction, KnowledgeGraph, Node};
+use graphoxide_core::{
+    read_graph, read_graph_with_cap, Edge, Extraction, KnowledgeGraph, Node,
+    CONTAINER_SOURCE_ATTRIBUTE,
+};
+use serde::Serialize;
 use std::{
+    collections::BTreeSet,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
+
+/// Conservative expansion from serialized graph facts to the peak working set
+/// used while retaining, deduplicating, normalizing, and writing them.
+///
+/// Incremental CLI callers reserve a separate share of their graph-stage
+/// budget for the parsed baseline and use this multiplier to derive its file
+/// cap. The same charge is applied before a raw merge clones retained facts.
+pub const INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER: usize = 8;
 
 /// Incremental equivalents of upstream's optional `directed=`/`dedup=` knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +45,12 @@ impl Default for IncrementalOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceIdentity {
+    source_file: String,
+    container_source: Option<String>,
+}
+
 /// Best-effort scan root for a graph when an incremental caller omitted it.
 pub fn infer_merge_root(graph_path: impl AsRef<Path>) -> Option<PathBuf> {
     let graph_path = graph_path.as_ref();
@@ -38,10 +58,10 @@ pub fn infer_merge_root(graph_path: impl AsRef<Path>) -> Option<PathBuf> {
         let marker = graph_path.parent()?.join(marker_name);
         if let Ok(recorded) = fs::read_to_string(marker) {
             let recorded = recorded.trim();
-            if !recorded.is_empty() {
-                if let Ok(root) = canonicalize_with_missing_tail(Path::new(recorded)) {
-                    return Some(root);
-                }
+            if !recorded.is_empty()
+                && let Ok(root) = canonicalize_with_missing_tail(Path::new(recorded))
+            {
+                return Some(root);
             }
         }
     }
@@ -96,12 +116,11 @@ pub fn build_merge_with_options(
     let directed = options.directed.unwrap_or(inherited_directed);
     let (new_ast_sources, new_semantic_sources) =
         tier_sources(new_chunks, effective_root.as_deref());
-    let new_sources: Vec<String> = new_ast_sources
-        .iter()
-        .chain(&new_semantic_sources)
-        .cloned()
-        .collect();
-
+    let new_container_sources = unowned_sources(
+        &new_ast_sources,
+        &new_semantic_sources,
+        effective_root.as_deref(),
+    );
     let mut chunks = Vec::new();
     if let Some(existing) = existing {
         let mut carried = Extraction {
@@ -114,6 +133,7 @@ pub fn build_merge_with_options(
                 node,
                 &new_ast_sources,
                 &new_semantic_sources,
+                &new_container_sources,
                 effective_root.as_deref(),
             )
         });
@@ -122,6 +142,7 @@ pub fn build_merge_with_options(
                 edge,
                 &new_ast_sources,
                 &new_semantic_sources,
+                &new_container_sources,
                 effective_root.as_deref(),
             )
         });
@@ -130,6 +151,7 @@ pub fn build_merge_with_options(
                 hyperedge,
                 &new_ast_sources,
                 &new_semantic_sources,
+                &new_container_sources,
                 effective_root.as_deref(),
             )
         });
@@ -141,16 +163,25 @@ pub fn build_merge_with_options(
     let effective_prunes: Vec<&PathBuf> = prune_sources
         .iter()
         .filter(|prune| {
-            !new_sources.iter().any(|source| {
-                same_source(&prune.to_string_lossy(), source, effective_root.as_deref())
-            })
+            !new_ast_sources
+                .iter()
+                .chain(&new_semantic_sources)
+                .any(|identity| {
+                    identity.container_source.is_none()
+                        && same_source(
+                            &prune.to_string_lossy(),
+                            &identity.source_file,
+                            effective_root.as_deref(),
+                        )
+                })
         })
         .collect();
     for chunk in &mut chunks {
         chunk.nodes.retain(|node| {
             !effective_prunes.iter().any(|prune| {
-                same_source(
+                same_source_or_container_prune(
                     &node.source_file,
+                    container_source(&node.extra),
                     &prune.to_string_lossy(),
                     effective_root.as_deref(),
                 )
@@ -158,8 +189,9 @@ pub fn build_merge_with_options(
         });
         chunk.edges.retain(|edge| {
             !effective_prunes.iter().any(|prune| {
-                same_source(
+                same_source_or_container_prune(
                     &edge.source_file,
+                    container_source(&edge.extra),
                     &prune.to_string_lossy(),
                     effective_root.as_deref(),
                 )
@@ -170,14 +202,17 @@ pub fn build_merge_with_options(
                 .get("source_file")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            source_file.is_empty()
-                || !effective_prunes.iter().any(|prune| {
-                    same_source(
-                        source_file,
-                        &prune.to_string_lossy(),
-                        effective_root.as_deref(),
-                    )
-                })
+            !effective_prunes.iter().any(|prune| {
+                same_source_or_container_prune(
+                    source_file,
+                    hyperedge
+                        .get(CONTAINER_SOURCE_ATTRIBUTE)
+                        .and_then(|value| value.as_str())
+                        .filter(|source| !source.is_empty()),
+                    &prune.to_string_lossy(),
+                    effective_root.as_deref(),
+                )
+            })
         });
     }
     let build_options = BuildOptions {
@@ -212,79 +247,346 @@ pub fn merge_raw_extraction(
     let effective_root = root
         .map(Path::to_path_buf)
         .or_else(|| infer_merge_root(graph_path));
-    let (new_ast_sources, new_semantic_sources) =
-        tier_sources(std::slice::from_ref(new), effective_root.as_deref());
-    let new_sources: Vec<String> = new_ast_sources
-        .iter()
-        .chain(&new_semantic_sources)
-        .cloned()
-        .collect();
+    merge_raw_extraction_from_graph(
+        new.clone(),
+        &existing,
+        prune_sources,
+        effective_root.as_deref(),
+    )
+}
+
+/// Merge a raw extraction against an already-loaded graph.
+///
+/// This is the allocation-safe counterpart used by callers that also need the
+/// baseline for stale-source detection or community remapping: the graph is
+/// parsed once, rather than once for inspection and again for merging.
+pub fn merge_raw_extraction_from_graph(
+    new: Extraction,
+    existing: &KnowledgeGraph,
+    prune_sources: &[PathBuf],
+    root: Option<&Path>,
+) -> anyhow::Result<Extraction> {
+    merge_raw_extraction_from_graph_impl(new, existing, prune_sources, None, &[], root, None)
+}
+
+/// Merge against an already-loaded graph only when the conservative working
+/// set of the merged raw extraction fits `max_materialized_bytes`.
+///
+/// Admission is checked before retained baseline facts are cloned. A caller
+/// can therefore fail a low-budget incremental operation without first
+/// materializing another whole-graph copy.
+pub fn merge_raw_extraction_from_graph_with_materialization_limit(
+    new: Extraction,
+    existing: &KnowledgeGraph,
+    prune_sources: &[PathBuf],
+    root: Option<&Path>,
+    max_materialized_bytes: usize,
+) -> anyhow::Result<Extraction> {
+    anyhow::ensure!(
+        max_materialized_bytes > 0,
+        "incremental graph materialization limit must be greater than zero"
+    );
+    merge_raw_extraction_from_graph_impl(
+        new,
+        existing,
+        prune_sources,
+        None,
+        &[],
+        root,
+        Some(max_materialized_bytes),
+    )
+}
+
+/// Merge against an already-loaded graph using authoritative successful scan
+/// ownership and a conservative materialization limit.
+///
+/// `rebuilt_sources` must contain only physical inputs whose extraction
+/// completed successfully. `rebuilt_provider_sources` carries equally
+/// authoritative non-filesystem owners produced by an explicitly requested
+/// provider scan. Direct facts retain tier-scoped replacement, while facts
+/// marked with `_container_source` follow the rebuilt outer input across both
+/// tiers. Keeping this evidence separate from `prune_sources` preserves
+/// fail-open behavior for unreadable inputs and deletion semantics for inputs
+/// that are actually gone.
+pub fn merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+    new: Extraction,
+    existing: &KnowledgeGraph,
+    rebuilt_sources: &[PathBuf],
+    rebuilt_provider_sources: &[String],
+    prune_sources: &[PathBuf],
+    root: Option<&Path>,
+    max_materialized_bytes: usize,
+) -> anyhow::Result<Extraction> {
+    anyhow::ensure!(
+        max_materialized_bytes > 0,
+        "incremental graph materialization limit must be greater than zero"
+    );
+    merge_raw_extraction_from_graph_impl(
+        new,
+        existing,
+        prune_sources,
+        Some(rebuilt_sources),
+        rebuilt_provider_sources,
+        root,
+        Some(max_materialized_bytes),
+    )
+}
+
+fn merge_raw_extraction_from_graph_impl(
+    mut new: Extraction,
+    existing: &KnowledgeGraph,
+    prune_sources: &[PathBuf],
+    rebuilt_sources: Option<&[PathBuf]>,
+    rebuilt_provider_sources: &[String],
+    effective_root: Option<&Path>,
+    max_materialized_bytes: Option<usize>,
+) -> anyhow::Result<Extraction> {
+    let (mut new_ast_sources, mut new_semantic_sources) =
+        tier_sources(std::slice::from_ref(&new), effective_root);
+    if let Some(rebuilt_sources) = rebuilt_sources {
+        new_ast_sources.retain(|identity| {
+            identity_owned_by_rebuilt_source(identity, rebuilt_sources, effective_root)
+                || identity_owned_by_rebuilt_provider(identity, rebuilt_provider_sources)
+        });
+        new_semantic_sources.retain(|identity| {
+            identity_owned_by_rebuilt_source(identity, rebuilt_sources, effective_root)
+                || identity_owned_by_rebuilt_provider(identity, rebuilt_provider_sources)
+        });
+    }
+    let fresh_container_sources = rebuilt_sources.map_or_else(Vec::new, |sources| {
+        container_root_sources(&new.nodes, sources, effective_root)
+    });
+    promote_container_representation_sources(
+        &mut new_ast_sources,
+        &mut new_semantic_sources,
+        &fresh_container_sources,
+        effective_root,
+    );
+    let new_container_sources = rebuilt_sources.map_or_else(
+        || unowned_sources(&new_ast_sources, &new_semantic_sources, effective_root),
+        |sources| rebuilt_source_forms(sources, effective_root),
+    );
+    let replaced_container_representation = rebuilt_sources
+        .map_or_else(ContainerRepresentationFamily::default, |sources| {
+            container_representation_family(existing, sources, effective_root)
+        });
     let effective_prunes: Vec<&PathBuf> = prune_sources
         .iter()
         .filter(|prune| {
-            !new_sources.iter().any(|source| {
-                same_source(&prune.to_string_lossy(), source, effective_root.as_deref())
-            })
+            if let Some(rebuilt_sources) = rebuilt_sources {
+                !rebuilt_sources.iter().any(|rebuilt| {
+                    same_source(
+                        &prune.to_string_lossy(),
+                        &rebuilt.to_string_lossy(),
+                        effective_root,
+                    )
+                })
+            } else {
+                !new_ast_sources
+                    .iter()
+                    .chain(&new_semantic_sources)
+                    .any(|identity| {
+                        identity.container_source.is_none()
+                            && same_source(
+                                &prune.to_string_lossy(),
+                                &identity.source_file,
+                                effective_root,
+                            )
+                    })
+            }
         })
         .collect();
-    let pruned = |source_file: &str| {
-        effective_prunes.iter().any(|prune| {
-            same_source(
-                source_file,
+    let retained_node = |node: &Node| {
+        !is_replaced_node(
+            node,
+            &new_ast_sources,
+            &new_semantic_sources,
+            &new_container_sources,
+            effective_root,
+        ) && !replaced_container_representation
+            .node_ids
+            .contains(&node.id)
+            && !effective_prunes.iter().any(|prune| {
+                same_source_or_container_prune(
+                    &node.source_file,
+                    container_source(&node.extra),
+                    &prune.to_string_lossy(),
+                    effective_root,
+                )
+            })
+    };
+    let retained_edge = |edge: &Edge| {
+        !is_replaced_edge(
+            edge,
+            &new_ast_sources,
+            &new_semantic_sources,
+            &new_container_sources,
+            effective_root,
+        ) && !is_replaced_container_representation_edge(
+            edge,
+            &replaced_container_representation,
+            effective_root,
+        ) && !effective_prunes.iter().any(|prune| {
+            same_source_or_container_prune(
+                &edge.source_file,
+                container_source(&edge.extra),
                 &prune.to_string_lossy(),
-                effective_root.as_deref(),
+                effective_root,
             )
         })
     };
+    let retained_hyperedge = |hyperedge: &serde_json::Value| {
+        let source_file = hyperedge
+            .get("source_file")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        !is_replaced_hyperedge(
+            hyperedge,
+            &new_ast_sources,
+            &new_semantic_sources,
+            &new_container_sources,
+            effective_root,
+        ) && !effective_prunes.iter().any(|prune| {
+            same_source_or_container_prune(
+                source_file,
+                hyperedge
+                    .get(CONTAINER_SOURCE_ATTRIBUTE)
+                    .and_then(|value| value.as_str())
+                    .filter(|source| !source.is_empty()),
+                &prune.to_string_lossy(),
+                effective_root,
+            )
+        })
+    };
+
+    if let Some(max_materialized_bytes) = max_materialized_bytes {
+        ensure_raw_merge_fits(
+            existing,
+            &new,
+            &retained_node,
+            &retained_edge,
+            &retained_hyperedge,
+            max_materialized_bytes,
+        )?;
+    }
+
     let mut merged = Extraction {
         nodes: existing
             .nodes
-            .into_iter()
-            .filter(|node| {
-                !is_replaced_node(
-                    node,
-                    &new_ast_sources,
-                    &new_semantic_sources,
-                    effective_root.as_deref(),
-                ) && !pruned(&node.source_file)
-            })
+            .iter()
+            .filter(|node| retained_node(node))
+            .cloned()
             .collect(),
         edges: existing
             .links
-            .into_iter()
-            .filter(|edge| {
-                !is_replaced_edge(
-                    edge,
-                    &new_ast_sources,
-                    &new_semantic_sources,
-                    effective_root.as_deref(),
-                ) && !pruned(&edge.source_file)
-            })
+            .iter()
+            .filter(|edge| retained_edge(edge))
+            .cloned()
             .collect(),
         hyperedges: existing
             .hyperedges
-            .into_iter()
-            .filter(|hyperedge| {
-                let source_file = hyperedge
-                    .get("source_file")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                !is_replaced_hyperedge(
-                    hyperedge,
-                    &new_ast_sources,
-                    &new_semantic_sources,
-                    effective_root.as_deref(),
-                ) && !pruned(source_file)
-            })
+            .iter()
+            .filter(|hyperedge| retained_hyperedge(hyperedge))
+            .cloned()
             .collect(),
     };
-    merged.nodes.extend(new.nodes.clone());
-    merged.edges.extend(new.edges.clone());
-    merged.hyperedges.extend(new.hyperedges.clone());
+    merged.nodes.append(&mut new.nodes);
+    merged.edges.append(&mut new.edges);
+    merged.hyperedges.append(&mut new.hyperedges);
     Ok(merged)
 }
 
-fn tier_sources(chunks: &[Extraction], root: Option<&Path>) -> (Vec<String>, Vec<String>) {
+fn ensure_raw_merge_fits<N, E, H>(
+    existing: &KnowledgeGraph,
+    new: &Extraction,
+    retained_node: &N,
+    retained_edge: &E,
+    retained_hyperedge: &H,
+    max_materialized_bytes: usize,
+) -> anyhow::Result<()>
+where
+    N: Fn(&Node) -> bool,
+    E: Fn(&Edge) -> bool,
+    H: Fn(&serde_json::Value) -> bool,
+{
+    // Count directly into a sink so preflight never allocates a second JSON
+    // representation. The envelope and one delimiter per fact deliberately
+    // overcount the compact extraction representation by a few bytes.
+    let mut counter = CountingWriter::new(
+        u64::try_from(br#"{"nodes":[],"edges":[],"hyperedges":[]}"#.len())
+            .expect("extraction envelope length fits u64"),
+    );
+    for node in existing.nodes.iter().filter(|node| retained_node(node)) {
+        counter.count_json(node)?;
+    }
+    for edge in existing.links.iter().filter(|edge| retained_edge(edge)) {
+        counter.count_json(edge)?;
+    }
+    for hyperedge in existing
+        .hyperedges
+        .iter()
+        .filter(|hyperedge| retained_hyperedge(hyperedge))
+    {
+        counter.count_json(hyperedge)?;
+    }
+    for node in &new.nodes {
+        counter.count_json(node)?;
+    }
+    for edge in &new.edges {
+        counter.count_json(edge)?;
+    }
+    for hyperedge in &new.hyperedges {
+        counter.count_json(hyperedge)?;
+    }
+    let estimated_bytes = counter.bytes.saturating_mul(
+        u64::try_from(INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER)
+            .expect("working-set multiplier fits u64"),
+    );
+    let max_materialized_bytes = u64::try_from(max_materialized_bytes).unwrap_or(u64::MAX);
+    anyhow::ensure!(
+        estimated_bytes <= max_materialized_bytes,
+        "incremental merged extraction requires an estimated {estimated_bytes}-byte working set, exceeds {max_materialized_bytes}-byte materialization limit"
+    );
+    Ok(())
+}
+
+struct CountingWriter {
+    bytes: u64,
+}
+
+impl CountingWriter {
+    const fn new(bytes: u64) -> Self {
+        Self { bytes }
+    }
+
+    fn count_json(&mut self, value: &impl Serialize) -> anyhow::Result<()> {
+        serde_json::to_writer(&mut *self, value).context("estimate incremental graph fact size")?;
+        self.bytes = self
+            .bytes
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("incremental graph fact size exceeds u64"))?;
+        Ok(())
+    }
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX))
+            .ok_or_else(|| io::Error::other("incremental graph fact size exceeds u64"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn tier_sources(
+    chunks: &[Extraction],
+    root: Option<&Path>,
+) -> (Vec<SourceIdentity>, Vec<SourceIdentity>) {
     let mut ast = Vec::new();
     let mut semantic = Vec::new();
     for node in chunks.iter().flat_map(|chunk| &chunk.nodes) {
@@ -292,6 +594,7 @@ fn tier_sources(chunks: &[Extraction], root: Option<&Path>) -> (Vec<String>, Vec
             &mut ast,
             &mut semantic,
             &node.source_file,
+            container_source(&node.extra),
             is_ast_node(node),
             root,
         );
@@ -301,6 +604,7 @@ fn tier_sources(chunks: &[Extraction], root: Option<&Path>) -> (Vec<String>, Vec
             &mut ast,
             &mut semantic,
             &edge.source_file,
+            container_source(&edge.extra),
             is_ast_edge(edge),
             root,
         );
@@ -314,6 +618,10 @@ fn tier_sources(chunks: &[Extraction], root: Option<&Path>) -> (Vec<String>, Vec
             &mut ast,
             &mut semantic,
             source_file,
+            hyperedge
+                .get(CONTAINER_SOURCE_ATTRIBUTE)
+                .and_then(|value| value.as_str())
+                .filter(|source| !source.is_empty()),
             is_ast_tier_value(hyperedge),
             root,
         );
@@ -321,17 +629,188 @@ fn tier_sources(chunks: &[Extraction], root: Option<&Path>) -> (Vec<String>, Vec
     (ast, semantic)
 }
 
+fn rebuilt_source_forms(rebuilt_sources: &[PathBuf], root: Option<&Path>) -> Vec<String> {
+    let mut sources = Vec::new();
+    for source in rebuilt_sources {
+        add_source_forms(&mut sources, &source.to_string_lossy(), root);
+    }
+    sources
+}
+
+fn unowned_sources(
+    ast: &[SourceIdentity],
+    semantic: &[SourceIdentity],
+    root: Option<&Path>,
+) -> Vec<String> {
+    let mut sources = Vec::new();
+    for identity in ast.iter().chain(semantic) {
+        if identity.container_source.is_some() {
+            continue;
+        }
+        add_source_forms(&mut sources, &identity.source_file, root);
+    }
+    sources
+}
+
+fn identity_owned_by_rebuilt_source(
+    identity: &SourceIdentity,
+    rebuilt_sources: &[PathBuf],
+    root: Option<&Path>,
+) -> bool {
+    let owner = identity
+        .container_source
+        .as_deref()
+        .unwrap_or(&identity.source_file);
+    rebuilt_sources
+        .iter()
+        .any(|rebuilt| same_source(owner, &rebuilt.to_string_lossy(), root))
+}
+
+fn identity_owned_by_rebuilt_provider(
+    identity: &SourceIdentity,
+    rebuilt_provider_sources: &[String],
+) -> bool {
+    let owner = identity
+        .container_source
+        .as_deref()
+        .unwrap_or(&identity.source_file);
+    rebuilt_provider_sources
+        .iter()
+        .any(|provider| owner == provider)
+}
+
+fn is_container_representation_root(node: &Node) -> bool {
+    container_source(&node.extra).is_none()
+        && matches!(
+            node.extra.get("type").and_then(serde_json::Value::as_str),
+            Some("container" | "format_inventory")
+        )
+}
+
+fn is_container_representation_node(node: &Node) -> bool {
+    container_source(&node.extra).is_none()
+        && matches!(
+            node.extra.get("type").and_then(serde_json::Value::as_str),
+            Some("container" | "format_inventory" | "container_member")
+        )
+}
+
+fn container_root_sources(
+    nodes: &[Node],
+    rebuilt_sources: &[PathBuf],
+    root: Option<&Path>,
+) -> Vec<String> {
+    let mut sources = Vec::new();
+    for node in nodes.iter().filter(|node| {
+        is_container_representation_root(node)
+            && rebuilt_sources
+                .iter()
+                .any(|rebuilt| same_source(&node.source_file, &rebuilt.to_string_lossy(), root))
+    }) {
+        add_source_forms(&mut sources, &node.source_file, root);
+    }
+    sources
+}
+
+fn promote_container_representation_sources(
+    ast: &mut Vec<SourceIdentity>,
+    semantic: &mut Vec<SourceIdentity>,
+    container_sources: &[String],
+    root: Option<&Path>,
+) {
+    let mut promoted = Vec::new();
+    semantic.retain(|identity| {
+        let is_direct_container_source = identity.container_source.is_none()
+            && container_sources
+                .iter()
+                .any(|source| same_source(&identity.source_file, source, root));
+        if is_direct_container_source && !promoted.contains(identity) {
+            promoted.push(identity.clone());
+        }
+        !is_direct_container_source
+    });
+    for identity in promoted {
+        if !ast.contains(&identity) {
+            ast.push(identity);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ContainerRepresentationFamily {
+    sources: Vec<String>,
+    node_ids: BTreeSet<String>,
+}
+
+fn container_representation_family(
+    existing: &KnowledgeGraph,
+    rebuilt_sources: &[PathBuf],
+    root: Option<&Path>,
+) -> ContainerRepresentationFamily {
+    let container_sources = container_root_sources(&existing.nodes, rebuilt_sources, root);
+    let node_ids = existing
+        .nodes
+        .iter()
+        .filter(|node| {
+            is_container_representation_node(node)
+                && container_sources
+                    .iter()
+                    .any(|source| same_source(&node.source_file, source, root))
+        })
+        .map(|node| node.id.clone())
+        .collect();
+    ContainerRepresentationFamily {
+        sources: container_sources,
+        node_ids,
+    }
+}
+
+fn is_replaced_container_representation_edge(
+    edge: &Edge,
+    representation: &ContainerRepresentationFamily,
+    root: Option<&Path>,
+) -> bool {
+    container_source(&edge.extra).is_none()
+        && edge
+            .extra
+            .get("_origin")
+            .and_then(serde_json::Value::as_str)
+            != Some("semantic")
+        && edge.relation == "contains"
+        && representation
+            .sources
+            .iter()
+            .any(|source| same_source(&edge.source_file, source, root))
+        && (representation.node_ids.contains(&edge.source)
+            || representation.node_ids.contains(&edge.target))
+}
+
 fn add_tiered_source(
-    ast: &mut Vec<String>,
-    semantic: &mut Vec<String>,
+    ast: &mut Vec<SourceIdentity>,
+    semantic: &mut Vec<SourceIdentity>,
     source: &str,
+    container_owner: Option<&str>,
     is_ast: bool,
     root: Option<&Path>,
 ) {
     if source.is_empty() {
         return;
     }
-    add_source_forms(if is_ast { ast } else { semantic }, source, root);
+    let target = if is_ast { ast } else { semantic };
+    let identity = SourceIdentity {
+        source_file: source.to_owned(),
+        container_source: container_owner.map(str::to_owned),
+    };
+    if !target.contains(&identity) {
+        target.push(identity);
+    }
+    let normalized = SourceIdentity {
+        source_file: normalized_source(source, root),
+        container_source: container_owner.map(|owner| normalized_source(owner, root)),
+    };
+    if !normalized.source_file.is_empty() && !target.contains(&normalized) {
+        target.push(normalized);
+    }
 }
 
 fn add_source_forms(target: &mut Vec<String>, source: &str, root: Option<&Path>) {
@@ -342,48 +821,108 @@ fn add_source_forms(target: &mut Vec<String>, source: &str, root: Option<&Path>)
     }
 }
 
-fn is_replaced_node(node: &Node, ast: &[String], semantic: &[String], root: Option<&Path>) -> bool {
-    source_in(
+fn is_replaced_node(
+    node: &Node,
+    ast: &[SourceIdentity],
+    semantic: &[SourceIdentity],
+    containers: &[String],
+    root: Option<&Path>,
+) -> bool {
+    source_replaced(
         &node.source_file,
-        if is_ast_node(node) { ast } else { semantic },
+        container_source(&node.extra),
+        is_ast_node(node),
+        ast,
+        semantic,
+        containers,
         root,
     )
 }
 
-fn is_replaced_edge(edge: &Edge, ast: &[String], semantic: &[String], root: Option<&Path>) -> bool {
-    source_in(
+fn is_replaced_edge(
+    edge: &Edge,
+    ast: &[SourceIdentity],
+    semantic: &[SourceIdentity],
+    containers: &[String],
+    root: Option<&Path>,
+) -> bool {
+    source_replaced(
         &edge.source_file,
-        if is_ast_edge(edge) { ast } else { semantic },
+        container_source(&edge.extra),
+        is_ast_edge(edge),
+        ast,
+        semantic,
+        containers,
         root,
     )
 }
 
 fn is_replaced_hyperedge(
     hyperedge: &serde_json::Value,
-    ast: &[String],
-    semantic: &[String],
+    ast: &[SourceIdentity],
+    semantic: &[SourceIdentity],
+    containers: &[String],
     root: Option<&Path>,
 ) -> bool {
     let source_file = hyperedge
         .get("source_file")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    source_in(
+    source_replaced(
         source_file,
-        if is_ast_tier_value(hyperedge) {
-            ast
-        } else {
-            semantic
-        },
+        hyperedge
+            .get(CONTAINER_SOURCE_ATTRIBUTE)
+            .and_then(|value| value.as_str())
+            .filter(|source| !source.is_empty()),
+        is_ast_tier_value(hyperedge),
+        ast,
+        semantic,
+        containers,
         root,
     )
 }
 
-fn source_in(source: &str, candidates: &[String], root: Option<&Path>) -> bool {
-    !source.is_empty()
-        && candidates
+fn source_replaced(
+    source: &str,
+    container_owner: Option<&str>,
+    is_ast: bool,
+    ast: &[SourceIdentity],
+    semantic: &[SourceIdentity],
+    containers: &[String],
+    root: Option<&Path>,
+) -> bool {
+    let tier = if is_ast { ast } else { semantic };
+    if source_in(source, container_owner, tier, root) {
+        return true;
+    }
+    // A container is one scanned input even though recursively dispatched
+    // members may contain facts from both provenance tiers. Any newly scanned
+    // unowned fact identifies its physical input, even when malformed bytes
+    // now produce only a rejected inventory root. Re-extracting that outer
+    // input must replace every explicitly owned old member fact so a removed
+    // or renamed member cannot survive.
+    container_owner.is_some_and(|owner| {
+        containers
             .iter()
-            .any(|candidate| same_source(source, candidate, root))
+            .any(|container| same_source(owner, container, root))
+    })
+}
+
+fn source_in(
+    source: &str,
+    container_owner: Option<&str>,
+    candidates: &[SourceIdentity],
+    root: Option<&Path>,
+) -> bool {
+    !source.is_empty()
+        && candidates.iter().any(|candidate| {
+            same_source(source, &candidate.source_file, root)
+                && match (container_owner, candidate.container_source.as_deref()) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => same_source(left, right, root),
+                    _ => false,
+                }
+        })
 }
 
 fn is_ast_node(node: &Node) -> bool {
@@ -457,6 +996,25 @@ fn same_source(left: &str, right: &str, root: Option<&Path>) -> bool {
     ) {
         (Some(left), Some(right)) => left == right,
         _ => false,
+    }
+}
+
+fn container_source(extra: &std::collections::BTreeMap<String, serde_json::Value>) -> Option<&str> {
+    extra
+        .get(CONTAINER_SOURCE_ATTRIBUTE)
+        .and_then(|value| value.as_str())
+        .filter(|source| !source.is_empty())
+}
+
+fn same_source_or_container_prune(
+    source: &str,
+    container_owner: Option<&str>,
+    prune: &str,
+    root: Option<&Path>,
+) -> bool {
+    match container_owner {
+        Some(owner) => same_source(owner, prune, root),
+        None => same_source(source, prune, root),
     }
 }
 

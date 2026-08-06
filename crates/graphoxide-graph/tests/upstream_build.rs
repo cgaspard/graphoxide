@@ -779,6 +779,56 @@ fn test_build_relativizes_absolute_source_file() {
 }
 
 #[test]
+fn test_build_relativizes_and_round_trips_container_source_provenance() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("proj");
+    fs::create_dir(&root).unwrap();
+    let container = root.join("archives/structured.tar");
+    let container = container.to_string_lossy().to_string();
+    let member = format!("{container}!/nested/config.toml");
+    let extraction: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"member_a","label":"a","file_type":"document","source_file":member,"_container_source":container},
+            {"id":"member_b","label":"b","file_type":"document","source_file":member,"_container_source":container}
+        ],
+        "edges": [
+            {"source":"member_a","target":"member_b","relation":"contains","confidence":"EXTRACTED","source_file":member,"_container_source":container}
+        ],
+        "hyperedges": [
+            {"id":"member_group","nodes":["member_a","member_b"],"relation":"groups","source_file":member,"_container_source":container}
+        ]
+    }))
+    .unwrap();
+    let graph =
+        build_graph_with_options_and_root(&[extraction], &root, BuildOptions::default()).unwrap();
+    let round_trip: KnowledgeGraph =
+        serde_json::from_value(serde_json::to_value(graph).unwrap()).unwrap();
+
+    assert!(round_trip.nodes.iter().all(|node| {
+        node.extra
+            .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+            .and_then(Value::as_str)
+            == Some("archives/structured.tar")
+    }));
+    assert!(round_trip.links.iter().all(|edge| {
+        edge.extra
+            .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+            .and_then(Value::as_str)
+            == Some("archives/structured.tar")
+    }));
+    assert!(round_trip.hyperedges.iter().all(|hyperedge| {
+        hyperedge
+            .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+            .and_then(Value::as_str)
+            == Some("archives/structured.tar")
+    }));
+    assert!(round_trip
+        .nodes
+        .iter()
+        .all(|node| node.source_file == "archives/structured.tar!/nested/config.toml"));
+}
+
+#[test]
 fn test_build_from_json_ambiguous_old_stem_alias_stays_dangling() {
     let temp = TempDir::new().unwrap();
     let graph = build_value_at(
@@ -1019,6 +1069,531 @@ fn test_merge_raw_extraction_tier_scoped() {
         .hyperedges
         .iter()
         .any(|value| value["id"] == "auth_group"));
+}
+
+#[test]
+fn test_incremental_container_members_follow_the_outer_source_lifecycle() {
+    let baseline: KnowledgeGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"archive","label":"structured.tar","file_type":"document","source_file":"archives/structured.tar","type":"container"},
+            {"id":"kept_old","label":"kept","file_type":"document","source_file":"archives/structured.tar!/nested/kept.toml","source_location":"L1","_origin":"fallback","_container_source":"archives/structured.tar"},
+            {"id":"removed","label":"removed","file_type":"document","source_file":"archives/structured.tar!/nested/removed.csv","source_location":"L1","_origin":"fallback","_container_source":"archives/structured.tar"},
+            {"id":"literal_member_old","label":"archive literal","file_type":"code","source_file":"archives/structured.tar!/literal.rs","source_location":"L1","_origin":"ast","_container_source":"archives/structured.tar"},
+            {"id":"unrelated","label":"unrelated","file_type":"code","source_file":"src/unrelated.rs","source_location":"L1","_origin":"ast"},
+            {"id":"literal","label":"literal","file_type":"code","source_file":"archives/structured.tar!/literal.rs","source_location":"L1","_origin":"ast"}
+        ],
+        "links": [
+            {"source":"archive","target":"kept_old","relation":"contains","confidence":"EXTRACTED","source_file":"archives/structured.tar"},
+            {"source":"kept_old","target":"removed","relation":"references","confidence":"EXTRACTED","source_file":"archives/structured.tar!/nested/removed.csv","source_location":"L1","_origin":"fallback","_container_source":"archives/structured.tar"}
+        ],
+        "hyperedges": [
+            {"id":"removed_group","nodes":["kept_old","removed"],"relation":"groups","source_file":"archives/structured.tar!/nested/removed.csv","_container_source":"archives/structured.tar"},
+            {"id":"owned_without_source","nodes":["kept_old","removed"],"relation":"groups","_container_source":"archives/structured.tar"}
+        ]
+    }))
+    .unwrap();
+
+    let unrelated: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"changed_elsewhere","label":"changed","file_type":"code","source_file":"src/changed.rs","source_location":"L1","_origin":"ast"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+    let retained =
+        graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_materialization_limit(
+            unrelated,
+            &baseline,
+            &[],
+            None,
+            1024 * 1024,
+        )
+        .unwrap();
+    assert!(retained.nodes.iter().any(|node| node.id == "kept_old"));
+    assert!(retained.nodes.iter().any(|node| node.id == "removed"));
+    assert!(retained
+        .nodes
+        .iter()
+        .any(|node| node.id == "literal_member_old"));
+    assert!(retained.nodes.iter().any(|node| node.id == "literal"));
+    assert!(retained
+        .hyperedges
+        .iter()
+        .any(|value| value["id"] == "removed_group"));
+    assert!(retained
+        .hyperedges
+        .iter()
+        .any(|value| value["id"] == "owned_without_source"));
+
+    let changed_archive: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"archive_current","label":"structured.tar","file_type":"document","source_file":"archives/structured.tar","type":"container"},
+            {"id":"kept_current","label":"kept","file_type":"document","source_file":"archives/structured.tar!/nested/kept.toml","source_location":"L1","_origin":"fallback","_container_source":"archives/structured.tar"},
+            {"id":"literal_member_current","label":"archive literal","file_type":"code","source_file":"archives/structured.tar!/literal.rs","source_location":"L2","_origin":"ast","_container_source":"archives/structured.tar"}
+        ],
+        "edges": [
+            {"source":"archive_current","target":"kept_current","relation":"contains","confidence":"EXTRACTED","source_file":"archives/structured.tar"}
+        ]
+    }))
+    .unwrap();
+    let replaced = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            changed_archive,
+            &baseline,
+            &[PathBuf::from("archives/structured.tar")],
+            &[],
+            &[],
+            None,
+            1024 * 1024,
+        )
+        .unwrap();
+    let replaced_ids = replaced
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(replaced_ids.contains("archive_current"));
+    assert!(replaced_ids.contains("kept_current"));
+    assert!(replaced_ids.contains("literal_member_current"));
+    assert!(replaced_ids.contains("unrelated"));
+    assert!(replaced_ids.contains("literal"));
+    assert!(!replaced_ids.contains("archive"));
+    assert!(!replaced_ids.contains("kept_old"));
+    assert!(!replaced_ids.contains("removed"));
+    assert!(!replaced_ids.contains("literal_member_old"));
+    assert!(replaced.hyperedges.iter().all(|value| !matches!(
+        value["id"].as_str(),
+        Some("removed_group" | "owned_without_source")
+    )));
+
+    let rejected_archive: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"archive_rejected","label":"structured.tar","file_type":"document","source_file":"archives/structured.tar","type":"format_inventory","parse_status":"rejected"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+    let rejected = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            rejected_archive,
+            &baseline,
+            &[PathBuf::from("archives/structured.tar")],
+            &[],
+            &[],
+            None,
+            1024 * 1024,
+        )
+        .unwrap();
+    assert!(rejected
+        .nodes
+        .iter()
+        .any(|node| node.id == "archive_rejected"));
+    assert!(rejected.nodes.iter().any(|node| node.id == "literal"));
+    assert!(rejected.nodes.iter().any(|node| node.id == "unrelated"));
+    assert!(rejected.nodes.iter().all(|node| {
+        !matches!(
+            node.id.as_str(),
+            "archive" | "kept_old" | "removed" | "literal_member_old"
+        )
+    }));
+    assert!(rejected.hyperedges.is_empty());
+
+    let pruned =
+        graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_materialization_limit(
+            Extraction::default(),
+            &baseline,
+            &[PathBuf::from("archives/structured.tar")],
+            None,
+            1024 * 1024,
+        )
+        .unwrap();
+    assert_eq!(
+        pruned
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["unrelated", "literal"],
+        "deleting the outer archive must prune marked members but preserve a colliding real path"
+    );
+    assert!(pruned.edges.is_empty());
+    assert!(pruned.hyperedges.is_empty());
+
+    let changed_literal: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"literal_current","label":"literal","file_type":"code","source_file":"archives/structured.tar!/literal.rs","source_location":"L2","_origin":"ast"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+    let literal_replaced =
+        graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_materialization_limit(
+            changed_literal,
+            &baseline,
+            &[],
+            None,
+            1024 * 1024,
+        )
+        .unwrap();
+    assert!(literal_replaced
+        .nodes
+        .iter()
+        .any(|node| node.id == "literal_member_old"));
+    assert!(literal_replaced
+        .nodes
+        .iter()
+        .any(|node| node.id == "literal_current"));
+    assert!(!literal_replaced
+        .nodes
+        .iter()
+        .any(|node| node.id == "literal"));
+
+    let literal_pruned =
+        graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_materialization_limit(
+            Extraction::default(),
+            &baseline,
+            &[PathBuf::from("archives/structured.tar!/literal.rs")],
+            None,
+            1024 * 1024,
+        )
+        .unwrap();
+    assert!(literal_pruned
+        .nodes
+        .iter()
+        .any(|node| node.id == "literal_member_old"));
+    assert!(!literal_pruned.nodes.iter().any(|node| node.id == "literal"));
+}
+
+#[test]
+fn test_authoritative_rebuild_handles_container_to_structured_transition() {
+    let baseline: KnowledgeGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"config","label":"config.json","file_type":"document","source_file":"config.json","type":"container"},
+            {"id":"old_member","label":"old.json","file_type":"document","source_file":"config.json","type":"container_member"},
+            {"id":"seeded_a","label":"chosen concept A","file_type":"concept","source_file":"config.json","source_location":null,"_origin":"semantic"},
+            {"id":"seeded_b","label":"chosen concept B","file_type":"concept","source_file":"config.json","source_location":null,"_origin":"semantic"}
+        ],
+        "links": [
+            {"source":"config","target":"old_member","relation":"contains","confidence":"EXTRACTED","source_file":"config.json"},
+            {"source":"seeded_a","target":"seeded_b","relation":"contains","confidence":"INFERRED","source_file":"config.json","_origin":"semantic"}
+        ]
+    }))
+    .unwrap();
+    let fresh: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"config","label":"config.json","file_type":"document","source_file":"config.json","source_location":"L1","_origin":"structured","type":"structured_file"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+
+    let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        fresh,
+        &baseline,
+        &[PathBuf::from("config.json")],
+        &[],
+        &[PathBuf::from("config.json")],
+        None,
+        1024 * 1024,
+    )
+    .unwrap();
+
+    assert_eq!(
+        merged
+            .nodes
+            .iter()
+            .filter(|node| node.id == "config")
+            .count(),
+        1
+    );
+    assert!(merged.nodes.iter().any(|node| {
+        node.id == "config"
+            && node.extra.get("type").and_then(Value::as_str) == Some("structured_file")
+    }));
+    assert!(merged
+        .nodes
+        .iter()
+        .all(|node| { node.extra.get("type").and_then(Value::as_str) != Some("container") }));
+    assert!(merged.nodes.iter().all(|node| node.id != "old_member"));
+    assert!(merged.nodes.iter().any(|node| node.id == "seeded_a"));
+    assert!(merged.nodes.iter().any(|node| node.id == "seeded_b"));
+    assert_eq!(merged.edges.len(), 1);
+    assert!(merged
+        .edges
+        .iter()
+        .any(|edge| edge.source == "seeded_a" && edge.target == "seeded_b"));
+}
+
+#[test]
+fn test_authoritative_rebuild_handles_structured_to_container_transition() {
+    let baseline: KnowledgeGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"config","label":"config.json","file_type":"document","source_file":"config.json","source_location":"L1","_origin":"structured","type":"structured_file"},
+            {"id":"old_key","label":"old","file_type":"document","source_file":"config.json","source_location":"L2","_origin":"structured","type":"structured_key"},
+            {"id":"seeded_a","label":"chosen concept A","file_type":"concept","source_file":"config.json","source_location":null,"_origin":"semantic"},
+            {"id":"seeded_b","label":"chosen concept B","file_type":"concept","source_file":"config.json","source_location":null,"_origin":"semantic"}
+        ],
+        "links": [
+            {"source":"config","target":"old_key","relation":"contains","confidence":"EXTRACTED","source_file":"config.json","source_location":"L2"},
+            {"source":"seeded_a","target":"seeded_b","relation":"contains","confidence":"INFERRED","source_file":"config.json","_origin":"semantic"}
+        ]
+    }))
+    .unwrap();
+    let fresh: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"config","label":"config.json","file_type":"document","source_file":"config.json","type":"container"},
+            {"id":"new_member","label":"new.json","file_type":"document","source_file":"config.json","type":"container_member"}
+        ],
+        "edges": [
+            {"source":"config","target":"new_member","relation":"contains","confidence":"EXTRACTED","source_file":"config.json"}
+        ]
+    }))
+    .unwrap();
+
+    let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        fresh,
+        &baseline,
+        &[PathBuf::from("config.json")],
+        &[],
+        &[],
+        None,
+        1024 * 1024,
+    )
+    .unwrap();
+
+    assert_eq!(
+        merged
+            .nodes
+            .iter()
+            .filter(|node| node.id == "config")
+            .count(),
+        1
+    );
+    assert!(merged.nodes.iter().any(|node| {
+        node.id == "config" && node.extra.get("type").and_then(Value::as_str) == Some("container")
+    }));
+    assert!(merged.nodes.iter().all(|node| node.id != "old_key"));
+    assert!(merged.nodes.iter().any(|node| node.id == "new_member"));
+    assert!(merged.nodes.iter().any(|node| node.id == "seeded_a"));
+    assert!(merged.nodes.iter().any(|node| node.id == "seeded_b"));
+    assert!(merged
+        .edges
+        .iter()
+        .any(|edge| edge.source == "config" && edge.target == "new_member"));
+    assert!(merged
+        .edges
+        .iter()
+        .any(|edge| edge.source == "seeded_a" && edge.target == "seeded_b"));
+    assert!(merged
+        .edges
+        .iter()
+        .all(|edge| edge.source != "config" || edge.target != "old_key"));
+}
+
+#[test]
+fn test_authoritative_container_rebuild_removes_unmarked_inventory_member() {
+    let baseline: KnowledgeGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"archive","label":"archive.zip","file_type":"document","source_file":"archive.zip","type":"container"},
+            {"id":"removed_member","label":"removed.json","file_type":"document","source_file":"archive.zip","type":"container_member"}
+        ],
+        "links": [
+            {"source":"archive","target":"removed_member","relation":"contains","confidence":"EXTRACTED","source_file":"archive.zip"}
+        ]
+    }))
+    .unwrap();
+    let fresh: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"archive","label":"archive.zip","file_type":"document","source_file":"archive.zip","type":"container"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+
+    let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        fresh,
+        &baseline,
+        &[PathBuf::from("archive.zip")],
+        &[],
+        &[],
+        None,
+        1024 * 1024,
+    )
+    .unwrap();
+
+    assert_eq!(merged.nodes.len(), 1);
+    assert_eq!(merged.nodes[0].id, "archive");
+    assert!(merged.edges.is_empty());
+}
+
+#[test]
+fn test_explicit_merge_without_rebuilt_evidence_preserves_container_baseline() {
+    let baseline: KnowledgeGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"archive","label":"archive.zip","file_type":"document","source_file":"archive.zip","type":"container"},
+            {"id":"old_member","label":"old.json","file_type":"document","source_file":"archive.zip","type":"container_member"}
+        ],
+        "links": []
+    }))
+    .unwrap();
+    let fresh: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"unowned_fresh","label":"fresh","file_type":"document","source_file":"archive.zip","source_location":"L1","_origin":"structured"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+
+    let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        fresh,
+        &baseline,
+        &[],
+        &[],
+        &[],
+        None,
+        1024 * 1024,
+    )
+    .unwrap();
+
+    assert!(merged.nodes.iter().any(|node| node.id == "archive"));
+    assert!(merged.nodes.iter().any(|node| node.id == "old_member"));
+    assert!(merged.nodes.iter().any(|node| node.id == "unowned_fresh"));
+}
+
+#[test]
+fn test_authoritative_rebuild_does_not_infer_cross_file_replacement() {
+    let baseline: KnowledgeGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"main_old","label":"main","file_type":"code","source_file":"src/main.ts","source_location":"L1","_origin":"ast"},
+            {"id":"dependency_old","label":"dependency","file_type":"code","source_file":"src/dependency.ts","source_location":"L1","_origin":"ast"}
+        ],
+        "links": []
+    }))
+    .unwrap();
+    let fresh: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"main_new","label":"main","file_type":"code","source_file":"src/main.ts","source_location":"L1","_origin":"ast"},
+            {"id":"dependency_cross_file","label":"cross-file provenance","file_type":"code","source_file":"src/dependency.ts","source_location":"L2","_origin":"ast"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+
+    let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        fresh,
+        &baseline,
+        &[PathBuf::from("src/main.ts")],
+        &[],
+        &[],
+        None,
+        1024 * 1024,
+    )
+    .unwrap();
+
+    assert!(merged.nodes.iter().all(|node| node.id != "main_old"));
+    assert!(merged.nodes.iter().any(|node| node.id == "main_new"));
+    assert!(merged.nodes.iter().any(|node| node.id == "dependency_old"));
+    assert!(merged
+        .nodes
+        .iter()
+        .any(|node| node.id == "dependency_cross_file"));
+}
+
+#[test]
+fn test_authoritative_rebuild_preserves_postgresql_provider_replacement() {
+    let baseline: KnowledgeGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"old_table","label":"old","file_type":"code","source_file":"postgresql:/host/db","source_location":"L1","_origin":"sql"}
+        ],
+        "links": []
+    }))
+    .unwrap();
+    let fresh: Extraction = serde_json::from_value(json!({
+        "nodes": [
+            {"id":"new_table","label":"new","file_type":"code","source_file":"postgresql:/host/db","source_location":"L1","_origin":"sql"}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+
+    let unprivileged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        fresh.clone(),
+        &baseline,
+        &[],
+        &[],
+        &[],
+        None,
+        1024 * 1024,
+    )
+    .unwrap();
+    assert!(unprivileged.nodes.iter().any(|node| node.id == "old_table"));
+
+    let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        fresh,
+        &baseline,
+        &[],
+        &["postgresql:/host/db".into()],
+        &[],
+        None,
+        1024 * 1024,
+    )
+    .unwrap();
+
+    assert!(merged.nodes.iter().all(|node| node.id != "old_table"));
+    assert!(merged.nodes.iter().any(|node| node.id == "new_table"));
+}
+
+#[test]
+fn test_merge_raw_extraction_from_loaded_graph_matches_path_merge() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("graph.json");
+    write_two_tier_graph(&path);
+    let existing = read_graph(&path).unwrap();
+    let fresh = extraction(json!({"nodes":[
+        {"id":"session_model","label":"Session Model","file_type":"concept","source_file":"docs/readme.md","source_location":null}
+    ],"edges":[]}));
+    let expected = merge_raw_extraction(&fresh, &path, &[], None).unwrap();
+
+    // Once loaded, the bounded merge has no reason to touch the graph path.
+    fs::remove_file(&path).unwrap();
+    let actual =
+        graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_materialization_limit(
+            fresh,
+            &existing,
+            &[],
+            None,
+            1024 * 1024,
+        )
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+}
+
+#[test]
+fn test_merge_raw_extraction_low_materialization_budget_fails_closed() {
+    let existing = build_value_with(
+        json!({"nodes":[{
+            "id":"retained",
+            "label":"x".repeat(4096),
+            "file_type":"document",
+            "source_file":"keep.md"
+        }],"edges":[]}),
+        no_dedup(),
+    );
+    let error =
+        graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_materialization_limit(
+            Extraction::default(),
+            &existing,
+            &[],
+            None,
+            1024,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("estimated"));
+    assert!(error.to_string().contains("exceeds 1024-byte"));
+    assert_eq!(existing.nodes.len(), 1, "the baseline remains untouched");
 }
 
 #[test]

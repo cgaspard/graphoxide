@@ -394,6 +394,70 @@ mod rust {
     }
 
     #[test]
+    fn test_rust_anchored_imports_resolve_without_root_name_collisions() {
+        let project = TempDir::new().expect("Rust import fixture");
+        for (relative, source) in [
+            ("foo.rs", "pub struct Unrelated;\n"),
+            ("src/foo.rs", "pub struct Item;\n"),
+            ("src/sub/foo.rs", "pub struct Local;\n"),
+            (
+                "src/sub/mod.rs",
+                "use self::foo;\nuse super::foo;\nuse crate::foo;\nuse vendor::foo;\nuse crate::foo::Item;\n",
+            ),
+        ] {
+            let path = project.path().join(relative);
+            fs::create_dir_all(path.parent().expect("Rust fixture parent"))
+                .expect("create Rust fixture parent");
+            fs::write(path, source).expect("write Rust fixture");
+        }
+        let paths = [
+            project.path().join("foo.rs"),
+            project.path().join("src/foo.rs"),
+            project.path().join("src/sub/foo.rs"),
+            project.path().join("src/sub/mod.rs"),
+        ];
+        let result = extract_set(&paths, project.path(), true);
+        let file_id = |source_file: &str| {
+            result
+                .nodes
+                .iter()
+                .find(|node| {
+                    node.source_file == source_file
+                        && node.extra.get("type").and_then(|value| value.as_str()) == Some("file")
+                })
+                .unwrap_or_else(|| panic!("missing Rust file node {source_file}"))
+                .id
+                .as_str()
+        };
+        let import_at = |line: &str| {
+            result
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.source_file == "src/sub/mod.rs"
+                        && edge.relation == "imports_from"
+                        && edge
+                            .extra
+                            .get("source_location")
+                            .and_then(|value| value.as_str())
+                            == Some(line)
+                })
+                .unwrap_or_else(|| panic!("missing Rust import at {line}"))
+        };
+
+        assert_eq!(import_at("L1").true_target(), file_id("src/sub/foo.rs"));
+        assert_eq!(import_at("L2").true_target(), file_id("src/foo.rs"));
+        assert_eq!(import_at("L3").true_target(), file_id("src/foo.rs"));
+        assert_ne!(import_at("L4").true_target(), file_id("foo.rs"));
+        let item = result
+            .nodes
+            .iter()
+            .find(|node| node.source_file == "src/foo.rs" && node.label == "Item")
+            .expect("Rust imported item");
+        assert_eq!(import_at("L5").true_target(), item.id);
+    }
+
+    #[test]
     fn test_rust_call_edges_have_call_context() {
         assert_edges_have_context(&extract_fixture("sample.rs"), &["calls"], "call");
     }

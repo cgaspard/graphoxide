@@ -2812,7 +2812,19 @@ mod dotnet_apex_systemverilog {
 
     #[test]
     fn test_csproj_finds_project_references() {
-        assert_labels_contain(&extract_fixture("sample.csproj"), &["Domain.csproj"]);
+        let fixture = TempFixture::new("csproj-project-references");
+        let project = fixture.write(
+            "App/sample.csproj",
+            &fs::read_to_string(super::fixture("sample.csproj"))
+                .expect("read project-reference fixture"),
+        );
+        fixture.write("Domain/Domain.csproj", "<Project />");
+        fixture.write("Infrastructure/Infrastructure.csproj", "<Project />");
+
+        assert_labels_contain(
+            &extract(&project).expect("extract project with proven references"),
+            &["Domain.csproj"],
+        );
     }
 
     #[test]

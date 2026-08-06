@@ -33,6 +33,28 @@
         }
       ],
       "reason": "Graphoxide intentionally indexes mixed repositories offline without forcing --code-only, unlike Graphify's credential error contract."
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_force_flag_redispatches_and_stamps_manifest",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_default_extract_force_does_not_reuse_legacy_ast_cache"
+        }
+      ],
+      "reason": "Graphoxide's default isolated executor re-extracts without refreshing the legacy AST cache, while Graphify force-refreshes its warm semantic cache."
+    },
+    {
+      "upstream": "tests/test_extract_cli.py::test_extract_graphify_force_env_redispatches",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-cli",
+          "id": "test_default_extract_graphify_force_does_not_reuse_legacy_ast_cache"
+        }
+      ],
+      "reason": "Graphoxide's force environment variable selects isolated re-extraction without refreshing the legacy AST cache, unlike Graphify's warm semantic-cache contract."
     }
   ]
 }

@@ -5,6 +5,7 @@
 //! split by emitting private `__bash_raw_call` edges; `resolution::resolve`
 //! consumes them before an extraction leaves the project pipeline.
 
+use crate::project_path::{normalize_project_path, source_relative_project_path, ProjectPath};
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use regex::Regex;
 use std::{
@@ -20,10 +21,33 @@ const SCRIPT_RUNNERS: &[&str] = &["bash", "sh", "zsh", "ksh", "dash"];
 
 pub(crate) fn extract_bash(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let source = fs::read(path)?;
+    extract_bash_impl(path, source_file, source.as_slice(), true)
+}
+
+/// Extract Bash facts from bytes already supplied by the I/O plane.
+///
+/// Cross-file source and script-invocation resolution is deliberately left to
+/// the corpus resolver in this mode: resolving those paths here would require
+/// filesystem probes on the extraction worker.
+#[allow(dead_code)] // Activated by the byte-oriented engine dispatch.
+pub(crate) fn extract_bash_bytes(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+) -> anyhow::Result<Extraction> {
+    extract_bash_impl(path, source_file, source, false)
+}
+
+fn extract_bash_impl(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    resolve_paths: bool,
+) -> anyhow::Result<Extraction> {
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_bash::LANGUAGE.into())?;
     let tree = parser
-        .parse(&source, None)
+        .parse(source, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter-bash returned no tree"))?;
 
     let stem = Path::new(source_file)
@@ -37,9 +61,10 @@ pub(crate) fn extract_bash(path: &Path, source_file: &str) -> anyhow::Result<Ext
     // and incremental extraction.
     let entry_id = format!("{}__entry", make_id(&[source_file]));
     let mut state = BashState {
-        source: &source,
+        source,
         source_file,
         physical_path: path,
+        resolve_paths,
         stem,
         file_id: file_id.clone(),
         entry_id: entry_id.clone(),
@@ -49,7 +74,7 @@ pub(crate) fn extract_bash(path: &Path, source_file: &str) -> anyhow::Result<Ext
         seen_edges: HashSet::new(),
         functions: HashMap::new(),
         function_ranges: HashMap::new(),
-        variable_bases: collect_variable_bases(tree.root_node(), &source, path),
+        variable_bases: collect_variable_bases(tree.root_node(), source, path),
     };
     state.add_node(
         file_id.clone(),
@@ -93,6 +118,7 @@ struct BashState<'a> {
     source: &'a [u8],
     source_file: &'a str,
     physical_path: &'a Path,
+    resolve_paths: bool,
     stem: String,
     file_id: String,
     entry_id: String,
@@ -133,11 +159,10 @@ impl BashState<'_> {
             return self.literal(name);
         }
         let mut cursor = node.walk();
-        let name = node
-            .named_children(&mut cursor)
+
+        node.named_children(&mut cursor)
             .find(|child| child.kind() == "word")
-            .and_then(|child| self.literal(child));
-        name
+            .and_then(|child| self.literal(child))
     }
 
     fn add_node(&mut self, id: String, label: &str, line: usize, kind: &str) {
@@ -318,24 +343,27 @@ impl BashState<'_> {
             None
         };
         if let Some(raw) = script_argument.filter(|raw| raw.ends_with(".sh")) {
+            if !self.resolve_paths {
+                return;
+            }
             let candidate = self
                 .physical_path
                 .parent()
                 .unwrap_or_else(|| Path::new(""))
                 .join(raw);
-            if let Ok(resolved) = candidate.canonicalize() {
-                if resolved.is_file() {
-                    let target_source =
-                        logical_target_source_file(self.physical_path, self.source_file, &resolved);
-                    self.add_edge(
-                        caller,
-                        format!("{}__entry", make_id(&[&target_source])),
-                        "calls",
-                        line,
-                        Confidence::Extracted,
-                        Some("script_invocation"),
-                    );
-                }
+            if let Ok(resolved) = candidate.canonicalize()
+                && resolved.is_file()
+            {
+                let target_source =
+                    logical_target_source_file(self.physical_path, self.source_file, &resolved);
+                self.add_edge(
+                    caller,
+                    format!("{}__entry", make_id(&[&target_source])),
+                    "calls",
+                    line,
+                    Confidence::Extracted,
+                    Some("script_invocation"),
+                );
             }
             return;
         }
@@ -360,6 +388,58 @@ impl BashState<'_> {
     fn handle_source(&mut self, argument: &TsNode<'_>, line: usize) {
         let raw = strip_shell_quotes(&self.text(*argument));
         if raw.is_empty() {
+            return;
+        }
+        if !self.resolve_paths {
+            // Preserve a logical import candidate without consulting the
+            // filesystem. The corpus resolver will only treat this as a
+            // source edge when the target file was independently admitted by
+            // the I/O plane, so missing and unsafe source paths still
+            // fabricate no graph relationship.
+            if portable_absolute_path(&raw) {
+                return;
+            }
+            let portable_raw = raw.replace('\\', "/");
+            let target_source = if portable_raw.contains('$') {
+                simple_leading_variable(&portable_raw)
+                    .and_then(|name| self.variable_bases.get(name))
+                    .and_then(|base| {
+                        bash_source_suffix(&portable_raw).map(|suffix| base.join(suffix))
+                    })
+                    .and_then(|candidate| {
+                        logical_project_target_source_file(
+                            self.physical_path,
+                            self.source_file,
+                            &candidate,
+                        )
+                    })
+                    .and_then(|logical| {
+                        normalize_project_path(&logical).filter(|logical| !logical.is_empty())
+                    })
+            } else {
+                match source_relative_project_path(self.source_file, &portable_raw) {
+                    Some(ProjectPath::Contained(logical)) => Some(logical),
+                    Some(ProjectPath::EscapesRoot(_)) | None => None,
+                }
+            };
+            if let Some(target_source) = target_source {
+                let target_stem = Path::new(&target_source)
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                self.add_edge(
+                    self.file_id.clone(),
+                    make_id(&[&target_stem]),
+                    "imports_from",
+                    line,
+                    if raw.starts_with('.') {
+                        Confidence::Extracted
+                    } else {
+                        Confidence::Inferred
+                    },
+                    Some("import"),
+                );
+            }
             return;
         }
         let (candidate, confidence) = if raw.starts_with('.') || raw.starts_with('/') {
@@ -429,6 +509,13 @@ impl BashState<'_> {
             Some("import"),
         );
     }
+}
+
+fn portable_absolute_path(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    normalized.starts_with('/')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 fn inside_expansion(mut node: TsNode<'_>) -> bool {
@@ -525,6 +612,32 @@ fn leading_variable(raw: &str) -> Option<String> {
         .map(|value| value.as_str().to_owned())
 }
 
+/// Accept exactly one simple leading `$NAME` or `${NAME}` expansion followed
+/// by a slash. Defaults, indexing, indirection, concatenated variables, and
+/// other dynamic spellings are intentionally rejected in isolated mode.
+fn simple_leading_variable(raw: &str) -> Option<&str> {
+    let (name, remainder) = if let Some(braced) = raw.strip_prefix("${") {
+        let end = braced.find('}')?;
+        (&braced[..end], &braced[end + 1..])
+    } else {
+        let unbraced = raw.strip_prefix('$')?;
+        let end = unbraced
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap_or(unbraced.len());
+        (&unbraced[..end], &unbraced[end..])
+    };
+    let mut characters = name.chars();
+    if !characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        || !remainder.starts_with('/')
+    {
+        return None;
+    }
+    Some(name)
+}
+
 fn collect_variable_bases(
     _root: TsNode<'_>,
     source: &[u8],
@@ -596,9 +709,32 @@ fn logical_target_source_file(physical_path: &Path, source_file: &str, target: &
     target.to_string_lossy().replace('\\', "/")
 }
 
+/// Return a project-relative logical target only when the lexical candidate
+/// remains beneath the inferred scan root. Unlike the compatibility helper
+/// above, isolated extraction must not mint an external target from an
+/// absolute or parent-escaping source expression.
+fn logical_project_target_source_file(
+    physical_path: &Path,
+    source_file: &str,
+    target: &Path,
+) -> Option<String> {
+    let root = inferred_scan_root(physical_path, source_file)?;
+    let relative = target.strip_prefix(root).ok()?;
+    let mut normalized = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!normalized.as_os_str().is_empty()).then(|| normalized.to_string_lossy().replace('\\', "/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn suffix_rejects_dynamic_and_parent_paths() {
@@ -609,5 +745,74 @@ mod tests {
         assert_eq!(bash_source_suffix("$ROOT"), None);
         assert_eq!(bash_source_suffix("${ROOT}/lib/${NAME}.sh"), None);
         assert_eq!(bash_source_suffix("${ROOT}/../secret.sh"), None);
+    }
+
+    #[test]
+    fn byte_entrypoint_does_not_require_a_source_file() {
+        let result = extract_bash_bytes(
+            Path::new("missing.sh"),
+            "scripts/missing.sh",
+            b"helper() { :; }\nhelper\n",
+        )
+        .expect("extract in-memory Bash source");
+        assert!(result.nodes.iter().any(|node| node.label == "helper()"));
+        assert!(result.edges.iter().any(|edge| edge.relation == "calls"));
+    }
+
+    #[test]
+    fn byte_source_candidates_are_logical_and_fail_closed() {
+        let result = extract_bash_bytes(
+            Path::new("/graphoxide-missing-project/scripts/runner.sh"),
+            "scripts/runner.sh",
+            br#"source ./lib.sh
+source ../shared.sh
+source ../../escape.sh
+source /absolute/escape.sh
+source C:\absolute\escape.sh
+source C:/absolute/escape.sh
+source C:drive-relative.sh
+source \\server\share\escape.sh
+source //server/share/escape.sh
+source ./dir/node:escape.sh
+source ./NUL.sh
+source ./trailing.sh.
+source ./dir//escape.sh
+source "${ROOT}/lib/${NAME}.sh"
+"#,
+        )
+        .expect("extract in-memory Bash imports");
+        let imports = result
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports_from")
+            .map(|edge| edge.true_target())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(imports, BTreeSet::from(["scripts_lib", "shared"]));
+    }
+
+    #[test]
+    fn byte_source_expansions_require_one_known_literal_base() {
+        let result = extract_bash_bytes(
+            Path::new("/graphoxide-missing-project/scripts/runner.sh"),
+            "scripts/runner.sh",
+            br#"ROOT=.
+NAME=other
+source "${ROOT}/lib.sh"
+source "$UNSET/lib.sh"
+source "$ROOT$NAME/lib.sh"
+source "${ROOT}${NAME}/lib.sh"
+source "${ROOT:-.}/lib.sh"
+source "${ROOT}/lib/${NAME}.sh"
+source "${ROOT}/NUL.sh"
+"#,
+        )
+        .expect("extract bounded Bash expansion candidates");
+        let imports = result
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports_from")
+            .map(|edge| edge.true_target())
+            .collect::<Vec<_>>();
+        assert_eq!(imports, ["scripts_lib"]);
     }
 }

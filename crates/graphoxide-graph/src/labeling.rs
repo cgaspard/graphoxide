@@ -224,12 +224,11 @@ pub fn parse_label_response(
     let fence = Regex::new(r"(?i)^\s*```(?:json)?\s*|\s*```\s*$")
         .expect("the static label fence regex must compile");
     let mut cleaned = fence.replace_all(text.trim(), "").into_owned();
-    if !cleaned.starts_with('{') {
-        if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
-            if end > start {
-                cleaned = cleaned[start..=end].to_owned();
-            }
-        }
+    if !cleaned.starts_with('{')
+        && let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}'))
+        && end > start
+    {
+        cleaned = cleaned[start..=end].to_owned();
     }
     let parsed = serde_json::from_str::<serde_json::Value>(&cleaned)
         .ok()
@@ -421,17 +420,19 @@ where
             }
         }
     }
-    if written == 0 {
-        if let Some(error) = first_error {
-            let message = format!(
-                "all {} community-label batches failed: {error} (input tokens: {}, output tokens: {})",
-                batches.len(), usage.input, usage.output
-            );
-            return Err(LabelingError {
-                cause: error.context(message),
-                usage,
-            });
-        }
+    if written == 0
+        && let Some(error) = first_error
+    {
+        let message = format!(
+            "all {} community-label batches failed: {error} (input tokens: {}, output tokens: {})",
+            batches.len(),
+            usage.input,
+            usage.output
+        );
+        return Err(LabelingError {
+            cause: error.context(message),
+            usage,
+        });
     }
     Ok((labels, usage))
 }

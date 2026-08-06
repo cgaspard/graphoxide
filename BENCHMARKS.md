@@ -36,7 +36,10 @@ The default maximum of 100 samples keeps accidental runs bounded.
 
 The default fixture is [`parity/corpora/language-matrix`](parity/corpora/language-matrix).
 It contains 33 files and exercises multiple compiled and deterministic fallback
-extractors. Its complete input-tree digest is pinned by the parity corpus suite:
+extractors. Reports identify this built-in workload as the
+`compat-language-matrix` scenario; a supplied fixture is labeled
+`custom-fixture` and must not be compared as though it had the same coverage.
+Its complete input-tree digest is pinned by the parity corpus suite:
 
 ```text
 1b0e49b8bbac8a7414a38bb36b6e52b4259e66d04cbc5b2e5663e93a88adf0ef
@@ -62,14 +65,14 @@ Each independent sample performs these operations:
 2. Time a fresh-output build:
 
    ```bash
-   graphoxide extract . --force --json
+   graphoxide extract . --force --json --runtime-report graphoxide-out/benchmark-runtime-extract.json
    ```
 
 3. Apply the deterministic one-file mutation. This setup is not timed.
 4. Time the incremental update against the graph created in step 2:
 
    ```bash
-   graphoxide update . --json
+   graphoxide update . --json --runtime-report graphoxide-out/benchmark-runtime-update.json
    ```
 
 5. Remove the temporary sample directory.
@@ -86,6 +89,19 @@ summaries are computed for external and CLI-reported timings. The runner rejects
 a successful command that does not produce one parseable JSON object with a
 finite, non-negative `elapsed_ms`, the expected operation/mode/status, and—for
 the incremental sample—exactly one processed changed file.
+
+Every benchmark command also requests an atomically written `IndexRuntimeTelemetryV1`
+sidecar. It embeds the unchanged build report and records the isolated execution
+model, I/O backend, configured managed-memory/pool/cache limits when available, and
+runtime-detected SIMD capabilities. The runner rejects a legacy sidecar: its
+measurements must exercise the default dedicated I/O and CPU execution path.
+A detected CPU feature does not by itself mean a specific extractor used that
+instruction set. This sidecar is opt-in and never changes the `--json` object
+on standard output or graph bytes.
+
+The benchmark runner validates the sidecar's schema and its embedded operation,
+mode, and status for each sample. Runtime stage durations from a future isolated
+pipeline may overlap, so do not sum them into an end-to-end duration.
 
 The JSON also records the fixture digest, Git commit and dirty state, binary
 digest, Graphoxide and Rust versions, Node version, operating system,

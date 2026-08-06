@@ -56,9 +56,15 @@ fn python_member_calls(extractions: &mut [Extraction]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn rust_imports(extractions: &mut [Extraction]) -> anyhow::Result<()> {
+    crate::resolution::resolve_rust_imports(extractions);
+    Ok(())
+}
+
 static LANGUAGE_RESOLVERS: &[LanguageResolver] = &[
     LanguageResolver::new("swift_member_calls", &["swift"], swift_member_calls),
     LanguageResolver::new("python_member_calls", &["py", "pyi"], python_member_calls),
+    LanguageResolver::new("rust_imports", &["rs"], rust_imports),
 ];
 
 pub fn registered_resolvers() -> &'static [LanguageResolver] {

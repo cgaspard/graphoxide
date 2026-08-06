@@ -2,9 +2,10 @@
 
 use crate::{Confidence, Extraction, KnowledgeGraph};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -18,32 +19,91 @@ pub fn read_graph(path: impl AsRef<Path>) -> anyhow::Result<KnowledgeGraph> {
     read_graph_with_cap(path, max_graph_bytes())
 }
 
+/// One graph generation admitted through a single bounded file handle.
+#[derive(Debug)]
+pub struct CappedGraphRead {
+    /// Parsed graph from the admitted bytes.
+    pub graph: KnowledgeGraph,
+    /// Exact number of source bytes admitted before deserialization.
+    pub admitted_bytes: usize,
+    /// SHA-256 of exactly the admitted source bytes.
+    pub sha256: [u8; 32],
+}
+
 /// Read a graph with an explicit byte cap. This makes embedders and tests able
 /// to impose a tighter policy without mutating process-global environment.
 pub fn read_graph_with_cap(path: impl AsRef<Path>, cap: u64) -> anyhow::Result<KnowledgeGraph> {
+    Ok(read_graph_capped(path, cap)?.graph)
+}
+
+/// Read one graph generation with an explicit cap, returning accounting and
+/// digest evidence from the exact byte slice that was deserialized.
+pub fn read_graph_capped(path: impl AsRef<Path>, cap: u64) -> anyhow::Result<CappedGraphRead> {
     let path = path.as_ref();
-    let size = fs::metadata(path)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!("graph file not found: {}", path.display())
-            } else {
-                anyhow::anyhow!("Cannot read graph file {}: {error}", path.display())
-            }
-        })?
+    let file = fs::File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!("graph file not found: {}", path.display())
+        } else {
+            anyhow::anyhow!("Cannot read graph file {}: {error}", path.display())
+        }
+    })?;
+    read_graph_from_open_file_with_cap(path, file, cap)
+}
+
+fn read_graph_from_open_file_with_cap(
+    path: &Path,
+    mut file: fs::File,
+    cap: u64,
+) -> anyhow::Result<CappedGraphRead> {
+    // Inspect and read the same opened object. In particular, an atomic path
+    // replacement cannot swap in an unchecked file between these operations.
+    let size = file
+        .metadata()
+        .map_err(|error| anyhow::anyhow!("Cannot read graph file {}: {error}", path.display()))?
         .len();
     anyhow::ensure!(
         size <= cap,
         "graph file {} is {size} bytes, exceeds {cap}-byte cap",
         path.display()
     );
-    let bytes = fs::read(path)
-        .map_err(|error| anyhow::anyhow!("Cannot read graph file {}: {error}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|error| {
+    let bytes = read_bytes_with_cap(path, &mut file, cap, "Cannot read graph file")?;
+    let admitted_bytes = bytes.len();
+    let sha256 = Sha256::digest(&bytes).into();
+    let graph = serde_json::from_slice(&bytes).map_err(|error| {
         anyhow::anyhow!(
             "Cannot read graph file {}: {error}. The file may be corrupted; regenerate or rebuild it",
             path.display()
         )
+    })?;
+    Ok(CappedGraphRead {
+        graph,
+        admitted_bytes,
+        sha256,
     })
+}
+
+fn read_bytes_with_cap(
+    path: &Path,
+    reader: impl Read,
+    cap: u64,
+    read_error_prefix: &str,
+) -> anyhow::Result<Vec<u8>> {
+    // Metadata is only a snapshot: an in-place writer may grow the opened file
+    // after the check. Read at most cap + 1 so growth is detected before JSON
+    // deserialization and no input bytes beyond that bounded prefix are admitted.
+    let read_limit = cap.saturating_add(1);
+    let mut bounded = reader.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("{read_error_prefix} {}: {error}", path.display()))?;
+    let bytes_read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    anyhow::ensure!(
+        bytes_read <= cap,
+        "graph file {} is at least {bytes_read} bytes, exceeds {cap}-byte cap",
+        path.display()
+    );
+    Ok(bytes)
 }
 
 /// Read an arbitrary JSON object with the same size cap and actionable corruption
@@ -51,20 +111,59 @@ pub fn read_graph_with_cap(path: impl AsRef<Path>, cap: u64) -> anyhow::Result<K
 pub fn read_json_object(
     path: impl AsRef<Path>,
 ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    read_json_object_with_cap(path, max_graph_bytes())
+}
+
+/// Read an arbitrary JSON object through one opened handle with an explicit
+/// byte cap.
+///
+/// Metadata and bytes are taken from the same filesystem object, and the read
+/// admits at most `cap + 1` bytes so an in-place growth race is rejected before
+/// deserialization.
+pub fn read_json_object_with_cap(
+    path: impl AsRef<Path>,
+    cap: u64,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let path = path.as_ref();
-    check_graph_file_size_cap(path)?;
-    let bytes = fs::read(path)
+    let file = fs::File::open(path)
         .map_err(|error| anyhow::anyhow!("Cannot parse {}: {error}", path.display()))?;
+    read_json_object_from_open_file_with_cap(path, file, cap)
+}
+
+fn read_json_object_from_open_file_with_cap(
+    path: &Path,
+    mut file: fs::File,
+    cap: u64,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let size = file
+        .metadata()
+        .map_err(|error| anyhow::anyhow!("Cannot parse {}: {error}", path.display()))?
+        .len();
+    read_json_object_from_reader_with_cap(path, &mut file, size, cap)
+}
+
+fn read_json_object_from_reader_with_cap(
+    path: &Path,
+    reader: impl Read,
+    observed_size: u64,
+    cap: u64,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    anyhow::ensure!(
+        observed_size <= cap,
+        "graph file {} is {observed_size} bytes, exceeds {cap}-byte cap",
+        path.display()
+    );
+    let bytes = read_bytes_with_cap(path, reader, cap, "Cannot parse")?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
         anyhow::anyhow!(
-            "Cannot parse {}: {error}. The file may be corrupted; regenerate or rebuild it",
+            "Cannot parse {}: {error}. The file may be corrupted; re-run 'graphoxide extract'",
             path.display()
         )
     })?;
     value
         .as_object()
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("diagnostic input {} must be a JSON object", path.display()))
+        .ok_or_else(|| anyhow::anyhow!("diagnostic input must be a JSON object"))
 }
 
 pub fn write_graph_atomic(
@@ -125,11 +224,11 @@ pub fn write_raw_extractions_atomic(
     });
     if let Some(edges) = value.get_mut("edges").and_then(|v| v.as_array_mut()) {
         for edge in edges {
-            if let Some(edge) = edge.as_object_mut() {
-                if let (Some(source), Some(target)) = (edge.remove("_src"), edge.remove("_tgt")) {
-                    edge.insert("source".into(), source);
-                    edge.insert("target".into(), target);
-                }
+            if let Some(edge) = edge.as_object_mut()
+                && let (Some(source), Some(target)) = (edge.remove("_src"), edge.remove("_tgt"))
+            {
+                edge.insert("source".into(), source);
+                edge.insert("target".into(), target);
             }
         }
     }
@@ -393,7 +492,17 @@ pub fn check_graph_file_size_cap_with(path: &Path, cap: u64) -> anyhow::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_graph_file_size_cap_with, prepare_for_export};
+    use super::{
+        check_graph_file_size_cap_with, prepare_for_export, read_bytes_with_cap,
+        read_graph_from_open_file_with_cap, read_graph_with_cap, read_json_object,
+        read_json_object_from_open_file_with_cap, read_json_object_from_reader_with_cap,
+    };
+    use sha2::{Digest as _, Sha256};
+    use std::{
+        fs::{self, OpenOptions},
+        io::{Seek, Write},
+    };
+    use tempfile::tempdir;
 
     #[test]
     fn export_restores_direction_and_backfills_fields() {
@@ -430,5 +539,229 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("exceeds"));
         assert!(message.contains("byte cap"));
+    }
+
+    #[test]
+    fn read_graph_with_cap_rejects_oversize_before_deserializing() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("graph.json");
+        let contents = b"not valid graph json";
+        fs::write(&path, contents).expect("write oversized invalid graph");
+
+        let cap = 4;
+        let error = read_graph_with_cap(&path, cap).expect_err("oversized graph must fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "graph file {} is {} bytes, exceeds {cap}-byte cap",
+                path.display(),
+                contents.len()
+            )
+        );
+    }
+
+    #[test]
+    fn opened_graph_handle_is_used_for_metadata_and_reading() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("graph.json");
+        let contents = br#"{"nodes":[],"links":[]}"#;
+        fs::write(&path, contents).expect("write graph");
+        let file = fs::File::open(&path).expect("open graph");
+
+        // This path intentionally does not exist. It is diagnostic context only;
+        // metadata and content must both come from the already-opened handle.
+        let diagnostic_path = temp.path().join("replacement.json");
+        let admitted = read_graph_from_open_file_with_cap(
+            &diagnostic_path,
+            file,
+            u64::try_from(contents.len()).expect("fixture length fits in u64"),
+        )
+        .expect("opened graph remains readable");
+        assert!(admitted.graph.nodes.is_empty());
+        assert!(admitted.graph.links.is_empty());
+        assert_eq!(admitted.admitted_bytes, contents.len());
+        assert_eq!(
+            admitted.sha256.as_slice(),
+            Sha256::digest(contents).as_slice()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_graph_reports_bytes_from_its_generation_after_path_replacement() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("graph.json");
+        let replacement = temp.path().join("replacement.json");
+        let mut admitted_contents = br#"{"nodes":[],"links":[]}"#.to_vec();
+        admitted_contents.extend(std::iter::repeat_n(b' ', 4096));
+        let replacement_contents = br#"{"nodes":[],"links":[]}"#;
+        fs::write(&path, &admitted_contents).expect("write admitted graph generation");
+        fs::write(&replacement, replacement_contents).expect("write small replacement graph");
+        let file = fs::File::open(&path).expect("open admitted graph generation");
+        fs::rename(&replacement, &path).expect("atomically replace graph path");
+        assert_eq!(
+            fs::metadata(&path).expect("replacement metadata").len(),
+            u64::try_from(replacement_contents.len()).expect("fixture length fits in u64")
+        );
+
+        let admitted = read_graph_from_open_file_with_cap(
+            &path,
+            file,
+            u64::try_from(admitted_contents.len()).expect("fixture length fits in u64"),
+        )
+        .expect("opened graph generation remains readable");
+        assert_eq!(admitted.admitted_bytes, admitted_contents.len());
+        assert_eq!(
+            admitted.sha256.as_slice(),
+            Sha256::digest(&admitted_contents).as_slice()
+        );
+        assert!(admitted.admitted_bytes > replacement_contents.len());
+    }
+
+    #[test]
+    fn bounded_reader_rejects_growth_after_metadata_check() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("graph.json");
+        let contents = br#"{"nodes":[],"links":[]}"#;
+        fs::write(&path, contents).expect("write graph");
+        let mut reader = fs::File::open(&path).expect("open graph");
+        let cap = reader.metadata().expect("read checked metadata").len();
+        assert_eq!(
+            cap,
+            u64::try_from(contents.len()).expect("fixture length fits in u64")
+        );
+
+        // Simulate an in-place writer growing the file after the metadata check.
+        // Whitespace keeps the complete document valid JSON, so the byte cap is
+        // the reason this read fails.
+        let mut writer = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open graph for append");
+        writer
+            .write_all(&[b' '; 8 * 1024])
+            .expect("grow graph after metadata check");
+        writer.flush().expect("flush appended graph bytes");
+
+        let error = read_bytes_with_cap(&path, &mut reader, cap, "Cannot read graph file")
+            .expect_err("growth beyond the checked cap must fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "graph file {} is at least {} bytes, exceeds {cap}-byte cap",
+                path.display(),
+                cap + 1
+            )
+        );
+        assert_eq!(
+            reader.stream_position().expect("inspect bounded read"),
+            cap + 1,
+            "the bounded reader must not consume the rest of the grown file"
+        );
+    }
+
+    #[test]
+    fn opened_json_object_handle_is_used_for_metadata_and_reading() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("diagnostic.json");
+        let contents = br#"{"status":"ready"}"#;
+        fs::write(&path, contents).expect("write diagnostic object");
+        let file = fs::File::open(&path).expect("open diagnostic object");
+
+        let diagnostic_path = temp.path().join("replacement.json");
+        let object = read_json_object_from_open_file_with_cap(
+            &diagnostic_path,
+            file,
+            u64::try_from(contents.len()).expect("fixture length fits in u64"),
+        )
+        .expect("opened diagnostic object remains readable");
+        assert_eq!(object.get("status"), Some(&serde_json::json!("ready")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_json_object_handle_ignores_a_path_replacement() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("diagnostic.json");
+        let replacement = temp.path().join("replacement.json");
+        let approved = br#"{"status":"approved"}"#;
+        fs::write(&path, approved).expect("write approved diagnostic object");
+        fs::write(&replacement, br#"{"status":"replacement"}"#)
+            .expect("write replacement diagnostic object");
+        let file = fs::File::open(&path).expect("open approved diagnostic object");
+        fs::rename(&replacement, &path).expect("replace diagnostic path");
+
+        let object = read_json_object_from_open_file_with_cap(
+            &path,
+            file,
+            u64::try_from(approved.len()).expect("fixture length fits in u64"),
+        )
+        .expect("the already-opened object remains the diagnostic input");
+        assert_eq!(object.get("status"), Some(&serde_json::json!("approved")));
+    }
+
+    #[test]
+    fn json_object_reader_rejects_growth_after_metadata_snapshot() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("diagnostic.json");
+        let contents = br#"{"status":"ready"}"#;
+        fs::write(&path, contents).expect("write diagnostic object");
+        let mut reader = fs::File::open(&path).expect("open diagnostic object");
+        let observed_size = reader.metadata().expect("read checked metadata").len();
+        let mut writer = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open diagnostic object for append");
+        writer
+            .write_all(&[b' '; 8 * 1024])
+            .expect("grow diagnostic object after metadata snapshot");
+        writer.flush().expect("flush appended diagnostic bytes");
+
+        let error =
+            read_json_object_from_reader_with_cap(&path, &mut reader, observed_size, observed_size)
+                .expect_err("growth beyond the checked cap must fail before JSON parsing");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "graph file {} is at least {} bytes, exceeds {observed_size}-byte cap",
+                path.display(),
+                observed_size + 1
+            )
+        );
+    }
+
+    #[test]
+    fn read_json_object_rejects_oversize_before_deserializing() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("diagnostic.json");
+        let contents = b"not valid diagnostic json";
+        fs::write(&path, contents).expect("write oversized diagnostic object");
+        let file = fs::File::open(&path).expect("open diagnostic object");
+
+        let cap = 4;
+        let error = read_json_object_from_open_file_with_cap(&path, file, cap)
+            .expect_err("oversized diagnostic object must fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "graph file {} is {} bytes, exceeds {cap}-byte cap",
+                path.display(),
+                contents.len()
+            )
+        );
+    }
+
+    #[test]
+    fn read_json_object_preserves_parse_specific_corruption_diagnostic() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("diagnostic.json");
+        fs::write(&path, br#"{"unfinished":"#).expect("write corrupt diagnostic object");
+
+        let message = read_json_object(&path)
+            .expect_err("corrupt diagnostic object must fail")
+            .to_string();
+        assert!(message.starts_with(&format!("Cannot parse {}:", path.display())));
+        assert!(message.contains("corrupted"));
+        assert!(!message.contains("Cannot read graph file"));
     }
 }

@@ -222,16 +222,6 @@
       ]
     },
     {
-      "upstream": "tests/test_extract.py::test_collect_files_follows_symlinked_directory",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_collect_files_follows_symlinked_directory"
-        }
-      ]
-    },
-    {
       "upstream": "tests/test_extract.py::test_collect_files_skips_out_of_root_symlinked_directory",
       "targets": [
         {
@@ -1262,22 +1252,12 @@
       ]
     },
     {
-      "upstream": "tests/test_extract.py::test_extract_json_large_file_skipped",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_extract_json_large_file_skipped"
-        }
-      ]
-    },
-    {
       "upstream": "tests/test_extract.py::test_extract_json_handles_invalid_json",
       "targets": [
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_extract_json_handles_invalid_json"
+          "id": "test_extract_json_handles_invalid_json_as_a_structured_diagnostic"
         }
       ]
     },
@@ -1288,26 +1268,6 @@
           "runner": "rust",
           "package": "graphoxide-extract",
           "id": "test_extract_json_no_self_loops"
-        }
-      ]
-    },
-    {
-      "upstream": "tests/test_extract.py::test_extract_json_data_file_skipped",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_extract_json_data_file_skipped"
-        }
-      ]
-    },
-    {
-      "upstream": "tests/test_extract.py::test_extract_json_top_level_array_skipped",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_extract_json_top_level_array_skipped"
         }
       ]
     },

@@ -714,12 +714,11 @@ fn resolve_token(
         }
 
         let mut candidates = Vec::new();
-        if !owner.namespace.is_empty() {
-            if let Some(candidate) =
+        if !owner.namespace.is_empty()
+            && let Some(candidate) =
                 exact_type(types_by_fqn, &format!("{}.{}", owner.namespace, token))
-            {
-                candidates.push(candidate);
-            }
+        {
+            candidates.push(candidate);
         }
         if let Some(candidate) = exact_type(types_by_fqn, &token) {
             candidates.push(candidate);
@@ -778,18 +777,21 @@ fn unresolved_stub(extraction: &mut Extraction, token: &str, line: Option<String
         .unwrap_or("");
     let id = make_id(&["__csharp_ref", source, token]);
     if !extraction.nodes.iter().any(|node| node.id == id) {
-        extraction.nodes.push(Node {
-            id: id.clone(),
-            label: simple_type_name(token),
-            file_type: "code".into(),
-            source_file: String::new(),
-            source_location: line,
-            community: None,
-            extra: BTreeMap::from([
-                ("_origin".into(), "ast".into()),
-                (MANAGED_NODE.into(), true.into()),
-            ]),
-        });
+        crate::resolution::push_resolved_node(
+            &mut extraction.nodes,
+            Node {
+                id: id.clone(),
+                label: simple_type_name(token),
+                file_type: "code".into(),
+                source_file: String::new(),
+                source_location: line,
+                community: None,
+                extra: BTreeMap::from([
+                    ("_origin".into(), "ast".into()),
+                    (MANAGED_NODE.into(), true.into()),
+                ]),
+            },
+        );
     }
     id
 }

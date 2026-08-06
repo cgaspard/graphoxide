@@ -61,7 +61,21 @@ pub(crate) fn extract_json_config(path: &Path, source_file: &str) -> anyhow::Res
         bytes.len() as u64 <= MAX_BYTES,
         "json file too large to index"
     );
-    let value = graphoxide_core::parse_jsonc_slice(&bytes)
+    extract_json_config_bytes(path, source_file, &bytes)
+}
+
+/// Extract supported JSON configuration from bytes already read by the I/O
+/// plane. This function intentionally performs no filesystem operation.
+pub(crate) fn extract_json_config_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_BYTES,
+        "json file too large to index"
+    );
+    let value = graphoxide_core::parse_jsonc_slice(bytes)
         .with_context(|| format!("parse JSON configuration {source_file}"))?;
     let Some(object) = value.as_object() else {
         return Ok(Extraction::default());
@@ -81,7 +95,7 @@ pub(crate) fn extract_json_config(path: &Path, source_file: &str) -> anyhow::Res
         nodes: Vec::new(),
         edges: Vec::new(),
         pair_count: 0,
-        key_lines: json_key_lines(&bytes),
+        key_lines: json_key_lines(bytes),
     };
     state.add_node(
         file_id.clone(),
@@ -98,6 +112,23 @@ pub(crate) fn extract_json_config(path: &Path, source_file: &str) -> anyhow::Res
         edges: state.edges,
         hyperedges: Vec::new(),
     })
+}
+
+/// Return whether a JSON path must retain the compatibility configuration
+/// extractor. Generic JSON is owned by the byte-structured adapter; known
+/// editor/configuration paths and objects carrying configuration keys retain
+/// their existing graph shape and diagnostics.
+pub(crate) fn should_use_json_config(path: &Path, bytes: &[u8]) -> bool {
+    if is_editor_config_path(path) || is_resolution_config_path(path) {
+        return true;
+    }
+    graphoxide_core::parse_jsonc_slice(bytes)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .as_object()
+                .is_some_and(|object| object.keys().any(|key| CONFIG_KEYS.contains(&key.as_str())))
+        })
 }
 
 fn json_key_lines(source: &[u8]) -> BTreeMap<Vec<String>, usize> {
@@ -159,6 +190,10 @@ fn collect_json_key_lines(
 }
 
 fn is_config(path: &Path, object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    is_named_config(path) || object.keys().any(|key| CONFIG_KEYS.contains(&key.as_str()))
+}
+
+fn is_named_config(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -174,7 +209,26 @@ fn is_config(path: &Path, object: &serde_json::Map<String, serde_json::Value>) -
         ]
         .iter()
         .any(|suffix| name.ends_with(suffix))
-        || object.keys().any(|key| CONFIG_KEYS.contains(&key.as_str()))
+}
+
+fn is_resolution_config_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    ["tsconfig.json", "jsconfig.json"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+fn is_editor_config_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|value| value.eq_ignore_ascii_case(".vscode"))
+    })
 }
 
 struct JsonState<'a> {
@@ -304,5 +358,45 @@ impl JsonState<'_> {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_entrypoint_does_not_require_a_source_file() {
+        let extraction = extract_json_config_bytes(
+            Path::new("package.json"),
+            "package.json",
+            br#"{"name":"demo","dependencies":{"serde":"1"}}"#,
+        )
+        .expect("extract in-memory JSON configuration");
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "dependencies"));
+        assert!(extraction.nodes.iter().any(|node| node.label == "serde"));
+    }
+
+    #[test]
+    fn malformed_named_config_keeps_the_compatibility_error_route() {
+        assert!(should_use_json_config(
+            Path::new("tsconfig.json"),
+            b"{not valid json"
+        ));
+        assert!(should_use_json_config(
+            Path::new(".vscode/tasks.json"),
+            b"{not valid json"
+        ));
+        assert!(!should_use_json_config(
+            Path::new("package.json"),
+            b"{not valid json"
+        ));
+        assert!(!should_use_json_config(
+            Path::new("unrelated.json"),
+            b"{not valid json"
+        ));
     }
 }

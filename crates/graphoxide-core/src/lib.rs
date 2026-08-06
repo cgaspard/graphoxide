@@ -25,15 +25,16 @@ pub use file_slice::{
 pub use ids::{make_id, node_id, normalize_id};
 pub use io::{
     check_graph_file_size_cap, check_graph_file_size_cap_with, max_graph_bytes,
-    parse_max_graph_bytes, permission_fallback, read_graph, read_graph_with_cap, read_json_object,
-    replace_file, write_graph_atomic, write_json_atomic, write_raw_extractions_atomic,
-    write_text_atomic, write_text_atomic_with_replacer, DEFAULT_MAX_GRAPH_BYTES,
+    parse_max_graph_bytes, permission_fallback, read_graph, read_graph_capped, read_graph_with_cap,
+    read_json_object, read_json_object_with_cap, replace_file, write_graph_atomic,
+    write_json_atomic, write_raw_extractions_atomic, write_text_atomic,
+    write_text_atomic_with_replacer, CappedGraphRead, DEFAULT_MAX_GRAPH_BYTES,
 };
 pub use jsonc::{parse_jsonc, parse_jsonc_slice};
 pub use mcp_config::{is_mcp_config_path, mcp_server_map, MCP_CONFIG_FILENAMES};
 pub use model::{
     coerce_non_string_ids, normalize_graph_value, Confidence, Edge, Extraction, KnowledgeGraph,
-    Node,
+    Node, CONTAINER_SOURCE_ATTRIBUTE,
 };
 pub use reflect::{
     aggregate_lessons, build_learning_overlay, lessons_fresh, load_learning_overlay,

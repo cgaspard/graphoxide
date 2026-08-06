@@ -113,10 +113,10 @@ pub fn resolve_seed(graph: &KnowledgeGraph, query: &str) -> Option<usize> {
     if exact_sources.len() == 1 {
         return exact_sources.first().copied();
     }
-    if !exact_sources.is_empty() {
-        if let Some(position) = prefer_file_node(&index, &exact_sources, query) {
-            return Some(position);
-        }
+    if !exact_sources.is_empty()
+        && let Some(position) = prefer_file_node(&index, &exact_sources, query)
+    {
+        return Some(position);
     }
     let contains: Vec<_> = graph
         .nodes
@@ -147,12 +147,10 @@ pub fn affected(graph: &KnowledgeGraph, query: &str, depth: usize, relations: &[
     for edge in &graph.links {
         if edge.true_source() == index.node(seed).id
             && matches!(edge.relation.as_str(), "method" | "contains")
+            && let Some(member) = index.position(edge.true_target())
+            && seen.insert(member)
         {
-            if let Some(member) = index.position(edge.true_target()) {
-                if seen.insert(member) {
-                    queue.push_back((member, 0));
-                }
-            }
+            queue.push_back((member, 0));
         }
     }
     while let Some((current, current_depth)) = queue.pop_front() {

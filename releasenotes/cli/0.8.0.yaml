@@ -1,0 +1,15 @@
+version: 0.8.0
+date: 2026-08-05
+highlights:
+  - Add bounded universal indexing with truthful structured-format capabilities and deterministic runtime controls.
+added:
+  - Add an isolated indexing runtime with separate I/O and compute lanes, explicit managed-memory and worker controls, bounded fact-run staging, and opt-in runtime telemetry.
+  - Add deterministic format discovery through graphoxide formats, distinguishing semantic, schema, bounded structural, container, and inventory-only coverage.
+  - Add bounded structural adapters for supported data, protocols and schemas, diagrams, engineering and simulation assets, and archive members while preserving container provenance.
+changed:
+  - Move the Rust workspace and release builds to Rust 1.97.1, edition 2024, and Cargo resolver 3.
+  - Expand reproducible benchmark scenarios without introducing environment-sensitive performance thresholds.
+fixed:
+  - Prevent sensitive archive members from entering structural extraction and cap aggregate recursive archive output.
+  - Treat unrelated or non-object JSON files with MCP configuration names as safe metadata instead of aborting the repository scan.
+removed: []

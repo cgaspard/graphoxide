@@ -5,7 +5,13 @@
 //! shape expected by each supported vision backend without performing network
 //! I/O. Backend adapters can therefore be tested without SDKs or credentials.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use base64::engine::simd::Simd;
+use base64::{
+    encoded_len,
+    engine::general_purpose::{GeneralPurposeConfig, STANDARD},
+    Engine as _,
+};
 use graphoxide_core::{unit_path, FileUnit, FILE_CHAR_CAP};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -13,10 +19,41 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
 
 /// Inline limit shared by Anthropic and Bedrock-compatible payloads.
 pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+// Vision is explicit opt-in enrichment and is the only indexing-adjacent path
+// that serializes image bytes as Base64. `Simd` selects AVX2/NEON at runtime
+// and has a scalar fallback, so this neither changes the normal indexing path
+// nor requires a target-specific build.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+static VISION_BASE64: LazyLock<Simd> =
+    LazyLock::new(|| Simd::standard(GeneralPurposeConfig::new()));
+
+fn encode_vision_base64(bytes: &[u8]) -> String {
+    let Some(output_len) = encoded_len(bytes.len(), true) else {
+        // This cannot occur for the bounded inline-image path, but retaining a
+        // scalar fallback keeps the public `ImageRef` API total for callers
+        // constructing an oversized value themselves.
+        return STANDARD.encode(bytes);
+    };
+    let mut output = vec![0_u8; output_len];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let written = VISION_BASE64
+        .encode_slice(bytes, &mut output)
+        .expect("exact Base64 output allocation must be sufficient");
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let written = STANDARD
+        .encode_slice(bytes, &mut output)
+        .expect("exact Base64 output allocation must be sufficient");
+    debug_assert_eq!(written, output_len);
+    // Standard Base64 consists only of valid ASCII bytes. This converts the
+    // preallocated output buffer into the result without copying it.
+    String::from_utf8(output).expect("Base64 encoding must be valid UTF-8")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRef {
@@ -34,7 +71,7 @@ impl ImageRef {
         self.raw
             .as_deref()
             .filter(|bytes| !bytes.is_empty())
-            .map(|bytes| STANDARD.encode(bytes))
+            .map(encode_vision_base64)
             .unwrap_or_default()
     }
 
@@ -531,4 +568,20 @@ fn escape_attribute(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_vision_base64, STANDARD};
+    use base64::Engine as _;
+
+    #[test]
+    fn vision_base64_is_scalar_equivalent_across_simd_boundaries() {
+        for length in [0, 1, 2, 3, 31, 32, 63, 64, 127, 128, 129, 4_096, 131_071] {
+            let bytes = (0..length)
+                .map(|index| ((index * 37 + 11) % 251) as u8)
+                .collect::<Vec<_>>();
+            assert_eq!(encode_vision_base64(&bytes), STANDARD.encode(&bytes));
+        }
+    }
 }

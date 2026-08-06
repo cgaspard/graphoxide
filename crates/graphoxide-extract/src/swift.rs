@@ -427,14 +427,13 @@ pub(crate) fn extract_swift(
         );
     }
 
-    if tree.root_node().has_error() {
-        if let Some(file) = builder
+    if tree.root_node().has_error()
+        && let Some(file) = builder
             .nodes
             .iter_mut()
             .find(|node| node.id == builder.file_id)
-        {
-            file.extra.insert("parser_has_error".into(), true.into());
-        }
+    {
+        file.extra.insert("parser_has_error".into(), true.into());
     }
     Ok(builder.finish())
 }
@@ -445,13 +444,13 @@ fn collect_type_kinds(
     protocols: &mut HashSet<String>,
     classes: &mut HashSet<String>,
 ) {
-    if matches!(node.kind(), "class_declaration" | "protocol_declaration") {
-        if let Some(name) = declaration_name(node, source) {
-            if node.kind() == "protocol_declaration" {
-                protocols.insert(swift_key(&name));
-            } else if declaration_kind(node, source) == "class" {
-                classes.insert(swift_key(&name));
-            }
+    if matches!(node.kind(), "class_declaration" | "protocol_declaration")
+        && let Some(name) = declaration_name(node, source)
+    {
+        if node.kind() == "protocol_declaration" {
+            protocols.insert(swift_key(&name));
+        } else if declaration_kind(node, source) == "class" {
+            classes.insert(swift_key(&name));
         }
     }
     let mut cursor = node.walk();
@@ -580,17 +579,10 @@ fn walk_declarations<'tree>(
                     .entry(name.clone())
                     .or_insert(receiver_type);
             }
-            if let Some(value) = value.filter(|value| value.kind() == "call_expression") {
-                if let Some(call) = call_fact(value, source, &HashMap::new()) {
-                    emit_or_defer_call(
-                        owner,
-                        None,
-                        call,
-                        &HashMap::new(),
-                        &HashMap::new(),
-                        builder,
-                    );
-                }
+            if let Some(value) = value.filter(|value| value.kind() == "call_expression")
+                && let Some(call) = call_fact(value, source, &HashMap::new())
+            {
+                emit_or_defer_call(owner, None, call, &HashMap::new(), &HashMap::new(), builder);
             }
             let bodies: Vec<_> = node
                 .named_children(&mut node.walk())
@@ -803,20 +795,20 @@ fn collect_local_types(node: TsNode<'_>, source: &[u8], table: &mut HashMap<Stri
     if node.kind() == "function_declaration" {
         return;
     }
-    if node.kind() == "property_declaration" {
-        if let Some(name) = property_name(node, source) {
-            let annotation = node
-                .named_children(&mut node.walk())
-                .find(|child| child.kind() == "type_annotation");
-            let value = node.child_by_field_name("value").or_else(|| {
-                direct_named_child(node, &["call_expression", "navigation_expression"])
-            });
-            let type_name = annotation
-                .and_then(|annotation| type_head(annotation, source))
-                .or_else(|| value.and_then(|value| inferred_binding_type(value, source)));
-            if let Some(type_name) = type_name {
-                table.entry(name).or_insert(type_name);
-            }
+    if node.kind() == "property_declaration"
+        && let Some(name) = property_name(node, source)
+    {
+        let annotation = node
+            .named_children(&mut node.walk())
+            .find(|child| child.kind() == "type_annotation");
+        let value = node
+            .child_by_field_name("value")
+            .or_else(|| direct_named_child(node, &["call_expression", "navigation_expression"]));
+        let type_name = annotation
+            .and_then(|annotation| type_head(annotation, source))
+            .or_else(|| value.and_then(|value| inferred_binding_type(value, source)));
+        if let Some(type_name) = type_name {
+            table.entry(name).or_insert(type_name);
         }
     }
     let mut cursor = node.walk();
@@ -851,10 +843,10 @@ fn walk_calls(
     {
         return;
     }
-    if node.kind() == "call_expression" {
-        if let Some(call) = call_fact(node, source, receiver_types) {
-            emit_or_defer_call(caller, owner, call, method_index, type_index, builder);
-        }
+    if node.kind() == "call_expression"
+        && let Some(call) = call_fact(node, source, receiver_types)
+    {
+        emit_or_defer_call(caller, owner, call, method_index, type_index, builder);
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -943,21 +935,20 @@ fn emit_or_defer_call(
     }
 
     if call.receiver.is_none() {
-        if let Some(owner) = owner {
-            if let Some(target) =
+        if let Some(owner) = owner
+            && let Some(target) =
                 exactly_one_vec(method_index.get(&(owner.to_owned(), swift_key(&call.callee))))
-            {
-                builder.edge(
-                    caller,
-                    target,
-                    "calls",
-                    Some("call"),
-                    call.line,
-                    Confidence::Extracted,
-                    Some(1.0),
-                );
-                return;
-            }
+        {
+            builder.edge(
+                caller,
+                target,
+                "calls",
+                Some("call"),
+                call.line,
+                Confidence::Extracted,
+                Some(1.0),
+            );
+            return;
         }
         builder.raw_call(caller, &call);
         return;
@@ -1001,6 +992,8 @@ fn emit_or_defer_call(
 }
 
 pub(crate) fn resolve(extractions: &mut [Extraction]) {
+    namespace_colliding_module_anchors(extractions);
+
     let mut type_definitions = HashMap::<String, BTreeSet<String>>::new();
     let mut method_definitions = HashMap::<(String, String), BTreeSet<String>>::new();
     let mut method_owners = HashMap::<String, String>::new();
@@ -1031,15 +1024,15 @@ pub(crate) fn resolve(extractions: &mut [Extraction]) {
                     method_owners
                         .insert(edge.true_target().to_owned(), edge.true_source().to_owned());
                 }
-            } else if edge.relation == "contains" {
-                if let Some(label) = node_labels.get(edge.true_target()) {
-                    if label.ends_with("()") && is_swift_source(&edge.source_file) {
-                        free_functions
-                            .entry(swift_key(label))
-                            .or_default()
-                            .insert(edge.true_target().to_owned());
-                    }
-                }
+            } else if edge.relation == "contains"
+                && let Some(label) = node_labels.get(edge.true_target())
+                && label.ends_with("()")
+                && is_swift_source(&edge.source_file)
+            {
+                free_functions
+                    .entry(swift_key(label))
+                    .or_default()
+                    .insert(edge.true_target().to_owned());
             }
         }
     }
@@ -1150,15 +1143,60 @@ pub(crate) fn resolve(extractions: &mut [Extraction]) {
             {
                 continue;
             }
-            extraction.edges.push(resolved_edge(
-                &caller,
-                &target,
-                relation,
-                confidence,
-                score,
-                &source_file,
-                line,
-            ));
+            crate::resolution::push_resolved_edge(
+                &mut extraction.edges,
+                resolved_edge(
+                    &caller,
+                    &target,
+                    relation,
+                    confidence,
+                    score,
+                    &source_file,
+                    line,
+                ),
+            );
+        }
+    }
+}
+
+fn namespace_colliding_module_anchors(extractions: &mut [Extraction]) {
+    let source_backed_ids = extractions
+        .iter()
+        .flat_map(|extraction| &extraction.nodes)
+        .filter(|node| {
+            !node.source_file.is_empty()
+                && node.extra.get("type").and_then(Value::as_str) != Some("module")
+        })
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let remap = extractions
+        .iter()
+        .flat_map(|extraction| &extraction.nodes)
+        .filter(|node| {
+            source_backed_ids.contains(&node.id)
+                && node.extra.get("type").and_then(Value::as_str) == Some("module")
+                && node.extra.get(SWIFT_MODULE).and_then(Value::as_bool) == Some(true)
+        })
+        .map(|node| (node.id.clone(), make_id(&["__swift_module", &node.label])))
+        .collect::<BTreeMap<_, _>>();
+    if remap.is_empty() {
+        return;
+    }
+
+    for extraction in extractions {
+        for node in &mut extraction.nodes {
+            if node.extra.get("type").and_then(Value::as_str) == Some("module")
+                && node.extra.get(SWIFT_MODULE).and_then(Value::as_bool) == Some(true)
+                && let Some(target) = remap.get(&node.id)
+            {
+                node.id = target.clone();
+            }
+        }
+        for edge in &mut extraction.edges {
+            if let Some(target) = remap.get(edge.true_target()) {
+                edge.target = target.clone();
+                edge.extra.insert("_tgt".into(), target.clone().into());
+            }
         }
     }
 }
@@ -1199,8 +1237,8 @@ fn declaration_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
         .filter(|name| !name.is_empty())
         .or_else(|| {
             let mut cursor = node.walk();
-            let name = node
-                .named_children(&mut cursor)
+
+            node.named_children(&mut cursor)
                 .find(|child| {
                     matches!(
                         child.kind(),
@@ -1208,8 +1246,7 @@ fn declaration_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
                     )
                 })
                 .map(|name| node_text(name, source))
-                .filter(|name| !name.is_empty());
-            name
+                .filter(|name| !name.is_empty())
         })
 }
 
@@ -1222,8 +1259,8 @@ fn declaration_kind(node: TsNode<'_>, source: &[u8]) -> String {
                 "protocol".into()
             } else {
                 let mut cursor = node.walk();
-                let kind = node
-                    .children(&mut cursor)
+
+                node.children(&mut cursor)
                     .find(|child| {
                         matches!(
                             child.kind(),
@@ -1231,8 +1268,7 @@ fn declaration_kind(node: TsNode<'_>, source: &[u8]) -> String {
                         )
                     })
                     .map(|kind| kind.kind().to_owned())
-                    .unwrap_or_else(|| "class".into());
-                kind
+                    .unwrap_or_else(|| "class".into())
             }
         })
 }
@@ -1240,10 +1276,9 @@ fn declaration_kind(node: TsNode<'_>, source: &[u8]) -> String {
 fn property_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
     let pattern = node.child_by_field_name("name").or_else(|| {
         let mut cursor = node.walk();
-        let pattern = node
-            .named_children(&mut cursor)
-            .find(|child| child.kind() == "pattern");
-        pattern
+
+        node.named_children(&mut cursor)
+            .find(|child| child.kind() == "pattern")
     })?;
     pattern
         .child_by_field_name("bound_identifier")
@@ -1391,10 +1426,9 @@ fn first_descendant_text(node: TsNode<'_>, source: &[u8], kinds: &[&str]) -> Opt
 
 fn direct_named_child<'tree>(node: TsNode<'tree>, kinds: &[&str]) -> Option<TsNode<'tree>> {
     let mut cursor = node.walk();
-    let child = node
-        .named_children(&mut cursor)
-        .find(|child| kinds.contains(&child.kind()));
-    child
+
+    node.named_children(&mut cursor)
+        .find(|child| kinds.contains(&child.kind()))
 }
 
 fn children_by_field_name<'tree>(node: TsNode<'tree>, field: &str) -> Vec<TsNode<'tree>> {
@@ -1426,4 +1460,78 @@ fn is_swift_source(path: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("swift"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn imported_module(extraction: &Extraction) -> &str {
+        extraction
+            .edges
+            .iter()
+            .find(|edge| edge.relation == "imports")
+            .expect("Swift import edge")
+            .true_target()
+    }
+
+    #[test]
+    fn module_anchors_are_corpus_wide_and_do_not_collide_with_files() {
+        let first = extract_swift(
+            Path::new("Sources/App.swift"),
+            "import Helpers\nstruct App {}",
+            "Sources/App.swift",
+        )
+        .expect("extract first Swift importer");
+        let second = extract_swift(
+            Path::new("Sources/Other.swift"),
+            "import Helpers\nstruct Other {}",
+            "Sources/Other.swift",
+        )
+        .expect("extract second Swift importer");
+        let colliding_file = extract_swift(
+            Path::new("Helpers.swift"),
+            "struct Helpers {}",
+            "Helpers.swift",
+        )
+        .expect("extract same-named Swift file");
+
+        assert_eq!(imported_module(&first), make_id(&["Helpers"]));
+        assert_eq!(imported_module(&second), make_id(&["Helpers"]));
+        let mut extractions = vec![first, second, colliding_file];
+        resolve(&mut extractions);
+
+        let expected = make_id(&["__swift_module", "Helpers"]);
+        assert_eq!(imported_module(&extractions[0]), expected);
+        assert_eq!(imported_module(&extractions[1]), expected);
+        assert_ne!(expected, make_id(&["Helpers"]));
+        assert!(extractions[2].nodes.iter().any(|node| {
+            node.extra.get("type").and_then(Value::as_str) == Some("file")
+                && node.id == make_id(&["Helpers"])
+        }));
+        let node_ids = extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .map(|node| node.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .all(|edge| node_ids.contains(edge.true_source())
+                && node_ids.contains(edge.true_target())));
+    }
+
+    #[test]
+    fn uncollided_module_anchor_preserves_the_legacy_id() {
+        let importer = extract_swift(
+            Path::new("Sources/App.swift"),
+            "import Helpers\nstruct App {}",
+            "Sources/App.swift",
+        )
+        .expect("extract Swift importer");
+        let mut extractions = vec![importer];
+        resolve(&mut extractions);
+
+        assert_eq!(imported_module(&extractions[0]), make_id(&["Helpers"]));
+    }
 }

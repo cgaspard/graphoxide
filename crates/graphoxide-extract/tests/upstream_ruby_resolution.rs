@@ -1,4 +1,4 @@
-use graphoxide_core::{Confidence, Edge, Extraction, Node};
+use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use graphoxide_extract::extract_project_with_options;
 use std::{collections::BTreeSet, fs, path::PathBuf};
 use tempfile::TempDir;
@@ -152,6 +152,102 @@ const WORKER_RB: &str = r#"class Worker
   end
 end
 "#;
+
+#[test]
+fn test_require_relative_emits_only_static_literal_imports() {
+    let project = Project::new();
+    project.write(
+        "lib/runner.rb",
+        concat!(
+            "folder = 'folder'\n",
+            "require_relative \"#{folder}/worker\"\n",
+            "require_relative 'static_worker'\n",
+            "require_relative '.'\n",
+            "require_relative 'folder/..'\n",
+            "require_relative 'folder/'\n",
+            "require_relative 'scheme:worker'\n",
+        ),
+    );
+
+    let extraction = project.raw("lib/runner.rb");
+    let imports = extraction
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == "imports_from")
+        .collect::<Vec<_>>();
+    assert_eq!(imports.len(), 1, "dynamic Ruby paths must not emit imports");
+    assert!(imports[0].true_target().ends_with("lib_static_worker"));
+    assert!(!imports[0].true_target().contains("folder_worker"));
+}
+
+#[test]
+fn test_dynamic_require_relative_cannot_bind_an_admitted_file() {
+    let project = Project::new();
+    project.write("lib/folder/worker.rb", "class Worker\nend\n");
+    project.write(
+        "lib/dynamic.rb",
+        "folder = 'folder'\nrequire_relative \"#{folder}/worker\"\n",
+    );
+    project.write("lib/literal.rb", "require_relative 'folder/worker'\n");
+
+    let result = project.extract();
+    let dynamic = make_id(&["lib/dynamic"]);
+    let literal = make_id(&["lib/literal"]);
+    let worker = make_id(&["lib/folder/worker"]);
+
+    assert!(!edges(&result).any(|edge| {
+        edge.relation == "imports_from"
+            && edge.true_source() == dynamic
+            && edge.true_target() == worker
+    }));
+    assert!(edges(&result).any(|edge| {
+        edge.relation == "imports_from"
+            && edge.true_source() == literal
+            && edge.true_target() == worker
+    }));
+}
+
+#[test]
+fn test_require_relative_normalizes_only_contained_portable_paths() {
+    let project = Project::new();
+    project.write("worker.rb", "class RootWorker\nend\n");
+    project.write("lib/worker.rb", "class NestedWorker\nend\n");
+    project.write("lib/contained.rb", "require_relative '../worker'\n");
+    project.write("lib/escaping.rb", "require_relative '../../worker'\n");
+    project.write(
+        "lib/absolute.rb",
+        concat!(
+            "require_relative '/worker'\n",
+            "require_relative 'C:/worker'\n",
+            "require_relative 'C:worker'\n",
+            "require_relative '//server/share/worker'\n",
+            "require_relative '\\\\server\\share\\worker'\n",
+        ),
+    );
+
+    let result = project.extract();
+    let root_worker = make_id(&["worker"]);
+    let nested_worker = make_id(&["lib/worker"]);
+    let contained = make_id(&["lib/contained"]);
+    let escaping = make_id(&["lib/escaping"]);
+    let absolute = make_id(&["lib/absolute"]);
+
+    assert!(edges(&result).any(|edge| {
+        edge.relation == "imports_from"
+            && edge.true_source() == contained
+            && edge.true_target() == root_worker
+    }));
+    assert!(!edges(&result).any(|edge| {
+        edge.relation == "imports_from"
+            && edge.true_source() == contained
+            && edge.true_target() == nested_worker
+    }));
+    assert!(!edges(&result).any(|edge| {
+        edge.relation == "imports_from"
+            && matches!(edge.true_source(), source if source == escaping || source == absolute)
+            && matches!(edge.true_target(), target if target == root_worker || target == nested_worker)
+    }));
+}
 
 #[test]
 fn test_member_call_captures_receiver() {

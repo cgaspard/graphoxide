@@ -10,7 +10,7 @@ fn extract_json(root: &Path, name: &str, contents: &str) -> Extraction {
 }
 
 #[test]
-fn ordinary_json_shapes_are_skipped_by_the_public_dispatcher() {
+fn ordinary_json_shapes_are_structurally_indexed_by_the_public_dispatcher() {
     let temp = tempfile::tempdir().expect("create JSON gating fixture");
     let cases = [
         (
@@ -35,8 +35,17 @@ fn ordinary_json_shapes_are_skipped_by_the_public_dispatcher() {
 
     for (name, contents) in cases {
         let result = extract_json(temp.path(), name, contents);
-        assert!(result.nodes.is_empty(), "data JSON emitted nodes: {name}");
-        assert!(result.edges.is_empty(), "data JSON emitted edges: {name}");
+        let root = result
+            .nodes
+            .first()
+            .unwrap_or_else(|| panic!("data JSON was not structurally indexed: {name}"));
+        assert_eq!(
+            root.extra
+                .get("structured_format")
+                .and_then(serde_json::Value::as_str),
+            Some("json"),
+            "data JSON did not retain its typed structured format: {name}",
+        );
     }
 }
 
@@ -87,7 +96,7 @@ fn recognized_json_config_filenames_match_the_upstream_gate() {
 }
 
 #[test]
-fn jsonc_editor_files_do_not_abort_extraction_before_the_config_gate() {
+fn jsonc_editor_files_are_structurally_indexed_outside_the_editor_directory() {
     let temp = tempfile::tempdir().expect("create JSONC editor fixture");
     let cases = [
         (
@@ -114,13 +123,16 @@ fn jsonc_editor_files_do_not_abort_extraction_before_the_config_gate() {
 
     for (name, contents) in cases {
         let result = extract_json(temp.path(), name, contents);
-        assert!(
-            result.nodes.is_empty(),
-            "editor JSONC unexpectedly emitted nodes: {name}"
-        );
-        assert!(
-            result.edges.is_empty(),
-            "editor JSONC unexpectedly emitted edges: {name}"
+        let root = result
+            .nodes
+            .first()
+            .unwrap_or_else(|| panic!("editor JSONC was not structurally indexed: {name}"));
+        assert_eq!(
+            root.extra
+                .get("structured_format")
+                .and_then(serde_json::Value::as_str),
+            Some("json"),
+            "editor JSONC did not preserve JSON structure: {name}",
         );
     }
 }

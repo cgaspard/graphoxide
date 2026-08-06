@@ -1,0 +1,12 @@
+version: 0.8.0
+date: 2026-08-05
+highlights:
+  - Bundle the bounded universal indexer and expanded structured-format coverage in VS Code.
+added:
+  - Surface graph builds backed by the isolated I/O and compute runtime with deterministic resource controls.
+  - Index supported structured, schema, diagram, engineering, simulation, and archive content through the bundled CLI while reporting inventory-only formats truthfully.
+changed:
+  - Update the bundled cross-platform Graphoxide binaries to Rust 1.97.1 and the 0.8 indexing architecture.
+fixed:
+  - Keep sensitive nested archive content out of graph facts and avoid scan failures for unrelated JSON files named like MCP configuration files.
+removed: []

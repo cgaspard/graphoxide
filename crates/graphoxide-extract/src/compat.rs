@@ -5,18 +5,20 @@
 //! nodes, semantic edge roles, and source locations) instead of routing source
 //! through the old definition-only fallback regex.
 
+use crate::project_path::{normalize_project_path, source_relative_project_path, ProjectPath};
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use regex::Regex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub(crate) fn extract_compat(
     path: &Path,
     text: &str,
     source_file: &str,
+    allow_path_probes: bool,
 ) -> anyhow::Result<Option<Extraction>> {
     let extension = path
         .extension()
@@ -35,7 +37,7 @@ pub(crate) fn extract_compat(
         "ps1" | "psm1" => extract_powershell(path, text, source_file).map(Some),
         "psd1" => extract_powershell_manifest(path, text, source_file).map(Some),
         "groovy" | "gradle" => extract_groovy(path, text, source_file).map(Some),
-        "dm" | "dme" => extract_dm(path, text, source_file).map(Some),
+        "dm" | "dme" => extract_dm(path, text, source_file, allow_path_probes).map(Some),
         "dmm" => extract_dmm(path, text, source_file).map(Some),
         "dmf" => extract_dmf(path, text, source_file).map(Some),
         "sln" => extract_sln(path, text, source_file).map(Some),
@@ -589,21 +591,18 @@ fn extract_kotlin(path: &Path, text: &str, source_file: &str) -> anyhow::Result<
                 }
             }
         }
-        if is_enum {
-            if let Some(scope) = scopes.iter().find(|scope| scope.id == id) {
-                for capture in enum_entries.captures_iter(&text[scope.start + 1..scope.end]) {
-                    let entry_line =
-                        line_of(text, scope.start + 1 + capture.get(0).unwrap().start());
-                    let entry = builder.definition(&capture[1], Some(&id), "enum_case", entry_line);
-                    builder.edge(
-                        &id,
-                        &entry,
-                        "case_of",
-                        None,
-                        entry_line,
-                        Confidence::Extracted,
-                    );
-                }
+        if is_enum && let Some(scope) = scopes.iter().find(|scope| scope.id == id) {
+            for capture in enum_entries.captures_iter(&text[scope.start + 1..scope.end]) {
+                let entry_line = line_of(text, scope.start + 1 + capture.get(0).unwrap().start());
+                let entry = builder.definition(&capture[1], Some(&id), "enum_case", entry_line);
+                builder.edge(
+                    &id,
+                    &entry,
+                    "case_of",
+                    None,
+                    entry_line,
+                    Confidence::Extracted,
+                );
             }
         }
     }
@@ -710,9 +709,12 @@ fn extract_kotlin(path: &Path, text: &str, source_file: &str) -> anyhow::Result<
 
 fn extract_scala(path: &Path, text: &str, source_file: &str) -> anyhow::Result<Extraction> {
     let mut builder = Builder::new(path, source_file);
-    let imports = Regex::new(r"(?m)^\s*import\s+([^\s{]+)")?;
+    let imports = Regex::new(r"(?m)^\s*import\s+([^\s{,]+)")?;
     for capture in imports.captures_iter(text) {
-        let target = builder.external(&capture[1], line_of(text, capture.get(0).unwrap().start()));
+        let Some(module) = static_scala_import_target(&capture[1]) else {
+            continue;
+        };
+        let target = builder.external(module, line_of(text, capture.get(0).unwrap().start()));
         builder.edge(
             &builder.file_id.clone(),
             &target,
@@ -850,19 +852,67 @@ fn extract_scala(path: &Path, text: &str, source_file: &str) -> anyhow::Result<E
     Ok(builder.finish())
 }
 
+fn static_scala_import_target(raw: &str) -> Option<&str> {
+    let raw = raw.trim_end_matches(';');
+    let path = raw
+        .strip_suffix("._")
+        .or_else(|| raw.strip_suffix(".*"))
+        .or_else(|| raw.strip_suffix('.'))
+        .unwrap_or(raw);
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut segment_start = 0usize;
+    let mut quoted = false;
+    for (offset, character) in path.char_indices() {
+        match character {
+            '`' => quoted = !quoted,
+            '.' if !quoted => {
+                if !static_scala_identifier(&path[segment_start..offset]) {
+                    return None;
+                }
+                segment_start = offset + 1;
+            }
+            _ => {}
+        }
+    }
+    (!quoted && static_scala_identifier(&path[segment_start..])).then_some(if raw.ends_with('.') {
+        path
+    } else {
+        raw
+    })
+}
+
+fn static_scala_identifier(value: &str) -> bool {
+    if let Some(inner) = value
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+    {
+        return !inner.is_empty()
+            && !inner
+                .chars()
+                .any(|character| character.is_control() || character == '`');
+    }
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && characters
+            .all(|character| character == '_' || character == '$' || character.is_alphanumeric())
+}
+
 fn php_qualified_name(raw: &str, namespace: &str, aliases: &HashMap<String, String>) -> String {
     let raw = raw.trim();
     let absolute = raw.starts_with('\\');
     let raw = raw.trim_start_matches('\\');
     let (head, tail) = raw.split_once('\\').unwrap_or((raw, ""));
-    if !absolute {
-        if let Some(imported) = aliases.get(&head.to_ascii_lowercase()) {
-            return if tail.is_empty() {
-                imported.clone()
-            } else {
-                format!("{imported}\\{tail}")
-            };
-        }
+    if !absolute && let Some(imported) = aliases.get(&head.to_ascii_lowercase()) {
+        return if tail.is_empty() {
+            imported.clone()
+        } else {
+            format!("{imported}\\{tail}")
+        };
     }
     if absolute || namespace.is_empty() {
         raw.to_owned()
@@ -1240,24 +1290,24 @@ fn extract_swift(path: &Path, text: &str, source_file: &str) -> anyhow::Result<E
                 builder.edge(id, &target, relation, None, *line, Confidence::Extracted);
             }
         }
-        if kind == "enum" {
-            if let Some(scope) = scopes.iter().find(|scope| scope.id == *id) {
-                for capture in enum_cases.captures_iter(&text[scope.start + 1..scope.end]) {
-                    let offset = scope.start + 1 + capture.get(0).unwrap().start();
-                    let case_line = line_of(text, offset);
-                    let case_id = builder.definition(&capture[1], Some(id), "enum_case", case_line);
-                    builder.edge(
-                        id,
-                        &case_id,
-                        "case_of",
-                        None,
-                        case_line,
-                        Confidence::Extracted,
-                    );
-                    if let Some(associated) = capture.get(2) {
-                        for value_type in associated.as_str().split(',') {
-                            builder.reference(id, value_type, "type", case_line, "swift");
-                        }
+        if kind == "enum"
+            && let Some(scope) = scopes.iter().find(|scope| scope.id == *id)
+        {
+            for capture in enum_cases.captures_iter(&text[scope.start + 1..scope.end]) {
+                let offset = scope.start + 1 + capture.get(0).unwrap().start();
+                let case_line = line_of(text, offset);
+                let case_id = builder.definition(&capture[1], Some(id), "enum_case", case_line);
+                builder.edge(
+                    id,
+                    &case_id,
+                    "case_of",
+                    None,
+                    case_line,
+                    Confidence::Extracted,
+                );
+                if let Some(associated) = capture.get(2) {
+                    for value_type in associated.as_str().split(',') {
+                        builder.reference(id, value_type, "type", case_line, "swift");
                     }
                 }
             }
@@ -1334,7 +1384,10 @@ fn extract_elixir(path: &Path, text: &str, source_file: &str) -> anyhow::Result<
     let module_re = Regex::new(r"(?m)^\s*defmodule\s+([A-Za-z_][A-Za-z0-9_.]*)\s+do\b")?;
     let module = module_re.captures(text).map(|capture| {
         let offset = capture.get(0).expect("module match").start();
-        builder.definition(&capture[1], None, "module", line_of(text, offset))
+        (
+            builder.definition(&capture[1], None, "module", line_of(text, offset)),
+            capture[1].to_owned(),
+        )
     });
 
     let imports = Regex::new(r"(?m)^\s*(?:alias|import|require|use)\s+([^\n#]+)")?;
@@ -1350,17 +1403,25 @@ fn extract_elixir(path: &Path, text: &str, source_file: &str) -> anyhow::Result<
             captured.split(',').next().unwrap_or(captured).trim()
         };
         let modules = if let Some((base, members)) = raw.split_once(".{") {
+            let Some(members) = members.strip_suffix('}') else {
+                continue;
+            };
             members
-                .trim_end_matches('}')
                 .split(',')
                 .map(|member| format!("{base}.{}", member.trim()))
                 .collect::<Vec<_>>()
         } else {
             vec![raw.to_owned()]
         };
-        for module_name in modules {
-            if module_name.is_empty() {
+        for mut module_name in modules {
+            if !static_elixir_module(&module_name) {
                 continue;
+            }
+            if let Some(suffix) = module_name.strip_prefix("__MODULE__") {
+                let Some((_, declared_module)) = module.as_ref() else {
+                    continue;
+                };
+                module_name = format!("{declared_module}{suffix}");
             }
             let target = builder.external(&module_name, line);
             builder.edge(
@@ -1380,7 +1441,12 @@ fn extract_elixir(path: &Path, text: &str, source_file: &str) -> anyhow::Result<
     for (index, capture) in matches.iter().enumerate() {
         let matched = capture.get(0).expect("function match");
         let line = line_of(text, matched.start());
-        let id = builder.definition(&capture[1], module.as_deref(), "function", line);
+        let id = builder.definition(
+            &capture[1],
+            module.as_ref().map(|(id, _)| id.as_str()),
+            "function",
+            line,
+        );
         let end = matches
             .get(index + 1)
             .and_then(|next| next.get(0))
@@ -1422,6 +1488,40 @@ fn extract_elixir(path: &Path, text: &str, source_file: &str) -> anyhow::Result<
     Ok(builder.finish())
 }
 
+fn static_elixir_module(value: &str) -> bool {
+    if let Some(atom) = value.strip_prefix(':') {
+        if let Some(inner) = atom
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            return !inner.is_empty()
+                && !inner.contains("#{")
+                && !inner
+                    .chars()
+                    .any(|character| character.is_control() || character == '"');
+        }
+        let mut characters = atom.chars();
+        return characters
+            .next()
+            .is_some_and(|first| first == '_' || first.is_alphabetic())
+            && characters.all(|character| {
+                character == '_'
+                    || character == '@'
+                    || matches!(character, '!' | '?')
+                    || character.is_alphanumeric()
+            });
+    }
+
+    value.split('.').enumerate().all(|(index, segment)| {
+        if segment == "__MODULE__" {
+            return index == 0;
+        }
+        let mut characters = segment.chars();
+        characters.next().is_some_and(char::is_uppercase)
+            && characters.all(|character| character == '_' || character.is_alphanumeric())
+    })
+}
+
 #[derive(Clone)]
 struct ObjcMethod {
     id: String,
@@ -1431,8 +1531,26 @@ struct ObjcMethod {
 }
 
 fn extract_objc(path: &Path, text: &str, source_file: &str) -> anyhow::Result<Extraction> {
+    extract_objc_impl(path, text, source_file, true)
+}
+
+/// Extract Objective-C from I/O-owned bytes without probing quoted imports.
+pub(crate) fn extract_objc_bytes(
+    path: &Path,
+    text: &str,
+    source_file: &str,
+) -> anyhow::Result<Extraction> {
+    extract_objc_impl(path, text, source_file, false)
+}
+
+fn extract_objc_impl(
+    path: &Path,
+    text: &str,
+    source_file: &str,
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
     let mut builder = Builder::new(path, source_file);
-    emit_objc_imports(&mut builder, path, text, source_file)?;
+    emit_objc_imports(&mut builder, path, text, source_file, allow_path_probes)?;
 
     let declarations = Regex::new(
         r"(?m)^\s*@(interface|implementation|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*([A-Za-z_][A-Za-z0-9_]*))?(?:\s*<([^>]+)>)?",
@@ -1599,40 +1717,55 @@ fn emit_objc_imports(
     path: &Path,
     text: &str,
     source_file: &str,
+    allow_path_probes: bool,
 ) -> anyhow::Result<()> {
     let imports = Regex::new(r#"(?m)^\s*#import\s*([<\"])([^>\"]+)[>\"]"#)?;
     for capture in imports.captures_iter(text) {
         let matched = capture.get(0).expect("Objective-C import");
         let line = line_of(text, matched.start());
+        let mut logical_target = None;
         let target = if &capture[1] == "\"" {
             let raw = &capture[2];
-            let resolved = path.parent().unwrap_or_else(|| Path::new("")).join(raw);
-            if resolved.is_file() {
-                let logical = normalize_logical_path(
-                    &Path::new(source_file)
-                        .parent()
-                        .unwrap_or_else(|| Path::new(""))
-                        .join(raw),
-                );
+            let logical = normalize_logical_path(
+                &Path::new(source_file)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(raw),
+            );
+            if allow_path_probes {
+                let resolved = path.parent().unwrap_or_else(|| Path::new("")).join(raw);
+                if resolved.is_file() {
+                    let stem = Path::new(&logical)
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let base = make_id(&[&stem]);
+                    let has_pair = ["m", "mm"]
+                        .iter()
+                        .any(|extension| resolved.with_extension(extension).is_file());
+                    if has_pair {
+                        make_id(&[&logical, &base])
+                    } else {
+                        base
+                    }
+                } else {
+                    let module = Path::new(raw)
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or(raw);
+                    builder.module(module, line)
+                }
+            } else {
+                let Some(logical) = logical_project_import(source_file, raw) else {
+                    continue;
+                };
                 let stem = Path::new(&logical)
                     .with_extension("")
                     .to_string_lossy()
                     .replace('\\', "/");
                 let base = make_id(&[&stem]);
-                let has_pair = ["m", "mm"]
-                    .iter()
-                    .any(|extension| resolved.with_extension(extension).is_file());
-                if has_pair {
-                    make_id(&[&logical, &base])
-                } else {
-                    base
-                }
-            } else {
-                let module = Path::new(raw)
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or(raw);
-                builder.module(module, line)
+                logical_target = Some(logical);
+                base
             }
         } else {
             let module = Path::new(&capture[2])
@@ -1641,6 +1774,7 @@ fn emit_objc_imports(
                 .unwrap_or(&capture[2]);
             builder.module(module, line)
         };
+        let edge_count = builder.edges.len();
         builder.edge(
             &builder.file_id.clone(),
             &target,
@@ -1649,6 +1783,12 @@ fn emit_objc_imports(
             line,
             Confidence::Extracted,
         );
+        if builder.edges.len() > edge_count
+            && let Some(logical) = logical_target
+            && let Some(edge) = builder.edges.last_mut()
+        {
+            edge.extra.insert("target_file".into(), logical.into());
+        }
     }
     let module_imports = Regex::new(r"(?m)^\s*@import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;")?;
     for capture in module_imports.captures_iter(text) {
@@ -1838,10 +1978,10 @@ fn objc_owner_method(
         if !seen.insert(candidate.clone()) {
             continue;
         }
-        if !(skip_owner && first) {
-            if let Some(method) = owner_methods.get(&(candidate.clone(), name.to_owned())) {
-                return Some(method.clone());
-            }
+        if !(skip_owner && first)
+            && let Some(method) = owner_methods.get(&(candidate.clone(), name.to_owned()))
+        {
+            return Some(method.clone());
         }
         first = false;
         pending.extend(
@@ -1877,6 +2017,54 @@ fn normalize_logical_path(path: &Path) -> String {
     } else {
         joined
     }
+}
+
+fn logical_project_import(source_file: &str, raw: &str) -> Option<String> {
+    if looks_absolute_path(raw) || windows_drive_prefix(raw) {
+        return None;
+    }
+    let portable_raw = raw.replace('\\', "/");
+    let raw = Path::new(&portable_raw);
+    let source = Path::new(source_file);
+    if raw.is_absolute() || source.is_absolute() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for component in source
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .components()
+    {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_owned()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    for component in raw.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => parts.push(part.to_owned()),
+            std::path::Component::ParentDir => {
+                parts.pop()?;
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| {
+        parts
+            .iter()
+            .map(|part| part.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    })
+}
+
+fn windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn looks_absolute_path(path: &str) -> bool {
@@ -1969,24 +2157,21 @@ fn extract_julia(path: &Path, text: &str, source_file: &str) -> anyhow::Result<E
     for capture in imports.captures_iter(text) {
         let line = line_of(text, capture.get(0).expect("Julia import").start());
         let raw = capture[1].trim();
-        let module_name = raw
-            .split(':')
-            .next()
-            .unwrap_or(raw)
-            .trim()
-            .trim_start_matches('.');
-        if module_name.is_empty() {
-            continue;
+        let module_clause = raw.split(':').next().unwrap_or(raw);
+        for candidate in module_clause.split(',') {
+            let Some(module_name) = static_julia_module(candidate) else {
+                continue;
+            };
+            let target = builder.external(module_name, line);
+            builder.edge(
+                &builder.file_id.clone(),
+                &target,
+                "imports",
+                Some("import"),
+                line,
+                Confidence::Extracted,
+            );
         }
-        let target = builder.external(module_name, line);
-        builder.edge(
-            &builder.file_id.clone(),
-            &target,
-            "imports",
-            Some("import"),
-            line,
-            Confidence::Extracted,
-        );
     }
 
     let abstract_types = Regex::new(
@@ -2088,6 +2273,27 @@ fn extract_julia(path: &Path, text: &str, source_file: &str) -> anyhow::Result<E
         false,
     )?;
     Ok(builder.finish())
+}
+
+fn static_julia_module(value: &str) -> Option<&str> {
+    let value = value.trim().trim_start_matches('.');
+    if value.is_empty() {
+        return None;
+    }
+    value
+        .split('.')
+        .all(|segment| {
+            let mut characters = segment.chars();
+            characters
+                .next()
+                .is_some_and(|first| first == '_' || first.is_alphabetic())
+                && characters.all(|character| {
+                    character == '_'
+                        || matches!(character, '!' | '?')
+                        || character.is_alphanumeric()
+                })
+        })
+        .then_some(value)
 }
 
 #[derive(Clone)]
@@ -2361,42 +2567,206 @@ fn emit_builtin_reference(
     );
 }
 
+#[derive(Clone, Copy)]
+enum PowershellImportMode {
+    Namespace,
+    PathOrBare,
+    SourceRelative,
+}
+
+enum PowershellImportTarget<'a> {
+    External(&'a str),
+    Project(String),
+}
+
 fn emit_powershell_imports(builder: &mut Builder<'_>, text: &str) -> anyhow::Result<()> {
-    let using = Regex::new(r"(?im)^\s*using\s+(?:namespace|module|assembly)\s+([^\s#]+)")?;
-    let import_module =
-        Regex::new(r##"(?im)^\s*Import-Module\s+(?:(?:-Name|-N)\s+)?['"]?([^\s'"#]+)"##)?;
-    let dot_source = Regex::new(r##"(?im)^\s*\.\s+['"]?([^\s'"#]+)"##)?;
-    for capture in using
-        .captures_iter(text)
-        .chain(import_module.captures_iter(text))
-        .chain(dot_source.captures_iter(text))
-    {
-        let matched = capture.get(0).expect("PowerShell import");
-        let raw = capture[1].replace('\\', "/");
-        let name = raw
-            .trim_start_matches(['.', '/'])
-            .rsplit('/')
-            .next()
-            .unwrap_or(&raw);
-        let name = Path::new(name)
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or(name);
-        if name.is_empty() {
-            continue;
+    let patterns = [
+        (
+            Regex::new(r"(?im)^\s*using\s+namespace\s+([^\r\n#]+)")?,
+            false,
+            PowershellImportMode::Namespace,
+        ),
+        (
+            Regex::new(r"(?im)^\s*using\s+(?:module|assembly)\s+([^\r\n#]+)")?,
+            false,
+            PowershellImportMode::PathOrBare,
+        ),
+        (
+            Regex::new(r"(?im)^\s*Import-Module\s+(?:(?:-Name|-N)\s+)?([^\r\n#]+)")?,
+            true,
+            PowershellImportMode::PathOrBare,
+        ),
+        (
+            Regex::new(r"(?im)^\s*\.\s+([^\r\n#]+)")?,
+            true,
+            PowershellImportMode::SourceRelative,
+        ),
+    ];
+    for (pattern, allow_arguments, mode) in patterns {
+        for capture in pattern.captures_iter(text) {
+            let matched = capture.get(0).expect("PowerShell import");
+            let Some(raw) = static_powershell_import_target(&capture[1], allow_arguments) else {
+                continue;
+            };
+            let line = line_of(text, matched.start());
+            emit_powershell_import(builder, raw, line, mode);
         }
-        let line = line_of(text, matched.start());
-        let target = builder.external(name, line);
-        builder.edge(
-            &builder.file_id.clone(),
-            &target,
-            "imports_from",
-            Some("import"),
-            line,
-            Confidence::Extracted,
-        );
     }
     Ok(())
+}
+
+fn emit_powershell_import(
+    builder: &mut Builder<'_>,
+    raw: &str,
+    line: usize,
+    mode: PowershellImportMode,
+) {
+    let Some(classified) = classify_powershell_import(builder.source_file, raw, mode) else {
+        return;
+    };
+    let (target, target_file) = match classified {
+        PowershellImportTarget::External(raw) => {
+            let Some(name) = powershell_external_import_name(raw) else {
+                return;
+            };
+            (builder.external(&name, line), None)
+        }
+        PowershellImportTarget::Project(logical) => {
+            let stem = Path::new(&logical)
+                .with_extension("")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let target = make_id(&[&stem]);
+            let label = Path::new(&logical)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&logical);
+            let before = builder.nodes.len();
+            builder.insert_node(target.clone(), label, "reference", line, "");
+            if builder.nodes.len() > before {
+                builder
+                    .nodes
+                    .last_mut()
+                    .expect("new PowerShell project reference")
+                    .extra
+                    .insert("origin_file".into(), builder.source_file.into());
+            }
+            (target, Some(logical))
+        }
+    };
+    let edge_count = builder.edges.len();
+    builder.edge(
+        &builder.file_id.clone(),
+        &target,
+        "imports_from",
+        Some("import"),
+        line,
+        Confidence::Extracted,
+    );
+    if builder.edges.len() > edge_count
+        && let Some(target_file) = target_file
+        && let Some(edge) = builder.edges.last_mut()
+    {
+        edge.extra.insert("target_file".into(), target_file.into());
+    }
+}
+
+fn classify_powershell_import<'a>(
+    source_file: &str,
+    raw: &'a str,
+    mode: PowershellImportMode,
+) -> Option<PowershellImportTarget<'a>> {
+    let is_path = matches!(mode, PowershellImportMode::SourceRelative)
+        || (matches!(mode, PowershellImportMode::PathOrBare) && powershell_path_bearing(raw));
+    if !is_path {
+        return Some(PowershellImportTarget::External(raw));
+    }
+    let leaf = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    if raw.starts_with('~') || matches!(leaf, "" | "." | "..") {
+        return None;
+    }
+    // The legacy single-file entrypoint supplies an absolute source spelling.
+    // Scope that compatibility case to the file's basename: sibling targets
+    // retain their historical portable IDs, while parent traversal still
+    // fails closed because no admitted project root is available.
+    let logical_source = normalize_project_path(source_file)
+        .filter(|source| !source.is_empty())
+        .or_else(|| {
+            let basename = source_file.rsplit(['/', '\\']).next()?;
+            normalize_project_path(basename).filter(|source| !source.is_empty())
+        })?;
+    match source_relative_project_path(&logical_source, raw)? {
+        ProjectPath::Contained(logical) => Some(PowershellImportTarget::Project(logical)),
+        ProjectPath::EscapesRoot(_) => None,
+    }
+}
+
+fn powershell_path_bearing(raw: &str) -> bool {
+    raw.chars()
+        .next()
+        .is_some_and(|first| matches!(first, '.' | '/' | '\\' | '~'))
+        || raw.contains(['/', '\\', ':'])
+        || raw.rsplit_once('.').is_some_and(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "ps1" | "psm1" | "psd1" | "dll" | "exe" | "cdxml"
+            )
+        })
+}
+
+fn powershell_external_import_name(raw: &str) -> Option<String> {
+    (!raw.is_empty()).then(|| raw.to_owned())
+}
+
+fn static_powershell_import_target(raw: &str, allow_arguments: bool) -> Option<&str> {
+    let raw = raw.trim();
+    let (target, remainder) = match raw.as_bytes().first().copied() {
+        Some(quote @ (b'\'' | b'"')) => {
+            let body = &raw[1..];
+            let end = body.find(char::from(quote))?;
+            (&body[..end], body[end + 1..].trim())
+        }
+        Some(_) => {
+            let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
+            (&raw[..end], raw[end..].trim())
+        }
+        None => return None,
+    };
+    if target.is_empty()
+        || target.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '$' | '`'
+                        | '\''
+                        | '"'
+                        | '('
+                        | ')'
+                        | '{'
+                        | '}'
+                        | '['
+                        | ']'
+                        | ';'
+                        | '|'
+                        | '&'
+                        | ','
+                        | '+'
+                        | '='
+                        | '*'
+                        | '?'
+                        | '<'
+                        | '>'
+                )
+        })
+        || (!allow_arguments && !remainder.is_empty())
+        || remainder
+            .chars()
+            .next()
+            .is_some_and(|character| matches!(character, '+' | ',' | '|' | '&' | ';'))
+    {
+        return None;
+    }
+    Some(target)
 }
 
 fn emit_powershell_calls(
@@ -2494,26 +2864,43 @@ fn extract_powershell_manifest(
         }
     }
     for (raw, line) in imports {
-        let normalized = raw.replace('\\', "/");
-        let name = normalized.rsplit('/').next().unwrap_or(&normalized);
-        let name = Path::new(name)
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or(name);
-        if name.is_empty() {
+        let Some(raw) = static_powershell_manifest_target(&raw) else {
             continue;
-        }
-        let target = builder.external(name, line);
-        builder.edge(
-            &builder.file_id.clone(),
-            &target,
-            "imports_from",
-            Some("import"),
-            line,
-            Confidence::Extracted,
-        );
+        };
+        emit_powershell_import(&mut builder, raw, line, PowershellImportMode::PathOrBare);
     }
     Ok(builder.finish())
+}
+
+fn static_powershell_manifest_target(raw: &str) -> Option<&str> {
+    let raw = raw.trim();
+    (!raw.is_empty()
+        && !raw.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '$' | '`'
+                        | '\''
+                        | '"'
+                        | '('
+                        | ')'
+                        | '{'
+                        | '}'
+                        | '['
+                        | ']'
+                        | ';'
+                        | '|'
+                        | '&'
+                        | ','
+                        | '+'
+                        | '='
+                        | '*'
+                        | '?'
+                        | '<'
+                        | '>'
+                )
+        }))
+    .then_some(raw)
 }
 
 #[derive(Clone)]
@@ -2562,7 +2949,107 @@ fn add_dm_proc(
     });
 }
 
-fn extract_dm(path: &Path, text: &str, source_file: &str) -> anyhow::Result<Extraction> {
+fn dm_logical_source(path: &Path, source_file: &str, allow_path_probes: bool) -> Option<String> {
+    normalize_project_path(source_file)
+        .filter(|source| !source.is_empty())
+        .or_else(|| {
+            allow_path_probes
+                .then(|| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(normalize_project_path)
+                        .filter(|source| !source.is_empty())
+                })
+                .flatten()
+        })
+}
+
+fn dm_include_target(logical_source: &str, reference: &str) -> Option<String> {
+    let leaf = reference.rsplit(['/', '\\']).next().unwrap_or(reference);
+    if matches!(leaf, "" | "." | "..") {
+        return None;
+    }
+    match source_relative_project_path(logical_source, reference)? {
+        ProjectPath::Contained(logical) => Some(logical),
+        ProjectPath::EscapesRoot(_) => None,
+    }
+}
+
+fn dm_physical_path_matches_source(path: &Path, logical_source: &str) -> bool {
+    let mut physical = Some(path);
+    for logical in logical_source.rsplit('/') {
+        let Some(current) = physical else {
+            return false;
+        };
+        let Some(name) = current.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if name != logical {
+            return false;
+        }
+        physical = current.parent();
+    }
+    true
+}
+
+/// The byte entrypoint never calls this helper. The legacy path entrypoint may
+/// retain its historical eager include resolution, but only after the logical
+/// target has been admitted and the physical target is proven to be a regular
+/// file beneath the corresponding physical root.
+fn dm_legacy_include_source(
+    path: &Path,
+    logical_source: &str,
+    reference: &str,
+    logical_target: &str,
+) -> Option<String> {
+    let (root, candidate) = if dm_physical_path_matches_source(path, logical_source) {
+        let mut root = path.to_path_buf();
+        for _ in logical_source.split('/') {
+            if !root.pop() {
+                return None;
+            }
+        }
+        let candidate = root.join(logical_target);
+        (root, candidate)
+    } else {
+        // Some legacy callers pair a project-relative identity with a physical
+        // single-file path whose directory suffix does not match it. Preserve
+        // safe sibling/subdirectory lookup, but never infer a root for `..`.
+        if reference.split(['/', '\\']).any(|part| part == "..") {
+            return None;
+        }
+        let root = path.parent()?;
+        let mut candidate = root.to_path_buf();
+        for part in reference.split(['/', '\\']) {
+            if part != "." {
+                candidate.push(part);
+            }
+        }
+        (root.to_path_buf(), candidate)
+    };
+
+    let root = if root.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        root
+    };
+    let Ok(root) = fs::canonicalize(root) else {
+        return None;
+    };
+    let physical_source = candidate.to_string_lossy().replace('\\', "/");
+    let Ok(canonical_candidate) = fs::canonicalize(candidate) else {
+        return None;
+    };
+    (canonical_candidate.starts_with(&root) && canonical_candidate.is_file())
+        .then_some(physical_source)
+}
+
+fn extract_dm(
+    path: &Path,
+    text: &str,
+    source_file: &str,
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
     let mut builder = Builder::new(path, source_file);
     let include = Regex::new(r#"^#include\s+[\"']([^\"']+)[\"']"#)?;
     let path_declaration = Regex::new(r"^(/[A-Za-z_][A-Za-z0-9_/]*)(?:\s*\([^)]*\))?\s*$")?;
@@ -2573,6 +3060,7 @@ fn extract_dm(path: &Path, text: &str, source_file: &str) -> anyhow::Result<Extr
     let mut declaration_offsets = Vec::new();
     let mut current_owner: Option<(String, String)> = None;
     let mut offset = 0usize;
+    let logical_source = dm_logical_source(path, source_file, allow_path_probes);
 
     for (line_index, raw_line) in text.split_inclusive('\n').enumerate() {
         let line_number = line_index + 1;
@@ -2580,43 +3068,58 @@ fn extract_dm(path: &Path, text: &str, source_file: &str) -> anyhow::Result<Extr
         let trimmed = line.trim();
         let body_start = offset + raw_line.len();
         if let Some(capture) = include.captures(trimmed) {
-            let raw = capture[1].replace('\\', "/");
-            let normalized = raw.strip_prefix("./").unwrap_or(&raw);
-            let resolved = path
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join(normalized);
-            let source = builder.file_id.clone();
-            let (target, relation, external) = if resolved.exists() {
-                let resolved_text = resolved.to_string_lossy().replace('\\', "/");
-                let target = make_id(&[&resolved_text]);
-                let label = resolved
+            if let Some(logical_source) = logical_source.as_deref()
+                && let Some(logical_target) = dm_include_target(logical_source, &capture[1])
+            {
+                let stem = Path::new(&logical_target)
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let target = make_id(&[&stem]);
+                let label = Path::new(&logical_target)
                     .file_name()
                     .and_then(|value| value.to_str())
-                    .unwrap_or(normalized);
-                builder.insert_node(target.clone(), label, "file", line_number, &resolved_text);
-                (target, "imports_from", false)
-            } else {
-                let target = make_id(&[normalized]);
-                builder.insert_node(target.clone(), normalized, "reference", line_number, "");
-                (target, "imports", true)
-            };
-            let prior_edges = builder.edges.len();
-            builder.edge(
-                &source,
-                &target,
-                relation,
-                Some("import"),
-                line_number,
-                Confidence::Extracted,
-            );
-            if external && builder.edges.len() > prior_edges {
-                builder
-                    .edges
-                    .last_mut()
-                    .expect("new DM include edge")
-                    .extra
-                    .insert("external".into(), true.into());
+                    .unwrap_or(&logical_target);
+                let resolved_source = if allow_path_probes {
+                    dm_legacy_include_source(path, logical_source, &capture[1], &logical_target)
+                } else {
+                    None
+                };
+                let resolved = resolved_source.is_some();
+                let prior_nodes = builder.nodes.len();
+                builder.insert_node(
+                    target.clone(),
+                    label,
+                    if resolved { "file" } else { "reference" },
+                    line_number,
+                    resolved_source.as_deref().unwrap_or(&logical_target),
+                );
+                if builder.nodes.len() > prior_nodes {
+                    let node = builder.nodes.last_mut().expect("new DM include node");
+                    node.extra.insert(
+                        crate::project_path::EXACT_PROJECT_RELATIVE_PLACEHOLDER.into(),
+                        true.into(),
+                    );
+                    node.extra
+                        .insert("target_file".into(), logical_target.clone().into());
+                }
+                let prior_edges = builder.edges.len();
+                builder.edge(
+                    &builder.file_id.clone(),
+                    &target,
+                    if resolved { "imports_from" } else { "imports" },
+                    Some("import"),
+                    line_number,
+                    Confidence::Extracted,
+                );
+                if builder.edges.len() > prior_edges {
+                    let edge = builder.edges.last_mut().expect("new DM include edge");
+                    edge.extra
+                        .insert("target_file".into(), logical_target.into());
+                    if !resolved {
+                        edge.extra.insert("external".into(), true.into());
+                    }
+                }
             }
             offset += raw_line.len();
             continue;
@@ -2683,19 +3186,19 @@ fn extract_dm(path: &Path, text: &str, source_file: &str) -> anyhow::Result<Extr
                 .fold(0usize, |depth, character| {
                     depth + if character == '\t' { 4 } else { 1 }
                 });
-            if indentation <= 4 {
-                if let Some(capture) = nested_proc.captures(trimmed) {
-                    declaration_offsets.push(offset);
-                    add_dm_proc(
-                        &mut builder,
-                        &mut procs,
-                        &mut proc_ids,
-                        &capture[1],
-                        Some((&owner_path, &owner_id)),
-                        line_number,
-                        body_start,
-                    );
-                }
+            if indentation <= 4
+                && let Some(capture) = nested_proc.captures(trimmed)
+            {
+                declaration_offsets.push(offset);
+                add_dm_proc(
+                    &mut builder,
+                    &mut procs,
+                    &mut proc_ids,
+                    &capture[1],
+                    Some((&owner_path, &owner_id)),
+                    line_number,
+                    body_start,
+                );
             }
         }
         offset += raw_line.len();
@@ -2779,6 +3282,14 @@ fn extract_dm(path: &Path, text: &str, source_file: &str) -> anyhow::Result<Extr
 
 pub(crate) fn extract_dmi(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let bytes = fs::read(path)?;
+    extract_dmi_bytes(path, source_file, &bytes)
+}
+
+pub(crate) fn extract_dmi_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
     let mut builder = Builder::new(path, source_file);
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok(builder.finish());
@@ -2803,11 +3314,11 @@ pub(crate) fn extract_dmi(path: &Path, source_file: &str) -> anyhow::Result<Extr
         }
         if &bytes[offset + 4..offset + 8] == b"tEXt" {
             let payload = &bytes[payload_start..payload_end];
-            if let Some(null) = payload.iter().position(|byte| *byte == 0) {
-                if &payload[..null] == b"Description" {
-                    description = Some(String::from_utf8_lossy(&payload[null + 1..]).into_owned());
-                    break;
-                }
+            if let Some(null) = payload.iter().position(|byte| *byte == 0)
+                && &payload[..null] == b"Description"
+            {
+                description = Some(String::from_utf8_lossy(&payload[null + 1..]).into_owned());
+                break;
             }
         }
         offset = chunk_end;
@@ -4245,4 +4756,667 @@ fn capitalize(value: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod byte_tests {
+    use super::*;
+    use std::{collections::BTreeSet, fs};
+    use tempfile::TempDir;
+
+    fn imported_labels(extraction: &Extraction) -> BTreeSet<String> {
+        let labels = extraction
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.label.as_str()))
+            .collect::<HashMap<_, _>>();
+        extraction
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports")
+            .map(|edge| {
+                labels
+                    .get(edge.true_target())
+                    .copied()
+                    .unwrap_or(edge.true_target())
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn dm_import_edges(extraction: &Extraction) -> Vec<&Edge> {
+        extraction
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.extra.get("context").and_then(|value| value.as_str()) == Some("import")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dm_byte_includes_use_contained_source_relative_identity_without_probing() {
+        let fixture = TempDir::new().expect("create DM fixture");
+        let source_path = fixture.path().join("src/nested/main.dm");
+        fs::create_dir_all(source_path.parent().expect("DM source parent"))
+            .expect("create DM source parent");
+        fs::create_dir_all(fixture.path().join("src/shared"))
+            .expect("create intended include parent");
+        fs::write(&source_path, "ignored physical source").expect("write DM source");
+        fs::write(
+            fixture.path().join("src/shared/helpers.dm"),
+            "/proc/Intended()\n",
+        )
+        .expect("write intended include");
+        fs::write(
+            fixture.path().join("src/nested/helpers.dm"),
+            "/proc/Decoy()\n",
+        )
+        .expect("write same-basename decoy");
+
+        let source = "#include \"../shared/helpers.dm\"\n/proc/RunTest()\n\treturn\n";
+        let extraction = extract_dm(&source_path, source, "src/nested/main.dm", false)
+            .expect("extract DM bytes");
+        let missing_physical = extract_dm(
+            Path::new("/graphoxide-byte-only/src/nested/main.dm"),
+            source,
+            "src/nested/main.dm",
+            false,
+        )
+        .expect("extract DM bytes without a physical source");
+        assert_eq!(
+            serde_json::to_value(&extraction).expect("serialize DM extraction"),
+            serde_json::to_value(&missing_physical).expect("serialize pathless DM extraction"),
+        );
+
+        let edge = dm_import_edges(&extraction)
+            .into_iter()
+            .next()
+            .expect("contained DM include edge");
+        let target = make_id(&["src/shared/helpers"]);
+        assert_eq!(edge.relation, "imports");
+        assert_eq!(edge.true_target(), target);
+        assert_eq!(
+            edge.extra
+                .get("target_file")
+                .and_then(|value| value.as_str()),
+            Some("src/shared/helpers.dm"),
+        );
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| { node.id == target && node.source_file == "src/shared/helpers.dm" }));
+        assert_ne!(edge.true_target(), make_id(&["src/nested/helpers"]));
+    }
+
+    #[test]
+    fn dm_include_paths_reject_nonportable_and_root_escaping_spellings() {
+        let source = r#"#include "/absolute.dm"
+#include "\\server\share\unc.dm"
+#include "C:\drive.dm"
+#include "C:drive-relative.dm"
+#include "scheme:value.dm"
+#include "CON.dm"
+#include "dir//repeated.dm"
+#include "dir\\repeated.dm"
+#include "trailing-dot.dm."
+#include "trailing-space.dm "
+#include "../../outside.dm"
+"#;
+        let extraction = extract_dm(Path::new("src/main.dm"), source, "src/main.dm", false)
+            .expect("extract unsafe DM includes");
+        assert!(dm_import_edges(&extraction).is_empty());
+        assert_eq!(
+            extraction.nodes.len(),
+            1,
+            "unsafe includes must create no stubs"
+        );
+    }
+
+    #[test]
+    fn dm_exact_include_identity_does_not_bind_a_same_basename_decoy() {
+        let mut extractions = vec![
+            extract_dm(
+                Path::new("src/nested/main.dm"),
+                "#include \"../shared/helpers.dm\"\n",
+                "src/nested/main.dm",
+                false,
+            )
+            .expect("extract DM importer"),
+            extract_dm(
+                Path::new("vendor/helpers.dm"),
+                "/proc/Decoy()\n\treturn\n",
+                "vendor/helpers.dm",
+                false,
+            )
+            .expect("extract same-basename decoy"),
+        ];
+        crate::resolution::resolve(&mut extractions);
+
+        let edge = dm_import_edges(&extractions[0])
+            .into_iter()
+            .next()
+            .expect("DM include edge after corpus resolution");
+        assert_eq!(edge.true_target(), make_id(&["src/shared/helpers"]));
+        assert_ne!(edge.true_target(), make_id(&["vendor/helpers"]));
+        assert!(extractions[0].nodes.iter().any(|node| {
+            node.id == edge.true_target() && node.source_file == "src/shared/helpers.dm"
+        }));
+    }
+
+    #[test]
+    fn dm_exact_include_prefers_the_real_file_regardless_of_extraction_order() {
+        let mut extractions = vec![
+            extract_dm(
+                Path::new("src/shared/helpers.dm"),
+                "/proc/Intended()\n\treturn\n",
+                "src/shared/helpers.dm",
+                false,
+            )
+            .expect("extract intended DM target first"),
+            extract_dm(
+                Path::new("src/nested/main.dm"),
+                "#include \"../shared/helpers.dm\"\n",
+                "src/nested/main.dm",
+                false,
+            )
+            .expect("extract DM importer second"),
+            extract_dm(
+                Path::new("vendor/helpers.dm"),
+                "/proc/Decoy()\n\treturn\n",
+                "vendor/helpers.dm",
+                false,
+            )
+            .expect("extract same-basename DM decoy"),
+        ];
+        crate::resolution::resolve(&mut extractions);
+
+        let target = make_id(&["src/shared/helpers"]);
+        let edge = extractions
+            .iter()
+            .flat_map(dm_import_edges)
+            .find(|edge| edge.source_file == "src/nested/main.dm")
+            .expect("resolved DM import edge");
+        assert_eq!(edge.true_target(), target);
+        let target_nodes = extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .filter(|node| node.id == target)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_nodes.len(),
+            1,
+            "exact file retained a duplicate stub"
+        );
+        assert_eq!(target_nodes[0].source_file, "src/shared/helpers.dm");
+        assert_eq!(
+            target_nodes[0]
+                .extra
+                .get("type")
+                .and_then(serde_json::Value::as_str),
+            Some("file"),
+        );
+    }
+
+    #[test]
+    fn dm_legacy_path_resolution_is_portable_and_never_crosses_its_root() {
+        let fixture = TempDir::new().expect("create DM legacy fixture");
+        let source_path = fixture.path().join("src/nested/main.dm");
+        let intended = fixture.path().join("src/shared/helpers.dm");
+        let decoy = fixture.path().join("src/nested/helpers.dm");
+        fs::create_dir_all(source_path.parent().expect("DM source parent"))
+            .expect("create source parent");
+        fs::create_dir_all(intended.parent().expect("intended parent"))
+            .expect("create intended parent");
+        fs::write(&source_path, "ignored physical source").expect("write source");
+        fs::write(&intended, "/proc/Intended()\n").expect("write intended include");
+        fs::write(&decoy, "/proc/Decoy()\n").expect("write decoy include");
+
+        let extraction = extract_dm(
+            &source_path,
+            "#include \"../shared/helpers.dm\"\n",
+            "src/nested/main.dm",
+            true,
+        )
+        .expect("extract legacy DM path");
+        let edge = dm_import_edges(&extraction)
+            .into_iter()
+            .next()
+            .expect("resolved legacy DM include");
+        assert_eq!(edge.relation, "imports_from");
+        assert_eq!(edge.true_target(), make_id(&["src/shared/helpers"]));
+        let intended_source = intended.to_string_lossy().replace('\\', "/");
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| { node.id == edge.true_target() && node.source_file == intended_source }));
+        assert_ne!(
+            edge.true_target(),
+            make_id(&[&intended.to_string_lossy().replace('\\', "/")]),
+            "legacy path probing must not put a machine-specific path in the target ID",
+        );
+
+        let outside = fixture.path().join("outside.dm");
+        fs::write(&outside, "/proc/Outside()\n").expect("write physical outside file");
+        let root_source = fixture.path().join("project/main.dm");
+        fs::create_dir_all(root_source.parent().expect("root source parent"))
+            .expect("create root source parent");
+        fs::write(&root_source, "ignored physical source").expect("write root source");
+        let escaping = extract_dm(
+            &root_source,
+            "#include \"../outside.dm\"\n",
+            "main.dm",
+            true,
+        )
+        .expect("extract escaping legacy DM include");
+        assert!(dm_import_edges(&escaping).is_empty());
+        assert_eq!(escaping.nodes.len(), 1);
+    }
+
+    #[test]
+    fn dm_legacy_path_resolution_accepts_a_relative_physical_source() {
+        let current = std::env::current_dir().expect("current test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("graphoxide-relative-dm-")
+            .tempdir_in(&current)
+            .expect("create relative DM fixture");
+        let source = fixture.path().join("src/main.dm");
+        let include = fixture.path().join("src/helpers.dm");
+        fs::create_dir_all(source.parent().expect("relative source parent"))
+            .expect("create relative source parent");
+        fs::write(&source, "ignored physical source").expect("write relative DM source");
+        fs::write(&include, "/proc/Helper()\n").expect("write relative DM include");
+        let relative_source = source
+            .strip_prefix(&current)
+            .expect("fixture beneath current directory");
+        let logical_source = relative_source.to_string_lossy().replace('\\', "/");
+
+        let extraction = extract_dm(
+            relative_source,
+            "#include \"helpers.dm\"\n",
+            &logical_source,
+            true,
+        )
+        .expect("extract relative legacy DM path");
+        let edge = dm_import_edges(&extraction)
+            .into_iter()
+            .next()
+            .expect("relative DM include edge");
+        assert_eq!(edge.relation, "imports_from");
+        assert!(!edge.extra.contains_key("external"));
+    }
+
+    #[test]
+    fn scala_imports_require_static_module_paths() {
+        let extraction = extract_scala(
+            Path::new("Consumer.scala"),
+            r#"import scala.collection.mutable.ListBuffer
+import foo.bar._
+import foo.selectors.{Baz, Qux}
+import foo.`odd-name`
+import adapter()
+import $module.Member
+import unquote(adapter)
+import getAdapter().Plugin
+import provider().Thing
+import foo.${bar}
+import "dynamic.module"
+class Consumer
+"#,
+            "Consumer.scala",
+        )
+        .expect("extract Scala static modules");
+
+        assert_eq!(
+            imported_labels(&extraction),
+            BTreeSet::from([
+                "foo.`odd-name`".into(),
+                "foo.bar._".into(),
+                "foo.selectors".into(),
+                "scala.collection.mutable.ListBuffer".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn elixir_imports_require_static_module_forms() {
+        let extraction = extract_elixir(
+            Path::new("consumer.ex"),
+            r#"defmodule Consumer do
+  use MyApp.Adapter, otp_app: :consumer
+  alias MyApp.Schemas.{Account, Token}
+  alias __MODULE__.Nested
+  import Ecto.Query
+  require :logger
+  use @adapter
+  use unquote(adapter)
+  use adapter
+  use Module.concat([MyApp, Adapter])
+end
+"#,
+            "consumer.ex",
+        )
+        .expect("extract Elixir static modules");
+
+        assert_eq!(
+            imported_labels(&extraction),
+            BTreeSet::from([
+                ":logger".into(),
+                "Consumer.Nested".into(),
+                "Ecto.Query".into(),
+                "MyApp.Adapter".into(),
+                "MyApp.Schemas.Account".into(),
+                "MyApp.Schemas.Token".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn julia_imports_require_static_module_paths() {
+        let extraction = extract_julia(
+            Path::new("consumer.jl"),
+            r#"module Consumer
+using LinearAlgebra
+import Base: show, display
+using Base.Threads
+using ..ParentModule
+using Alpha, Beta.Gamma
+using $mod
+using $(module_name)
+using getmodule()
+using "dynamic.module"
+end
+"#,
+            "consumer.jl",
+        )
+        .expect("extract Julia static modules");
+
+        assert_eq!(
+            imported_labels(&extraction),
+            BTreeSet::from([
+                "Alpha".into(),
+                "Base".into(),
+                "Base.Threads".into(),
+                "Beta.Gamma".into(),
+                "LinearAlgebra".into(),
+                "ParentModule".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn objective_c_bytes_keep_full_symbols_and_logical_imports_without_path_io() {
+        let extraction = extract_objc_bytes(
+            Path::new("/graphoxide-missing-project/native/LegacyWorker.m"),
+            "#import \"LegacyWorker.h\"\n@implementation LegacyWorker\n- (id)process:(id)value { return value; }\n@end\n",
+            "native/LegacyWorker.m",
+        )
+        .expect("extract admitted Objective-C bytes");
+
+        assert!(extraction.nodes.iter().any(|node| {
+            node.id == "native_legacyworker_legacyworker" && node.label == "LegacyWorker"
+        }));
+        assert!(extraction.nodes.iter().any(|node| {
+            node.id == "native_legacyworker_legacyworker_process" && node.label == "-process"
+        }));
+        assert!(extraction.edges.iter().any(|edge| {
+            edge.relation == "imports"
+                && edge.true_target() == "native_legacyworker"
+                && edge
+                    .extra
+                    .get("target_file")
+                    .and_then(|value| value.as_str())
+                    == Some("native/LegacyWorker.h")
+        }));
+    }
+
+    #[test]
+    fn objective_c_byte_imports_reject_absolute_and_parent_escaping_paths() {
+        let extraction = extract_objc_bytes(
+            Path::new("/graphoxide-missing-project/native/Worker.m"),
+            "#import \"../../Escape.h\"\n#import \"/Absolute.h\"\n@implementation Worker\n@end\n",
+            "native/Worker.m",
+        )
+        .expect("extract admitted Objective-C bytes");
+        assert!(
+            extraction
+                .edges
+                .iter()
+                .all(|edge| edge.relation != "imports"),
+            "unsafe quoted imports must not create logical project bindings"
+        );
+    }
+
+    #[test]
+    fn logical_project_import_allows_contained_parent_navigation_only() {
+        assert_eq!(
+            logical_project_import("native/impl/Worker.m", "../Worker.h").as_deref(),
+            Some("native/Worker.h")
+        );
+        assert_eq!(
+            logical_project_import("native/Worker.m", "../../Escape.h"),
+            None
+        );
+        assert_eq!(
+            logical_project_import("native/Worker.m", "/Absolute.h"),
+            None
+        );
+        for absolute in [
+            r"C:\Absolute.h",
+            "C:/Absolute.h",
+            "C:DriveRelative.h",
+            r"\\server\share\Absolute.h",
+            "//server/share/Absolute.h",
+        ] {
+            assert_eq!(logical_project_import("native/Worker.m", absolute), None);
+        }
+        assert_eq!(
+            logical_project_import("native/impl/Worker.m", r"..\Worker.h").as_deref(),
+            Some("native/Worker.h")
+        );
+    }
+
+    #[test]
+    fn powershell_imports_require_static_lexical_targets() {
+        let extraction = extract_powershell(
+            Path::new("/graphoxide-missing-project/consumer.ps1"),
+            r#"using module MyModule
+Import-Module -Name .\module.psm1
+. ./script.ps1
+Import-Module $Module
+Import-Module "$Root/module.psm1"
+Import-Module "${Module}"
+Import-Module "$(Get-ModuleName)"
+Import-Module "$Root$Name/module.psm1"
+. $Root/script.ps1
+. "${Root}/script.ps1"
+using module $Module
+"#,
+            "consumer.ps1",
+        )
+        .expect("extract PowerShell import facts");
+        let targets = extraction
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports_from")
+            .map(|edge| edge.true_target())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(targets, BTreeSet::from(["module", "mymodule", "script"]));
+    }
+
+    #[test]
+    fn powershell_nested_path_import_binds_the_exact_same_family_file() {
+        let fixture = TempDir::new().expect("PowerShell path fixture");
+        let nested_dir = fixture.path().join("nested");
+        fs::create_dir_all(&nested_dir).expect("create nested module directory");
+        let consumer = fixture.path().join("consumer.ps1");
+        let root_module = fixture.path().join("Tools.psm1");
+        let nested_module = nested_dir.join("Tools.psm1");
+        fs::write(&consumer, "Import-Module ./nested/Tools.psm1\n")
+            .expect("write PowerShell consumer");
+        fs::write(&root_module, "function Invoke-RootTool {}\n")
+            .expect("write root PowerShell module");
+        fs::write(&nested_module, "function Invoke-NestedTool {}\n")
+            .expect("write nested PowerShell module");
+
+        let result = crate::extract_files(
+            &[consumer, root_module, nested_module],
+            Some(fixture.path()),
+            true,
+        )
+        .expect("extract PowerShell collision corpus");
+        let file_id = |source_file: &str| {
+            result
+                .extractions
+                .iter()
+                .flat_map(|extraction| &extraction.nodes)
+                .find(|node| {
+                    node.source_file == source_file
+                        && node.extra.get("type").and_then(|value| value.as_str()) == Some("file")
+                })
+                .map(|node| node.id.clone())
+                .unwrap_or_else(|| panic!("missing file node for {source_file}"))
+        };
+        let root_id = file_id("Tools.psm1");
+        let nested_id = file_id("nested/Tools.psm1");
+        let import = result
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .find(|edge| edge.source_file == "consumer.ps1" && edge.relation == "imports_from")
+            .expect("nested PowerShell path import");
+
+        assert_eq!(import.true_target(), nested_id);
+        assert_ne!(import.true_target(), root_id);
+    }
+
+    #[test]
+    fn powershell_project_paths_omit_unsafe_forms_in_scripts_and_manifests() {
+        let script = extract_powershell(
+            Path::new("/graphoxide-missing-project/scripts/consumer.ps1"),
+            r#"using namespace System.IO
+using module MyModule
+Import-Module Pester.Core
+using module ../modules/Using.psm1
+using assembly '../lib/Support.dll'
+Import-Module -Name .\local\Import.psm1
+. ../shared/Setup.ps1
+using module /outside/Escape.psm1
+using assembly 'C:\outside\Escape.dll'
+Import-Module -Name '\\server\share\Escape.psm1'
+Import-Module C:relative\Escape.psm1
+Import-Module ~/Escape.psm1
+Import-Module .
+Import-Module .\directory\
+using module ../modules/
+. ../../Escape.ps1
+. \rooted\Escape.ps1
+. .
+. ./shared/
+"#,
+            "scripts/consumer.ps1",
+        )
+        .expect("extract safe and unsafe PowerShell script imports");
+        let script_targets = script
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports_from")
+            .map(|edge| edge.true_target().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            script_targets,
+            BTreeSet::from([
+                "lib_support".into(),
+                "modules_using".into(),
+                "mymodule".into(),
+                "pester_core".into(),
+                "scripts_local_import".into(),
+                "shared_setup".into(),
+                "system_io".into(),
+            ])
+        );
+        let external_labels = script
+            .nodes
+            .iter()
+            .filter(|node| node.source_file.is_empty())
+            .map(|node| node.label.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(external_labels.contains("System.IO"));
+        assert!(external_labels.contains("MyModule"));
+        assert!(external_labels.contains("Pester.Core"));
+        let script_target_files = script
+            .edges
+            .iter()
+            .filter_map(|edge| edge.extra.get("target_file")?.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            script_target_files,
+            BTreeSet::from([
+                "lib/Support.dll",
+                "modules/Using.psm1",
+                "scripts/local/Import.psm1",
+                "shared/Setup.ps1",
+            ])
+        );
+
+        let manifest = extract_powershell_manifest(
+            Path::new("/graphoxide-missing-project/manifests/Module.psd1"),
+            r#"@{
+    RootModule = '../modules/Root.psm1'
+    NestedModules = @(
+        '../nested/Nested.psm1',
+        '../../Escape.psm1',
+        '/outside/Escape.psm1',
+        'C:\outside\Escape.psm1',
+        '.',
+        '../nested/'
+    )
+    RequiredModules = @(
+        'PSReadLine',
+        '\\server\share\Escape.psm1',
+        'C:relative\Escape.psm1',
+        '../'
+    )
+}
+"#,
+            "manifests/Module.psd1",
+        )
+        .expect("extract safe and unsafe PowerShell manifest imports");
+        let manifest_targets = manifest
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports_from")
+            .map(|edge| edge.true_target().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            manifest_targets,
+            BTreeSet::from([
+                "modules_root".into(),
+                "nested_nested".into(),
+                "psreadline".into(),
+            ])
+        );
+
+        let unsafe_root = extract_powershell_manifest(
+            Path::new("/graphoxide-missing-project/manifests/Unsafe.psd1"),
+            "@{\n    RootModule = '/outside/Escape.psm1'\n}\n",
+            "manifests/Unsafe.psd1",
+        )
+        .expect("extract unsafe PowerShell RootModule");
+        assert!(unsafe_root
+            .edges
+            .iter()
+            .all(|edge| edge.relation != "imports_from"));
+
+        let degenerate_root = extract_powershell_manifest(
+            Path::new("/graphoxide-missing-project/manifests/Degenerate.psd1"),
+            "@{\n    RootModule = '.'\n}\n",
+            "manifests/Degenerate.psd1",
+        )
+        .expect("extract degenerate PowerShell RootModule");
+        assert!(degenerate_root
+            .edges
+            .iter()
+            .all(|edge| edge.relation != "imports_from"));
+    }
 }

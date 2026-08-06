@@ -127,7 +127,10 @@ fn test_status_not_installed() {
 fn test_no_git_repo_raises() {
     let temp = TempDir::new().unwrap();
     let error = install(temp.path(), Path::new(EXE)).unwrap_err();
-    assert!(error.to_string().contains("No git repository"));
+    assert!(
+        error.to_string().contains("No git repository"),
+        "unexpected install error: {error:#}"
+    );
 }
 
 #[test]

@@ -10,6 +10,7 @@ use graphoxide_core::{Edge, Extraction, KnowledgeGraph, Node};
 use graphoxide_extract::detect::{
     self, DetectOptions, DetectResult, FileType, ManifestKind, SaveManifestOptions,
 };
+pub use graphoxide_extract::format_registry::WATCHED_EXTENSIONS;
 use graphoxide_graph::{origin_is_structural, BuildOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,128 +35,8 @@ pub const BUILD_CONFIG: &str = ".graphoxide_build.json";
 pub const COMPAT_BUILD_CONFIG: &str = ".graphify_build.json";
 pub const PENDING_DRAIN_MAX_PASSES: usize = 20;
 
-/// The upstream watcher intentionally excludes audio/video even though the
-/// semantic scanner can ingest them.
-pub const WATCHED_EXTENSIONS: &[&str] = &[
-    ".py",
-    ".pyi",
-    ".ts",
-    ".tsx",
-    ".mts",
-    ".cts",
-    ".js",
-    ".jsx",
-    ".mjs",
-    ".cjs",
-    ".ejs",
-    ".ets",
-    ".go",
-    ".rs",
-    ".java",
-    ".groovy",
-    ".gradle",
-    ".cpp",
-    ".cc",
-    ".cxx",
-    ".c",
-    ".h",
-    ".hpp",
-    ".hh",
-    ".cu",
-    ".cuh",
-    ".metal",
-    ".rb",
-    ".rake",
-    ".swift",
-    ".kt",
-    ".kts",
-    ".cs",
-    ".scala",
-    ".php",
-    ".lua",
-    ".luau",
-    ".toc",
-    ".zig",
-    ".ps1",
-    ".psm1",
-    ".psd1",
-    ".ex",
-    ".exs",
-    ".m",
-    ".mm",
-    ".jl",
-    ".vue",
-    ".svelte",
-    ".astro",
-    ".dart",
-    ".v",
-    ".sv",
-    ".svh",
-    ".sql",
-    ".r",
-    ".f",
-    ".f90",
-    ".f95",
-    ".f03",
-    ".f08",
-    ".pas",
-    ".pp",
-    ".dpr",
-    ".dpk",
-    ".lpr",
-    ".inc",
-    ".dfm",
-    ".lfm",
-    ".lpk",
-    ".sh",
-    ".bash",
-    ".json",
-    ".tf",
-    ".tfvars",
-    ".hcl",
-    ".dm",
-    ".dme",
-    ".dmi",
-    ".dmm",
-    ".dmf",
-    ".sln",
-    ".slnx",
-    ".csproj",
-    ".fsproj",
-    ".vbproj",
-    ".xaml",
-    ".razor",
-    ".cshtml",
-    ".cls",
-    ".trigger",
-    ".md",
-    ".markdown",
-    ".mdx",
-    ".qmd",
-    ".skill",
-    ".txt",
-    ".rst",
-    ".html",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".xml",
-    ".pdf",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".webp",
-    ".svg",
-];
-
 pub fn is_watched_extension(extension: &str) -> bool {
-    let normalized = if extension.starts_with('.') {
-        extension.to_ascii_lowercase()
-    } else {
-        format!(".{}", extension.to_ascii_lowercase())
-    };
-    WATCHED_EXTENSIONS.contains(&normalized.as_str())
+    graphoxide_extract::format_registry::format_registry().is_watched_extension(extension)
 }
 
 pub fn notify_only(root: &Path) -> anyhow::Result<PathBuf> {
@@ -1150,6 +1031,34 @@ pub struct RebuildResult {
     pub timings: RebuildTimings,
 }
 
+/// One pass admitted by the durable watch rebuild coordinator.
+///
+/// The coordinator owns locking and the pending-change journal. Callers own
+/// the actual extraction implementation, which lets the CLI keep the retired
+/// path-based executor behind an explicit compatibility switch while routing
+/// the default path through the isolated I/O/CPU runtime.
+#[derive(Debug, Clone)]
+pub struct CoordinatedRebuildRequest {
+    /// Canonical root whose files are being rebuilt.
+    pub watch_root: PathBuf,
+    /// Project root used for stable source identities.
+    pub project_root: PathBuf,
+    /// Managed graph/cache/manifest directory guarded by the coordinator.
+    pub output_directory: PathBuf,
+    /// Portable root-marker payload established by the watch invocation.
+    pub marker_value: String,
+    /// Deduplicated paths admitted for this pass, when it is incremental.
+    pub changed_paths: Option<Vec<PathBuf>>,
+    /// Requested rebuild scope after queue admission.
+    pub scope: RebuildScope,
+    /// Whether intentional graph reductions are allowed.
+    pub force: bool,
+    /// Whether clustering is disabled for this pass.
+    pub no_cluster: bool,
+    /// One-based pass ordinal while draining the pending journal.
+    pub pass: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RebuildPass {
     result: RebuildResult,
@@ -1264,6 +1173,173 @@ pub fn rebuild_project(
     rebuild_project_with_observer(watch_path, options, |_, _| {})
 }
 
+fn coordinated_request(
+    context: &WatchContext,
+    options: &RebuildOptions,
+    changed_paths: Option<Vec<PathBuf>>,
+    pass: usize,
+) -> CoordinatedRebuildRequest {
+    CoordinatedRebuildRequest {
+        watch_root: context.watch_root.clone(),
+        project_root: context.project_root.clone(),
+        output_directory: context.output.clone(),
+        marker_value: context.marker_value.clone(),
+        changed_paths,
+        scope: if options.changed_paths.is_some() {
+            RebuildScope::Incremental
+        } else {
+            options.scope
+        },
+        force: options.force,
+        no_cluster: options.no_cluster,
+        pass,
+    }
+}
+
+fn merge_coordinated_results(mut aggregate: RebuildResult, next: RebuildResult) -> RebuildResult {
+    aggregate.status = match (aggregate.status, next.status) {
+        (RebuildStatus::RefusedShrink, _) | (_, RebuildStatus::RefusedShrink) => {
+            RebuildStatus::RefusedShrink
+        }
+        (RebuildStatus::Rebuilt, _) | (_, RebuildStatus::Rebuilt) => RebuildStatus::Rebuilt,
+        (RebuildStatus::Unchanged, _) | (_, RebuildStatus::Unchanged) => RebuildStatus::Unchanged,
+        (RebuildStatus::NoTrackedChanges, _) | (_, RebuildStatus::NoTrackedChanges) => {
+            RebuildStatus::NoTrackedChanges
+        }
+        _ => RebuildStatus::Queued,
+    };
+    if next.scope == RebuildScope::Full {
+        aggregate.scope = RebuildScope::Full;
+    }
+    aggregate.graph_path = next.graph_path;
+    aggregate.manifest_path = next.manifest_path;
+    aggregate.passes = next.passes;
+    aggregate.clustered |= next.clustered;
+    for warning in next.warnings {
+        if !aggregate.warnings.contains(&warning) {
+            aggregate.warnings.push(warning);
+        }
+    }
+    aggregate.stats.detected_files = next.stats.detected_files;
+    aggregate.stats.processed_files = aggregate
+        .stats
+        .processed_files
+        .saturating_add(next.stats.processed_files);
+    aggregate.stats.changed_files = aggregate
+        .stats
+        .changed_files
+        .saturating_add(next.stats.changed_files);
+    aggregate.stats.unchanged_files = next.stats.unchanged_files;
+    aggregate.stats.deleted_files = aggregate
+        .stats
+        .deleted_files
+        .saturating_add(next.stats.deleted_files);
+    aggregate.stats.nodes = next.stats.nodes;
+    aggregate.stats.edges = next.stats.edges;
+    aggregate.timings.detect_ms = aggregate
+        .timings
+        .detect_ms
+        .saturating_add(next.timings.detect_ms);
+    aggregate.timings.extract_ms = aggregate
+        .timings
+        .extract_ms
+        .saturating_add(next.timings.extract_ms);
+    aggregate.timings.build_ms = aggregate
+        .timings
+        .build_ms
+        .saturating_add(next.timings.build_ms);
+    aggregate.timings.cluster_ms = aggregate
+        .timings
+        .cluster_ms
+        .saturating_add(next.timings.cluster_ms);
+    aggregate.timings.write_ms = aggregate
+        .timings
+        .write_ms
+        .saturating_add(next.timings.write_ms);
+    aggregate
+}
+
+/// Run an external rebuild implementation under the durable watch protocol.
+///
+/// The supplied executor receives only a fully admitted pass. This preserves
+/// non-blocking `Queued` results, the lock inode, and all pending-journal
+/// drain behavior without requiring the executor to perform path-based watch
+/// state mutations itself.
+pub fn rebuild_project_with_executor<F>(
+    watch_path: &Path,
+    options: &RebuildOptions,
+    mut executor: F,
+) -> anyhow::Result<RebuildResult>
+where
+    F: FnMut(&CoordinatedRebuildRequest) -> anyhow::Result<RebuildResult>,
+{
+    let total_started = Instant::now();
+    let mut context = resolve_watch_context(
+        watch_path,
+        options.invocation_cwd.as_deref(),
+        options.repo_root_fallback.as_deref(),
+    )?;
+    if let Some(output_directory) = options.output_directory.as_deref() {
+        context.output = if output_directory.is_absolute() {
+            canonicalize_with_missing_tail(output_directory)?
+        } else {
+            canonicalize_with_missing_tail(&context.project_root.join(output_directory))?
+        };
+    }
+    validate_watch_output_directory(&context.watch_root, &context.output)?;
+    if !options.acquire_lock {
+        let mut result = executor(&coordinated_request(
+            &context,
+            options,
+            options.changed_paths.clone(),
+            1,
+        ))?;
+        result.timings.total_ms = elapsed_millis(total_started);
+        return Ok(result);
+    }
+    if let Some(changed) = options.changed_paths.as_deref()
+        && !options.block_on_lock
+    {
+        queue_pending(&context.output, changed)?;
+    }
+    let Some(_guard) = RebuildLockGuard::acquire(&context.output, options.block_on_lock)? else {
+        return Ok(RebuildResult {
+            status: RebuildStatus::Queued,
+            scope: requested_rebuild_scope(options),
+            graph_path: context.output.join("graph.json"),
+            manifest_path: context.output.join("manifest.json"),
+            passes: 0,
+            clustered: false,
+            warnings: Vec::new(),
+            stats: RebuildStats::default(),
+            timings: RebuildTimings {
+                total_ms: elapsed_millis(total_started),
+                ..RebuildTimings::default()
+            },
+        });
+    };
+    let merged = if let Some(changed) = options.changed_paths.as_deref() {
+        let queued = drain_pending(&context.output)?;
+        Some(merge_changed_paths(&[Some(changed), Some(&queued)]))
+    } else {
+        let _ = drain_pending(&context.output)?;
+        None
+    };
+    let mut result = executor(&coordinated_request(&context, options, merged, 1))?;
+    if options.changed_paths.is_some() {
+        for pass in 2..=PENDING_DRAIN_MAX_PASSES + 1 {
+            let late = drain_pending(&context.output)?;
+            if late.is_empty() {
+                break;
+            }
+            let next = executor(&coordinated_request(&context, options, Some(late), pass))?;
+            result = merge_coordinated_results(result, next);
+        }
+    }
+    result.timings.total_ms = elapsed_millis(total_started);
+    Ok(result)
+}
+
 pub fn rebuild_project_with_observer<F>(
     watch_path: &Path,
     options: &RebuildOptions,
@@ -1291,10 +1367,10 @@ where
         result.result.timings.total_ms = elapsed_millis(total_started);
         return Ok(result.result);
     }
-    if let Some(changed) = options.changed_paths.as_deref() {
-        if !options.block_on_lock {
-            queue_pending(&context.output, changed)?;
-        }
+    if let Some(changed) = options.changed_paths.as_deref()
+        && !options.block_on_lock
+    {
+        queue_pending(&context.output, changed)?;
     }
     let Some(_guard) = RebuildLockGuard::acquire(&context.output, options.block_on_lock)? else {
         return Ok(RebuildResult {
@@ -1669,7 +1745,9 @@ fn write_visualization(
     Ok(())
 }
 
-fn clear_needs_update(out: &Path) -> anyhow::Result<()> {
+/// Clear the durable non-code-change notice after a graph/manifest pair is
+/// accepted by either executor.
+pub fn clear_needs_update(out: &Path) -> anyhow::Result<()> {
     match fs::remove_file(out.join(NEEDS_UPDATE)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1836,10 +1914,9 @@ fn rebuild_once(
             if let Some(deleted) = candidates
                 .into_iter()
                 .find(|candidate| candidate.starts_with(&context.watch_root))
+                && let Some(identity) = absolute_identity(&deleted, &context.project_root)
             {
-                if let Some(identity) = absolute_identity(&deleted, &context.project_root) {
-                    deleted_sources.insert(identity);
-                }
+                deleted_sources.insert(identity);
             }
         }
         if incremental_selection.is_none() {

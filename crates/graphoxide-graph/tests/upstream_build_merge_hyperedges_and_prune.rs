@@ -1,4 +1,5 @@
-//! Executable port of upstream `test_build_merge_hyperedges_and_prune.py` (10 cases).
+//! Executable port of upstream `test_build_merge_hyperedges_and_prune.py` plus
+//! Graphoxide provenance regressions.
 
 use graphoxide_core::Extraction;
 use graphoxide_graph::{build_merge, infer_merge_root};
@@ -90,6 +91,32 @@ fn deleted_file_hyperedges_are_pruned() {
     assert!(ids.contains("he_b"));
     assert!(ids.contains("he_global"));
     assert!(!graph.nodes.iter().any(|node| node.id == "a1"));
+}
+
+#[test]
+fn deleted_container_prunes_owned_sourceless_hyperedge_but_keeps_global() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("corpus");
+    fs::create_dir(&root).unwrap();
+    let graph_path = tmp.path().join("graph.json");
+    write_graph(
+        &graph_path,
+        json!([
+            {"id": "archive", "label": "archive", "file_type": "document", "source_file": "archives/x.tar", "type": "container"},
+            {"id": "keep", "label": "keep", "file_type": "document", "source_file": "keep.md"}
+        ]),
+        json!([]),
+        json!([
+            {"id": "owned_sourceless", "nodes": ["keep"], "_container_source": "archives/x.tar"},
+            {"id": "global_sourceless", "nodes": ["keep"]}
+        ]),
+    );
+
+    let graph = build_merge(&[], graph_path, &[root.join("archives/x.tar")], Some(&root)).unwrap();
+    let ids = hyperedge_ids(&graph);
+    assert!(!ids.contains("owned_sourceless"));
+    assert!(ids.contains("global_sourceless"));
+    assert!(graph.nodes.iter().any(|node| node.id == "keep"));
 }
 
 #[test]

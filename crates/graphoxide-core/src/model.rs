@@ -15,6 +15,12 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
+/// Internal flattened attribute that ties recursively extracted container
+/// facts to the scanned outer source that owns their lifecycle. The `!/`
+/// spelling in `source_file` is reserved for virtual container members.
+#[doc(hidden)]
+pub const CONTAINER_SOURCE_ATTRIBUTE: &str = "_container_source";
+
 /// Edge confidence labels, identical to upstream.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -48,7 +54,8 @@ pub struct Node {
     /// One of: code, document, paper, image, rationale, concept.
     #[serde(default = "default_file_type")]
     pub file_type: String,
-    /// Repo-relative, forward slashes. Empty string for concept nodes.
+    /// Repo-relative, forward slashes. Empty string for concept nodes. The
+    /// `outer!/member` namespace is reserved for virtual container members.
     #[serde(default)]
     pub source_file: String,
     /// "L<line>" from AST extractors, absent/null from semantic extraction.
@@ -351,10 +358,10 @@ fn fold_value_alias(
     canonical: &str,
     alias: &str,
 ) {
-    if !object.contains_key(canonical) {
-        if let Some(value) = object.remove(alias) {
-            object.insert(canonical.into(), value);
-        }
+    if !object.contains_key(canonical)
+        && let Some(value) = object.remove(alias)
+    {
+        object.insert(canonical.into(), value);
     }
 }
 

@@ -34,14 +34,6 @@
       "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_manifest_stamps_hyperedge_only_docs"}]
     },
     {
-      "upstream": "tests/test_extract_cli.py::test_extract_force_flag_redispatches_and_stamps_manifest",
-      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_force_flag_redispatches_and_stamps_manifest"}]
-    },
-    {
-      "upstream": "tests/test_extract_cli.py::test_extract_graphify_force_env_redispatches",
-      "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_extract_graphify_force_env_redispatches"}]
-    },
-    {
       "upstream": "tests/test_extract_cli.py::test_cache_check_mode_deep_reads_deep_namespace",
       "targets": [{"runner": "rust", "package": "graphoxide-cli", "id": "test_cache_check_mode_deep_reads_deep_namespace"}]
     },

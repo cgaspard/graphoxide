@@ -1,5 +1,9 @@
 //! Regex and structured-data extraction for languages without a compiled grammar.
 
+use crate::project_path::{
+    normalize_project_path, source_relative_project_path, ProjectPath,
+    EXACT_PROJECT_RELATIVE_PLACEHOLDER,
+};
 use anyhow::Context as _;
 use graphoxide_core::{
     make_id,
@@ -10,8 +14,43 @@ use regex::Regex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
+    sync::LazyLock,
 };
+
+static GENERIC_DEFINITIONS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^\s*(?:(?:pub(?:lic|lic static)?|private|protected|internal|export|abstract|static|async|final|open|partial)\s+)*(class|interface|struct|enum|trait|protocol|module|namespace|type|def|fn|fun|function|func|sub|procedure)\s+([\p{L}_][\p{L}\p{N}_]*)",
+    )
+    .expect("valid generic definition regex")
+});
+
+static GENERIC_STATEMENT_IMPORTS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*(?:import|from|use|using)\s+([\p{L}\p{N}_./:@-]+)(?:\s|;|$)")
+        .expect("valid generic statement import regex")
+});
+
+static GENERIC_LITERAL_CALL_IMPORTS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
+    [
+        Regex::new(
+            r#"(?m)^\s*(?:require|include)\s*\(\s*'([\p{L}\p{N}_./:@-]+)'\s*\)\s*;?\s*(?:(?://|--|#)[^\r\n]*)?$"#,
+        ),
+        Regex::new(
+            r#"(?m)^\s*(?:require|include)\s*\(\s*\"([\p{L}\p{N}_./:@-]+)\"\s*\)\s*;?\s*(?:(?://|--|#)[^\r\n]*)?$"#,
+        ),
+        Regex::new(
+            r#"(?m)^\s*(?:require|include)\s+'([\p{L}\p{N}_./:@-]+)'\s*;?\s*(?:(?://|--|#)[^\r\n]*)?$"#,
+        ),
+        Regex::new(
+            r#"(?m)^\s*(?:require|include)\s+\"([\p{L}\p{N}_./:@-]+)\"\s*;?\s*(?:(?://|--|#)[^\r\n]*)?$"#,
+        ),
+    ]
+    .map(|regex| regex.expect("valid generic literal call import regex"))
+});
+
+static GENERIC_CALLS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"([\p{L}_][\p{L}\p{N}_]*)\s*\(").expect("valid generic call regex")
+});
 
 pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     if is_mcp_config_path(path) {
@@ -30,13 +69,62 @@ pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction
             source_file,
         ));
     }
-    let text = fs::read_to_string(path)?;
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        return crate::json_config::extract_json_config(path, source_file);
+    }
+    let bytes = fs::read(path)?;
+    extract_text_from_bytes(path, source_file, &bytes, true)
+}
+
+/// Extract fallback text facts from an already-read source buffer.
+///
+/// The byte-oriented path never performs filesystem I/O. Format-specific
+/// extractors that still require a path-owned dependency are deliberately
+/// deferred to their dedicated byte entry points instead of silently reading
+/// from a compute worker.
+pub fn extract_text_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    if is_mcp_config_path(path) {
+        return extract_mcp_config_bytes(path, source_file, bytes);
+    }
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("dmi"))
+    {
+        return crate::compat::extract_dmi_bytes(path, source_file, bytes);
+    }
+    if crate::manifest_ingest::is_package_manifest_path(path) {
+        return Ok(crate::manifest_ingest::extract_package_manifest_bytes(
+            path,
+            source_file,
+            bytes,
+        ));
+    }
+    extract_text_from_bytes(path, source_file, bytes, false)
+}
+
+fn extract_text_from_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    allow_path_dependent_compat: bool,
+) -> anyhow::Result<Extraction> {
+    let text = crate::bytes::validate_utf8(bytes)?;
+    let line_index = crate::bytes::LineIndex::new(bytes);
     if path
         .extension()
         .and_then(|v| v.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("json"))
     {
-        return crate::json_config::extract_json_config(path, source_file);
+        return crate::json_config::extract_json_config_bytes(path, source_file, bytes);
     }
     if path
         .extension()
@@ -45,9 +133,24 @@ pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction
             matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
         })
     {
-        return extract_markdown(&text, source_file, path);
+        return if allow_path_dependent_compat {
+            extract_markdown(text, source_file, path)
+        } else {
+            extract_markdown_with_path_probe(text, source_file, path, false)
+        };
     }
-    if let Some(extraction) = crate::compat::extract_compat(path, &text, source_file)? {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !allow_path_dependent_compat && matches!(extension.as_str(), "m" | "mm" | "h") {
+        return crate::compat::extract_objc_bytes(path, text, source_file);
+    }
+    if (allow_path_dependent_compat || extension != "xaml")
+        && let Some(extraction) =
+            crate::compat::extract_compat(path, text, source_file, allow_path_dependent_compat)?
+    {
         return Ok(extraction);
     }
     let stem = Path::new(source_file)
@@ -66,18 +169,15 @@ pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction
     )];
     let mut edges = Vec::new();
     let mut seen = HashSet::from([file_id.clone()]);
-    let definitions = Regex::new(
-        r"(?m)^\s*(?:(?:pub(?:lic|lic static)?|private|protected|internal|export|abstract|static|async|final|open|partial)\s+)*(class|interface|struct|enum|trait|protocol|module|namespace|type|def|fn|fun|function|func|sub|procedure)\s+([\p{L}_][\p{L}\p{N}_]*)",
-    )?;
     let mut labels = HashMap::new();
-    for capture in definitions.captures_iter(&text) {
+    for capture in GENERIC_DEFINITIONS.captures_iter(text) {
         let kind = &capture[1];
         let name = &capture[2];
         let id = make_id(&[&stem, name]);
         if !seen.insert(id.clone()) {
             continue;
         }
-        let line = line_of(&text, capture.get(0).unwrap().start());
+        let line = line_index.line_of(capture.get(0).unwrap().start());
         let function = matches!(
             kind,
             "def" | "fn" | "fun" | "function" | "func" | "sub" | "procedure"
@@ -103,12 +203,12 @@ pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction
         ));
         labels.insert(name.to_lowercase(), id);
     }
-    for (kind, name, start, function) in special_definitions(path, &text)? {
+    for (kind, name, start, function) in special_definitions(path, text)? {
         let id = make_id(&[&stem, &name]);
         if !seen.insert(id.clone()) {
             continue;
         }
-        let line = line_of(&text, start);
+        let line = line_index.line_of(start);
         nodes.push(node(
             id.clone(),
             if function {
@@ -130,60 +230,93 @@ pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction
         ));
         labels.insert(name.to_lowercase(), id);
     }
-    let imports = Regex::new(
-        r#"(?m)^\s*(?:import|from|use|using|require|include)\b\s*[('\"]*([\p{L}\p{N}_./:@-]+)"#,
-    )?;
-    for capture in imports.captures_iter(&text) {
-        let module = &capture[1];
-        let line = line_of(&text, capture.get(0).unwrap().start());
-        let id = make_id(&[module]);
+    for (start, module) in generic_import_facts(text) {
+        let Some(target) =
+            classify_generic_import(source_file, module, allow_path_dependent_compat)
+        else {
+            continue;
+        };
+        let line = line_index.line_of(start);
+        let (identity, label, target_file) = match target {
+            GenericImportTarget::Bare(module) => (
+                module.to_owned(),
+                module
+                    .rsplit(['/', ':', '.'])
+                    .find(|value| !value.is_empty())
+                    .unwrap_or(module)
+                    .to_owned(),
+                None,
+            ),
+            GenericImportTarget::ProjectRelative(logical) => {
+                let identity = Path::new(&logical)
+                    .with_extension("")
+                    .to_string_lossy()
+                    .into_owned();
+                let label = Path::new(&logical)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(&logical)
+                    .to_owned();
+                (identity, label, Some(logical))
+            }
+        };
+        let id = make_id(&[&identity]);
         if id.is_empty() {
             continue;
         }
         if seen.insert(id.clone()) {
-            nodes.push(node(
-                id.clone(),
-                module
-                    .rsplit(['/', ':', '.'])
-                    .find(|v| !v.is_empty())
-                    .unwrap_or(module),
-                source_file,
-                line,
-                "module",
-            ));
+            let mut module_node = node(id.clone(), label, source_file, line, "module");
+            if let Some(target_file) = target_file.as_deref() {
+                module_node
+                    .extra
+                    .insert(EXACT_PROJECT_RELATIVE_PLACEHOLDER.into(), true.into());
+                module_node
+                    .extra
+                    .insert("target_file".into(), target_file.into());
+            }
+            nodes.push(module_node);
         }
-        edges.push(edge(
+        let mut import = edge(
             file_id.clone(),
             id,
             "imports",
             source_file,
             line,
             Confidence::Extracted,
-        ));
+        );
+        if let Some(target_file) = target_file {
+            import
+                .extra
+                .insert("target_file".into(), target_file.into());
+            import
+                .extra
+                .insert(EXACT_PROJECT_RELATIVE_PLACEHOLDER.into(), true.into());
+        }
+        edges.push(import);
     }
-    let calls = Regex::new(r"([\p{L}_][\p{L}\p{N}_]*)\s*\(")?;
     let keywords = [
         "if", "for", "while", "switch", "catch", "return", "class", "function", "func", "fn",
         "def", "sizeof", "typeof",
     ];
-    for capture in calls.captures_iter(&text) {
+    for capture in GENERIC_CALLS.captures_iter(text) {
         let name = &capture[1];
         if keywords.contains(&name) {
             continue;
         }
         if let Some(target) = labels.get(&name.to_lowercase()) {
-            let line = line_of(&text, capture.get(0).unwrap().start());
-            if let Some(source) = nearest_definition(&nodes, line) {
-                if source != target {
-                    edges.push(edge(
-                        source.into(),
-                        target.clone(),
-                        "calls",
-                        source_file,
-                        line,
-                        Confidence::Inferred,
-                    ));
-                }
+            let line = line_index.line_of(capture.get(0).unwrap().start());
+            if let Some(source) = nearest_definition(&nodes, line)
+                && source != target
+            {
+                edges.push(edge(
+                    source.into(),
+                    target.clone(),
+                    "calls",
+                    source_file,
+                    line,
+                    Confidence::Inferred,
+                ));
             }
         }
     }
@@ -194,22 +327,99 @@ pub fn extract_text(path: &Path, source_file: &str) -> anyhow::Result<Extraction
     })
 }
 
-/// Extract an MCP configuration, degrading to generic JSON when the document
-/// turns out not to be one.
+fn generic_import_facts(text: &str) -> Vec<(usize, &str)> {
+    let mut facts = GENERIC_STATEMENT_IMPORTS
+        .captures_iter(text)
+        .map(|capture| {
+            (
+                capture.get(0).expect("generic statement import").start(),
+                capture.get(1).expect("generic statement module").as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for regex in GENERIC_LITERAL_CALL_IMPORTS.iter() {
+        facts.extend(regex.captures_iter(text).map(|capture| {
+            (
+                capture.get(0).expect("generic literal import").start(),
+                capture.get(1).expect("generic literal module").as_str(),
+            )
+        }));
+    }
+    facts.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
+    facts.dedup();
+    facts
+}
+
+enum GenericImportTarget<'a> {
+    Bare(&'a str),
+    ProjectRelative(String),
+}
+
+fn classify_generic_import<'a>(
+    source_file: &str,
+    module: &'a str,
+    allow_path_entrypoint_compat: bool,
+) -> Option<GenericImportTarget<'a>> {
+    if module.is_empty()
+        || module.trim() != module
+        || module.starts_with(['/', '\\'])
+        || module.contains('\\')
+        || module.contains("//")
+        || module.chars().any(char::is_control)
+    {
+        return None;
+    }
+
+    let bytes = module.as_bytes();
+    if bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':') {
+        return None;
+    }
+
+    if module.starts_with('.') {
+        if !(module.starts_with("./") || module.starts_with("../")) {
+            return None;
+        }
+        let logical_source = normalize_project_path(source_file)
+            .filter(|source| !source.is_empty())
+            .or_else(|| {
+                if !allow_path_entrypoint_compat {
+                    return None;
+                }
+                let basename = source_file.rsplit(['/', '\\']).next()?;
+                normalize_project_path(basename).filter(|source| !source.is_empty())
+            })?;
+        return match source_relative_project_path(&logical_source, module)? {
+            ProjectPath::Contained(logical) => Some(GenericImportTarget::ProjectRelative(logical)),
+            ProjectPath::EscapesRoot(_) => None,
+        };
+    }
+
+    if (module.contains('/') && module.contains(':'))
+        || module
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
+    {
+        return None;
+    }
+
+    Some(GenericImportTarget::Bare(module))
+}
+
+/// Extract an MCP configuration, degrading to generic JSON when a valid
+/// document with a recognised basename turns out not to contain a server map.
 ///
-/// The recognised basenames — `mcp.json` above all — are common enough that a
-/// project may use them for something else entirely. A document that does not
-/// carry a server map is therefore ordinary JSON, not a malformed MCP config:
-/// treating it as an error would abort the whole repository scan over one
-/// unrelated file (#4). Genuine faults (oversized or unparsable input) are
-/// still reported.
+/// The path entrypoint retains upstream's compatibility behavior and reports
+/// genuine file, size, and parse faults. The byte-only entrypoint below cannot
+/// reopen or reclassify input, so malformed MCP-like bytes fail closed to
+/// redacted metadata instead.
 fn extract_mcp_config(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     const MAX_BYTES: u64 = 1_048_576;
-    const MAX_SERVERS: usize = 200;
     let metadata = fs::metadata(path)?;
     anyhow::ensure!(metadata.len() <= MAX_BYTES, "mcp config too large to index");
-    let text = fs::read_to_string(path)?;
-    let document = graphoxide_core::parse_jsonc(&text)
+    let bytes = fs::read(path)?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("read MCP configuration {source_file} as UTF-8"))?;
+    let document = graphoxide_core::parse_jsonc(text)
         .with_context(|| format!("parse MCP configuration {source_file}"))?;
     let Some(root) = document.as_object() else {
         tracing::warn!(
@@ -217,11 +427,56 @@ fn extract_mcp_config(path: &Path, source_file: &str) -> anyhow::Result<Extracti
         );
         return crate::json_config::extract_json_config(path, source_file);
     };
-    let Some(servers) = mcp_server_map(root) else {
+    if mcp_server_map(root).is_none() {
         tracing::warn!(
             "{source_file}: mcp config has no server map; indexing as generic JSON instead"
         );
         return crate::json_config::extract_json_config(path, source_file);
+    }
+    extract_mcp_config_bytes(path, source_file, &bytes)
+}
+
+fn extract_mcp_config_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    const MAX_BYTES: usize = 1_048_576;
+    const MAX_SERVERS: usize = 200;
+    if bytes.len() > MAX_BYTES {
+        return Ok(non_mcp_config_fallback(
+            path,
+            source_file,
+            "exceeds safe byte limit",
+        ));
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Ok(non_mcp_config_fallback(
+            path,
+            source_file,
+            "content is not UTF-8",
+        ));
+    };
+    let Ok(document) = graphoxide_core::parse_jsonc(text) else {
+        return Ok(non_mcp_config_fallback(
+            path,
+            source_file,
+            "content is not valid JSON or JSONC",
+        ));
+    };
+    let Some(root) = document.as_object() else {
+        return Ok(non_mcp_config_fallback(
+            path,
+            source_file,
+            "root is not an object",
+        ));
+    };
+    let Some(servers) = mcp_server_map(root) else {
+        return Ok(non_mcp_config_fallback(
+            path,
+            source_file,
+            "no MCP server map",
+        ));
     };
 
     let stem = Path::new(source_file)
@@ -372,6 +627,37 @@ fn extract_mcp_config(path: &Path, source_file: &str) -> anyhow::Result<Extracti
     })
 }
 
+fn non_mcp_config_fallback(path: &Path, source_file: &str, reason: &'static str) -> Extraction {
+    tracing::warn!(
+        source_file,
+        reason,
+        "recognized MCP filename does not contain an MCP configuration; retaining metadata only"
+    );
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(source_file);
+    let mut file = node(
+        make_id(&[source_file]),
+        sanitize_label(filename),
+        source_file,
+        1,
+        "json_config_file",
+    );
+    file.extra.insert(
+        "metadata".into(),
+        serde_json::json!({
+            "parse_status": "not_mcp_configuration",
+            "reason": reason,
+        }),
+    );
+    Extraction {
+        nodes: vec![file],
+        edges: Vec::new(),
+        hyperedges: Vec::new(),
+    }
+}
+
 fn mcp_node(id: String, label: &str, kind: &str, source_file: &str) -> Node {
     let mut result = node(id, sanitize_label(label), source_file, 1, kind);
     result
@@ -505,6 +791,15 @@ fn walk_json(
 /// When the linked file is part of the project scan, the target ID is the same
 /// ID as that file's real document node.
 fn extract_markdown(text: &str, source_file: &str, path: &Path) -> anyhow::Result<Extraction> {
+    extract_markdown_with_path_probe(text, source_file, path, true)
+}
+
+fn extract_markdown_with_path_probe(
+    text: &str,
+    source_file: &str,
+    path: &Path,
+    probe_target_paths: bool,
+) -> anyhow::Result<Extraction> {
     let stem = Path::new(source_file)
         .with_extension("")
         .to_string_lossy()
@@ -538,7 +833,9 @@ fn extract_markdown(text: &str, source_file: &str, path: &Path) -> anyhow::Resul
 
         {
             let mut add_link = |raw: &str, start: usize| {
-                let Some(target) = resolve_markdown_link(raw, source_file, path) else {
+                let Some(target) =
+                    resolve_markdown_link(raw, source_file, path, probe_target_paths)
+                else {
                     return;
                 };
                 if target.id == file_id || !linked_targets.insert(target.id.clone()) {
@@ -643,22 +940,22 @@ fn resolve_markdown_link(
     raw: &str,
     source_file: &str,
     physical_source: &Path,
+    probe_target_paths: bool,
 ) -> Option<MarkdownTarget> {
-    let mut target = raw.trim();
-    if target.is_empty() {
-        return None;
-    }
-    target = target.split('#').next()?.split('?').next()?.trim();
-    if target.is_empty() {
-        return None;
-    }
-    let lower = target.to_ascii_lowercase();
-    if target.contains("://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("tel:")
-        || lower.starts_with("//")
-        || lower.starts_with("data:")
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.chars().any(|character| {
+            character.is_control() || matches!(character, '$' | '`' | '{' | '}' | '<' | '>' | '\\')
+        })
     {
+        return None;
+    }
+    let target = raw.split('#').next()?.split('?').next()?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let bytes = target.as_bytes();
+    if target.starts_with('/') || bytes.get(1) == Some(&b':') || target.contains(':') {
         return None;
     }
 
@@ -677,18 +974,7 @@ fn resolve_markdown_link(
         return None;
     }
 
-    let logical = if raw_path.is_absolute() {
-        raw_path
-            .strip_prefix(Path::new("/"))
-            .unwrap_or(&raw_path)
-            .to_path_buf()
-    } else {
-        Path::new(source_file)
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(&raw_path)
-    };
-    let logical = normalize_lexical_path(&logical);
+    let logical = normalize_portable_markdown_path(source_file, target)?;
     let logical_without_extension = logical.with_extension("");
     let id = make_id(&[&logical_without_extension
         .to_string_lossy()
@@ -697,38 +983,91 @@ fn resolve_markdown_link(
         return None;
     }
 
-    let physical = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        physical_source
+    let existing_source_file = if probe_target_paths {
+        let physical = physical_source
             .parent()
             .unwrap_or_else(|| Path::new(""))
-            .join(raw_path)
+            .join(raw_path);
+        physical
+            .is_file()
+            .then(|| logical.to_string_lossy().replace('\\', "/"))
+    } else {
+        None
     };
-    let existing_source_file = physical
-        .is_file()
-        .then(|| logical.to_string_lossy().replace('\\', "/"));
     Some(MarkdownTarget {
         id,
         existing_source_file,
     })
 }
 
-fn normalize_lexical_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push("..");
-                }
+fn normalize_portable_markdown_path(source_file: &str, target: &str) -> Option<PathBuf> {
+    let source_file = source_file.replace('\\', "/");
+    let mut parts = Vec::<String>::new();
+    for part in source_file
+        .rsplit_once('/')
+        .map_or("", |(parent, _)| parent)
+        .split('/')
+    {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
             }
-            Component::Normal(part) => normalized.push(part),
-            Component::RootDir | Component::Prefix(_) => {}
+            _ => parts.push(part.to_owned()),
         }
     }
-    normalized
+    for part in target.split('/') {
+        match part {
+            "" => return None,
+            "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ if portable_markdown_path_segment(part) => parts.push(part.to_owned()),
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.iter().collect())
+}
+
+fn portable_markdown_path_segment(segment: &str) -> bool {
+    let device_stem = segment
+        .split('.')
+        .next()
+        .unwrap_or(segment)
+        .trim_end()
+        .to_ascii_lowercase();
+    !segment.is_empty()
+        && !segment.ends_with(['.', ' '])
+        && !matches!(
+            device_stem.as_str(),
+            "con"
+                | "prn"
+                | "aux"
+                | "nul"
+                | "com1"
+                | "com2"
+                | "com3"
+                | "com4"
+                | "com5"
+                | "com6"
+                | "com7"
+                | "com8"
+                | "com9"
+                | "lpt1"
+                | "lpt2"
+                | "lpt3"
+                | "lpt4"
+                | "lpt5"
+                | "lpt6"
+                | "lpt7"
+                | "lpt8"
+                | "lpt9"
+        )
+        && !segment.chars().any(|character| {
+            character.is_control()
+                || matches!(character, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*')
+        })
 }
 
 fn node(id: String, label: impl Into<String>, source: &str, line: usize, kind: &str) -> Node {
@@ -771,9 +1110,6 @@ fn edge(
             ("_tgt".into(), target.into()),
         ]),
     }
-}
-fn line_of(text: &str, offset: usize) -> usize {
-    text[..offset].bytes().filter(|b| *b == b'\n').count() + 1
 }
 fn nearest_definition(nodes: &[Node], line: usize) -> Option<&str> {
     nodes
@@ -1265,6 +1601,158 @@ mod tests {
     }
 
     #[test]
+    fn generic_call_imports_require_quoted_literal_evidence() {
+        let extraction = extract_text_bytes(
+            Path::new("consumer.lua"),
+            "consumer.lua",
+            br#"import static.module
+from package.core import value
+use namespace:item
+require('quoted.module')
+include "./literal.lua"
+require('commented.module'); -- static trailing comment
+require(module_name)
+include(foo)
+require(get_module())
+require("${module_name}")
+require("prefix" .. suffix)
+include "extra.module", bar
+require('unexpected.module') unexpected
+"#,
+        )
+        .expect("extract generic imports");
+        let targets = extraction
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports")
+            .map(|edge| edge.true_target())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            targets,
+            HashSet::from([
+                "static_module",
+                "package_core",
+                "namespace_item",
+                "quoted_module",
+                "literal",
+                "commented_module",
+            ])
+        );
+        assert!(targets.is_disjoint(&HashSet::from([
+            "module_name",
+            "foo",
+            "get_module",
+            "prefix",
+            "extra_module",
+            "unexpected_module",
+        ])));
+        let literal = extraction
+            .nodes
+            .iter()
+            .find(|node| node.id == "literal")
+            .expect("project-relative literal module");
+        assert_eq!(literal.label, "literal");
+        assert_eq!(
+            literal
+                .extra
+                .get(EXACT_PROJECT_RELATIVE_PLACEHOLDER)
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn generic_project_relative_imports_use_safe_logical_file_identity() {
+        let extraction = extract_text_bytes(
+            Path::new("/graphoxide-missing-project/src/deep/consumer.lua"),
+            "src/deep/consumer.lua",
+            br#"include "../lib/worker.lua"
+include "../../../victim.lua"
+include "/victim.lua"
+include "//server/share/victim.lua"
+include "C:/victim.lua"
+include "./aux:worker.lua"
+include "./CON.lua"
+include "./bad//worker.lua"
+import static.module
+use namespace:item
+require('@scope/package')
+"#,
+        )
+        .expect("extract safe generic imports");
+        let imports = extraction
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            imports
+                .iter()
+                .map(|edge| edge.true_target())
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                "src_lib_worker",
+                "static_module",
+                "namespace_item",
+                "scope_package",
+            ])
+        );
+
+        let worker = extraction
+            .nodes
+            .iter()
+            .find(|node| node.id == "src_lib_worker")
+            .expect("source-relative worker module");
+        assert_eq!(worker.label, "worker", "file extension became the label");
+        assert_eq!(
+            worker
+                .extra
+                .get(EXACT_PROJECT_RELATIVE_PLACEHOLDER)
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let worker_import = imports
+            .iter()
+            .find(|edge| edge.true_target() == "src_lib_worker")
+            .expect("worker import edge");
+        assert_eq!(
+            worker_import
+                .extra
+                .get("target_file")
+                .and_then(serde_json::Value::as_str),
+            Some("src/lib/worker.lua")
+        );
+    }
+
+    #[test]
+    fn generic_path_entrypoint_scopes_relative_compatibility_to_a_basename() {
+        let directory = std::env::temp_dir().join(format!(
+            "graphoxide-generic-path-{}-{}",
+            std::process::id(),
+            NEXT_MARKDOWN_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).expect("create generic path fixture");
+        let path = directory.join("consumer.lua");
+        fs::write(
+            &path,
+            "include \"./worker.lua\"\ninclude \"../outside.lua\"\n",
+        )
+        .expect("write generic path fixture");
+        let source_file = path.to_string_lossy().into_owned();
+        let extraction = extract_text(&path, &source_file).expect("extract path-owned source");
+        fs::remove_file(&path).expect("remove generic path fixture");
+        fs::remove_dir(&directory).expect("remove generic path fixture directory");
+
+        let imports = extraction
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports")
+            .map(|edge| edge.true_target())
+            .collect::<Vec<_>>();
+        assert_eq!(imports, ["worker"]);
+    }
+
+    #[test]
     fn structured_fallbacks_find_tier_two_and_three_symbols() {
         let cases = [
             ("schema.sql", "CREATE TABLE users (id int);", "users"),
@@ -1388,6 +1876,163 @@ mod tests {
         let serialized = serde_json::to_string(&result).expect("serialize extraction");
         for secret_or_path in ["ghp_PLACEHOLDER_NOT_A_REAL_TOKEN", "/tmp/workspace"] {
             assert!(!serialized.contains(secret_or_path));
+        }
+    }
+
+    #[test]
+    fn every_registered_mcp_filename_uses_the_redacting_fallback() {
+        let payload = r#"{
+            "mcpServers": {
+                "private": {
+                    "command": "secret-bin",
+                    "args": ["--token", "secret-argument"],
+                    "env": {"TOKEN": "secret-environment"}
+                }
+            }
+        }"#;
+        for filename in [
+            ".mcp.json",
+            "mcp.json",
+            "mcp_servers.json",
+            "claude_desktop_config.json",
+        ] {
+            let extraction = extract_text_bytes(Path::new(filename), filename, payload.as_bytes())
+                .unwrap_or_else(|error| panic!("{filename} did not use MCP extraction: {error:#}"));
+            let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+            assert!(!rendered.contains("secret-argument"), "{filename}");
+            assert!(!rendered.contains("secret-environment"), "{filename}");
+        }
+    }
+
+    #[test]
+    fn mcp_filename_without_server_map_is_safe_metadata_instead_of_an_error() {
+        let payload = br#"{"someOtherKey":{"token":"sentinel-secret"}}"#;
+        let extraction = extract_text_bytes(Path::new("mcp.json"), "mcp.json", payload)
+            .expect("an unrelated JSON document named mcp.json must not abort extraction");
+        assert_eq!(extraction.nodes.len(), 1);
+        assert_eq!(
+            extraction.nodes[0].extra["metadata"]["parse_status"],
+            "not_mcp_configuration"
+        );
+        let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+        assert!(!rendered.contains("sentinel-secret"));
+    }
+
+    #[test]
+    fn mcp_filename_with_non_object_root_is_safe_metadata_instead_of_an_error() {
+        let payload = br#"[{"token":"sentinel-secret"}]"#;
+        let extraction =
+            extract_text_bytes(Path::new(".vscode/mcp.json"), ".vscode/mcp.json", payload)
+                .expect("a non-object MCP filename must not abort extraction");
+        assert_eq!(extraction.nodes.len(), 1);
+        assert_eq!(
+            extraction.nodes[0].extra["metadata"]["parse_status"],
+            "not_mcp_configuration"
+        );
+        let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+        assert!(!rendered.contains("sentinel-secret"));
+    }
+
+    #[test]
+    fn malformed_or_non_utf8_mcp_filename_is_safe_metadata_instead_of_an_error() {
+        for payload in [
+            b"{not-json sentinel-secret".as_slice(),
+            b"\xffsentinel-secret",
+        ] {
+            let extraction = extract_text_bytes(Path::new("mcp.json"), "mcp.json", payload)
+                .expect("malformed MCP-like input must not abort extraction");
+            assert_eq!(extraction.nodes.len(), 1);
+            assert_eq!(
+                extraction.nodes[0].extra["metadata"]["parse_status"],
+                "not_mcp_configuration"
+            );
+            let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+            assert!(!rendered.contains("sentinel-secret"));
+        }
+    }
+
+    #[test]
+    fn oversized_mcp_filename_is_safe_metadata_instead_of_an_error() {
+        let mut payload = vec![b' '; 1_048_577];
+        payload[..15].copy_from_slice(b"sentinel-secret");
+        let extraction = extract_text_bytes(Path::new("mcp.json"), "mcp.json", &payload)
+            .expect("oversized MCP-like input must not abort extraction");
+        assert_eq!(extraction.nodes.len(), 1);
+        assert_eq!(
+            extraction.nodes[0].extra["metadata"]["parse_status"],
+            "not_mcp_configuration"
+        );
+        let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+        assert!(!rendered.contains("sentinel-secret"));
+    }
+
+    #[test]
+    fn byte_entrypoint_extracts_markdown_without_target_path_probes() {
+        let extraction = extract_text_bytes(
+            Path::new("missing.md"),
+            "docs/missing.md",
+            b"# Missing\n[Guide](guide.md)\n",
+        )
+        .expect("extract in-memory Markdown source");
+        let reference = extraction
+            .edges
+            .iter()
+            .find(|edge| edge.relation == "references")
+            .expect("document link");
+        assert!(!reference.extra.contains_key("target_file"));
+        assert!(extraction.nodes.iter().any(|node| node.label == "Missing"));
+    }
+
+    #[test]
+    fn byte_markdown_links_require_static_contained_portable_paths() {
+        let extraction = extract_text_bytes(
+            Path::new("missing.md"),
+            "docs/guide/index.md",
+            r#"# Links
+[literal](./page.md#section)
+[[nested/../données]]
+[parent]: ../overview.markdown#summary
+[dynamic](${page}.md)
+[[{{page}}]]
+[dynamic-ref]: $page.md
+[escape](../../../page.md)
+[absolute](/page.md)
+[drive](C:page.md)
+[unc](//server/share/page.md)
+[backslash](..\page.md)
+"#
+            .as_bytes(),
+        )
+        .expect("extract guarded Markdown links");
+        let targets = extraction
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "references")
+            .map(|edge| edge.true_target().to_owned())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            targets,
+            HashSet::from([
+                make_id(&["docs/guide/page"]),
+                make_id(&["docs/guide/données"]),
+                make_id(&["docs/overview"]),
+            ])
+        );
+    }
+
+    #[test]
+    fn simd_utf8_decoder_matches_scalar_validation_and_text() {
+        for bytes in [
+            b"plain ASCII\n".as_slice(),
+            "valid UTF-8: λ and 文\n".as_bytes(),
+            b"invalid \xF0\x28\x8C\x28".as_slice(),
+            b"truncated \xE2\x82".as_slice(),
+        ] {
+            assert_eq!(
+                crate::bytes::validate_utf8(bytes).map(str::to_owned),
+                std::str::from_utf8(bytes).map(str::to_owned),
+                "SIMD validation must preserve scalar UTF-8 behavior for {bytes:?}",
+            );
         }
     }
 }

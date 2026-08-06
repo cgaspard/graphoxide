@@ -27,12 +27,36 @@ pub(crate) fn extract_pascal_family(
     source_file: &str,
     extension: &str,
 ) -> anyhow::Result<Extraction> {
+    let bytes = fs::read(path)?;
+    extract_pascal_family_with_path_probes(path, source_file, extension, &bytes, true)
+}
+
+/// Extract a Pascal-family document from already-read source bytes.
+///
+/// The path remains available only for stable identities. This entry point
+/// performs no filesystem access, including sibling resolution.
+pub(crate) fn extract_pascal_family_bytes(
+    path: &Path,
+    source_file: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    extract_pascal_family_with_path_probes(path, source_file, extension, bytes, false)
+}
+
+fn extract_pascal_family_with_path_probes(
+    path: &Path,
+    source_file: &str,
+    extension: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
     match extension {
-        "dfm" => extract_form(path, source_file, true),
-        "lfm" => extract_form(path, source_file, false),
-        "lpk" => extract_lazarus_package(path, source_file),
+        "dfm" => extract_form(path, source_file, bytes, true),
+        "lfm" => extract_form(path, source_file, bytes, false),
+        "lpk" => extract_lazarus_package(path, source_file, bytes, allow_path_probes),
         extension if PASCAL_EXTENSIONS.contains(&extension) => {
-            extract_pascal_source(path, source_file)
+            extract_pascal_source(path, source_file, bytes, allow_path_probes)
         }
         _ => Ok(Extraction::default()),
     }
@@ -180,8 +204,13 @@ struct Procedure {
     body_line: usize,
 }
 
-fn extract_pascal_source(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
-    let raw = String::from_utf8_lossy(&fs::read(path)?).into_owned();
+fn extract_pascal_source(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
+    let raw = String::from_utf8_lossy(bytes).into_owned();
     let text = strip_pascal_comments(&raw);
     let mut builder = Builder::new(path, source_file);
     let mut module_id = builder.file_id.clone();
@@ -202,8 +231,15 @@ fn extract_pascal_source(path: &Path, source_file: &str) -> anyhow::Result<Extra
         let whole = capture.get(0).expect("uses capture");
         let line = line_of(&text, whole.start());
         for unit in split_uses(capture.get(1).expect("uses list").as_str()) {
-            let target = resolve_pascal_unit(path, source_file, &unit);
+            let target = if allow_path_probes {
+                resolve_pascal_unit(path, source_file, &unit)
+            } else {
+                make_id(&[&unit])
+            };
             builder.edge(&module_id, &target, "imports", line, Some("import"));
+            if !allow_path_probes && let Some(edge) = builder.edges.last_mut() {
+                edge.extra.insert("pascal_unit".into(), unit.into());
+            }
         }
     }
 
@@ -256,11 +292,18 @@ fn extract_pascal_source(path: &Path, source_file: &str) -> anyhow::Result<Extra
         for base in &declaration.bases {
             let base_id = if let Some(id) = type_ids.get(&base.to_ascii_lowercase()) {
                 id.clone()
-            } else if let Some(id) = resolve_pascal_class(path, source_file, base) {
+            } else if let Some(id) = allow_path_probes
+                .then(|| resolve_pascal_class(path, source_file, base))
+                .flatten()
+            {
                 id
             } else {
                 let id = make_id(&[base]);
                 builder.node(id.clone(), base, declaration.line, "class");
+                if !allow_path_probes && let Some(node) = builder.nodes.last_mut() {
+                    node.extra
+                        .insert("pascal_unresolved_base".into(), base.clone().into());
+                }
                 id
             };
             builder.edge(&owner, &base_id, "inherits", declaration.line, None);
@@ -381,6 +424,130 @@ fn emit_pascal_calls(builder: &mut Builder<'_>, procedures: &[Procedure]) {
     }
 }
 
+/// Bind byte-extracted Pascal unit and base-class facts against the complete
+/// set of independently admitted project extractions.
+///
+/// The per-file parser emits lexical unit/base identities because it cannot
+/// inspect sibling paths. This pass uses only normalized `source_file`
+/// metadata and already-extracted nodes; it performs no filesystem I/O.
+pub(crate) fn resolve_project_symbols(extractions: &mut [Extraction]) {
+    let mut files = BTreeMap::<(String, String), BTreeSet<(String, String)>>::new();
+    let mut types = BTreeMap::<(String, String), BTreeSet<String>>::new();
+
+    for extraction in extractions.iter() {
+        for node in &extraction.nodes {
+            if !is_pascal_source(&node.source_file) {
+                continue;
+            }
+            if node.extra.get("type").and_then(|value| value.as_str()) == Some("file") {
+                let path = Path::new(&node.source_file);
+                let directory = path
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase();
+                let stem = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !stem.is_empty() {
+                    files
+                        .entry((directory, stem))
+                        .or_default()
+                        .insert((node.id.clone(), node.source_file.clone()));
+                }
+            }
+            if matches!(
+                node.extra.get("type").and_then(|value| value.as_str()),
+                Some("class" | "interface")
+            ) && !node.extra.contains_key("pascal_unresolved_base")
+            {
+                types
+                    .entry((node.source_file.clone(), normalize_id(&node.label)))
+                    .or_default()
+                    .insert(node.id.clone());
+            }
+        }
+    }
+
+    let mut imported_sources = vec![BTreeSet::<String>::new(); extractions.len()];
+    for (index, extraction) in extractions.iter_mut().enumerate() {
+        for edge in &mut extraction.edges {
+            let Some(unit) = edge
+                .extra
+                .remove("pascal_unit")
+                .and_then(|value| value.as_str().map(str::to_owned))
+            else {
+                continue;
+            };
+            let directory = Path::new(&edge.source_file)
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+            let unit = unit.to_ascii_lowercase();
+            let Some(bindings) = files.get(&(directory, unit)) else {
+                continue;
+            };
+            let Some((target, source_file)) = (bindings.len() == 1)
+                .then(|| bindings.iter().next().expect("one Pascal unit binding"))
+            else {
+                continue;
+            };
+            edge.target = target.clone();
+            edge.extra.insert("_tgt".into(), target.clone().into());
+            imported_sources[index].insert(source_file.clone());
+        }
+    }
+
+    for (index, extraction) in extractions.iter_mut().enumerate() {
+        let mut remap = BTreeMap::new();
+        for node in &extraction.nodes {
+            let Some(base) = node
+                .extra
+                .get("pascal_unresolved_base")
+                .and_then(|value| value.as_str())
+            else {
+                continue;
+            };
+            let candidates = imported_sources[index]
+                .iter()
+                .filter_map(|source| types.get(&(source.clone(), normalize_id(base))))
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if candidates.len() == 1 {
+                remap.insert(
+                    node.id.clone(),
+                    candidates
+                        .into_iter()
+                        .next()
+                        .expect("one Pascal base binding"),
+                );
+            }
+        }
+        for edge in &mut extraction.edges {
+            if let Some(target) = remap.get(edge.true_source()) {
+                edge.source = target.clone();
+                edge.extra.insert("_src".into(), target.clone().into());
+            }
+            if let Some(target) = remap.get(edge.true_target()) {
+                edge.target = target.clone();
+                edge.extra.insert("_tgt".into(), target.clone().into());
+            }
+        }
+        extraction
+            .nodes
+            .retain(|node| !remap.contains_key(&node.id));
+        for node in &mut extraction.nodes {
+            node.extra.remove("pascal_unresolved_base");
+        }
+    }
+}
+
 /// Consume private per-file Pascal call facts once the complete corpus is
 /// available, resolving only through explicit inheritance topology.
 pub(crate) fn resolve_inherited_calls(extractions: &mut [Extraction]) {
@@ -475,14 +642,17 @@ pub(crate) fn resolve_inherited_calls(extractions: &mut [Extraction]) {
             "metadata".into(),
             serde_json::json!({"resolver": "pascal_inherited_calls"}),
         );
-        extractions[index].edges.push(Edge {
-            source: caller.into(),
-            target,
-            relation: "calls".into(),
-            confidence: Confidence::Extracted,
-            source_file: raw.source_file,
-            extra,
-        });
+        crate::resolution::push_resolved_edge(
+            &mut extractions[index].edges,
+            Edge {
+                source: caller.into(),
+                target,
+                relation: "calls".into(),
+                confidence: Confidence::Extracted,
+                source_file: raw.source_file,
+                extra,
+            },
+        );
     }
 }
 
@@ -747,12 +917,16 @@ fn logical_pascal_stem(
     )
 }
 
-fn extract_form(path: &Path, source_file: &str, delphi: bool) -> anyhow::Result<Extraction> {
-    let raw = fs::read(path)?;
-    if delphi && raw.starts_with(&[0xff, 0x0a]) {
+fn extract_form(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    delphi: bool,
+) -> anyhow::Result<Extraction> {
+    if delphi && bytes.starts_with(&[0xff, 0x0a]) {
         return Ok(Extraction::default());
     }
-    let text = String::from_utf8_lossy(&raw);
+    let text = String::from_utf8_lossy(bytes);
     let mut builder = Builder::new(path, source_file);
     let object_re = Regex::new(
         r"(?i)^\s*(?:object|inherited|inline)\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)",
@@ -795,8 +969,12 @@ fn extract_form(path: &Path, source_file: &str, delphi: bool) -> anyhow::Result<
     Ok(builder.finish())
 }
 
-fn extract_lazarus_package(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
-    let bytes = fs::read(path)?;
+fn extract_lazarus_package(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
     anyhow::ensure!(
         bytes.len() <= PROJECT_XML_MAX_BYTES,
         "package XML is larger than {PROJECT_XML_MAX_BYTES} bytes"
@@ -810,7 +988,7 @@ fn extract_lazarus_package(path: &Path, source_file: &str) -> anyhow::Result<Ext
     let mut package_name = None;
     let mut dependencies = Vec::new();
     let mut units = Vec::new();
-    let mut reader = Reader::from_reader(bytes.as_slice());
+    let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(true);
     loop {
         match reader.read_event()? {
@@ -845,7 +1023,11 @@ fn extract_lazarus_package(path: &Path, source_file: &str) -> anyhow::Result<Ext
         builder.edge(&package_id, &id, "imports", 1, Some("import"));
     }
     for unit in units {
-        let id = resolve_pascal_unit(path, source_file, &unit);
+        let id = if allow_path_probes {
+            resolve_pascal_unit(path, source_file, &unit)
+        } else {
+            make_id(&[&unit])
+        };
         builder.node(id.clone(), &unit, 1, "module");
         builder.edge(&package_id, &id, "contains", 1, None);
     }
@@ -955,4 +1137,173 @@ fn is_pascal_keyword(name: &str) -> bool {
             | "free"
             | "destroy"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_path_and_bytes_match(extension: &str, contents: &[u8]) {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join(format!("fixture.{extension}"));
+        fs::write(&path, contents).expect("write fixture");
+
+        let source_file = format!("fixture.{extension}");
+        let path_extraction =
+            extract_pascal_family(&path, &source_file, extension).expect("path extraction");
+        let bytes_extraction =
+            extract_pascal_family_bytes(&path, &source_file, extension, contents)
+                .expect("byte extraction");
+
+        assert_eq!(
+            serde_json::to_value(path_extraction).expect("serialize path extraction"),
+            serde_json::to_value(bytes_extraction).expect("serialize byte extraction"),
+        );
+    }
+
+    #[test]
+    fn byte_entrypoint_matches_path_entrypoint_for_pascal_family_formats() {
+        assert_path_and_bytes_match(
+            "pas",
+            b"unit Fixture;\ninterface\nimplementation\nprocedure Run;\nbegin\nend;\nend.\n",
+        );
+        assert_path_and_bytes_match(
+            "dfm",
+            b"object Form1: TForm1\n  OnCreate = FormCreate\nend\n",
+        );
+        assert_path_and_bytes_match(
+            "lpk",
+            b"<Package><Name Value=\"Fixture\"/><RequiredPkgs><PackageName Value=\"LCL\"/></RequiredPkgs></Package>",
+        );
+    }
+
+    #[test]
+    fn byte_entrypoint_preserves_binary_dfm_handling() {
+        let extraction = extract_pascal_family_bytes(
+            Path::new("fixture.dfm"),
+            "fixture.dfm",
+            "dfm",
+            &[0xff, 0x0a],
+        )
+        .expect("binary DFM is supported");
+        assert!(extraction.nodes.is_empty());
+        assert!(extraction.edges.is_empty());
+    }
+
+    #[test]
+    fn byte_entrypoint_does_not_probe_pascal_siblings() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("main.pas");
+        fs::write(directory.path().join("Sibling.pas"), b"unit Sibling;")
+            .expect("write sibling fixture");
+
+        let extraction = extract_pascal_family_bytes(
+            &path,
+            "src/main.pas",
+            "pas",
+            b"unit Main; uses Sibling; interface implementation end.",
+        )
+        .expect("byte extraction");
+
+        assert!(extraction
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "imports" && edge.target == make_id(&["Sibling"])));
+    }
+
+    #[test]
+    fn byte_project_resolution_binds_units_bases_and_inherited_calls() {
+        let mut extractions = vec![
+            extract_pascal_family_bytes(
+                Path::new("/graphoxide-missing-project/pascal/Runner.pas"),
+                "pascal/Runner.pas",
+                "pas",
+                b"unit Runner; interface uses Worker; type TRunner = class(TWorker) public procedure Execute; end; implementation procedure TRunner.Execute; begin Process; end; end.",
+            )
+            .expect("extract runner bytes"),
+            extract_pascal_family_bytes(
+                Path::new("/graphoxide-missing-project/pascal/Worker.pas"),
+                "pascal/Worker.pas",
+                "pas",
+                b"unit Worker; interface type TWorker = class public procedure Process; end; implementation procedure TWorker.Process; begin end; end.",
+            )
+            .expect("extract worker bytes"),
+        ];
+
+        resolve_project_symbols(&mut extractions);
+        resolve_inherited_calls(&mut extractions);
+        let edges = extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .collect::<Vec<_>>();
+        assert!(edges
+            .iter()
+            .any(|edge| { edge.relation == "imports" && edge.true_target() == "pascal_worker" }));
+        assert!(edges.iter().any(|edge| {
+            edge.relation == "inherits"
+                && edge.true_source() == "pascal_runner_trunner"
+                && edge.true_target() == "pascal_worker_tworker"
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.relation == "calls"
+                && edge.true_source() == "pascal_runner_trunner_execute"
+                && edge.true_target() == "pascal_worker_tworker_process"
+        }));
+        assert!(extractions
+            .iter()
+            .flat_map(|value| &value.nodes)
+            .all(|node| {
+                node.id != "tworker" && !node.extra.contains_key("pascal_unresolved_base")
+            }));
+    }
+
+    #[test]
+    fn duplicate_pascal_unit_candidates_remain_unresolved() {
+        let mut extractions = vec![
+            extract_pascal_family_bytes(
+                Path::new("/graphoxide-missing-project/pascal/Runner.pas"),
+                "pascal/Runner.pas",
+                "pas",
+                b"unit Runner; interface uses Worker; type TRunner = class(TWorker) public procedure Execute; end; implementation procedure TRunner.Execute; begin Process; end; end.",
+            )
+            .expect("extract runner bytes"),
+            extract_pascal_family_bytes(
+                Path::new("/graphoxide-missing-project/pascal/Worker.pas"),
+                "pascal/Worker.pas",
+                "pas",
+                b"unit Worker; interface type TWorker = class public procedure Process; end; implementation procedure TWorker.Process; begin end; end.",
+            )
+            .expect("extract first worker bytes"),
+            extract_pascal_family_bytes(
+                Path::new("/graphoxide-missing-project/pascal/worker.pp"),
+                "pascal/worker.pp",
+                "pp",
+                b"unit worker; interface type TWorker = class public procedure Process; end; implementation procedure TWorker.Process; begin end; end.",
+            )
+            .expect("extract ambiguous worker bytes"),
+        ];
+
+        resolve_project_symbols(&mut extractions);
+        resolve_inherited_calls(&mut extractions);
+        let runner = &extractions[0];
+        assert!(runner
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "imports" && edge.true_target() == "worker"));
+        assert!(runner
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "inherits" && edge.true_target() == "tworker"));
+        assert!(!runner.edges.iter().any(|edge| {
+            edge.relation == "calls" && edge.true_target().ends_with("tworker_process")
+        }));
+        assert!(runner
+            .edges
+            .iter()
+            .all(|edge| !edge.extra.contains_key("pascal_unit")));
+        assert!(runner
+            .nodes
+            .iter()
+            .all(|node| !node.extra.contains_key("pascal_unresolved_base")));
+    }
 }

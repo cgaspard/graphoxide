@@ -54,23 +54,34 @@ pub fn extract_package_manifest(path: &Path) -> Extraction {
 
 /// Parse a manifest while using a caller-provided portable source identity.
 pub(crate) fn extract_package_manifest_as(path: &Path, source_file: &str) -> Extraction {
+    let Ok(bytes) = fs::read(path) else {
+        return Extraction::default();
+    };
+    extract_package_manifest_bytes(path, source_file, &bytes)
+}
+
+/// Parse an I/O-admitted manifest without reopening its path from the compute
+/// plane. Malformed, oversized, and non-UTF-8 payloads intentionally remain
+/// empty extractions so one configuration file cannot abort a repository scan.
+pub(crate) fn extract_package_manifest_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> Extraction {
     let Some(ecosystem) = ecosystem(path) else {
         return Extraction::default();
     };
-    let Ok(metadata) = fs::metadata(path) else {
-        return Extraction::default();
-    };
-    if metadata.len() > MAX_MANIFEST_BYTES {
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Extraction::default();
     }
-    let Ok(text) = fs::read_to_string(path) else {
+    let Ok(text) = std::str::from_utf8(bytes) else {
         return Extraction::default();
     };
     let parsed = match ecosystem {
-        Ecosystem::Apm => parse_apm(&text),
-        Ecosystem::Python => parse_pyproject(&text),
-        Ecosystem::Go => parse_go_mod(&text),
-        Ecosystem::Maven => parse_pom(&text),
+        Ecosystem::Apm => parse_apm(text),
+        Ecosystem::Python => parse_pyproject(text),
+        Ecosystem::Go => parse_go_mod(text),
+        Ecosystem::Maven => parse_pom(text),
     };
     let Some(mut info) = parsed else {
         return Extraction::default();
