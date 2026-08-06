@@ -4,6 +4,8 @@
 //! that disappears here can never appear in the graph, so unsupported,
 //! sensitive, ignored, and unreadable paths are all reported explicitly.
 
+use crate::format_registry::format_registry;
+pub use crate::format_registry::FileType;
 use md5::{Digest as _, Md5};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -11,37 +13,29 @@ use serde_json::{Map, Value};
 use sha2::Sha256;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fs,
-    io::{BufReader, Read},
+    fs::{self, OpenOptions},
+    io::{BufReader, Cursor, Read},
     path::{Component, Path, PathBuf},
     time::UNIX_EPOCH,
 };
 use unicode_normalization::UnicodeNormalization;
 
-const CODE_EXTENSIONS: &[&str] = &[
-    "py", "pyi", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "ejs", "ets", "go", "rs",
-    "java", "groovy", "gradle", "cpp", "cc", "cxx", "c", "h", "hpp", "hh", "cu", "cuh", "metal",
-    "rb", "rake", "swift", "kt", "kts", "cs", "scala", "php", "lua", "luau", "toc", "zig", "ps1",
-    "psm1", "psd1", "ex", "exs", "m", "mm", "jl", "vue", "svelte", "astro", "dart", "v", "sv",
-    "svh", "sql", "r", "f", "f90", "f95", "f03", "f08", "pas", "pp", "dpr", "dpk", "lpr", "inc",
-    "dfm", "lfm", "lpk", "sh", "bash", "json", "tf", "tfvars", "hcl", "dm", "dme", "dmi", "dmm",
-    "dmf", "sln", "slnx", "csproj", "fsproj", "vbproj", "xaml", "razor", "cshtml", "cls",
-    "trigger",
-];
-const DOCUMENT_EXTENSIONS: &[&str] = &[
-    "md", "markdown", "mdx", "qmd", "skill", "txt", "rst", "html", "yaml", "yml", "toml", "xml",
-];
-const PAPER_EXTENSIONS: &[&str] = &["pdf"];
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
-const OFFICE_EXTENSIONS: &[&str] = &["docx", "xlsx"];
 pub const OFFICE_MAX_RAW_BYTES: u64 = 50 * 1024 * 1024;
 pub const OFFICE_MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 pub const OFFICE_MAX_COMPRESSION_RATIO: u64 = 200;
 pub const OFFICE_MAX_MEMBERS: usize = 10_000;
+pub const OFFICE_MAX_CENTRAL_DIRECTORY_BYTES: usize = 16 * 1024 * 1024;
 const OFFICE_MAX_MARKDOWN_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum source bytes inspected solely for the corpus-size word heuristic.
+///
+/// Extraction has its own runtime admission. Discovery never needs to retain
+/// an entire source merely to decide whether a graph is likely useful.
+pub const WORD_COUNT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const PAPER_HEURISTIC_MAX_BYTES: u64 = 12_000;
 
 /// Resource ceilings applied before any Office XML parser sees attacker-owned
-/// `.docx` or `.xlsx` content.
+/// `.docx` or `.xlsx` content. Central-directory materialization is separately
+/// capped by [`OFFICE_MAX_CENTRAL_DIRECTORY_BYTES`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OfficeLimits {
     pub max_raw_bytes: u64,
@@ -60,10 +54,6 @@ impl Default for OfficeLimits {
         }
     }
 }
-const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "mov", "webm", "mkv", "avi", "m4v", "mp3", "wav", "m4a", "ogg",
-];
-const GOOGLE_WORKSPACE_EXTENSIONS: &[&str] = &["gdoc", "gsheet", "gslides"];
 const SKIP_FILES: &[&str] = &[
     "package-lock.json",
     "yarn.lock",
@@ -118,45 +108,18 @@ const SKIP_DIRS: &[&str] = &[
     ".graphoxide",
     ".worktrees",
 ];
-const VCS_MARKERS: &[&str] = &[".git", ".hg", ".svn", "_darcs", ".fossil"];
 const CORPUS_WARN_THRESHOLD: usize = 50_000;
 const CORPUS_UPPER_THRESHOLD: usize = 500_000;
 const FILE_COUNT_UPPER: usize = 500;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FileType {
-    Code,
-    Document,
-    Paper,
-    Image,
-    Video,
-}
-
-impl FileType {
-    pub const ALL: [Self; 5] = [
-        Self::Code,
-        Self::Document,
-        Self::Paper,
-        Self::Image,
-        Self::Video,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Code => "code",
-            Self::Document => "document",
-            Self::Paper => "paper",
-            Self::Image => "image",
-            Self::Video => "video",
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct DetectOptions {
     pub follow_symlinks: bool,
     pub google_workspace: bool,
+    /// Materialize legacy Markdown sidecars for Office documents during
+    /// discovery. The isolated executor disables this so original containers
+    /// first pass through runtime byte admission and bounded adapters.
+    pub convert_office_sidecars: bool,
     pub extra_excludes: Vec<String>,
     pub output_dir: Option<PathBuf>,
     pub honor_gitignore: bool,
@@ -167,6 +130,7 @@ impl Default for DetectOptions {
         Self {
             follow_symlinks: false,
             google_workspace: false,
+            convert_office_sidecars: true,
             extra_excludes: Vec::new(),
             output_dir: None,
             honor_gitignore: true,
@@ -186,10 +150,37 @@ pub struct DetectResult {
     pub skipped_sensitive: Vec<String>,
     pub unclassified: Vec<String>,
     pub walk_errors: Vec<String>,
+    /// Files whose corpus-size heuristic inspected only the documented prefix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub word_count_truncations: Vec<String>,
     pub ignored: Vec<String>,
     pub pruned_noise_dirs: Vec<String>,
     pub graphifyignore_patterns: usize,
     pub scan_root: String,
+    /// Stable logical-to-physical source bindings captured during discovery.
+    ///
+    /// This control-plane detail is deliberately excluded from serialized
+    /// compatibility output. Runtime I/O uses it to avoid reopening a mutable
+    /// symlink alias while graph provenance retains the logical path.
+    #[serde(skip, default)]
+    physical_sources: BTreeMap<String, String>,
+}
+
+impl DetectResult {
+    /// Return the once-canonicalized physical source bound to a logical path.
+    #[must_use]
+    pub fn physical_source(&self, logical: &Path) -> PathBuf {
+        self.physical_sources
+            .get(logical.to_string_lossy().as_ref())
+            .map_or_else(|| logical.to_path_buf(), PathBuf::from)
+    }
+
+    /// Apply the supported-source policy using the logical format identity and
+    /// the physical path already approved by discovery.
+    #[must_use]
+    pub fn is_supported_source(&self, logical: &Path) -> bool {
+        is_supported_path_at(logical, &self.physical_source(logical))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,28 +248,30 @@ fn is_package_manifest(path: &Path) -> bool {
 
 /// Classify a path into the extraction tier used by the upstream detector.
 pub fn classify_file(path: &Path) -> Option<FileType> {
-    if is_package_manifest(path)
-        || path
+    classify_file_at(path, path)
+}
+
+fn classify_file_at(logical_path: &Path, physical_path: &Path) -> Option<FileType> {
+    if is_package_manifest(logical_path)
+        || logical_path
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(|name| name.to_lowercase().ends_with(".blade.php"))
     {
         return Some(FileType::Code);
     }
-    let extension = lower_extension(path);
+    let extension = lower_extension(logical_path);
+    let registry = format_registry();
     if extension.is_empty() {
-        return shebang_interpreter(path).and_then(|interpreter| {
+        return shebang_interpreter(physical_path).and_then(|interpreter| {
             SHEBANG_CODE_INTERPRETERS
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(&interpreter))
                 .then_some(FileType::Code)
         });
     }
-    if CODE_EXTENSIONS.contains(&extension.as_str()) {
-        return Some(FileType::Code);
-    }
-    if PAPER_EXTENSIONS.contains(&extension.as_str()) {
-        let asset = path.components().any(|component| {
+    if registry.classify_extension(&extension) == Some(FileType::Paper) {
+        let asset = logical_path.components().any(|component| {
             let name = component.as_os_str().to_string_lossy().to_lowercase();
             [
                 ".imageset",
@@ -292,33 +285,30 @@ pub fn classify_file(path: &Path) -> Option<FileType> {
         });
         return (!asset).then_some(FileType::Paper);
     }
-    if IMAGE_EXTENSIONS.contains(&extension.as_str()) {
-        return Some(FileType::Image);
-    }
-    if DOCUMENT_EXTENSIONS.contains(&extension.as_str()) {
-        return Some(if looks_like_paper(path) {
+    if registry.is_document_heuristic_extension(&extension) {
+        return Some(if looks_like_paper(physical_path) {
             FileType::Paper
         } else {
             FileType::Document
         });
     }
-    if OFFICE_EXTENSIONS.contains(&extension.as_str())
-        || GOOGLE_WORKSPACE_EXTENSIONS.contains(&extension.as_str())
-    {
-        return Some(FileType::Document);
-    }
-    if VIDEO_EXTENSIONS.contains(&extension.as_str()) {
-        return Some(FileType::Video);
-    }
-    None
+    registry.classify_extension(&extension)
 }
 
 /// Heuristic used to distinguish converted papers from ordinary Markdown.
 pub fn looks_like_paper(path: &Path) -> bool {
-    let Ok(bytes) = fs::read(path) else {
+    let Ok(file) = open_source_nofollow(path) else {
         return false;
     };
-    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(12_000)]);
+    let mut bytes = Vec::with_capacity(PAPER_HEURISTIC_MAX_BYTES as usize);
+    if file
+        .take(PAPER_HEURISTIC_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
     let signals = [
         r"(?i)\barxiv\b",
         r"(?i)\bdoi\s*:",
@@ -340,19 +330,136 @@ pub fn looks_like_paper(path: &Path) -> bool {
         >= 3
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BoundedWordCount {
+    words: usize,
+    truncated: bool,
+}
+
 pub fn count_words(path: &Path) -> usize {
-    let Ok(bytes) = fs::read(path) else {
-        return 0;
-    };
     if matches!(lower_extension(path).as_str(), "pdf" | "docx" | "xlsx") {
         return 0;
     }
-    String::from_utf8_lossy(&bytes).split_whitespace().count()
+    count_words_with_cap(path, WORD_COUNT_MAX_BYTES).map_or(0, |count| count.words)
+}
+
+fn open_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // FILE_FLAG_OPEN_REPARSE_POINT opens the final component itself rather
+        // than following a last-moment symlink or junction replacement.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn count_text(text: &str, words: &mut usize, in_word: &mut bool) {
+    for character in text.chars() {
+        if character.is_whitespace() {
+            if *in_word {
+                *words = words.saturating_add(1);
+                *in_word = false;
+            }
+        } else {
+            *in_word = true;
+        }
+    }
+}
+
+/// Apply `String::from_utf8_lossy` semantics without retaining the complete
+/// file. Returns the number of input bytes consumed; an incomplete trailing
+/// sequence is left for the next fixed-size read unless `final_chunk` is true.
+fn count_lossy_utf8(
+    bytes: &[u8],
+    final_chunk: bool,
+    words: &mut usize,
+    in_word: &mut bool,
+) -> usize {
+    let mut consumed = 0;
+    while consumed < bytes.len() {
+        match std::str::from_utf8(&bytes[consumed..]) {
+            Ok(text) => {
+                count_text(text, words, in_word);
+                return bytes.len();
+            }
+            Err(error) => {
+                let valid_end = consumed.saturating_add(error.valid_up_to());
+                // SAFETY is not needed: `valid_up_to` is the UTF-8 validator's
+                // boundary and `from_utf8` verifies that exact prefix again.
+                if let Ok(text) = std::str::from_utf8(&bytes[consumed..valid_end]) {
+                    count_text(text, words, in_word);
+                }
+                consumed = valid_end;
+                if let Some(invalid_len) = error.error_len() {
+                    // The replacement character is not whitespace, matching
+                    // `String::from_utf8_lossy` word-boundary behavior.
+                    *in_word = true;
+                    consumed = consumed.saturating_add(invalid_len);
+                } else if final_chunk {
+                    *in_word = true;
+                    return bytes.len();
+                } else {
+                    return consumed;
+                }
+            }
+        }
+    }
+    consumed
+}
+
+fn count_words_with_cap(path: &Path, cap: usize) -> std::io::Result<BoundedWordCount> {
+    let mut file = open_source_nofollow(path)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut pending = Vec::with_capacity(buffer.len().saturating_add(4));
+    let mut inspected = 0_usize;
+    let mut words = 0_usize;
+    let mut in_word = false;
+    while inspected < cap {
+        let requested = buffer.len().min(cap - inspected);
+        let read = file.read(&mut buffer[..requested])?;
+        if read == 0 {
+            break;
+        }
+        inspected = inspected.saturating_add(read);
+        pending.extend_from_slice(&buffer[..read]);
+        let consumed = count_lossy_utf8(&pending, false, &mut words, &mut in_word);
+        if consumed > 0 {
+            pending.drain(..consumed);
+        }
+    }
+    let consumed = count_lossy_utf8(&pending, true, &mut words, &mut in_word);
+    debug_assert_eq!(consumed, pending.len());
+    if in_word {
+        words = words.saturating_add(1);
+    }
+    let mut marker = [0_u8; 1];
+    let truncated = inspected == cap && file.read(&mut marker)? != 0;
+    Ok(BoundedWordCount { words, truncated })
 }
 
 /// Whether a file exists, is regular, and is no larger than `cap` bytes.
 pub fn file_within_size_cap(path: &Path, cap: u64) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() <= cap)
+    open_source_with_size_cap(path, cap).is_some()
+}
+
+fn open_source_with_size_cap(path: &Path, cap: u64) -> Option<fs::File> {
+    let file = open_source_nofollow(path).ok()?;
+    (file.metadata().ok()?.len() <= cap).then_some(file)
 }
 
 /// Validate an Office ZIP with production resource ceilings.
@@ -368,15 +475,36 @@ pub fn zip_within_caps_with(path: &Path, limits: OfficeLimits) -> bool {
     validated_office_zip(path, limits).is_some()
 }
 
-fn validated_office_zip(path: &Path, limits: OfficeLimits) -> Option<zip::ZipArchive<fs::File>> {
-    if limits.max_members == 0
-        || limits.max_compression_ratio == 0
-        || !file_within_size_cap(path, limits.max_raw_bytes)
-    {
+type OfficeZipArchive = zip::ZipArchive<Cursor<Vec<u8>>>;
+
+fn validated_office_zip(path: &Path, limits: OfficeLimits) -> Option<OfficeZipArchive> {
+    if limits.max_members == 0 || limits.max_compression_ratio == 0 {
         return None;
     }
-    let file = fs::File::open(path).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let file = open_source_with_size_cap(path, limits.max_raw_bytes)?;
+    validated_office_zip_from_checked_file(file, limits)
+}
+
+fn validated_office_zip_from_checked_file(
+    file: fs::File,
+    limits: OfficeLimits,
+) -> Option<OfficeZipArchive> {
+    // Metadata is only a snapshot. Read at most one byte beyond the raw-file
+    // ceiling from the same no-follow handle so in-place growth cannot move an
+    // unchecked generation into the ZIP parser.
+    let bytes = read_checked_source_with_cap(file, limits.max_raw_bytes)?;
+    let central_directory_cap = bytes.len().min(OFFICE_MAX_CENTRAL_DIRECTORY_BYTES);
+    if !crate::containers::preflight_zip_metadata_with_limits(
+        &bytes,
+        limits.max_members,
+        central_directory_cap,
+    ) {
+        return None;
+    }
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+    // The preflight and ZIP reader must agree on the selected directory. Keep
+    // this release-mode check as defense in depth if the dependency ever
+    // changes its footer selection behavior.
     if archive.len() > limits.max_members {
         return None;
     }
@@ -422,10 +550,21 @@ pub fn extract_pdf_text(path: &Path) -> String {
 }
 
 pub fn extract_pdf_text_with_cap(path: &Path, cap: u64) -> String {
-    if !file_within_size_cap(path, cap) {
+    let Some(file) = open_source_with_size_cap(path, cap) else {
         return String::new();
-    }
-    pdf_extract::extract_text(path).unwrap_or_default()
+    };
+    let Some(bytes) = read_checked_source_with_cap(file, cap) else {
+        return String::new();
+    };
+    pdf_extract::extract_text_from_mem(&bytes).unwrap_or_default()
+}
+
+fn read_checked_source_with_cap(file: fs::File, cap: u64) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= cap).then_some(bytes)
 }
 
 /// Convert a bounded `.docx` package into plain Markdown paragraphs. XML is
@@ -541,7 +680,7 @@ pub fn xlsx_to_markdown(path: &Path) -> String {
     normalize_office_markdown(&output)
 }
 
-fn read_xlsx_shared_strings(archive: &mut zip::ZipArchive<fs::File>) -> Option<Vec<String>> {
+fn read_xlsx_shared_strings(archive: &mut OfficeZipArchive) -> Option<Vec<String>> {
     let Ok(member) = archive.by_name("xl/sharedStrings.xml") else {
         return Some(Vec::new());
     };
@@ -847,13 +986,21 @@ fn env_command_args(args: &[String], allow_split: bool) -> Vec<String> {
 
 /// Return the basename of an extensionless script's shebang interpreter.
 pub fn shebang_interpreter(path: &Path) -> Option<String> {
-    let mut file = fs::File::open(path).ok()?;
+    let mut file = open_source_nofollow(path).ok()?;
     let mut bytes = [0_u8; 256];
     let read = file.read(&mut bytes).ok()?;
-    if !bytes[..read].starts_with(b"#!") {
+    shebang_interpreter_bytes(&bytes[..read])
+}
+
+/// Parse the basename of an extensionless script's shebang interpreter from
+/// already admitted source bytes. The compute plane uses this variant so an
+/// extractor never reopens a source path after I/O admission.
+pub(crate) fn shebang_interpreter_bytes(bytes: &[u8]) -> Option<String> {
+    let bytes = &bytes[..bytes.len().min(256)];
+    if !bytes.starts_with(b"#!") {
         return None;
     }
-    let first = bytes[..read].split(|byte| *byte == b'\n').next()?;
+    let first = bytes.split(|byte| *byte == b'\n').next()?;
     let line = String::from_utf8_lossy(&first[2..]);
     let parts = shell_words(line.trim())?;
     let first = parts.first()?;
@@ -1178,10 +1325,7 @@ fn find_vcs_root(start: &Path) -> Option<PathBuf> {
         .map(PathBuf::from)
         .and_then(|path| fs::canonicalize(path).ok());
     loop {
-        if VCS_MARKERS
-            .iter()
-            .any(|marker| current.join(marker).exists())
-        {
+        if is_vcs_root(&current) {
             return Some(current);
         }
         if home.as_ref().is_some_and(|home| *home == current) {
@@ -1193,6 +1337,37 @@ fn find_vcs_root(start: &Path) -> Option<PathBuf> {
         }
         current = parent;
     }
+}
+
+fn is_vcs_root(directory: &Path) -> bool {
+    let dot_git = directory.join(".git");
+    let git_valid = if dot_git.is_dir() {
+        dot_git.join("HEAD").is_file()
+    } else if dot_git.is_file() {
+        fs::read_to_string(&dot_git)
+            .ok()
+            .and_then(|value| {
+                value
+                    .trim()
+                    .strip_prefix("gitdir:")
+                    .map(str::trim)
+                    .map(PathBuf::from)
+            })
+            .map(|git_dir| {
+                if git_dir.is_absolute() {
+                    git_dir
+                } else {
+                    directory.join(git_dir)
+                }
+            })
+            .is_some_and(|git_dir| git_dir.join("HEAD").is_file())
+    } else {
+        false
+    };
+    git_valid
+        || [".hg", ".svn", "_darcs", ".fossil"]
+            .iter()
+            .any(|marker| directory.join(marker).exists())
 }
 
 fn git_info_exclude(vcs_root: &Path) -> Option<PathBuf> {
@@ -1255,10 +1430,8 @@ pub fn load_ignore_patterns(root: &Path, honor_gitignore: bool) -> Vec<IgnorePat
     }
     directories.reverse();
     let mut patterns = Vec::new();
-    if honor_gitignore {
-        if let Some(exclude) = git_info_exclude(&ceiling) {
-            patterns.extend(read_ignore_file(&exclude, &ceiling));
-        }
+    if honor_gitignore && let Some(exclude) = git_info_exclude(&ceiling) {
+        patterns.extend(read_ignore_file(&exclude, &ceiling));
     }
     for directory in directories {
         patterns.extend(load_dir_ignore(&directory, honor_gitignore));
@@ -1447,13 +1620,19 @@ struct WalkState<'a> {
     options: &'a DetectOptions,
     configured_output: PathBuf,
     patterns: Vec<IgnorePattern>,
-    paths: Vec<PathBuf>,
+    paths: Vec<DiscoveredPath>,
     ignored: Vec<String>,
     pruned_noise: Vec<String>,
     skipped_sensitive: Vec<String>,
     errors: Vec<String>,
     active_targets: HashSet<PathBuf>,
     ignore_cache: HashMap<PathBuf, bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredPath {
+    logical: PathBuf,
+    physical: PathBuf,
 }
 
 impl WalkState<'_> {
@@ -1497,6 +1676,17 @@ impl WalkState<'_> {
             let symlink = kind.is_symlink();
             let directory_entry = kind.is_dir() || (symlink && path.is_dir());
             if directory_entry {
+                // `outer!/member` is the serialized identity reserved for
+                // logical container members. Do not admit a physical
+                // directory whose name would create the same project-relative
+                // boundary and make graph IDs/provenance ambiguous.
+                if name.ends_with('!') {
+                    self.ignored.push(format!(
+                        "{} [directory name ending in ! is reserved for virtual container members]",
+                        path.display()
+                    ));
+                    continue;
+                }
                 if !memory_tree {
                     let configured = fs::canonicalize(&path)
                         .ok()
@@ -1530,15 +1720,76 @@ impl WalkState<'_> {
                     }
                 }
                 self.walk(&path, memory_tree);
-            } else if (kind.is_file() || (symlink && path.is_file()))
-                && !SKIP_FILES.contains(&name.as_str())
-            {
-                self.paths.push(path);
             } else if symlink {
-                self.skipped_sensitive.push(format!(
-                    "{} [symlink target outside scan root or unavailable]",
-                    path.display()
-                ));
+                if !self.options.follow_symlinks {
+                    self.skipped_sensitive.push(format!(
+                        "{} [file symlink skipped - enable follow symlinks]",
+                        path.display()
+                    ));
+                    continue;
+                }
+                let Ok(physical) = fs::canonicalize(&path) else {
+                    self.skipped_sensitive.push(format!(
+                        "{} [symlink target outside scan root or unavailable]",
+                        path.display()
+                    ));
+                    continue;
+                };
+                if !physical.starts_with(self.root) {
+                    self.skipped_sensitive.push(format!(
+                        "{} [symlink target outside scan root]",
+                        path.display()
+                    ));
+                    continue;
+                }
+                if !fs::symlink_metadata(&physical)
+                    .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+                {
+                    self.skipped_sensitive.push(format!(
+                        "{} [symlink target outside scan root or unavailable]",
+                        path.display()
+                    ));
+                    continue;
+                }
+                if physical != path && (is_sensitive(&path) || is_sensitive(&physical)) {
+                    self.skipped_sensitive
+                        .push(path.to_string_lossy().into_owned());
+                    continue;
+                }
+                if !SKIP_FILES.contains(&name.as_str()) {
+                    self.paths.push(DiscoveredPath {
+                        logical: path,
+                        physical,
+                    });
+                }
+            } else if kind.is_file() && !SKIP_FILES.contains(&name.as_str()) {
+                let Ok(physical) = fs::canonicalize(&path) else {
+                    self.errors.push(format!(
+                        "{}: unable to resolve regular source",
+                        path.display()
+                    ));
+                    continue;
+                };
+                if !physical.starts_with(self.root)
+                    || !fs::symlink_metadata(&physical).is_ok_and(|metadata| {
+                        metadata.is_file() && !metadata.file_type().is_symlink()
+                    })
+                {
+                    self.skipped_sensitive.push(format!(
+                        "{} [resolved source outside scan root or unavailable]",
+                        path.display()
+                    ));
+                    continue;
+                }
+                if physical != path && (is_sensitive(&path) || is_sensitive(&physical)) {
+                    self.skipped_sensitive
+                        .push(path.to_string_lossy().into_owned());
+                    continue;
+                }
+                self.paths.push(DiscoveredPath {
+                    logical: path,
+                    physical,
+                });
             }
         }
         self.active_targets.remove(&target);
@@ -1579,19 +1830,35 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
     if memory.is_dir() {
         state.walk(&memory, true);
     }
-    state.paths.sort();
-    state.paths.dedup();
+    // A physical source is indexed once. Prefer its ordinary in-tree spelling
+    // over a symlink alias, then use lexical order as the stable tie-breaker.
+    state.paths.sort_by(|left, right| {
+        left.physical
+            .cmp(&right.physical)
+            .then_with(|| (left.logical != left.physical).cmp(&(right.logical != right.physical)))
+            .then_with(|| left.logical.cmp(&right.logical))
+    });
+    state
+        .paths
+        .dedup_by(|left, right| left.physical == right.physical);
+    state
+        .paths
+        .sort_by(|left, right| left.logical.cmp(&right.logical));
 
     let mut files: DetectedFiles = FileType::ALL
         .iter()
         .map(|kind| (kind.as_str().to_owned(), Vec::new()))
         .collect();
-    let mut total_words = 0;
+    let mut total_words = 0_usize;
     let mut unclassified = Vec::new();
+    let mut word_count_truncations = Vec::new();
+    let mut physical_sources = BTreeMap::new();
     let converted = configured_output.join("converted");
-    for path in state.paths {
+    for discovered in state.paths {
+        let path = discovered.logical;
+        let physical = discovered.physical;
         let in_memory = memory.is_dir() && path.starts_with(&memory);
-        if path.starts_with(&converted) {
+        if path.starts_with(&converted) || physical.starts_with(&converted) {
             continue;
         }
         if !in_memory
@@ -1600,24 +1867,36 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
             state.ignored.push(path.to_string_lossy().into_owned());
             continue;
         }
-        if !resolves_under(&path, &root) {
+        if !physical.starts_with(&root)
+            || !fs::symlink_metadata(&physical)
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
             state.skipped_sensitive.push(format!(
-                "{} [symlink target outside scan root]",
+                "{} [resolved source changed or left scan root]",
                 path.display()
             ));
             continue;
         }
-        if is_sensitive(&path) {
+        if is_sensitive(&path) || is_sensitive(&physical) {
             state
                 .skipped_sensitive
                 .push(path.to_string_lossy().into_owned());
             continue;
         }
-        let Some(kind) = classify_file(&path) else {
+        // Keep `classify_file` as the compatibility-facing legacy projection,
+        // but admit registered byte-only formats into the document work queue.
+        // This adds no watch suffixes and retains `None` for callers that ask
+        // whether a path belongs to the historical classification contract.
+        let kind = classify_file_at(&path, &physical).or_else(|| {
+            format_registry()
+                .find_by_path(&path)
+                .map(|_| FileType::Document)
+        });
+        let Some(kind) = kind else {
             unclassified.push(path.to_string_lossy().into_owned());
             continue;
         };
-        if GOOGLE_WORKSPACE_EXTENSIONS.contains(&lower_extension(&path).as_str()) {
+        if format_registry().is_google_workspace_extension(&lower_extension(&path)) {
             if !options.google_workspace {
                 state.skipped_sensitive.push(format!(
                     "{} [Google Workspace shortcut skipped - enable Google Workspace conversion]",
@@ -1625,7 +1904,7 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
                 ));
                 continue;
             }
-            let text = fs::read_to_string(&path).unwrap_or_default();
+            let text = fs::read_to_string(&physical).unwrap_or_default();
             let body = format!(
                 "# {}\n\n{}",
                 path.file_stem().unwrap_or_default().to_string_lossy(),
@@ -1636,7 +1915,22 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
                 {
                     continue;
                 }
-                total_words += count_words(&sidecar);
+                if let Ok(count) = count_words_with_cap(&sidecar, WORD_COUNT_MAX_BYTES) {
+                    total_words = total_words.saturating_add(count.words);
+                    if count.truncated {
+                        word_count_truncations.push(format!(
+                            "{} [word count truncated at {} bytes]",
+                            sidecar.display(),
+                            WORD_COUNT_MAX_BYTES
+                        ));
+                    }
+                }
+                let sidecar_physical =
+                    fs::canonicalize(&sidecar).unwrap_or_else(|_| sidecar.clone());
+                physical_sources.insert(
+                    sidecar.to_string_lossy().into_owned(),
+                    sidecar_physical.to_string_lossy().into_owned(),
+                );
                 files
                     .get_mut(FileType::Document.as_str())
                     .expect("document bucket")
@@ -1644,10 +1938,12 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
             }
             continue;
         }
-        if OFFICE_EXTENSIONS.contains(&lower_extension(&path).as_str()) {
+        if options.convert_office_sidecars
+            && format_registry().is_office_extension(&lower_extension(&path))
+        {
             let body = match lower_extension(&path).as_str() {
-                "docx" => docx_to_markdown(&path),
-                "xlsx" => xlsx_to_markdown(&path),
+                "docx" => docx_to_markdown(&physical),
+                "xlsx" => xlsx_to_markdown(&physical),
                 _ => String::new(),
             };
             if let Some(sidecar) = convert_office_text(&path, &converted, Some(&root), &body)? {
@@ -1655,7 +1951,22 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
                 {
                     continue;
                 }
-                total_words += count_words(&sidecar);
+                if let Ok(count) = count_words_with_cap(&sidecar, WORD_COUNT_MAX_BYTES) {
+                    total_words = total_words.saturating_add(count.words);
+                    if count.truncated {
+                        word_count_truncations.push(format!(
+                            "{} [word count truncated at {} bytes]",
+                            sidecar.display(),
+                            WORD_COUNT_MAX_BYTES
+                        ));
+                    }
+                }
+                let sidecar_physical =
+                    fs::canonicalize(&sidecar).unwrap_or_else(|_| sidecar.clone());
+                physical_sources.insert(
+                    sidecar.to_string_lossy().into_owned(),
+                    sidecar_physical.to_string_lossy().into_owned(),
+                );
                 files
                     .get_mut(FileType::Document.as_str())
                     .expect("document bucket")
@@ -1668,9 +1979,23 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
             }
             continue;
         }
-        if kind != FileType::Video {
-            total_words += count_words(&path);
+        if kind != FileType::Video
+            && !matches!(lower_extension(&path).as_str(), "pdf" | "docx" | "xlsx")
+            && let Ok(count) = count_words_with_cap(&physical, WORD_COUNT_MAX_BYTES)
+        {
+            total_words = total_words.saturating_add(count.words);
+            if count.truncated {
+                word_count_truncations.push(format!(
+                    "{} [word count truncated at {} bytes]",
+                    path.display(),
+                    WORD_COUNT_MAX_BYTES
+                ));
+            }
         }
+        physical_sources.insert(
+            path.to_string_lossy().into_owned(),
+            physical.to_string_lossy().into_owned(),
+        );
         files
             .get_mut(kind.as_str())
             .expect("file-type bucket")
@@ -1683,6 +2008,7 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
     state.ignored.sort();
     state.pruned_noise.sort();
     state.skipped_sensitive.sort();
+    word_count_truncations.sort();
     let total_files = files.values().map(Vec::len).sum();
     let needs_graph = total_words >= CORPUS_WARN_THRESHOLD;
     let warning = if !needs_graph {
@@ -1705,10 +2031,12 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
         skipped_sensitive: state.skipped_sensitive,
         unclassified,
         walk_errors: state.errors,
+        word_count_truncations,
         ignored: state.ignored,
         pruned_noise_dirs: state.pruned_noise,
         graphifyignore_patterns: state.patterns.len(),
         scan_root: root.to_string_lossy().into_owned(),
+        physical_sources,
     })
 }
 
@@ -1720,7 +2048,7 @@ pub fn collect_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
         .values()
         .flatten()
         .map(PathBuf::from)
-        .filter(|path| is_supported_path(path))
+        .filter(|path| result.is_supported_source(path))
         .collect();
     paths.sort();
     paths.dedup();
@@ -1729,16 +2057,24 @@ pub fn collect_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
 
 /// Whether a changed path belongs to the offline structural extraction tier.
 pub fn is_supported_path(path: &Path) -> bool {
-    let name = path
+    is_supported_path_at(path, path)
+}
+
+fn is_supported_path_at(logical_path: &Path, physical_path: &Path) -> bool {
+    let name = logical_path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("");
     !SKIP_FILES.contains(&name)
-        && !is_sensitive(path)
+        && !is_sensitive(logical_path)
+        && !is_sensitive(physical_path)
         && (matches!(
-            classify_file(path),
-            Some(FileType::Code | FileType::Document)
-        ) || (path.extension().is_none() && has_code_shebang(path)))
+            classify_file_at(logical_path, physical_path),
+            Some(FileType::Code | FileType::Document | FileType::Paper | FileType::Image)
+        ) || crate::format_registry::format_registry()
+            .find_by_path(logical_path)
+            .is_some()
+            || (logical_path.extension().is_none() && has_code_shebang(physical_path)))
 }
 
 fn nfc(value: &str) -> String {
@@ -1926,12 +2262,12 @@ pub fn save_manifest(
                 let resolved = resolved.to_string_lossy().into_owned();
                 indexed.insert(resolved.clone());
                 indexed.insert(nfc(&resolved));
-            } else if let (Some(lexical_root), Some(root)) = (&lexical_root, &root) {
-                if let Ok(relative) = Path::new(path).strip_prefix(lexical_root) {
-                    let rebased = root.join(relative).to_string_lossy().into_owned();
-                    indexed.insert(rebased.clone());
-                    indexed.insert(nfc(&rebased));
-                }
+            } else if let (Some(lexical_root), Some(root)) = (&lexical_root, &root)
+                && let Ok(relative) = Path::new(path).strip_prefix(lexical_root)
+            {
+                let rebased = root.join(relative).to_string_lossy().into_owned();
+                indexed.insert(rebased.clone());
+                indexed.insert(nfc(&rebased));
             }
         }
         indexed
@@ -2062,7 +2398,8 @@ pub fn detect_incremental(
     }
     for (file_type, paths) in &detection.files {
         for path in paths {
-            let current_mtime = modified_time(Path::new(path)).unwrap_or_default();
+            let physical = detection.physical_source(Path::new(path));
+            let current_mtime = modified_time(&physical).unwrap_or_default();
             let stored = manifest.get(&nfc(path));
             let changed = if let Some(number) = stored.and_then(Value::as_f64) {
                 current_mtime != number
@@ -2080,7 +2417,7 @@ pub fn detect_incremental(
                     .unwrap_or_default();
                 hash.is_empty()
                     || stored_mtime(&normalized).is_none_or(|mtime| {
-                        current_mtime != mtime && content_md5(Path::new(path)) != hash
+                        current_mtime != mtime && content_md5(&physical) != hash
                     })
             } else {
                 true
@@ -2179,6 +2516,24 @@ pub fn convert_office_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    fn write_test_zip(path: &Path) {
+        let file = fs::File::create(path).expect("create Office ZIP fixture");
+        let mut writer = ZipWriter::new(file);
+        writer
+            .start_file(
+                "word/document.xml",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .expect("start Office ZIP member");
+        writer
+            .write_all(b"<document>opened generation</document>")
+            .expect("write Office ZIP member");
+        writer.finish().expect("finish Office ZIP fixture");
+    }
 
     #[test]
     fn compiled_cpp_suffixes_are_detectable() {
@@ -2196,5 +2551,147 @@ mod tests {
                 "docs/guide.{suffix}"
             ))));
         }
+    }
+
+    #[test]
+    fn registered_structured_formats_are_admitted_without_expanding_watch_projection() {
+        for suffix in [
+            "csv",
+            "proto",
+            "dot",
+            "kicad_sch",
+            "ifc",
+            "usda",
+            "usdz",
+            "parquet",
+            "zip",
+            "avif",
+        ] {
+            let path = format!("design/input.{suffix}");
+            assert!(is_supported_path(Path::new(&path)), "{suffix}");
+        }
+        for suffix in ["csv", "proto", "dot", "kicad_sch", "ifc", "usda"] {
+            assert!(
+                !crate::format_registry::format_registry().is_watched_extension(suffix),
+                "new dispatcher admission must not change watch projection: {suffix}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_office_handle_is_not_swapped_by_path_replacement() {
+        let fixture = tempdir().expect("temporary Office fixture");
+        let path = fixture.path().join("document.docx");
+        let replacement = fixture.path().join("replacement.docx");
+        write_test_zip(&path);
+        fs::write(&replacement, b"not a ZIP").expect("write replacement");
+
+        let file = open_source_with_size_cap(&path, OFFICE_MAX_RAW_BYTES)
+            .expect("open checked Office generation");
+        fs::rename(&replacement, &path).expect("atomically replace Office path");
+
+        let archive = validated_office_zip_from_checked_file(file, OfficeLimits::default())
+            .expect("parse the checked Office generation");
+        assert_eq!(archive.len(), 1);
+    }
+
+    #[test]
+    fn checked_office_read_rejects_growth_past_the_raw_cap() {
+        let fixture = tempdir().expect("temporary Office fixture");
+        let path = fixture.path().join("document.docx");
+        write_test_zip(&path);
+        let checked_size = fs::metadata(&path).expect("Office metadata").len();
+        let file =
+            open_source_with_size_cap(&path, checked_size).expect("open checked Office generation");
+        let mut writer = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open Office file for growth");
+        writer.write_all(b"x").expect("grow Office file");
+
+        let limits = OfficeLimits {
+            max_raw_bytes: checked_size,
+            ..OfficeLimits::default()
+        };
+        assert!(validated_office_zip_from_checked_file(file, limits).is_none());
+    }
+
+    #[test]
+    fn office_preflight_rejects_classic_large_member_count_before_zip_reader() {
+        const EOCD_BYTES: usize = 22;
+        let directory_offset = 60_000_usize;
+        let mut bytes = vec![0_u8; directory_offset + EOCD_BYTES];
+        bytes[directory_offset..directory_offset + 4].copy_from_slice(b"PK\x05\x06");
+        bytes[directory_offset + 8..directory_offset + 10]
+            .copy_from_slice(&50_000_u16.to_le_bytes());
+        bytes[directory_offset + 10..directory_offset + 12]
+            .copy_from_slice(&50_000_u16.to_le_bytes());
+        bytes[directory_offset + 16..directory_offset + 20]
+            .copy_from_slice(&(directory_offset as u32).to_le_bytes());
+
+        assert!(!crate::containers::preflight_zip_metadata_with_limits(
+            &bytes,
+            10_000,
+            OFFICE_MAX_CENTRAL_DIRECTORY_BYTES,
+        ));
+    }
+
+    #[test]
+    fn office_preflight_rejects_zip64_large_member_count_before_zip_reader() {
+        const ZIP64_RECORD_BYTES: usize = 56;
+        const ZIP64_LOCATOR_BYTES: usize = 20;
+        const EOCD_BYTES: usize = 22;
+        let locator = ZIP64_RECORD_BYTES;
+        let eocd = locator + ZIP64_LOCATOR_BYTES;
+        let mut bytes = vec![0_u8; eocd + EOCD_BYTES];
+
+        bytes[0..4].copy_from_slice(b"PK\x06\x06");
+        bytes[4..12].copy_from_slice(&44_u64.to_le_bytes());
+        bytes[24..32].copy_from_slice(&50_000_u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&50_000_u64.to_le_bytes());
+        bytes[locator..locator + 4].copy_from_slice(b"PK\x06\x07");
+        bytes[locator + 16..locator + 20].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[eocd..eocd + 4].copy_from_slice(b"PK\x05\x06");
+        bytes[eocd + 8..eocd + 10].copy_from_slice(&u16::MAX.to_le_bytes());
+        bytes[eocd + 10..eocd + 12].copy_from_slice(&u16::MAX.to_le_bytes());
+        bytes[eocd + 12..eocd + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[eocd + 16..eocd + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(!crate::containers::preflight_zip_metadata_with_limits(
+            &bytes,
+            10_000,
+            OFFICE_MAX_CENTRAL_DIRECTORY_BYTES,
+        ));
+    }
+
+    #[test]
+    fn checked_pdf_read_rejects_growth_past_the_raw_cap() {
+        let fixture = tempdir().expect("temporary PDF fixture");
+        let path = fixture.path().join("document.pdf");
+        fs::write(&path, b"%PDF").expect("write PDF prefix");
+        let file = open_source_with_size_cap(&path, 4).expect("open checked PDF generation");
+        let mut writer = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open PDF for growth");
+        writer.write_all(b"-").expect("grow PDF");
+
+        assert!(read_checked_source_with_cap(file, 4).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_office_admission_does_not_follow_the_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("temporary Office fixture");
+        let target = fixture.path().join("target.docx");
+        let alias = fixture.path().join("alias.docx");
+        write_test_zip(&target);
+        symlink(&target, &alias).expect("create Office symlink");
+
+        assert!(!file_within_size_cap(&alias, OFFICE_MAX_RAW_BYTES));
+        assert!(!zip_within_caps(&alias));
     }
 }

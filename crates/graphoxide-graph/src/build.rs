@@ -1,7 +1,9 @@
 //! Deterministic extraction merge and endpoint repair.
 
 use crate::provenance::origin_is_structural;
-use graphoxide_core::{normalize_id, Edge, Extraction, KnowledgeGraph, Node};
+use graphoxide_core::{
+    normalize_id, Edge, Extraction, KnowledgeGraph, Node, CONTAINER_SOURCE_ATTRIBUTE,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -377,6 +379,24 @@ fn relativize_source_file(value: &str, root: &std::path::Path) -> String {
     relative.to_string_lossy().replace('\\', "/")
 }
 
+fn normalize_container_source(
+    extra: &mut BTreeMap<String, serde_json::Value>,
+    root: Option<&std::path::Path>,
+) {
+    let Some(source) = extra
+        .get(CONTAINER_SOURCE_ATTRIBUTE)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let normalized = match root {
+        Some(root) => relativize_source_file(&source, root),
+        None => source.replace('\\', "/"),
+    };
+    extra.insert(CONTAINER_SOURCE_ATTRIBUTE.into(), normalized.into());
+}
+
 fn normalize_extractions(
     extractions: &[Extraction],
     root: Option<&std::path::Path>,
@@ -400,6 +420,7 @@ fn normalize_extractions(
                     normalize_id(&absolute_stem.to_string_lossy()).into(),
                 );
             }
+            normalize_container_source(&mut node.extra, root);
             node.file_type = canonical_file_type(&node.file_type).to_owned();
         }
         for edge in &mut extraction.edges {
@@ -407,21 +428,24 @@ fn normalize_extractions(
                 Some(root) => relativize_source_file(&edge.source_file, root),
                 None => edge.source_file.replace('\\', "/"),
             };
+            normalize_container_source(&mut edge.extra, root);
         }
         for hyperedge in &mut extraction.hyperedges {
             let Some(object) = hyperedge.as_object_mut() else {
                 continue;
             };
-            if let Some(source_file) = object
-                .get("source_file")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-            {
-                let normalized = match root {
-                    Some(root) => relativize_source_file(&source_file, root),
-                    None => source_file.replace('\\', "/"),
-                };
-                object.insert("source_file".into(), normalized.into());
+            for key in ["source_file", CONTAINER_SOURCE_ATTRIBUTE] {
+                if let Some(source_file) = object
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+                {
+                    let normalized = match root {
+                        Some(root) => relativize_source_file(&source_file, root),
+                        None => source_file.replace('\\', "/"),
+                    };
+                    object.insert(key.into(), normalized.into());
+                }
             }
         }
     }
@@ -546,18 +570,20 @@ fn build_graph_with_report_normalized(
     }
     for node in nodes.values() {
         let key = (node_path_key(node), node.label.to_lowercase());
-        if let Some(candidates) = canonical_by_key.get(&key) {
-            if candidates.len() == 1 && candidates[0] != node.id && !is_structural_node(node) {
-                remap.insert(node.id.clone(), candidates[0].clone());
-            }
+        if let Some(candidates) = canonical_by_key.get(&key)
+            && candidates.len() == 1
+            && candidates[0] != node.id
+            && !is_structural_node(node)
+        {
+            remap.insert(node.id.clone(), candidates[0].clone());
         }
     }
     for (old, canonical) in &remap {
         let incoming = nodes.get(old).cloned();
-        if !doc_twin_remap.contains_key(old) {
-            if let (Some(incoming), Some(existing)) = (incoming, nodes.get_mut(canonical)) {
-                merge_node(existing, &incoming);
-            }
+        if !doc_twin_remap.contains_key(old)
+            && let (Some(incoming), Some(existing)) = (incoming, nodes.get_mut(canonical))
+        {
+            merge_node(existing, &incoming);
         }
         if nodes.remove(old).is_some() {
             report.merge_node(if doc_twin_remap.contains_key(old) {
@@ -1197,21 +1223,21 @@ fn repair(
         });
     }
     let key = normalize_id(value);
-    if let Some(ids) = normalized.get(&key) {
-        if ids.len() == 1 {
-            return Some(RepairedEndpoint {
-                id: ids[0].clone(),
-                repair: EndpointRepair::NormalizedId,
-            });
-        }
+    if let Some(ids) = normalized.get(&key)
+        && ids.len() == 1
+    {
+        return Some(RepairedEndpoint {
+            id: ids[0].clone(),
+            repair: EndpointRepair::NormalizedId,
+        });
     }
-    if let Some(ids) = legacy.get(&key) {
-        if ids.len() == 1 {
-            return Some(RepairedEndpoint {
-                id: ids[0].clone(),
-                repair: EndpointRepair::LegacyId,
-            });
-        }
+    if let Some(ids) = legacy.get(&key)
+        && ids.len() == 1
+    {
+        return Some(RepairedEndpoint {
+            id: ids[0].clone(),
+            repair: EndpointRepair::LegacyId,
+        });
     }
     None
 }

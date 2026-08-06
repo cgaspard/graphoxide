@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 — 2026-08-05
+
+- Bundled the bounded universal indexer with isolated I/O and compute lanes,
+  deterministic resource controls, and opt-in runtime telemetry.
+- Added truthful capability reporting and structural coverage for supported
+  data, schema, diagram, engineering, simulation, and archive formats.
+- Hardened recursive archive indexing against sensitive members, aggregate
+  graph amplification, and unsafe or malformed content.
+
 ## 0.6.0 — 2026-08-05
 
 - Fixed builds and updates failing outright in workspaces containing a

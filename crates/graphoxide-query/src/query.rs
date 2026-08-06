@@ -303,12 +303,11 @@ fn validated_edge_endpoints(edge: &Edge) -> Option<(&str, &str)> {
         .get("_src")
         .and_then(serde_json::Value::as_str)
         .zip(edge.extra.get("_tgt").and_then(serde_json::Value::as_str));
-    if let Some((source, target)) = marked {
-        if (source == edge.source && target == edge.target)
-            || (source == edge.target && target == edge.source)
-        {
-            return Some((source, target));
-        }
+    if let Some((source, target)) = marked
+        && ((source == edge.source && target == edge.target)
+            || (source == edge.target && target == edge.source))
+    {
+        return Some((source, target));
     }
     Some((&edge.source, &edge.target))
 }
@@ -1009,10 +1008,11 @@ pub fn bfs(
                 continue;
             }
             for &edge_index in index.adjacent(current) {
-                if let Some(other) = index.other(&index.graph.links[edge_index], current) {
-                    if !visited.contains(&other) && next.insert(other) {
-                        edges.push((current, other));
-                    }
+                if let Some(other) = index.other(&index.graph.links[edge_index], current)
+                    && !visited.contains(&other)
+                    && next.insert(other)
+                {
+                    edges.push((current, other));
                 }
             }
         }
@@ -1047,11 +1047,11 @@ pub fn dfs(
         }
         let mut next = Vec::new();
         for &edge_index in index.adjacent(current) {
-            if let Some(other) = index.other(&index.graph.links[edge_index], current) {
-                if !visited.contains(&other) {
-                    edges.push((current, other));
-                    next.push(other);
-                }
+            if let Some(other) = index.other(&index.graph.links[edge_index], current)
+                && !visited.contains(&other)
+            {
+                edges.push((current, other));
+                next.push(other);
             }
         }
         for other in next.into_iter().rev() {
@@ -1227,10 +1227,10 @@ fn traverse_graph(
             }
             let mut next = Vec::new();
             for &edge_index in &index.adjacent[current] {
-                if let Some(other) = index.other(&graph.links[edge_index], current) {
-                    if visited.insert(other) {
-                        next.push(other);
-                    }
+                if let Some(other) = index.other(&graph.links[edge_index], current)
+                    && visited.insert(other)
+                {
+                    next.push(other);
                 }
             }
             next.sort_unstable_by(|a, b| b.cmp(a));
@@ -1247,10 +1247,10 @@ fn traverse_graph(
                     continue;
                 }
                 for &edge_index in &index.adjacent[current] {
-                    if let Some(other) = index.other(&graph.links[edge_index], current) {
-                        if !visited.contains(&other) {
-                            next.insert(other);
-                        }
+                    if let Some(other) = index.other(&graph.links[edge_index], current)
+                        && !visited.contains(&other)
+                    {
+                        next.insert(other);
                     }
                 }
             }
@@ -1295,10 +1295,11 @@ fn render(
             continue;
         };
         if let (Some(source), Some(target)) = (index.position(source_id), index.position(target_id))
+            && source != target
+            && visited.contains(&source)
+            && visited.contains(&target)
         {
-            if source != target && visited.contains(&source) && visited.contains(&target) {
-                edges.push((source, target));
-            }
+            edges.push((source, target));
         }
     }
     format!(
@@ -1355,11 +1356,12 @@ pub fn subgraph_to_text(
     while let Some(current) = queue.pop_front() {
         let distance = distances[&current] + 1;
         for &edge_index in index.adjacent(current) {
-            if let Some(other) = index.other(&index.graph.links[edge_index], current) {
-                if visited.contains(&other) && !distances.contains_key(&other) {
-                    distances.insert(other, distance);
-                    queue.push_back(other);
-                }
+            if let Some(other) = index.other(&index.graph.links[edge_index], current)
+                && visited.contains(&other)
+                && !distances.contains_key(&other)
+            {
+                distances.insert(other, distance);
+                queue.push_back(other);
             }
         }
     }

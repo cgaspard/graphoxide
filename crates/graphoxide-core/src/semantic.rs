@@ -3,7 +3,7 @@
 use crate::io::write_json_atomic;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{collections::BTreeSet, fs, io::Read, path::Path};
 
 pub const MAX_SEMANTIC_FRAGMENT_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_SEMANTIC_FRAGMENT_NODES: usize = 10_000;
@@ -227,17 +227,51 @@ pub fn load_validated_semantic_fragment_with_limits(
     path: &Path,
     limits: SemanticFragmentLimits,
 ) -> Result<Value, Vec<String>> {
-    let size = fs::metadata(path)
+    let file = fs::File::open(path)
+        .map_err(|error| vec![format!("could not stat {}: {error}", path.display())])?;
+    load_validated_semantic_fragment_from_open_file(path, file, limits)
+}
+
+fn load_validated_semantic_fragment_from_open_file(
+    path: &Path,
+    mut file: fs::File,
+    limits: SemanticFragmentLimits,
+) -> Result<Value, Vec<String>> {
+    let size = file
+        .metadata()
         .map_err(|error| vec![format!("could not stat {}: {error}", path.display())])?
         .len();
-    if size > limits.bytes as u64 {
+    load_validated_semantic_fragment_from_reader(path, &mut file, size, limits)
+}
+
+fn load_validated_semantic_fragment_from_reader(
+    path: &Path,
+    reader: impl Read,
+    observed_size: u64,
+    limits: SemanticFragmentLimits,
+) -> Result<Value, Vec<String>> {
+    let byte_limit = u64::try_from(limits.bytes).unwrap_or(u64::MAX);
+    if observed_size > byte_limit {
         return Err(vec![format!(
-            "payload is {size} bytes; max is {}",
+            "payload is {observed_size} bytes; max is {}",
             limits.bytes
         )]);
     }
-    let bytes = fs::read(path)
+    // The metadata result is only a snapshot. Admit at most one byte beyond the
+    // ceiling so an in-place growth race is rejected without allocating the
+    // complete replacement payload.
+    let mut bytes = Vec::new();
+    reader
+        .take(byte_limit.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| vec![format!("could not read {}: {error}", path.display())])?;
+    if bytes.len() > limits.bytes {
+        return Err(vec![format!(
+            "payload is {} bytes; max is {}",
+            bytes.len(),
+            limits.bytes
+        )]);
+    }
     let mut fragment: Value =
         serde_json::from_slice(&bytes).map_err(|error| vec![format!("invalid JSON: {error}")])?;
     let errors = validate_semantic_fragment_with_limits(&fragment, limits);
@@ -308,12 +342,11 @@ pub fn parse_llm_json(raw: &str) -> anyhow::Result<Value> {
         let body_end = raw[body_start..]
             .find("```")
             .map_or(raw.len(), |end| body_start + end);
-        if tag.is_empty() || tag.eq_ignore_ascii_case("json") {
-            if let Some(candidate) = first_balanced_object(&raw[body_start..body_end]) {
-                if let Ok(parsed) = serde_json::from_str::<Value>(candidate) {
-                    return Ok(sanitize_fragment_shape(&parsed));
-                }
-            }
+        if (tag.is_empty() || tag.eq_ignore_ascii_case("json"))
+            && let Some(candidate) = first_balanced_object(&raw[body_start..body_end])
+            && let Ok(parsed) = serde_json::from_str::<Value>(candidate)
+        {
+            return Ok(sanitize_fragment_shape(&parsed));
         }
         cursor = body_end.saturating_add(3);
         if cursor >= raw.len() {
@@ -321,10 +354,10 @@ pub fn parse_llm_json(raw: &str) -> anyhow::Result<Value> {
         }
     }
 
-    if let Some(candidate) = first_balanced_object(raw) {
-        if let Ok(parsed) = serde_json::from_str::<Value>(candidate) {
-            return Ok(sanitize_fragment_shape(&parsed));
-        }
+    if let Some(candidate) = first_balanced_object(raw)
+        && let Ok(parsed) = serde_json::from_str::<Value>(candidate)
+    {
+        return Ok(sanitize_fragment_shape(&parsed));
     }
     Ok(empty())
 }
@@ -610,5 +643,105 @@ fn json_number(value: f64) -> Value {
         Value::from(value as i64)
     } else {
         Value::from(value)
+    }
+}
+
+#[cfg(test)]
+mod bounded_fragment_loader_tests {
+    use super::*;
+    use std::io::{self, Read, Write};
+    use tempfile::tempdir;
+
+    fn fragment(label: &str) -> Value {
+        serde_json::json!({
+            "nodes": [{"id": "module_func", "label": label, "file_type": "code"}],
+            "edges": [],
+            "hyperedges": []
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_fragment_handle_is_not_swapped_by_path_replacement() {
+        let temp = tempdir().expect("temporary fragment directory");
+        let path = temp.path().join("chunk.json");
+        let replacement = temp.path().join("replacement.json");
+        let expected = fragment("opened generation");
+        fs::write(
+            &path,
+            serde_json::to_vec(&expected).expect("serialize fragment"),
+        )
+        .expect("write original fragment");
+        fs::write(
+            &replacement,
+            serde_json::to_vec(&fragment("replacement generation")).expect("serialize replacement"),
+        )
+        .expect("write replacement fragment");
+
+        let file = fs::File::open(&path).expect("open original fragment");
+        fs::rename(&replacement, &path).expect("atomically replace fragment path");
+
+        let loaded = load_validated_semantic_fragment_from_open_file(
+            &path,
+            file,
+            SemanticFragmentLimits::default(),
+        )
+        .expect("load opened generation");
+        assert_eq!(loaded, expected);
+    }
+
+    #[test]
+    fn fragment_growth_after_metadata_is_rejected_at_cap_plus_one() {
+        let temp = tempdir().expect("temporary fragment directory");
+        let path = temp.path().join("chunk.json");
+        let bytes = serde_json::to_vec(&fragment("bounded")).expect("serialize fragment");
+        fs::write(&path, &bytes).expect("write fragment");
+        let file = fs::File::open(&path).expect("open fragment");
+        let observed_size = file.metadata().expect("fragment metadata").len();
+        let mut writer = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open fragment for growth");
+        writer.write_all(b" ").expect("grow fragment");
+
+        let limits = SemanticFragmentLimits {
+            bytes: bytes.len(),
+            ..SemanticFragmentLimits::default()
+        };
+        let errors =
+            load_validated_semantic_fragment_from_reader(&path, file, observed_size, limits)
+                .expect_err("growth beyond the observed cap must fail");
+        assert_eq!(
+            errors,
+            vec![format!(
+                "payload is {} bytes; max is {}",
+                bytes.len() + 1,
+                bytes.len()
+            )]
+        );
+    }
+
+    struct MustNotRead;
+
+    impl Read for MustNotRead {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            panic!("oversized metadata must reject before reading")
+        }
+    }
+
+    #[test]
+    fn initially_oversized_fragment_preserves_the_size_error_and_is_not_read() {
+        let limits = SemanticFragmentLimits {
+            bytes: 64,
+            ..SemanticFragmentLimits::default()
+        };
+        let errors = load_validated_semantic_fragment_from_reader(
+            Path::new("chunk.json"),
+            MustNotRead,
+            65,
+            limits,
+        )
+        .expect_err("oversized fragment must fail");
+        assert_eq!(errors, vec!["payload is 65 bytes; max is 64"]);
     }
 }

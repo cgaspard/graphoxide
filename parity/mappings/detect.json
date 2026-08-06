@@ -272,26 +272,6 @@
       ]
     },
     {
-      "upstream": "tests/test_detect.py::test_detect_follows_symlinked_directory",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_detect_follows_symlinked_directory"
-        }
-      ]
-    },
-    {
-      "upstream": "tests/test_detect.py::test_detect_follows_symlinked_file",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_detect_follows_symlinked_file"
-        }
-      ]
-    },
-    {
       "upstream": "tests/test_detect.py::test_graphifyignore_hermetic_without_vcs",
       "targets": [
         {
@@ -428,16 +408,6 @@
           "runner": "rust",
           "package": "graphoxide-extract",
           "id": "test_detect_skips_out_of_root_symlinked_file_by_default"
-        }
-      ]
-    },
-    {
-      "upstream": "tests/test_detect.py::test_detect_incremental_propagates_follow_symlinks",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_detect_incremental_propagates_follow_symlinks"
         }
       ]
     },

@@ -3,6 +3,7 @@ use graphoxide_cli::watch::*;
 use graphoxide_core::{Confidence, Edge, KnowledgeGraph, Node};
 use serde_json::{json, Value};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Write as _,
@@ -183,6 +184,19 @@ fn test_watched_extensions_excludes_noise() {
     assert!(is_watched_extension(".sh"));
     assert!(!is_watched_extension(".pyc"));
     assert!(!is_watched_extension(".log"));
+}
+
+#[test]
+fn test_watched_extension_projection_matches_the_shared_registry() {
+    let expected: Vec<_> = graphoxide_extract::format_registry::format_registry()
+        .watched_extensions()
+        .map(|extension| format!(".{extension}"))
+        .collect();
+    let compatibility: Vec<_> = WATCHED_EXTENSIONS
+        .iter()
+        .map(|extension| (*extension).to_owned())
+        .collect();
+    assert_eq!(compatibility, expected);
 }
 
 #[test]
@@ -1619,6 +1633,76 @@ fn test_rebuild_code_queues_on_lock_contention() {
             .collect::<Vec<_>>(),
         vec!["a.py", "b.py"]
     );
+}
+
+#[test]
+fn test_external_executor_preserves_queued_lock_and_pending_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path().join(OUTPUT_DIRECTORY);
+    let _holder = RebuildLockGuard::acquire(&out, false).unwrap().unwrap();
+    let mut opts = options(temp.path(), true);
+    opts.acquire_lock = true;
+    opts.changed_paths = Some(vec!["a.py".into()]);
+    let result = rebuild_project_with_executor(temp.path(), &opts, |_| {
+        panic!("a queued rebuild must not invoke the executor")
+    })
+    .unwrap();
+    assert_eq!(result.status, RebuildStatus::Queued);
+    assert_eq!(
+        fs::read_to_string(out.join(PENDING_CHANGES))
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["a.py"]
+    );
+}
+
+#[test]
+fn test_external_executor_receives_merged_pending_paths_and_drains_late_arrivals() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path().join(OUTPUT_DIRECTORY);
+    queue_pending(&out, &["queued.py".into()]).unwrap();
+    let mut opts = options(temp.path(), true);
+    opts.acquire_lock = true;
+    opts.changed_paths = Some(vec!["own.py".into()]);
+    let passes = RefCell::new(Vec::new());
+    let result = rebuild_project_with_executor(temp.path(), &opts, |request| {
+        let changed = request.changed_paths.clone().unwrap_or_default();
+        passes.borrow_mut().push((request.pass, changed));
+        if request.pass == 1 {
+            queue_pending(&request.output_directory, &["late.py".into()]).unwrap();
+        }
+        Ok(RebuildResult {
+            status: RebuildStatus::Rebuilt,
+            scope: request.scope,
+            graph_path: request.output_directory.join("graph.json"),
+            manifest_path: request.output_directory.join("manifest.json"),
+            passes: request.pass,
+            clustered: false,
+            warnings: Vec::new(),
+            stats: RebuildStats {
+                detected_files: 3,
+                processed_files: 1,
+                changed_files: 1,
+                unchanged_files: 2,
+                deleted_files: 0,
+                nodes: request.pass,
+                edges: request.pass,
+            },
+            timings: RebuildTimings::default(),
+        })
+    })
+    .unwrap();
+    assert_eq!(result.status, RebuildStatus::Rebuilt);
+    assert_eq!(result.passes, 2);
+    assert_eq!(
+        passes.into_inner(),
+        vec![
+            (1, vec![PathBuf::from("own.py"), PathBuf::from("queued.py")]),
+            (2, vec![PathBuf::from("late.py")]),
+        ]
+    );
+    assert!(!out.join(PENDING_CHANGES).exists());
 }
 
 #[test]

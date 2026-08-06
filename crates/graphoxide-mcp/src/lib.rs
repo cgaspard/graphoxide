@@ -354,15 +354,14 @@ impl GraphoxideServer {
     fn shortest_path(&self, Parameters(p): Parameters<PathParams>) -> String {
         self.with_graph(p.project_path, |g| {
             let result = graphoxide_query::shortest_path(g, &p.source, &p.target);
-            if let Some(limit) = p.max_hops {
-                if let Some(hops) = result
+            if let Some(limit) = p.max_hops
+                && let Some(hops) = result
                     .strip_prefix("Shortest path (")
                     .and_then(|rest| rest.split_whitespace().next())
                     .and_then(|value| value.parse::<usize>().ok())
                     .filter(|hops| *hops > limit)
-                {
-                    return format!("Path exceeds max_hops={limit} ({hops} hops found).");
-                }
+            {
+                return format!("Path exceeds max_hops={limit} ({hops} hops found).");
             }
             result
         })

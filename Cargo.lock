@@ -103,6 +103,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "async-trait"
 version = "0.1.91"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -205,6 +217,20 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+
+[[package]]
+name = "blake3"
+version = "1.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.0",
+]
 
 [[package]]
 name = "block-buffer"
@@ -388,6 +414,12 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-foundation-sys"
@@ -834,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-cli"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -844,6 +876,7 @@ dependencies = [
  "graphoxide-export",
  "graphoxide-extract",
  "graphoxide-graph",
+ "graphoxide-index-runtime",
  "graphoxide-mcp",
  "graphoxide-query",
  "ignore",
@@ -860,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-core"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -881,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-export"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -896,17 +929,23 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-extract"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.0",
+ "blake3",
+ "crc32fast",
  "filetime",
+ "flate2",
  "graphoxide-core",
  "graphoxide-graph",
+ "graphoxide-index-runtime",
  "graphoxide-query",
  "hex",
  "ignore",
+ "libc",
  "md-5 0.10.6",
+ "memchr",
  "pdf-extract",
  "postgres",
  "quick-xml",
@@ -917,6 +956,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.10.9",
+ "simdutf8",
  "tempfile",
  "thiserror",
  "toml",
@@ -941,9 +981,10 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-graph"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "graphoxide-core",
  "hex",
  "network_partitions",
@@ -963,8 +1004,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphoxide-index-runtime"
+version = "0.8.0"
+dependencies = [
+ "blake3",
+ "crc32fast",
+ "libc",
+ "tempfile",
+ "thiserror",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "graphoxide-mcp"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -984,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-query"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "graphoxide-core",
@@ -998,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-skillgen"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "tempfile",
 ]
@@ -2418,6 +2471,12 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "siphasher"

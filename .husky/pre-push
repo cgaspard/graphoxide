@@ -1,2 +1,10 @@
 #!/usr/bin/env sh
+
+# Git exports repository-local variables to hooks. Clear them before running
+# tests that create their own temporary repositories, otherwise nested `git`
+# commands can accidentally operate on the repository being pushed.
+graphoxide_git_local_env="$(git rev-parse --local-env-vars)" || exit 1
+unset $graphoxide_git_local_env
+unset graphoxide_git_local_env
+
 npm run verify:pre-push

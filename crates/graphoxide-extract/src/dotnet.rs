@@ -4,13 +4,14 @@
 //! Keep their extraction in one place so XML validation, portable identities,
 //! and the XAML-to-C# bridge share the same corpus boundary.
 
+use crate::project_path::{normalize_project_path, source_relative_project_path, ProjectPath};
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use quick_xml::{events::Event, Reader};
 use regex::Regex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 const PROJECT_XML_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -28,12 +29,41 @@ pub(crate) fn extract_dotnet(
     source_file: &str,
     extension: &str,
 ) -> anyhow::Result<Extraction> {
+    let bytes = fs::read(path)?;
+    extract_dotnet_with_path_probes(path, source_file, extension, &bytes, true)
+}
+
+/// Extract a .NET-adjacent document from already-read source bytes.
+///
+/// The path is retained solely for stable identities and existing project
+/// resolution. The primary document is never read by this entry point.
+pub(crate) fn extract_dotnet_bytes(
+    path: &Path,
+    source_file: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    extract_dotnet_with_path_probes(path, source_file, extension, bytes, false)
+}
+
+/// Extract a .NET document with explicit control over cross-file probes.
+/// Legacy path entrypoints retain the existing project-aware enrichment while
+/// I/O-isolated CPU work is restricted to the admitted document bytes.
+pub(crate) fn extract_dotnet_with_path_probes(
+    path: &Path,
+    source_file: &str,
+    extension: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
     match extension {
-        "sln" => extract_sln(path, source_file),
-        "slnx" => extract_slnx(path, source_file),
-        "csproj" | "fsproj" | "vbproj" => extract_project(path, source_file),
-        "xaml" => extract_xaml(path, source_file),
-        "razor" | "cshtml" => extract_razor(path, source_file),
+        "sln" => extract_sln(path, source_file, bytes, allow_path_probes),
+        "slnx" => extract_slnx(path, source_file, bytes, allow_path_probes),
+        "csproj" | "fsproj" | "vbproj" => {
+            extract_project(path, source_file, bytes, allow_path_probes)
+        }
+        "xaml" => extract_xaml(path, source_file, bytes, allow_path_probes),
+        "razor" | "cshtml" => extract_razor(path, source_file, bytes),
         _ => anyhow::bail!("unsupported .NET extension: {extension}"),
     }
 }
@@ -198,14 +228,11 @@ fn line_of(text: &str, offset: usize) -> usize {
     text[..offset].bytes().filter(|byte| *byte == b'\n').count() + 1
 }
 
-fn read_lossy(path: &Path) -> anyhow::Result<(Vec<u8>, String)> {
-    let bytes = fs::read(path)?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    Ok((bytes, text))
+fn lossy_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn read_xml(path: &Path) -> anyhow::Result<(Vec<u8>, String)> {
-    let (bytes, text) = read_lossy(path)?;
+fn validate_xml(bytes: &[u8]) -> anyhow::Result<()> {
     anyhow::ensure!(
         bytes.len() <= PROJECT_XML_MAX_BYTES,
         "project XML is larger than {PROJECT_XML_MAX_BYTES} bytes"
@@ -216,7 +243,7 @@ fn read_xml(path: &Path) -> anyhow::Result<(Vec<u8>, String)> {
             && !lowercase.windows(8).any(|window| window == b"<!entity"),
         "refusing XML with DOCTYPE/ENTITY declaration"
     );
-    let mut reader = Reader::from_reader(bytes.as_slice());
+    let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     loop {
         match reader.read_event() {
@@ -225,7 +252,7 @@ fn read_xml(path: &Path) -> anyhow::Result<(Vec<u8>, String)> {
             Err(error) => return Err(anyhow::anyhow!("XML parse error: {error}")),
         }
     }
-    Ok((bytes, text))
+    Ok(())
 }
 
 fn normalize_logical_path(path: &Path) -> String {
@@ -260,56 +287,67 @@ fn looks_absolute_path(path: &str) -> bool {
             .is_some_and(|bytes| bytes[0] == b':' && bytes[1] == b'/')
 }
 
-fn portable_project_reference(
+fn portable_project_reference_with_probes(
     physical_source: &Path,
     logical_source: &str,
     reference: &str,
-) -> (String, bool) {
-    let reference = reference.replace('\\', "/");
-    if looks_absolute_path(&reference) {
-        if reference.starts_with('/') && !looks_absolute_path(logical_source) {
-            let logical_depth = Path::new(logical_source)
-                .components()
-                .filter(|component| !matches!(component, Component::CurDir))
-                .count();
-            let mut physical_root = physical_source.to_path_buf();
-            for _ in 0..logical_depth {
-                physical_root.pop();
-            }
-            let physical_root = normalize_logical_path(&physical_root);
-            let absolute_reference = normalize_logical_path(Path::new(&reference));
-            if let Some(relative) = absolute_reference
-                .strip_prefix(&physical_root)
-                .and_then(|suffix| suffix.strip_prefix('/'))
-            {
-                return (relative.to_owned(), false);
-            }
+    allow_path_probes: bool,
+) -> Option<(String, bool)> {
+    if !has_project_extension(reference) {
+        return None;
+    }
+    let logical_source = normalize_project_path(logical_source)
+        .filter(|source| !source.is_empty())
+        .or_else(|| {
+            allow_path_probes
+                .then(|| {
+                    physical_source
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(normalize_project_path)
+                        .filter(|source| !source.is_empty())
+                })
+                .flatten()
+        })?;
+    match source_relative_project_path(&logical_source, reference)? {
+        ProjectPath::Contained(logical) => Some((logical, false)),
+        ProjectPath::EscapesRoot(logical)
+            if allow_path_probes
+                && physical_project_reference_is_file(physical_source, reference) =>
+        {
+            Some((logical, true))
         }
-        let basename = reference
-            .rsplit('/')
-            .find(|segment| !segment.is_empty())
-            .unwrap_or(&reference)
-            .to_owned();
-        return (basename, true);
+        ProjectPath::EscapesRoot(_) => None,
     }
-    let logical = normalize_logical_path(
-        &Path::new(logical_source)
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(&reference),
-    );
-    let walk_up_depth = logical
-        .split('/')
-        .take_while(|component| *component == "..")
-        .count();
-    if walk_up_depth > 3 {
-        (
-            logical.rsplit('/').next().unwrap_or(&logical).to_owned(),
-            true,
-        )
-    } else {
-        (logical, walk_up_depth > 0)
+}
+
+fn has_project_extension(path: &str) -> bool {
+    let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    filename
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .is_some_and(|extension| {
+            !extension.is_empty() && extension.to_ascii_lowercase().ends_with("proj")
+        })
+}
+
+fn physical_project_reference_is_file(physical_source: &Path, reference: &str) -> bool {
+    let Some(parent) = physical_source.parent() else {
+        return false;
+    };
+    let mut candidate = parent.to_path_buf();
+    for component in reference.split(['/', '\\']) {
+        match component {
+            "." => {}
+            ".." => {
+                if !candidate.pop() {
+                    return false;
+                }
+            }
+            component => candidate.push(component),
+        }
     }
+    fs::canonicalize(candidate).is_ok_and(|candidate| candidate.is_file())
 }
 
 fn portable_project_id(logical_path: &str, external: bool) -> String {
@@ -324,8 +362,13 @@ fn portable_project_id(logical_path: &str, external: bool) -> String {
     }
 }
 
-fn extract_sln(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
-    let (_, text) = read_lossy(path)?;
+fn extract_sln(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
+    let text = lossy_text(bytes);
     let mut builder = Builder::new(path, source_file);
     let project = Regex::new(
         r#"(?m)^Project\("[^"]*"\)\s*=\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"\{?([^"}]+)\}?""#,
@@ -333,12 +376,20 @@ fn extract_sln(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let mut guid_to_id = HashMap::new();
     for capture in project.captures_iter(&text) {
         let name = &capture[1];
-        let relative = capture[2].replace('\\', "/");
+        let Some(relative) = static_msbuild_value(&capture[2]) else {
+            continue;
+        };
+        let relative = relative.replace('\\', "/");
         let solution_folder = relative == name;
-        let (logical, external) = if solution_folder {
-            (relative, false)
+        let portable = if solution_folder {
+            normalize_project_path(&relative)
+                .filter(|logical| !logical.is_empty())
+                .map(|logical| (logical, false))
         } else {
-            portable_project_reference(path, source_file, &relative)
+            portable_project_reference_with_probes(path, source_file, &relative, allow_path_probes)
+        };
+        let Some((logical, external)) = portable else {
+            continue;
         };
         let id = if solution_folder {
             make_id(&[&logical])
@@ -423,15 +474,39 @@ fn event_attributes(
     Ok(values)
 }
 
+fn static_build_value(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty()
+        || ["$(", "@(", "%("]
+            .iter()
+            .any(|marker| value.contains(marker))
+        || value.contains('*')
+        || value.contains('?')
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn static_msbuild_value(value: &str) -> Option<String> {
+    let decoded = quick_xml::escape::unescape(value.trim()).ok()?;
+    static_build_value(decoded.as_ref()).map(str::to_owned)
+}
+
 #[derive(Default)]
 struct SolutionProject {
     path: String,
     dependencies: Vec<String>,
 }
 
-fn extract_slnx(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
-    let (bytes, _) = read_xml(path)?;
-    let mut reader = Reader::from_reader(bytes.as_slice());
+fn extract_slnx(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
+    validate_xml(bytes)?;
+    let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(true);
     let mut projects = Vec::new();
     let mut current: Option<SolutionProject> = None;
@@ -439,16 +514,22 @@ fn extract_slnx(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
         match reader.read_event()? {
             Event::Start(event) if xml_local_name(event.name().as_ref()) == b"Project" => {
                 let attributes = event_attributes(&event)?;
-                current = attributes.get("Path").cloned().map(|path| SolutionProject {
-                    path,
-                    dependencies: Vec::new(),
-                });
+                current = attributes
+                    .get("Path")
+                    .and_then(|path| static_msbuild_value(path))
+                    .map(|path| SolutionProject {
+                        path,
+                        dependencies: Vec::new(),
+                    });
             }
             Event::Empty(event) if xml_local_name(event.name().as_ref()) == b"Project" => {
                 let attributes = event_attributes(&event)?;
-                if let Some(path) = attributes.get("Path") {
+                if let Some(path) = attributes
+                    .get("Path")
+                    .and_then(|path| static_msbuild_value(path))
+                {
                     projects.push(SolutionProject {
-                        path: path.clone(),
+                        path,
                         dependencies: Vec::new(),
                     });
                 }
@@ -458,8 +539,9 @@ fn extract_slnx(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
             {
                 if let (Some(project), Some(dependency)) =
                     (current.as_mut(), event_attributes(&event)?.get("Project"))
+                    && let Some(dependency) = static_msbuild_value(dependency)
                 {
-                    project.dependencies.push(dependency.clone());
+                    project.dependencies.push(dependency);
                 }
             }
             Event::End(event) if xml_local_name(event.name().as_ref()) == b"Project" => {
@@ -475,7 +557,14 @@ fn extract_slnx(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let mut builder = Builder::new(path, source_file);
     let mut by_path = HashMap::new();
     for project in &projects {
-        let (logical, external) = portable_project_reference(path, source_file, &project.path);
+        let Some((logical, external)) = portable_project_reference_with_probes(
+            path,
+            source_file,
+            &project.path,
+            allow_path_probes,
+        ) else {
+            continue;
+        };
         let id = portable_project_id(&logical, external);
         let normalized_path = project.path.replace('\\', "/");
         let label = Path::new(&normalized_path)
@@ -491,16 +580,30 @@ fn extract_slnx(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
             Confidence::Extracted,
             1,
         );
-        by_path.insert(project.path.replace('\\', "/").to_ascii_lowercase(), id);
+        by_path.insert(logical.to_ascii_lowercase(), id);
     }
     for project in &projects {
-        let normalized = project.path.replace('\\', "/").to_ascii_lowercase();
-        let Some(source) = by_path.get(&normalized) else {
+        let Some((source_path, _)) = portable_project_reference_with_probes(
+            path,
+            source_file,
+            &project.path,
+            allow_path_probes,
+        ) else {
+            continue;
+        };
+        let Some(source) = by_path.get(&source_path.to_ascii_lowercase()) else {
             continue;
         };
         for dependency in &project.dependencies {
-            let normalized = dependency.replace('\\', "/").to_ascii_lowercase();
-            if let Some(target) = by_path.get(&normalized) {
+            let Some((dependency, _)) = portable_project_reference_with_probes(
+                path,
+                source_file,
+                dependency,
+                allow_path_probes,
+            ) else {
+                continue;
+            };
+            if let Some(target) = by_path.get(&dependency.to_ascii_lowercase()) {
                 builder.edge(source, target, "imports", None, Confidence::Extracted, 1);
             }
         }
@@ -516,19 +619,32 @@ fn xml_attribute(attributes: &str, name: &str) -> Option<String> {
         .map(|capture| capture[1].to_owned())
 }
 
-fn extract_project(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
-    let (_, text) = read_xml(path)?;
+fn extract_project(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
+    validate_xml(bytes)?;
+    let text = lossy_text(bytes);
     let mut builder = Builder::new(path, source_file);
     let framework = Regex::new(r"(?is)<TargetFrameworks?>\s*([^<]+?)\s*</TargetFrameworks?>")?;
     for capture in framework.captures_iter(&text) {
         for value in capture[1]
             .split(';')
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter_map(static_msbuild_value)
         {
-            let id = make_id(&["framework", value]);
+            let id = make_id(&["framework", &value]);
             let line = line_of(&text, capture.get(0).expect("target framework").start());
-            builder.node(id.clone(), value, "framework", "concept", source_file, line);
+            builder.node(
+                id.clone(),
+                &value,
+                "framework",
+                "concept",
+                source_file,
+                line,
+            );
             builder.edge(
                 &builder.file_id.clone(),
                 &id,
@@ -545,12 +661,15 @@ fn extract_project(path: &Path, source_file: &str) -> anyhow::Result<Extraction>
         let Some(include) = xml_attribute(attributes, "Include") else {
             continue;
         };
+        let Some(include) = static_msbuild_value(&include) else {
+            continue;
+        };
         let line = line_of(&text, capture.get(0).expect("project reference").start());
         if capture[1].eq_ignore_ascii_case("PackageReference") {
             let label = xml_attribute(attributes, "Version")
-                .filter(|version| !version.is_empty())
+                .and_then(|version| static_msbuild_value(&version))
                 .map(|version| format!("{include} ({version})"))
-                .unwrap_or_else(|| include.clone());
+                .unwrap_or_else(|| include.to_owned());
             let id = make_id(&["nuget", &include]);
             builder.node(id.clone(), &label, "package", "code", source_file, line);
             builder.edge(
@@ -563,7 +682,14 @@ fn extract_project(path: &Path, source_file: &str) -> anyhow::Result<Extraction>
             );
         } else {
             let normalized = include.replace('\\', "/");
-            let (logical, external) = portable_project_reference(path, source_file, &normalized);
+            let Some((logical, external)) = portable_project_reference_with_probes(
+                path,
+                source_file,
+                &normalized,
+                allow_path_probes,
+            ) else {
+                continue;
+            };
             let id = portable_project_id(&logical, external);
             let label = normalized.rsplit('/').next().unwrap_or(&normalized);
             builder.node(id.clone(), label, "project", "code", &logical, line);
@@ -579,10 +705,12 @@ fn extract_project(path: &Path, source_file: &str) -> anyhow::Result<Extraction>
     }
     let sdk = Regex::new(r#"(?is)<Project\b[^>]*\bSdk\s*=\s*"([^"]+)""#)?;
     if let Some(capture) = sdk.captures(&text) {
-        let value = &capture[1];
-        let id = make_id(&["sdk", value]);
+        let Some(value) = static_msbuild_value(&capture[1]) else {
+            return Ok(builder.finish());
+        };
+        let id = make_id(&["sdk", &value]);
         let line = line_of(&text, capture.get(0).expect("project SDK").start());
-        builder.node(id.clone(), value, "sdk", "concept", source_file, line);
+        builder.node(id.clone(), &value, "sdk", "concept", source_file, line);
         builder.edge(
             &builder.file_id.clone(),
             &id,
@@ -1108,8 +1236,14 @@ fn add_binding(
     }
 }
 
-fn extract_xaml(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
-    let (_, text) = read_xml(path)?;
+fn extract_xaml(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+    allow_path_probes: bool,
+) -> anyhow::Result<Extraction> {
+    validate_xml(bytes)?;
+    let text = lossy_text(bytes);
     let mut builder = Builder::new(path, source_file);
     let root_tag = Regex::new(r"(?s)<\s*([A-Za-z_][A-Za-z0-9_.:-]*)\b")?
         .captures(&text)
@@ -1143,7 +1277,15 @@ fn extract_xaml(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let class_name = class_regex
         .captures(&text)
         .map(|capture| capture[1].to_owned());
-    let codebehind = codebehind_symbols(path, source_file, class_name.as_deref())?;
+    let codebehind = if allow_path_probes {
+        codebehind_symbols(path, source_file, class_name.as_deref())?
+    } else {
+        CodebehindSymbols {
+            class: None,
+            handlers: HashMap::new(),
+            method_edges: HashMap::new(),
+        }
+    };
     if let Some(class_name) = class_name.as_deref() {
         let line = text
             .find(class_name)
@@ -1181,12 +1323,11 @@ fn extract_xaml(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let mut has_data_context = false;
     for capture in data_context_block.captures_iter(&text) {
         has_data_context = true;
-        if let Some(child) = child_tag.captures(&capture[1]) {
-            if let Some(name) = simple_type_name(&child[1]) {
-                if !explicit_names.contains(&name) {
-                    explicit_names.push(name);
-                }
-            }
+        if let Some(child) = child_tag.captures(&capture[1])
+            && let Some(name) = simple_type_name(&child[1])
+            && !explicit_names.contains(&name)
+        {
+            explicit_names.push(name);
         }
     }
     let attribute_regex = Regex::new(r#"([A-Za-z_][A-Za-z0-9_.:-]*)\s*=\s*"([^"]*)""#)?;
@@ -1196,12 +1337,11 @@ fn extract_xaml(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
         let local = capture[1].rsplit([':', '}']).next().unwrap_or(&capture[1]);
         if local == "DataContext" {
             has_data_context = true;
-            if let Some(value) = design_type.captures(&capture[2]) {
-                if let Some(name) = simple_type_name(&value[1]) {
-                    if !explicit_names.contains(&name) {
-                        explicit_names.push(name);
-                    }
-                }
+            if let Some(value) = design_type.captures(&capture[2])
+                && let Some(name) = simple_type_name(&value[1])
+                && !explicit_names.contains(&name)
+            {
+                explicit_names.push(name);
             }
         }
         if local.ends_with("ViewModelLocator.AutoWireViewModel")
@@ -1224,7 +1364,7 @@ fn extract_xaml(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
         inferred_view_model_names(view_name)
     };
     let mut generated_members = HashMap::new();
-    if !vm_names.is_empty() {
+    if allow_path_probes && !vm_names.is_empty() {
         let classes = view_model_classes(path, source_file)?;
         let mut candidates = vm_names
             .iter()
@@ -1314,24 +1454,25 @@ fn extract_xaml(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
         };
         for (key, value) in parsed {
             let local = key.rsplit([':', '}']).next().unwrap_or(&key);
-            if !NON_EVENT_ATTRIBUTES.contains(&local) && identifier.is_match(&value) {
-                if let Some(handler) = codebehind.handlers.get(&value) {
-                    builder.existing_node(handler);
-                    if let Some(method_edge) = codebehind.method_edges.get(&handler.id) {
-                        if let Some(class) = codebehind.class.as_ref() {
-                            builder.existing_node(class);
-                        }
-                        builder.existing_edge(method_edge);
+            if !NON_EVENT_ATTRIBUTES.contains(&local)
+                && identifier.is_match(&value)
+                && let Some(handler) = codebehind.handlers.get(&value)
+            {
+                builder.existing_node(handler);
+                if let Some(method_edge) = codebehind.method_edges.get(&handler.id) {
+                    if let Some(class) = codebehind.class.as_ref() {
+                        builder.existing_node(class);
                     }
-                    builder.edge(
-                        &owner,
-                        &handler.id,
-                        "references",
-                        Some("event"),
-                        Confidence::Extracted,
-                        line,
-                    );
+                    builder.existing_edge(method_edge);
                 }
+                builder.edge(
+                    &owner,
+                    &handler.id,
+                    "references",
+                    Some("event"),
+                    Confidence::Extracted,
+                    line,
+                );
             }
             add_binding(
                 &mut builder,
@@ -1356,34 +1497,35 @@ fn extract_xaml(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
                     );
                 }
             }
-            if element_type == "Binding" && local == "Converter" {
-                if let Some(converter) = static_resource(&value) {
-                    let id = make_id(&["binding_converter", &converter]);
-                    builder.node(
-                        id.clone(),
-                        &converter,
-                        "binding_converter",
-                        "concept",
-                        source_file,
-                        line,
-                    );
-                    builder.edge(
-                        &owner,
-                        &id,
-                        "references",
-                        Some("binding_converter"),
-                        Confidence::Extracted,
-                        line,
-                    );
-                }
+            if element_type == "Binding"
+                && local == "Converter"
+                && let Some(converter) = static_resource(&value)
+            {
+                let id = make_id(&["binding_converter", &converter]);
+                builder.node(
+                    id.clone(),
+                    &converter,
+                    "binding_converter",
+                    "concept",
+                    source_file,
+                    line,
+                );
+                builder.edge(
+                    &owner,
+                    &id,
+                    "references",
+                    Some("binding_converter"),
+                    Confidence::Extracted,
+                    line,
+                );
             }
         }
     }
     Ok(builder.finish())
 }
 
-fn extract_razor(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
-    let (_, text) = read_lossy(path)?;
+fn extract_razor(path: &Path, source_file: &str, bytes: &[u8]) -> anyhow::Result<Extraction> {
+    let text = lossy_text(bytes);
     let mut builder = Builder::new(path, source_file);
     for (pattern, relation, context) in [
         (
@@ -1486,4 +1628,299 @@ fn extract_razor(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
         );
     }
     Ok(builder.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_path_and_bytes_match(extension: &str, contents: &str) {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join(format!("fixture.{extension}"));
+        fs::write(&path, contents).expect("write fixture");
+
+        let path_extraction = extract_dotnet(&path, &format!("fixture.{extension}"), extension)
+            .expect("path extraction");
+        let bytes_extraction = extract_dotnet_bytes(
+            &path,
+            &format!("fixture.{extension}"),
+            extension,
+            contents.as_bytes(),
+        )
+        .expect("byte extraction");
+
+        assert_eq!(
+            serde_json::to_value(path_extraction).expect("serialize path extraction"),
+            serde_json::to_value(bytes_extraction).expect("serialize byte extraction"),
+        );
+    }
+
+    #[test]
+    fn byte_entrypoint_matches_path_entrypoint_for_all_dotnet_primary_formats() {
+        assert_path_and_bytes_match(
+            "sln",
+            r#"Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App", "App/App.csproj", "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"
+EndProject
+"#,
+        );
+        assert_path_and_bytes_match(
+            "slnx",
+            r#"<Solution><Project Path="App/App.csproj" /></Solution>"#,
+        );
+        assert_path_and_bytes_match(
+            "csproj",
+            r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup><ItemGroup><PackageReference Include="Example" Version="1.0" /></ItemGroup></Project>"#,
+        );
+        assert_path_and_bytes_match(
+            "xaml",
+            r#"<Window x:Class="Sample.MainWindow" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"><Button Name="SaveButton" Click="Save" /></Window>"#,
+        );
+        assert_path_and_bytes_match(
+            "razor",
+            "@using Sample.Services\n@page \"/sample\"\n<Widget />\n",
+        );
+    }
+
+    #[test]
+    fn byte_xml_entrypoint_rejects_unsafe_declarations() {
+        let error = extract_dotnet_bytes(
+            Path::new("fixture.csproj"),
+            "fixture.csproj",
+            "csproj",
+            b"<!DOCTYPE project><Project />",
+        )
+        .expect_err("DOCTYPE must be rejected");
+        assert!(error.to_string().contains("DOCTYPE/ENTITY"));
+    }
+
+    #[test]
+    fn byte_msbuild_extraction_publishes_only_static_coordinates() {
+        let project = br#"<Project Sdk="$&#40;ProjectSdk)">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;$(ExtraFramework);@(Frameworks);%(Identity)</TargetFrameworks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(Folder)/Worker.csproj" />
+    <ProjectReference Include="@(GeneratedProjects)" />
+    <ProjectReference Include="%(RelativeDir)Metadata.csproj" />
+    <ProjectReference Include="Wild*/Target.csproj" />
+    <ProjectReference Include="Static/Static.csproj" />
+    <PackageReference Include="$(PackageName)" Version="1.0.0" />
+    <PackageReference Include="Static.DynamicVersion" Version="$(PackageVersion)" />
+    <PackageReference Include="Static.Literal" Version="1.2.3" />
+  </ItemGroup>
+</Project>"#;
+        let extraction = extract_dotnet_bytes(
+            Path::new("App/App.csproj"),
+            "App/App.csproj",
+            "csproj",
+            project,
+        )
+        .expect("extract admitted MSBuild bytes");
+        let labels = extraction
+            .nodes
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect::<HashSet<_>>();
+
+        for expected in [
+            "net8.0",
+            "Static.csproj",
+            "Static.DynamicVersion",
+            "Static.Literal (1.2.3)",
+        ] {
+            assert!(labels.contains(expected), "missing static fact {expected}");
+        }
+        assert!(labels.iter().all(|label| {
+            !["$(", "@(", "%(", "&#40;", "Wild*"]
+                .iter()
+                .any(|marker| label.contains(marker))
+        }));
+        assert!(!labels.iter().any(|label| label.contains("ProjectSdk")));
+    }
+
+    #[test]
+    fn byte_slnx_extraction_rejects_dynamic_project_paths() {
+        let extraction = extract_dotnet_bytes(
+            Path::new("Workspace.slnx"),
+            "Workspace.slnx",
+            "slnx",
+            br#"<Solution>
+  <Project Path="$(Folder)/Worker.csproj" />
+  <Project Path="@(GeneratedProjects)" />
+  <Project Path="%(RelativeDir)Metadata.csproj" />
+  <Project Path="Wild*/Target.csproj" />
+  <Project Path="$&#40;Encoded)/Encoded.csproj" />
+  <Project Path="Static/Static.csproj" />
+</Solution>"#,
+        )
+        .expect("extract admitted SLNX bytes");
+        let project_labels = extraction
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("project")
+            })
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(project_labels, ["Static"]);
+    }
+
+    fn project_labels(extraction: &Extraction) -> Vec<&str> {
+        extraction
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("project")
+            })
+            .map(|node| node.label.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn byte_project_paths_are_static_contained_and_portable_in_all_three_formats() {
+        let sln = br#"Project("{TYPE}") = "Dynamic", "$(Folder)/Worker.csproj", "{00000000-0000-0000-0000-000000000001}"
+EndProject
+Project("{TYPE}") = "Absolute", "/Absolute/Absolute.csproj", "{00000000-0000-0000-0000-000000000002}"
+EndProject
+Project("{TYPE}") = "DriveAbsolute", "C:\Absolute\Absolute.csproj", "{00000000-0000-0000-0000-000000000003}"
+EndProject
+Project("{TYPE}") = "DriveRelative", "C:Relative\Relative.csproj", "{00000000-0000-0000-0000-000000000004}"
+EndProject
+Project("{TYPE}") = "Unc", "\\server\share\Unc.csproj", "{00000000-0000-0000-0000-000000000005}"
+EndProject
+Project("{TYPE}") = "Escaping", "..\..\Outside\Outside.csproj", "{00000000-0000-0000-0000-000000000006}"
+EndProject
+Project("{TYPE}") = "Device", "Devices\NUL.csproj", "{00000000-0000-0000-0000-000000000007}"
+EndProject
+Project("{TYPE}") = "EncodedDrive", "C&#58;Encoded\Encoded.csproj", "{00000000-0000-0000-0000-000000000008}"
+EndProject
+Project("{TYPE}") = "Safe", "..\Safe\Safe.csproj", "{00000000-0000-0000-0000-000000000009}"
+EndProject
+"#;
+        let sln = extract_dotnet_bytes(
+            Path::new("Solutions/Workspace.sln"),
+            "Solutions/Workspace.sln",
+            "sln",
+            sln,
+        )
+        .expect("extract bounded SLN bytes");
+        assert_eq!(project_labels(&sln), ["Safe"]);
+
+        let slnx = extract_dotnet_bytes(
+            Path::new("Solutions/Workspace.slnx"),
+            "Solutions/Workspace.slnx",
+            "slnx",
+            br#"<Solution>
+  <Project Path="$(Folder)/Worker.csproj" />
+  <Project Path="/Absolute/Absolute.csproj" />
+  <Project Path="C:\Absolute\Absolute.csproj" />
+  <Project Path="C:Relative\Relative.csproj" />
+  <Project Path="\\server\share\Unc.csproj" />
+  <Project Path="../../Outside/Outside.csproj" />
+  <Project Path="Devices/NUL.csproj" />
+  <Project Path="C&#58;Encoded/Encoded.csproj" />
+  <Project Path="../Safe/Safe.csproj" />
+</Solution>"#,
+        )
+        .expect("extract bounded SLNX bytes");
+        assert_eq!(project_labels(&slnx), ["Safe"]);
+
+        let project = extract_dotnet_bytes(
+            Path::new("Solutions/App.csproj"),
+            "Solutions/App.csproj",
+            "csproj",
+            br#"<Project><ItemGroup>
+  <ProjectReference Include="$(Folder)/Worker.csproj" />
+  <ProjectReference Include="/Absolute/Absolute.csproj" />
+  <ProjectReference Include="C:\Absolute\Absolute.csproj" />
+  <ProjectReference Include="C:Relative\Relative.csproj" />
+  <ProjectReference Include="\\server\share\Unc.csproj" />
+  <ProjectReference Include="../../Outside/Outside.csproj" />
+  <ProjectReference Include="Devices/NUL.csproj" />
+  <ProjectReference Include="C&#58;Encoded/Encoded.csproj" />
+  <ProjectReference Include="&#47;EncodedRoot/EncodedRoot.csproj" />
+  <ProjectReference Include="../Safe/Safe.csproj" />
+</ItemGroup></Project>"#,
+        )
+        .expect("extract bounded project bytes");
+        assert_eq!(project_labels(&project), ["Safe.csproj"]);
+    }
+
+    #[test]
+    fn byte_project_paths_reject_invalid_source_identities_without_fallback() {
+        let contents = br#"<Project><ItemGroup><ProjectReference Include="Safe/Safe.csproj" /></ItemGroup></Project>"#;
+        for source_file in [
+            "/absolute/App.csproj",
+            r"C:\absolute\App.csproj",
+            r"\\server\share\App.csproj",
+            "App/NUL.csproj",
+        ] {
+            let extraction =
+                extract_dotnet_bytes(Path::new("App/App.csproj"), source_file, "csproj", contents)
+                    .expect("extract bytes with invalid logical source");
+            assert!(
+                project_labels(&extraction).is_empty(),
+                "invalid source identity admitted a reference: {source_file:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn path_probes_preserve_only_existing_relative_external_projects() {
+        for extension in ["sln", "slnx", "csproj"] {
+            let directory = tempfile::tempdir().expect("external project fixture");
+            let source_dir = directory.path().join("App");
+            let core = directory.path().join("Core/Core.csproj");
+            fs::create_dir_all(&source_dir).expect("create source directory");
+            fs::create_dir_all(core.parent().expect("Core parent")).expect("create Core directory");
+            fs::write(&core, "<Project />").expect("write existing external project");
+
+            let contents = match extension {
+                "sln" => concat!(
+                    "Project(\"{TYPE}\") = \"Core\", \"..\\Core\\Core.csproj\", \"{00000000-0000-0000-0000-000000000001}\"\nEndProject\n",
+                    "Project(\"{TYPE}\") = \"Missing\", \"..\\Missing\\Missing.csproj\", \"{00000000-0000-0000-0000-000000000002}\"\nEndProject\n",
+                ),
+                "slnx" => concat!(
+                    "<Solution><Project Path=\"../Core/Core.csproj\" />",
+                    "<Project Path=\"../Missing/Missing.csproj\" /></Solution>",
+                ),
+                "csproj" => concat!(
+                    "<Project><ItemGroup><ProjectReference Include=\"../Core/Core.csproj\" />",
+                    "<ProjectReference Include=\"../Missing/Missing.csproj\" /></ItemGroup></Project>",
+                ),
+                _ => unreachable!(),
+            };
+            let source = source_dir.join(format!("App.{extension}"));
+            fs::write(&source, contents).expect("write referencing file");
+
+            let path_extraction = extract_dotnet(
+                &source,
+                source.file_name().and_then(|name| name.to_str()).unwrap(),
+                extension,
+            )
+            .expect("extract path-mode external reference");
+            let byte_extraction = extract_dotnet_bytes(
+                &source,
+                source.file_name().and_then(|name| name.to_str()).unwrap(),
+                extension,
+                contents.as_bytes(),
+            )
+            .expect("extract byte-mode external reference");
+            let external_core = make_id(&["ext", "../Core/Core.csproj"]);
+
+            assert!(path_extraction
+                .nodes
+                .iter()
+                .any(|node| node.id == external_core));
+            assert!(!project_labels(&path_extraction).contains(&"Missing"));
+            assert!(!project_labels(&path_extraction).contains(&"Missing.csproj"));
+            assert!(byte_extraction
+                .nodes
+                .iter()
+                .all(|node| node.id != external_core));
+            assert!(project_labels(&byte_extraction).is_empty());
+        }
+    }
 }

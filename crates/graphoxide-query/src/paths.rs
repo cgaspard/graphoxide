@@ -257,10 +257,10 @@ pub fn explain_with_overlay(
             if let Some(other) = index.position(edge.true_target()) {
                 connections.push((false, other, edge_index));
             }
-        } else if edge.true_target() == node.id {
-            if let Some(other) = index.position(edge.true_source()) {
-                connections.push((true, other, edge_index));
-            }
+        } else if edge.true_target() == node.id
+            && let Some(other) = index.position(edge.true_source())
+        {
+            connections.push((true, other, edge_index));
         }
     }
     connections.sort_by_key(|connection| std::cmp::Reverse(index.degree(connection.1)));

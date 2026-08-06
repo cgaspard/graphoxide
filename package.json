@@ -5,6 +5,12 @@
   "scripts": {
     "prepare": "husky",
     "benchmark:graph-build": "node scripts/benchmark-graph-build.mjs",
+    "benchmark:structured-json": "node scripts/benchmark-graph-build.mjs --scenario structured-json",
+    "benchmark:structured-containers": "node scripts/benchmark-graph-build.mjs --scenario structured-containers",
+    "benchmark:idl-schema": "node scripts/benchmark-graph-build.mjs --scenario idl-schema",
+    "benchmark:diagrams": "node scripts/benchmark-graph-build.mjs --scenario diagrams",
+    "benchmark:facility-models": "node scripts/benchmark-graph-build.mjs --scenario facility-models",
+    "benchmark:openusd-assets": "node scripts/benchmark-graph-build.mjs --scenario openusd-assets",
     "test:benchmark": "node --test scripts/benchmark-graph-build.test.mjs",
     "verify:pre-push": "node scripts/verify.mjs --pre-push",
     "verify:release": "node scripts/verify.mjs --release"

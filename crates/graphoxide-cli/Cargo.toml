@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 graphoxide-core.workspace = true
 graphoxide-extract.workspace = true
+graphoxide-index-runtime.workspace = true
 graphoxide-graph.workspace = true
 graphoxide-query.workspace = true
 graphoxide-export.workspace = true

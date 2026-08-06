@@ -330,6 +330,20 @@ fn emit_references(
 /// Extract addressable Terraform/HCL entities and their traversal edges.
 pub fn extract_terraform(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let source = fs::read_to_string(path)?;
+    extract_terraform_bytes(path, source_file, source.as_bytes())
+}
+
+/// Extract addressable Terraform/HCL entities from already-read source bytes.
+///
+/// This entry point deliberately has no filesystem operations. Callers that
+/// schedule I/O separately can hand the extractor their owned source buffer
+/// without making a second read on a compute worker.
+pub fn extract_terraform_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    let source = std::str::from_utf8(bytes)?;
     let file_stem = Path::new(source_file)
         .with_extension("")
         .to_string_lossy()
@@ -345,9 +359,9 @@ pub fn extract_terraform(path: &Path, source_file: &str) -> anyhow::Result<Extra
         "file",
     )];
     let mut edges = Vec::new();
-    let mask = code_mask(&source);
-    let depths = brace_depth(&source, &mask);
-    let parsed = blocks(&source, &mask)?;
+    let mask = code_mask(source);
+    let depths = brace_depth(source, &mask);
+    let parsed = blocks(source, &mask)?;
     let mut owners = Vec::new();
     let mut seen_nodes = BTreeSet::from([file_id.clone()]);
     let local_assignment = Regex::new(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=")?;
@@ -369,7 +383,7 @@ pub fn extract_terraform(path: &Path, source_file: &str) -> anyhow::Result<Extra
                 let absolute = block.body_start + whole.start();
                 let label = format!("local.{}", &captures[1]);
                 let id = address_id(source_file, &label);
-                let line = line_of(&source, absolute);
+                let line = line_of(source, absolute);
                 if seen_nodes.insert(id.clone()) {
                     nodes.push(terraform_node(
                         id.clone(),
@@ -403,7 +417,7 @@ pub fn extract_terraform(path: &Path, source_file: &str) -> anyhow::Result<Extra
             continue;
         };
         let id = address_id(source_file, &label);
-        let line = line_of(&source, block.start);
+        let line = line_of(source, block.start);
         if seen_nodes.insert(id.clone()) {
             nodes.push(terraform_node(id.clone(), label, source_file, line, kind));
             edges.push(terraform_edge(
@@ -433,7 +447,7 @@ pub fn extract_terraform(path: &Path, source_file: &str) -> anyhow::Result<Extra
         .collect::<BTreeSet<_>>();
     for owner in &owners {
         emit_references(
-            &source,
+            source,
             &mask,
             source_file,
             owner,
@@ -446,4 +460,23 @@ pub fn extract_terraform(path: &Path, source_file: &str) -> anyhow::Result<Extra
         edges,
         hyperedges: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_entrypoint_does_not_require_a_source_file() {
+        let extraction = extract_terraform_bytes(
+            Path::new("missing.tf"),
+            "infra/missing.tf",
+            b"resource \"aws_instance\" \"web\" {}\n",
+        )
+        .expect("extract in-memory Terraform source");
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "aws_instance.web"));
+    }
 }

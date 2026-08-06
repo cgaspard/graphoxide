@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "divergences": [
+    {
+      "upstream": "tests/test_extract.py::test_extract_json_large_file_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_extract_json_large_file_is_a_bounded_structured_diagnostic"
+        }
+      ],
+      "reason": "Graphoxide preserves an oversized JSON file as a bounded metadata-only diagnostic instead of returning an empty error result."
+    },
+    {
+      "upstream": "tests/test_extract.py::test_extract_json_data_file_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_extract_json_data_file_is_structurally_indexed"
+        }
+      ],
+      "reason": "Graphoxide intentionally emits a bounded structural summary for data-shaped JSON instead of skipping the file entirely."
+    },
+    {
+      "upstream": "tests/test_extract.py::test_extract_json_top_level_array_skipped",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_extract_json_top_level_array_is_structurally_indexed"
+        }
+      ],
+      "reason": "Graphoxide intentionally emits a bounded structural summary for top-level JSON arrays instead of skipping the file entirely."
+    }
+  ]
+}

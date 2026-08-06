@@ -5,7 +5,7 @@ use graphoxide_extract::detect::{
     classify_file, collect_files, convert_office_text, count_words, detect, detect_incremental,
     is_ignored, is_ignored_with_cache, is_noise_dir, is_sensitive, load_ignore_patterns,
     load_manifest, save_manifest, shebang_interpreter, DetectOptions, DetectResult, DetectedFiles,
-    FileType, IgnorePattern, ManifestKind, SaveManifestOptions,
+    FileType, IgnorePattern, ManifestKind, SaveManifestOptions, WORD_COUNT_MAX_BYTES,
 };
 use serde_json::{json, Value};
 use std::{
@@ -18,6 +18,10 @@ use tempfile::TempDir;
 
 fn fixture() -> TempDir {
     tempfile::tempdir().expect("temporary detector fixture")
+}
+
+fn init_git_marker(root: &Path) {
+    write(root, ".git/HEAD", "ref: refs/heads/main\n");
 }
 
 fn write(root: &Path, relative: &str, contents: &str) -> PathBuf {
@@ -161,6 +165,20 @@ fn test_detect_skips_noise_dot_dirs() {
         }
     }
     assert!(has(&result, ".github"));
+}
+
+#[test]
+fn test_detect_skips_reserved_virtual_container_namespace_directories() {
+    let fixture = fixture();
+    write(fixture.path(), "literal!/file.rs", "fn literal() {}\n");
+    write(fixture.path(), "ordinary/file.rs", "fn ordinary() {}\n");
+
+    let result = scan(fixture.path());
+    assert!(!has(&result, "literal!/file.rs"));
+    assert!(has(&result, "ordinary/file.rs"));
+    assert!(result.ignored.iter().any(|item| {
+        item.contains("literal!") && item.contains("reserved for virtual container members")
+    }));
 }
 
 #[test]
@@ -767,7 +785,9 @@ fn test_detect_follows_symlinked_directory() {
     let yes = scan_with(fixture.path(), |options| options.follow_symlinks = true);
     assert!(has(&no, "real_lib"));
     assert!(!has(&no, "linked_lib"));
-    assert!(has(&yes, "linked_lib"));
+    assert!(has(&yes, "real_lib"));
+    assert!(!has(&yes, "linked_lib"));
+    assert_eq!(bucket(&yes, "code").len(), 1);
 }
 
 #[test]
@@ -778,7 +798,38 @@ fn test_detect_follows_symlinked_file() {
     make_symlink(&real, &fixture.path().join("link.py"));
     let result = scan_with(fixture.path(), |options| options.follow_symlinks = true);
     assert!(has(&result, "real.py"));
-    assert!(has(&result, "link.py"));
+    assert!(!has(&result, "link.py"));
+    assert_eq!(bucket(&result, "code").len(), 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_detect_rejects_in_root_file_symlink_by_default() {
+    let fixture = fixture();
+    let real = write(fixture.path(), "real.py", "x=1");
+    make_symlink(&real, &fixture.path().join("link.py"));
+    let result = scan(fixture.path());
+    assert!(has(&result, "real.py"));
+    assert!(!has(&result, "link.py"));
+    assert!(result
+        .skipped_sensitive
+        .iter()
+        .any(|item| item.contains("file symlink skipped")));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_detect_applies_sensitive_policy_to_followed_file_target() {
+    let fixture = fixture();
+    let sensitive = write(fixture.path(), ".env", "TOKEN=do-not-index");
+    make_symlink(&sensitive, &fixture.path().join("benign.py"));
+    let result = scan_with(fixture.path(), |options| options.follow_symlinks = true);
+    assert!(!has(&result, "benign.py"));
+    assert!(!has(&result, ".env"));
+    assert!(result
+        .skipped_sensitive
+        .iter()
+        .any(|item| item.contains("benign.py")));
 }
 
 #[test]
@@ -797,7 +848,7 @@ fn test_graphifyignore_hermetic_without_vcs() {
 #[test]
 fn test_graphifyignore_discovered_from_parent_in_vcs() {
     let fixture = fixture();
-    fs::create_dir(fixture.path().join(".git")).unwrap();
+    init_git_marker(fixture.path());
     write(fixture.path(), ".graphifyignore", "vendor/\n");
     let sub = fixture.path().join("packages/mylib");
     write(&sub, "main.py", "x=1");
@@ -812,7 +863,7 @@ fn test_graphifyignore_discovered_from_parent_in_vcs() {
 fn test_graphifyignore_stops_at_git_boundary() {
     let fixture = fixture();
     write(fixture.path(), ".graphifyignore", "main.py\n");
-    fs::create_dir_all(fixture.path().join("repo/.git")).unwrap();
+    init_git_marker(&fixture.path().join("repo"));
     let sub = fixture.path().join("repo/sub");
     write(&sub, "main.py", "x=1");
     let result = scan(&sub);
@@ -823,7 +874,7 @@ fn test_graphifyignore_stops_at_git_boundary() {
 #[test]
 fn test_graphifyignore_at_git_root_is_included() {
     let fixture = fixture();
-    fs::create_dir_all(fixture.path().join("repo/.git")).unwrap();
+    init_git_marker(&fixture.path().join("repo"));
     write(fixture.path(), "repo/.graphifyignore", "vendor/\n");
     let sub = fixture.path().join("repo/packages/mylib");
     write(&sub, "main.py", "x=1");
@@ -966,7 +1017,7 @@ fn test_detect_skips_out_of_root_symlinked_file_by_default() {
     assert!(result
         .skipped_sensitive
         .iter()
-        .any(|item| item.contains("symlink target outside scan root")));
+        .any(|item| item.contains("file symlink skipped")));
 }
 
 #[test]
@@ -1222,7 +1273,7 @@ fn test_is_ignored_cache_evaluates_each_dir_once() {
 #[test]
 fn test_gitignore_fallback_when_no_graphifyignore() {
     let fixture = fixture();
-    fs::create_dir(fixture.path().join(".git")).unwrap();
+    init_git_marker(fixture.path());
     write(fixture.path(), ".gitignore", "vendor/\n*.generated.py\n");
     write(fixture.path(), "vendor/lib.py", "x=1\n");
     write(fixture.path(), "main.py", "x=1\n");
@@ -1236,7 +1287,7 @@ fn test_gitignore_fallback_when_no_graphifyignore() {
 #[test]
 fn test_graphifyignore_and_gitignore_are_merged() {
     let fixture = fixture();
-    fs::create_dir(fixture.path().join(".git")).unwrap();
+    init_git_marker(fixture.path());
     write(fixture.path(), ".gitignore", "main.py\n");
     write(fixture.path(), ".graphifyignore", "other.py\n");
     write(fixture.path(), "main.py", "x=1\n");
@@ -1251,7 +1302,7 @@ fn test_graphifyignore_and_gitignore_are_merged() {
 #[test]
 fn test_graphifyignore_negation_overrides_gitignore() {
     let fixture = fixture();
-    fs::create_dir(fixture.path().join(".git")).unwrap();
+    init_git_marker(fixture.path());
     write(fixture.path(), ".gitignore", "*.py\n");
     write(fixture.path(), ".graphifyignore", "!keep.py\n");
     write(fixture.path(), "main.py", "x=1\n");
@@ -1264,6 +1315,7 @@ fn test_graphifyignore_negation_overrides_gitignore() {
 #[test]
 fn test_git_info_exclude_ranks_below_gitignore_negation() {
     let fixture = fixture();
+    init_git_marker(fixture.path());
     write(fixture.path(), ".git/info/exclude", "secret*.txt\n");
     write(fixture.path(), ".gitignore", "!secret-ok.txt\n");
     let bad = write(fixture.path(), "secret-bad.txt", "x\n");
@@ -1317,6 +1369,23 @@ fn test_detect_video_not_in_words() {
     let fixture = fixture();
     write_bytes(fixture.path(), "clip.mp4", &[0; 100]);
     assert_eq!(scan(fixture.path()).total_words, 0);
+}
+
+#[test]
+fn test_detect_streams_registered_source_word_count_under_static_cap() {
+    let fixture = fixture();
+    let path = fixture.path().join("large.jsonl");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len((WORD_COUNT_MAX_BYTES as u64).saturating_add(1))
+        .unwrap();
+
+    let result = scan(fixture.path());
+    assert!(has(&result, "large.jsonl"));
+    assert_eq!(result.total_words, 1);
+    assert_eq!(result.word_count_truncations.len(), 1);
+    assert!(result.word_count_truncations[0].contains(&format!(
+        "word count truncated at {WORD_COUNT_MAX_BYTES} bytes"
+    )));
 }
 
 #[test]
@@ -2250,8 +2319,11 @@ fn test_detect_incremental_propagates_follow_symlinks() {
         detect_incremental(fixture.path(), &manifest, &options, ManifestKind::Semantic).unwrap();
     assert!(yes.new_files["document"]
         .iter()
+        .any(|path| path.contains("real_corpus")));
+    assert!(!yes.new_files["document"]
+        .iter()
         .any(|path| path.contains("linked_corpus")));
-    assert!(yes.new_total >= 2);
+    assert_eq!(yes.new_total, 1);
     save_manifest(
         &yes.detection.files,
         &manifest,

@@ -7,7 +7,6 @@
 //! without changing it and quantifies that risk before a migration to a true
 //! multigraph representation.
 
-use anyhow::Context;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -361,15 +360,7 @@ pub fn diagnose_file_with_cap(
     max_bytes: u64,
 ) -> anyhow::Result<MultigraphDiagnosticSummary> {
     let path = path.as_ref();
-    graphoxide_core::check_graph_file_size_cap_with(path, max_bytes)?;
-    let bytes = fs::read(path).with_context(|| format!("Cannot parse {}", path.display()))?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        anyhow::anyhow!(
-            "Cannot parse {}: {error}. The file may be corrupted; re-run 'graphoxide extract'",
-            path.display()
-        )
-    })?;
-    anyhow::ensure!(value.is_object(), "diagnostic input must be a JSON object");
+    let value = Value::Object(graphoxide_core::read_json_object_with_cap(path, max_bytes)?);
     let effective_directed = directed.unwrap_or_else(|| {
         value
             .get("directed")
@@ -570,15 +561,15 @@ fn exact_signature(raw: &Value) -> String {
         return "<non-object>".into();
     };
     let mut normalized = object.clone();
-    if !normalized.contains_key("source") {
-        if let Some(source) = normalized.get("from").cloned() {
-            normalized.insert("source".into(), source);
-        }
+    if !normalized.contains_key("source")
+        && let Some(source) = normalized.get("from").cloned()
+    {
+        normalized.insert("source".into(), source);
     }
-    if !normalized.contains_key("target") {
-        if let Some(target) = normalized.get("to").cloned() {
-            normalized.insert("target".into(), target);
-        }
+    if !normalized.contains_key("target")
+        && let Some(target) = normalized.get("to").cloned()
+    {
+        normalized.insert("target".into(), target);
     }
     normalized.remove("from");
     normalized.remove("to");

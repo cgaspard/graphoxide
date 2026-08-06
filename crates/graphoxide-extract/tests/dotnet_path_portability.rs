@@ -48,6 +48,19 @@ fn write_fixture(root: &Path) {
     fs::write(root.join("sample.csproj"), PROJECT).expect("write project");
     fs::write(root.join("sample.xaml"), XAML).expect("write XAML");
     fs::write(root.join("sample.xaml.cs"), CODE_BEHIND).expect("write code-behind");
+
+    // Parent-escaping project references are retained only when the path-owning
+    // entrypoint can prove that the referenced project is a real file.
+    let parent = root.parent().expect("fixture parent");
+    for relative in [
+        "Domain/Domain.csproj",
+        "Infrastructure/Infrastructure.csproj",
+    ] {
+        let project = parent.join(relative);
+        fs::create_dir_all(project.parent().expect("external project parent"))
+            .expect("create external project directory");
+        fs::write(project, "<Project />").expect("write external project");
+    }
 }
 
 fn fixture_graph(parent: &Path, checkout_name: &str) -> (std::path::PathBuf, KnowledgeGraph) {

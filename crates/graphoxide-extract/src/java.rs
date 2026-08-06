@@ -5,7 +5,7 @@
 //! expressions, conflicting lexical bindings, and ambiguous imported types
 //! unresolved instead of falling back to a bare method-name match.
 
-use graphoxide_core::{normalize_id, Extraction};
+use graphoxide_core::{make_id, normalize_id, Extraction};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::Node;
@@ -192,10 +192,10 @@ fn lexical_receiver_type(call: Node<'_>, source: &[u8], name: &str) -> Option<St
             }
             nested_local |= nested_within(node, body);
         }
-        if node.kind() == "lambda_expression" {
-            if let Some(binding) = lambda_binding(node, source, name) {
-                lambda_types.push(binding);
-            }
+        if node.kind() == "lambda_expression"
+            && let Some(binding) = lambda_binding(node, source, name)
+        {
+            lambda_types.push(binding);
         }
         let mut cursor = node.walk();
         pending.extend(node.named_children(&mut cursor));
@@ -204,10 +204,8 @@ fn lexical_receiver_type(call: Node<'_>, source: &[u8], name: &str) -> Option<St
     let mut candidates = if local_types.is_empty() {
         field.into_iter().collect::<BTreeSet<_>>()
     } else {
-        if nested_local {
-            if let Some(field) = field {
-                local_types.insert(field);
-            }
+        if nested_local && let Some(field) = field {
+            local_types.insert(field);
         }
         local_types
     };
@@ -297,6 +295,51 @@ fn matching_types<'a>(
     all.iter().collect()
 }
 
+fn unique_qualified_type(
+    qualified_types: &BTreeMap<String, BTreeSet<String>>,
+    path: &str,
+) -> Option<String> {
+    qualified_types
+        .get(path)
+        .filter(|ids| ids.len() == 1)
+        .and_then(|ids| ids.first())
+        .cloned()
+}
+
+fn static_import_owner(
+    qualified_types: &BTreeMap<String, BTreeSet<String>>,
+    path: &str,
+) -> Option<String> {
+    let mut candidate = path.strip_suffix(".*").unwrap_or(path);
+    loop {
+        if let Some(id) = unique_qualified_type(qualified_types, candidate) {
+            return Some(id);
+        }
+        candidate = candidate.rsplit_once('.')?.0;
+    }
+}
+
+fn import_anchor(
+    qualified_types: &BTreeMap<String, BTreeSet<String>>,
+    path: &str,
+    static_import: bool,
+    raw_target: &str,
+    collides: bool,
+) -> String {
+    if !collides {
+        return raw_target.to_owned();
+    }
+    if static_import {
+        return static_import_owner(qualified_types, path)
+            .unwrap_or_else(|| make_id(&["__java_static_import", path]));
+    }
+    if let Some(package) = path.strip_suffix(".*") {
+        return make_id(&["__java_package", package]);
+    }
+    unique_qualified_type(qualified_types, path)
+        .unwrap_or_else(|| make_id(&["__java_type_import", path]))
+}
+
 /// Resolve Java type-reference/heritage phantoms using exact package imports.
 /// A unique project definition is sufficient; collisions require an exact
 /// non-static import or same-package match.  Anything else stays unresolved.
@@ -335,6 +378,27 @@ pub(crate) fn resolve_types(extractions: &mut [Extraction]) {
         candidates.sort();
         candidates.dedup();
     }
+    let mut qualified_types = BTreeMap::<String, BTreeSet<String>>::new();
+    for candidates in definitions.values() {
+        for (id, _, qualified) in candidates {
+            if !qualified.is_empty() {
+                qualified_types
+                    .entry(qualified.clone())
+                    .or_default()
+                    .insert(id.clone());
+            }
+        }
+    }
+    let declared_type_ids = qualified_types
+        .values()
+        .flat_map(|ids| ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let source_backed_ids = extractions
+        .iter()
+        .flat_map(|extraction| &extraction.nodes)
+        .filter(|node| !node.source_file.is_empty())
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
     let mut method_owners = BTreeMap::<String, String>::new();
     for extraction in extractions.iter() {
         for edge in &extraction.edges {
@@ -348,6 +412,86 @@ pub(crate) fn resolve_types(extractions: &mut [Extraction]) {
     }
 
     for extraction in extractions.iter_mut() {
+        let mut anchors = BTreeMap::<String, (String, bool)>::new();
+        let mut remapped_raw_targets = BTreeSet::new();
+        for edge in &mut extraction.edges {
+            let Some(path) = edge
+                .extra
+                .get(IMPORT_PATH)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let raw_target = edge.true_target().to_owned();
+            let static_import =
+                edge.extra.get(STATIC_IMPORT).and_then(Value::as_bool) == Some(true);
+            let target = import_anchor(
+                &qualified_types,
+                &path,
+                static_import,
+                &raw_target,
+                source_backed_ids.contains(&raw_target),
+            );
+            if target == raw_target {
+                continue;
+            }
+            edge.target = target.clone();
+            edge.extra.insert("_tgt".into(), target.clone().into());
+            remapped_raw_targets.insert(raw_target);
+            if !declared_type_ids.contains(&target) {
+                anchors
+                    .entry(target)
+                    .or_insert_with(|| (path, static_import));
+            }
+        }
+        for (id, (path, static_import)) in anchors {
+            if extraction.nodes.iter().any(|node| node.id == id) {
+                continue;
+            }
+            let wildcard = path.ends_with(".*") && !static_import;
+            let label = if wildcard {
+                path.strip_suffix(".*").unwrap_or(&path)
+            } else {
+                &path
+            };
+            let mut extra = BTreeMap::from([
+                ("_origin".into(), "resolver".into()),
+                (
+                    "type".into(),
+                    if wildcard { "package" } else { "reference" }.into(),
+                ),
+                (IMPORT_PATH.into(), path.clone().into()),
+                ("java_import_anchor".into(), true.into()),
+            ]);
+            if static_import {
+                extra.insert(STATIC_IMPORT.into(), true.into());
+            }
+            crate::resolution::push_resolved_node(
+                &mut extraction.nodes,
+                graphoxide_core::Node {
+                    id,
+                    label: label.to_owned(),
+                    file_type: "code".into(),
+                    source_file: String::new(),
+                    source_location: None,
+                    community: None,
+                    extra,
+                },
+            );
+        }
+        if !remapped_raw_targets.is_empty() {
+            let live_endpoints = extraction
+                .edges
+                .iter()
+                .flat_map(|edge| [edge.true_source(), edge.true_target()])
+                .collect::<BTreeSet<_>>();
+            extraction.nodes.retain(|node| {
+                !remapped_raw_targets.contains(&node.id)
+                    || !node.source_file.is_empty()
+                    || live_endpoints.contains(node.id.as_str())
+            });
+        }
         let mut imports = BTreeMap::<String, BTreeSet<String>>::new();
         for edge in &extraction.edges {
             if edge.extra.get(STATIC_IMPORT).and_then(Value::as_bool) == Some(true) {
@@ -458,5 +602,164 @@ pub(crate) fn resolve_types(extractions: &mut [Extraction]) {
                 edge.extra.remove(key);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::extract_as_bytes;
+    use std::path::Path;
+
+    fn extract(path: &str, source: &str) -> Extraction {
+        extract_as_bytes(Path::new(path), path, source.as_bytes()).expect("extract Java source")
+    }
+
+    fn import_target<'a>(extraction: &'a Extraction, path: &str) -> &'a str {
+        extraction
+            .edges
+            .iter()
+            .find(|edge| edge.extra.get(IMPORT_PATH).and_then(Value::as_str) == Some(path))
+            .expect("Java import edge")
+            .true_target()
+    }
+
+    fn qualified_type_id(extractions: &[Extraction], qualified: &str) -> String {
+        extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .find(|node| node.extra.get(QUALIFIED_TYPE).and_then(Value::as_str) == Some(qualified))
+            .expect("qualified Java type")
+            .id
+            .clone()
+    }
+
+    fn assert_no_dangling_edges(extractions: &[Extraction]) {
+        let node_ids = extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .map(|node| node.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for edge in extractions.iter().flat_map(|extraction| &extraction.edges) {
+            assert!(
+                node_ids.contains(edge.true_source()),
+                "dangling source: {edge:?}"
+            );
+            assert!(
+                node_ids.contains(edge.true_target()),
+                "dangling target: {edge:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_import_anchor_cannot_collide_with_a_same_named_file() {
+        let mut extractions = vec![
+            extract("src/Main.java", "import com.example.*; class Main {}"),
+            extract("com/example.java", "class Collision {}"),
+        ];
+        resolve_types(&mut extractions);
+
+        let target = import_target(&extractions[0], "com.example.*");
+        assert_eq!(target, make_id(&["__java_package", "com.example"]));
+        assert_ne!(target, make_id(&["com/example"]));
+        assert_no_dangling_edges(&extractions);
+    }
+
+    #[test]
+    fn colliding_exact_and_static_imports_resolve_to_unique_declared_types() {
+        let mut extractions = vec![
+            extract(
+                "src/Main.java",
+                "import com.example.Widget; import static com.example.Util.*; class Main {}",
+            ),
+            extract(
+                "src/Widget.java",
+                "package com.example; public class Widget {}",
+            ),
+            extract(
+                "src/Util.java",
+                "package com.example; public class Util { public static void run() {} }",
+            ),
+            extract("com/example/Widget.java", "class WidgetPathCollision {}"),
+            extract("com/example/Util.java", "class UtilPathCollision {}"),
+        ];
+        let widget = qualified_type_id(&extractions, "com.example.Widget");
+        let util = qualified_type_id(&extractions, "com.example.Util");
+        resolve_types(&mut extractions);
+
+        assert_eq!(import_target(&extractions[0], "com.example.Widget"), widget);
+        assert_eq!(import_target(&extractions[0], "com.example.Util.*"), util);
+        assert_no_dangling_edges(&extractions);
+    }
+
+    #[test]
+    fn namespaced_fallbacks_are_real_nodes_and_replace_orphaned_raw_stubs() {
+        let mut importer = extract(
+            "src/Main.java",
+            "import missing.Widget; import static missing.Tools.run; import missing.pkg.*; class Main {}",
+        );
+        let raw_exact = make_id(&["missing.Widget"]);
+        importer.nodes.push(graphoxide_core::Node {
+            id: raw_exact.clone(),
+            label: "missing.Widget".into(),
+            file_type: "code".into(),
+            source_file: String::new(),
+            source_location: None,
+            community: None,
+            extra: BTreeMap::from([("type".into(), "reference".into())]),
+        });
+        let mut extractions = vec![
+            importer,
+            extract("missing/Widget.java", "class WidgetPathCollision {}"),
+            extract("missing/Tools/run.java", "class StaticPathCollision {}"),
+            extract("missing/pkg.java", "class PackagePathCollision {}"),
+        ];
+        resolve_types(&mut extractions);
+
+        for (path, expected) in [
+            (
+                "missing.Widget",
+                make_id(&["__java_type_import", "missing.Widget"]),
+            ),
+            (
+                "missing.Tools.run",
+                make_id(&["__java_static_import", "missing.Tools.run"]),
+            ),
+            ("missing.pkg.*", make_id(&["__java_package", "missing.pkg"])),
+        ] {
+            assert_eq!(import_target(&extractions[0], path), expected);
+            assert!(extractions[0].nodes.iter().any(|node| node.id == expected));
+        }
+        assert!(extractions[0].nodes.iter().all(|node| node.id != raw_exact));
+        assert_no_dangling_edges(&extractions);
+    }
+
+    #[test]
+    fn collision_free_imports_preserve_legacy_raw_targets() {
+        let mut extractions = vec![
+            extract(
+                "src/Main.java",
+                "import com.example.Widget; import static com.example.Util.*; class Main {}",
+            ),
+            extract(
+                "src/Widget.java",
+                "package com.example; public class Widget {}",
+            ),
+            extract(
+                "src/Util.java",
+                "package com.example; public class Util { public static void run() {} }",
+            ),
+        ];
+        resolve_types(&mut extractions);
+
+        assert_eq!(
+            import_target(&extractions[0], "com.example.Widget"),
+            make_id(&["com.example.Widget"])
+        );
+        assert_eq!(
+            import_target(&extractions[0], "com.example.Util.*"),
+            make_id(&["com.example.Util.*"])
+        );
     }
 }

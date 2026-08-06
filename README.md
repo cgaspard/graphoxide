@@ -20,7 +20,7 @@ graph schema while adding a native CLI/MCP runtime and IDE integration.
 
 ## Install
 
-Rust 1.95 is pinned in `rust-toolchain.toml`.
+Rust 1.97.1 is pinned in `rust-toolchain.toml`.
 
 Download a standalone archive for macOS, Linux, or Windows from the
 [latest GitHub release](https://github.com/cgaspard/graphoxide/releases/latest),
@@ -92,6 +92,13 @@ graphoxide extract . --code-only --no-cluster
 
 # Emit one JSON build report for automation
 graphoxide extract . --code-only --json
+
+# Inspect the deterministic structured-format capability contract
+graphoxide formats --json
+
+# Bound an isolated build explicitly and write additive runtime telemetry
+graphoxide extract . --memory-budget-bytes 1073741824 \
+  --compute-workers 4 --runtime-report graphoxide-out/runtime.json
 ```
 
 `--force` also permits replacing an existing graph with a smaller one. Use it intentionally if files were removed or ignore rules changed.
@@ -102,6 +109,19 @@ human-readable stage durations on stderr, or `--json` to either `extract` or
 stage durations, file counts, graph totals, output path, and warnings. Timing is
 never written into `graph.json`, so telemetry does not affect deterministic
 graph output.
+
+The default executor separates filesystem I/O from CPU extraction behind
+bounded queues and a resolved managed-memory budget. `--memory-budget-bytes`,
+`--io-workers`, `--compute-workers`, `--read-batch-bytes`, and `--io-backend`
+provide explicit overrides; unsupported `io-uring` requests fall back to the
+portable threaded backend and record that decision in the optional runtime
+report. `graphoxide formats --json` reports each registered family's actual
+semantic, schema, structural, container, or inventory-only support and its
+parser limits. The managed budget governs Graphoxide's queues and registered
+format-parser allowances, admits completed extraction facts before they enter
+the aggregate result, and bounds caches and graph staging. It is not a hard
+process RSS limit; discovery and language parsers retain their own fixed safety
+caps.
 
 ### 2. Query the graph
 
@@ -247,7 +267,40 @@ deterministic fallback tier while their grammar-backed adapters are hardened.
 
 Deterministic structured/regex extraction covers the remaining offline matrix, including Kotlin, Scala, PHP, Swift, Lua, Groovy, Elixir, Zig, Julia, Fortran, Verilog/SystemVerilog, Objective-C, PowerShell, Terraform/HCL, SQL, Apex, Dart, Pascal, Blade/Razor, Visual Studio solutions/projects, XAML, Delphi/Lazarus forms, Vue/Svelte/Astro containers, and package manifests. Header routing distinguishes C++, C, and Objective-C markers.
 
-The walker honors `.gitignore` and `.graphoxideignore`, skips dependency/build/cache directories and sensitive credential files, and never re-ingests `graphoxide-out/`.
+The walker honors `.gitignore` and `.graphoxideignore`, skips dependency/build/cache directories and sensitive credential files, and never re-ingests `graphoxide-out/`. The `outer!/member` source spelling is reserved for logical archive members, so physical directory names ending in `!` are skipped with a discovery diagnostic.
+
+## Deterministic graph-build benchmark profiles
+
+The local graph-build benchmark always uses the default isolated execution model,
+records the opt-in `--runtime-report` sidecar for both full and incremental
+passes, and validates the resulting graph and manifest before reporting a
+sample. It measures observations on the local machine; it does not assert a
+throughput threshold.
+
+In addition to the source compatibility corpus, the following generated profiles
+exercise structured-format families with fixed content, canonical archive
+metadata, and a fixture SHA-256 in the JSON report:
+
+| Profile | Fixture families |
+| --- | --- |
+| `structured-json` | JSON, JSONC, JSON5, JSON Schema, and configuration documents |
+| `structured-containers` | YAML, TOML, CSV, XML, SVG, ZIP, TAR, GZIP, and SVGZ |
+| `idl-schema` | Protobuf, FlatBuffers, Thrift, Cap'n Proto, Avro, WIT, Smithy, YANG, ASN.1, CDDL, GraphQL, OpenAPI, and AsyncAPI |
+| `diagrams` | Graphviz DOT, Mermaid, PlantUML, D2, draw.io, Excalidraw, tldraw, BPMN, DBML, and Structurizr DSL |
+| `facility-models` | KiCad, EAGLE, gEDA, IPC-2581, IFC, IDS, gbXML, CityGML, LandXML, EnergyPlus, Modelica, OpenFOAM, OpenConfig, and Redfish |
+| `openusd-assets` | USDA, USDC, USDZ, URDF, SDF, MJCF, glTF, GLB, MaterialX, OpenDRIVE, OpenSCENARIO, and FMI metadata |
+
+Run a profile with the generic command or the matching npm shortcut:
+
+```bash
+npm --silent run benchmark:graph-build -- --scenario idl-schema
+npm --silent run benchmark:structured-containers
+```
+
+The output includes the selected profile's format families, fixture digest,
+validated isolated-runtime telemetry, full/incremental graph artifact digests,
+and separate external-wall and CLI-reported elapsed timings. The timings remain
+environment-specific evidence rather than release gates.
 
 ## VS Code extension
 
@@ -259,7 +312,7 @@ workflows, managed graph freshness, report/export commands, and MCP integration.
 Install the packaged extension for your platform from this checkout, for example:
 
 ```bash
-code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.6.0.vsix
+code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.8.0.vsix
 ```
 
 Then open a repository and accept the first-open **Enable Graphoxide** prompt.
@@ -454,7 +507,7 @@ Questions and full responses may contain sensitive project context, so choose th
 
 The Python reference implementation is kept in the gitignored `upstream/`
 checkout as a differential oracle. The pinned 3,978-case inventory is accounted
-for by 3,975 executable parity mappings and 3 reviewed expected divergences;
+for by 3,966 executable parity mappings and 12 reviewed expected divergences;
 expected divergences are reported separately and never presented as blanket
 parity. The end-to-end corpus gate also compares reviewed deterministic graphs
 from both implementations.

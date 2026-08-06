@@ -1,6 +1,6 @@
 //! One-to-one executable port of pinned upstream `tests/test_dotnet.py`.
 
-use graphoxide_core::{Confidence, Edge, Extraction, Node};
+use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use graphoxide_extract::{detect, extract, extract_files};
 use std::{
     collections::HashMap,
@@ -187,14 +187,118 @@ fn test_csproj_packages() {
 
 #[test]
 fn test_csproj_project_references() {
+    let temp = tempfile::tempdir().expect("project-reference fixture");
+    let app = temp.path().join("App");
+    fs::create_dir_all(&app).expect("create app directory");
+    let project = app.join("sample.csproj");
+    fs::copy(fixtures().join("sample.csproj"), &project).expect("copy referencing project");
+    for relative in [
+        "Domain/Domain.csproj",
+        "Infrastructure/Infrastructure.csproj",
+    ] {
+        let referenced = temp.path().join(relative);
+        fs::create_dir_all(referenced.parent().expect("referenced project parent"))
+            .expect("create referenced project directory");
+        fs::write(referenced, "<Project Sdk=\"Microsoft.NET.Sdk\" />")
+            .expect("write referenced project");
+    }
+
     assert_eq!(
-        extract_fixture("sample.csproj")
+        extract(&project)
+            .expect("extract project with proven references")
             .edges
             .iter()
             .filter(|edge| edge.relation == "imports")
             .count(),
         6
     );
+}
+
+#[test]
+fn test_dynamic_csproj_reference_cannot_bind_an_admitted_project() {
+    let temp = tempfile::tempdir().expect("dynamic project-reference fixture");
+    let app = temp.path().join("App/App.csproj");
+    let dynamic_collision = temp.path().join("App/Folder/Worker.csproj");
+    let static_target = temp.path().join("App/Static/Static.csproj");
+    for target in [&dynamic_collision, &static_target] {
+        fs::create_dir_all(target.parent().expect("project parent"))
+            .expect("create project parent");
+        fs::write(target, "<Project Sdk=\"Microsoft.NET.Sdk\" />")
+            .expect("write referenced project");
+    }
+    fs::write(
+        &app,
+        concat!(
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>",
+            "<ProjectReference Include=\"$(Folder)/Worker.csproj\" />",
+            "<ProjectReference Include=\"Static/Static.csproj\" />",
+            "</ItemGroup></Project>",
+        ),
+    )
+    .expect("write referencing project");
+
+    let result = extract_files(
+        &[app, dynamic_collision, static_target],
+        Some(temp.path()),
+        true,
+    )
+    .expect("extract project-reference collision fixture");
+    let source = make_id(&["App/App"]);
+    let dynamic_target = make_id(&["App/Folder/Worker"]);
+    let static_target = make_id(&["App/Static/Static"]);
+    let imports = result
+        .extractions
+        .iter()
+        .flat_map(|extraction| &extraction.edges)
+        .filter(|edge| edge.relation == "imports" && edge.true_source() == source)
+        .map(Edge::true_target)
+        .collect::<Vec<_>>();
+
+    assert!(!imports.contains(&dynamic_target.as_str()));
+    assert!(imports.contains(&static_target.as_str()));
+}
+
+#[test]
+fn test_dynamic_slnx_path_cannot_bind_an_admitted_project() {
+    let temp = tempfile::tempdir().expect("dynamic SLNX fixture");
+    let solution = temp.path().join("Workspace.slnx");
+    let dynamic_collision = temp.path().join("Folder/Worker.csproj");
+    let static_target = temp.path().join("Static/Static.csproj");
+    for target in [&dynamic_collision, &static_target] {
+        fs::create_dir_all(target.parent().expect("project parent"))
+            .expect("create project parent");
+        fs::write(target, "<Project Sdk=\"Microsoft.NET.Sdk\" />").expect("write solution project");
+    }
+    fs::write(
+        &solution,
+        concat!(
+            "<Solution>",
+            "<Project Path=\"$(Folder)/Worker.csproj\" />",
+            "<Project Path=\"Static/Static.csproj\" />",
+            "</Solution>",
+        ),
+    )
+    .expect("write solution");
+
+    let result = extract_files(
+        &[solution, dynamic_collision, static_target],
+        Some(temp.path()),
+        true,
+    )
+    .expect("extract SLNX collision fixture");
+    let source = make_id(&["Workspace"]);
+    let dynamic_target = make_id(&["Folder/Worker"]);
+    let static_target = make_id(&["Static/Static"]);
+    let contains = result
+        .extractions
+        .iter()
+        .flat_map(|extraction| &extraction.edges)
+        .filter(|edge| edge.relation == "contains" && edge.true_source() == source)
+        .map(Edge::true_target)
+        .collect::<Vec<_>>();
+
+    assert!(!contains.contains(&dynamic_target.as_str()));
+    assert!(contains.contains(&static_target.as_str()));
 }
 
 #[test]

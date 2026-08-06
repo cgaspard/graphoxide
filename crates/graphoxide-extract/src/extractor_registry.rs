@@ -7,12 +7,16 @@ use graphoxide_core::Extraction;
 use std::path::Path;
 
 pub type ExtractorFn = fn(&Path, &str) -> anyhow::Result<Extraction>;
+/// A dedicated extractor that consumes source bytes prepared by the I/O
+/// service instead of reading the path itself.
+pub type ByteExtractorFn = fn(&Path, &str, &[u8]) -> anyhow::Result<Extraction>;
 
 #[derive(Clone, Copy)]
 pub struct LanguageExtractor {
     pub name: &'static str,
     pub suffixes: &'static [&'static str],
     pub extract: ExtractorFn,
+    pub extract_bytes: Option<ByteExtractorFn>,
 }
 
 impl LanguageExtractor {
@@ -25,6 +29,23 @@ impl LanguageExtractor {
             name,
             suffixes,
             extract,
+            extract_bytes: None,
+        }
+    }
+
+    /// Construct an extractor that supports both the legacy path facade and
+    /// the I/O-isolated byte execution path.
+    pub const fn with_bytes(
+        name: &'static str,
+        suffixes: &'static [&'static str],
+        extract: ExtractorFn,
+        extract_bytes: ByteExtractorFn,
+    ) -> Self {
+        Self {
+            name,
+            suffixes,
+            extract,
+            extract_bytes: Some(extract_bytes),
         }
     }
 
@@ -39,10 +60,11 @@ impl LanguageExtractor {
     }
 }
 
-static LANGUAGE_EXTRACTORS: &[LanguageExtractor] = &[LanguageExtractor::new(
+static LANGUAGE_EXTRACTORS: &[LanguageExtractor] = &[LanguageExtractor::with_bytes(
     "terraform",
     &["tf", "tfvars", "hcl"],
     crate::terraform::extract_terraform,
+    crate::terraform::extract_terraform_bytes,
 )];
 
 pub fn registered_extractors() -> &'static [LanguageExtractor] {

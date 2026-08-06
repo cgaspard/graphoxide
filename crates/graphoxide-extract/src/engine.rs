@@ -1,14 +1,18 @@
 //! Shared tree-sitter extraction driver for the compiled language set.
 
+use crate::project_path::{normalize_project_path, source_relative_project_path, ProjectPath};
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 use tree_sitter::{Node as TsNode, Parser};
+
+pub(crate) const RUST_IMPORT_PATH: &str = "rust_import_path";
 
 struct Spec {
     classes: &'static [&'static str],
@@ -156,6 +160,13 @@ pub fn extract(path: &Path) -> anyhow::Result<Extraction> {
 }
 
 pub(crate) fn has_ast_extractor(path: &Path) -> bool {
+    let source = fs::read(path).unwrap_or_default();
+    has_ast_extractor_bytes(path, &source)
+}
+
+/// Return whether the already-admitted source has an AST extractor without
+/// reopening its path from a CPU worker.
+pub(crate) fn has_ast_extractor_bytes(path: &Path, source: &[u8]) -> bool {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -165,7 +176,7 @@ pub(crate) fn has_ast_extractor(path: &Path) -> bool {
         return false;
     }
     if extension == "m" {
-        let head = fs::read_to_string(path).unwrap_or_default();
+        let head = String::from_utf8_lossy(source);
         return ["@interface", "@implementation", "@protocol", "#import"]
             .iter()
             .any(|marker| head.contains(marker));
@@ -174,6 +185,46 @@ pub(crate) fn has_ast_extractor(path: &Path) -> bool {
 }
 
 pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
+    let source = fs::read(path)?;
+    extract_as_with_path_probes(path, source_file, &source, true, None)
+}
+
+/// Extract a graph fragment from I/O-owned source bytes.
+///
+/// This is the compute-plane entrypoint: it classifies and parses the supplied
+/// allocation, but never opens, reads, stats, or probes `path`.
+pub(crate) fn extract_as_bytes(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+) -> anyhow::Result<Extraction> {
+    extract_as_with_path_probes(path, source_file, source, false, None)
+}
+
+/// Extract ready bytes while constraining registered parser scratch and output
+/// to one isolated compute owner's arena allowance.
+pub(crate) fn extract_as_bytes_with_parser_allowance(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    parser_allowance_bytes: usize,
+) -> anyhow::Result<Extraction> {
+    extract_as_with_path_probes(
+        path,
+        source_file,
+        source,
+        false,
+        Some(parser_allowance_bytes),
+    )
+}
+
+fn extract_as_with_path_probes(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    allow_path_probes: bool,
+    parser_allowance_bytes: Option<usize>,
+) -> anyhow::Result<Extraction> {
     let mut lang = crate::languages::for_path(path);
     let extension = path
         .extension()
@@ -181,30 +232,66 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         .unwrap_or("")
         .to_ascii_lowercase();
     if let Some(extractor) = crate::extractor_registry::extractor_for_path(path) {
-        return (extractor.extract)(path, source_file);
+        if allow_path_probes {
+            return (extractor.extract)(path, source_file);
+        }
+        return extractor.extract_bytes.map_or_else(
+            || crate::fallback::extract_text_bytes(path, source_file, source),
+            |extract| extract(path, source_file, source),
+        );
+    }
+    let registered_extraction = parser_allowance_bytes.map_or_else(
+        || crate::format_adapter::extract_registered_format(path, source_file, source, &extension),
+        |allowance| {
+            crate::format_adapter::extract_registered_format_with_allowance(
+                path,
+                source_file,
+                source,
+                &extension,
+                Some(allowance),
+            )
+        },
+    );
+    if let Some(extraction) = registered_extraction {
+        return Ok(extraction);
     }
     if crate::dotnet::supports_extension(&extension) {
-        return crate::dotnet::extract_dotnet(path, source_file, &extension);
+        if allow_path_probes {
+            return crate::dotnet::extract_dotnet(path, source_file, &extension);
+        }
+        return crate::dotnet::extract_dotnet_bytes(path, source_file, &extension, source);
     }
     let shebang = extension
         .is_empty()
-        .then(|| crate::detect::shebang_interpreter(path))
+        .then(|| crate::detect::shebang_interpreter_bytes(source))
         .flatten();
     if matches!(extension.as_str(), "sh" | "bash" | "zsh")
         || shebang
             .as_deref()
             .is_some_and(|name| matches!(name, "bash" | "sh" | "dash" | "zsh" | "ksh"))
     {
-        return crate::bash::extract_bash(path, source_file);
+        if allow_path_probes {
+            return crate::bash::extract_bash(path, source_file);
+        }
+        return crate::bash::extract_bash_bytes(path, source_file, source);
     }
     if extension == "dart" {
-        return crate::dart::extract_dart(path, source_file);
+        if allow_path_probes {
+            return crate::dart::extract_dart(path, source_file);
+        }
+        return crate::dart::extract_dart_bytes(path, source_file, source);
     }
     if crate::pascal::supports_extension(&extension) {
-        return crate::pascal::extract_pascal_family(path, source_file, &extension);
+        if allow_path_probes {
+            return crate::pascal::extract_pascal_family(path, source_file, &extension);
+        }
+        return crate::pascal::extract_pascal_family_bytes(path, source_file, &extension, source);
     }
     if extension == "sql" {
-        return crate::sql::extract_sql(path, source_file);
+        if allow_path_probes {
+            return crate::sql::extract_sql(path, source_file);
+        }
+        return crate::sql::extract_sql_bytes(path, source_file, source);
     }
     if extension == "r" {
         // R is classified as code, but no sound AST extractor is compiled in
@@ -227,10 +314,13 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         .and_then(|value| value.to_str())
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "sv" | "svh"))
     {
-        return crate::fallback::extract_text(path, source_file);
+        if allow_path_probes {
+            return crate::fallback::extract_text(path, source_file);
+        }
+        return crate::fallback::extract_text_bytes(path, source_file, source);
     }
     if extension == "m" {
-        let head = fs::read_to_string(path).unwrap_or_default();
+        let head = String::from_utf8_lossy(source);
         if !["@interface", "@implementation", "@protocol", "#import"]
             .iter()
             .any(|marker| head.contains(marker))
@@ -241,9 +331,12 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         }
     }
     if extension == "h" {
-        let head = fs::read_to_string(path).unwrap_or_default();
+        let head = String::from_utf8_lossy(source);
         if head.contains("@interface") || head.contains("@protocol") || head.contains("#import") {
-            return crate::fallback::extract_text(path, source_file);
+            if allow_path_probes {
+                return crate::fallback::extract_text(path, source_file);
+            }
+            return crate::fallback::extract_text_bytes(path, source_file, source);
         }
         if ["namespace ", "class ", "template<", "template <"]
             .iter()
@@ -252,28 +345,38 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
             lang = crate::languages::named("cpp");
         }
     }
-    let prepared_sfc = crate::sfc::prepare(path)?;
+    let prepared_sfc = if allow_path_probes {
+        crate::sfc::prepare(path)?
+    } else {
+        crate::sfc::prepare_bytes(path, source)?
+    };
     if let Some(prepared) = &prepared_sfc {
         lang = crate::languages::named(prepared.language);
     }
     let Some(lang) = lang else {
-        return crate::fallback::extract_text(path, source_file);
+        if allow_path_probes {
+            return crate::fallback::extract_text(path, source_file);
+        }
+        return crate::fallback::extract_text_bytes(path, source_file, source);
     };
     if matches!(lang.name, "bash" | "json") {
-        return crate::fallback::extract_text(path, source_file);
+        if allow_path_probes {
+            return crate::fallback::extract_text(path, source_file);
+        }
+        return crate::fallback::extract_text_bytes(path, source_file, source);
     }
-    let source = prepared_sfc
-        .as_ref()
-        .map(|prepared| prepared.original.clone())
-        .map_or_else(|| fs::read(path), Ok)?;
-    let parser_source = prepared_sfc
-        .as_ref()
-        .map(|prepared| prepared.parser.clone())
-        .unwrap_or_else(|| parser_compatible_source(&source, lang.name, path));
+    // Normal grammar inputs borrow their source allocation. Only CUDA/Metal
+    // compatibility masking and SFC parser masking allocate a distinct parser
+    // buffer; the physical source remains borrowed for locations, diagnostics,
+    // and graph evidence.
+    let parser_source = match prepared_sfc.as_ref() {
+        Some(prepared) => Cow::Borrowed(prepared.parser.as_slice()),
+        None => parser_compatible_source(source, lang.name, path),
+    };
     let mut parser = Parser::new();
     parser.set_language(&(lang.language)())?;
     let tree = parser
-        .parse(&parser_source, None)
+        .parse(parser_source.as_ref(), None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter returned no tree"))?;
     let stem_owned = Path::new(source_file)
         .with_extension("")
@@ -282,7 +385,7 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
     let stem = stem_owned.as_str();
     let file_id = make_id(&[stem]);
     let mut state = State {
-        source: &source,
+        source,
         source_file,
         physical_path: path.to_path_buf(),
         stem,
@@ -297,6 +400,7 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         indirect_calls: Vec::new(),
         callable_ids: HashSet::new(),
         language_name: lang.name,
+        allow_path_probes,
         package_scope: path
             .parent()
             .and_then(|p| p.file_name())
@@ -309,11 +413,11 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         python_parameter_types: HashMap::new(),
         python_attribute_types: HashMap::new(),
         javascript_injected_fields: HashMap::new(),
-        javascript_receiver_types: collect_typescript_receiver_types(tree.root_node(), &source),
+        javascript_receiver_types: collect_typescript_receiver_types(tree.root_node(), source),
         go_receiver_types: HashMap::new(),
-        java_type_parameters: collect_java_type_parameters(tree.root_node(), &source),
-        java_package: collect_java_package(tree.root_node(), &source),
-        declared_interfaces: collect_declared_interfaces(tree.root_node(), &source),
+        java_type_parameters: collect_java_type_parameters(tree.root_node(), source),
+        java_package: collect_java_package(tree.root_node(), source),
+        declared_interfaces: collect_declared_interfaces(tree.root_node(), source),
     };
     state.add_node(
         file_id.clone(),
@@ -324,15 +428,16 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         1,
         Some("file"),
     );
-    if lang.name == "java" && !state.java_package.is_empty() {
-        if let Some(file) = state.nodes.first_mut() {
-            file.extra.insert(
-                crate::java::PACKAGE.into(),
-                state.java_package.clone().into(),
-            );
-        }
+    if lang.name == "java"
+        && !state.java_package.is_empty()
+        && let Some(file) = state.nodes.first_mut()
+    {
+        file.extra.insert(
+            crate::java::PACKAGE.into(),
+            state.java_package.clone().into(),
+        );
     }
-    let diagnostics = syntax_diagnostics(tree.root_node(), &source, lang.name);
+    let diagnostics = syntax_diagnostics(tree.root_node(), source, lang.name);
     if tree.root_node().has_error()
         || diagnostics.error_nodes > 0
         || diagnostics.missing_nodes > 0
@@ -378,13 +483,23 @@ pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extra
         edges: state.edges,
         hyperedges: Vec::new(),
     };
-    if prepared_sfc.is_some() {
-        crate::sfc::augment_imports(&mut extraction, path, source_file, &source, &parser_source);
+    if allow_path_probes && prepared_sfc.is_some() {
+        crate::sfc::augment_imports(
+            &mut extraction,
+            path,
+            source_file,
+            source,
+            parser_source.as_ref(),
+        );
     }
     Ok(extraction)
 }
 
-fn parser_compatible_source(source: &[u8], language_name: &str, path: &Path) -> Vec<u8> {
+fn parser_compatible_source<'a>(
+    source: &'a [u8],
+    language_name: &str,
+    path: &Path,
+) -> Cow<'a, [u8]> {
     if language_name != "cpp"
         || !path
             .extension()
@@ -396,7 +511,7 @@ fn parser_compatible_source(source: &[u8], language_name: &str, path: &Path) -> 
                 )
             })
     {
-        return source.to_vec();
+        return Cow::Borrowed(source);
     }
     let mut compatible = source.to_vec();
     for qualifier in [
@@ -410,10 +525,7 @@ fn parser_compatible_source(source: &[u8], language_name: &str, path: &Path) -> 
         b"thread".as_slice(),
     ] {
         let mut start = 0;
-        while let Some(relative) = compatible[start..]
-            .windows(qualifier.len())
-            .position(|window| window == qualifier)
-        {
+        while let Some(relative) = crate::bytes::find_subslice(&compatible[start..], qualifier) {
             let offset = start + relative;
             let before_is_word = offset > 0
                 && (compatible[offset - 1].is_ascii_alphanumeric()
@@ -427,7 +539,7 @@ fn parser_compatible_source(source: &[u8], language_name: &str, path: &Path) -> 
             start = after;
         }
     }
-    compatible
+    Cow::Owned(compatible)
 }
 
 struct CallSite {
@@ -531,6 +643,10 @@ struct State<'a> {
     indirect_calls: Vec<(String, String, usize, &'static str)>,
     callable_ids: HashSet<String>,
     language_name: &'static str,
+    /// Compatibility path extraction may probe sibling files. The byte-only
+    /// compute entrypoint disables that behavior and emits deterministic
+    /// logical references instead.
+    allow_path_probes: bool,
     package_scope: String,
     enum_ids: HashSet<String>,
     pending_local_refs: Vec<(String, String, String, Option<&'static str>, usize)>,
@@ -731,10 +847,10 @@ impl State<'_> {
         if let Some(name) = node.child_by_field_name("name") {
             return self.text(name);
         }
-        if matches!(node.kind(), "function_definition") {
-            if let Some(decl) = node.child_by_field_name("declarator") {
-                return deepest_identifier(decl, self.source);
-            }
+        if matches!(node.kind(), "function_definition")
+            && let Some(decl) = node.child_by_field_name("declarator")
+        {
+            return deepest_identifier(decl, self.source);
         }
         if self.language_name == "cpp" && node.kind() == "function_declarator" {
             return deepest_identifier(node, self.source);
@@ -1024,10 +1140,8 @@ impl State<'_> {
         }
         self.add_node(id.clone(), label, line, Some("function"));
         self.callable_ids.insert(id.clone());
-        if exported {
-            if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
-                node.extra.insert("exported".into(), true.into());
-            }
+        if exported && let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+            node.extra.insert("exported".into(), true.into());
         }
         self.add_edge(
             owner.clone().unwrap_or_else(|| self.file_id.clone()),
@@ -1169,7 +1283,21 @@ impl State<'_> {
         let Some(module) = crate::ruby::require_relative(node, self.source) else {
             return false;
         };
-        let target = crate::ruby::require_target(self.source_file, &module);
+        let target = crate::ruby::require_target(self.source_file, &module).or_else(|| {
+            if !self.allow_path_probes {
+                return None;
+            }
+            // The legacy single-file entrypoint supplies an absolute source
+            // identity. Preserve its local import stub without allowing the
+            // untrusted module text to inherit host path semantics: validate
+            // it against only the physical file's final directory component.
+            let parent = self.physical_path.parent()?.file_name()?.to_str()?;
+            let filename = self.physical_path.file_name()?.to_str()?;
+            crate::ruby::require_target(&format!("{parent}/{filename}"), &module)
+        });
+        let Some(target) = target else {
+            return true;
+        };
         self.add_edge(
             self.file_id.clone(),
             target,
@@ -1258,12 +1386,13 @@ impl State<'_> {
         }
         self.add_node(id.clone(), label, line, Some("function"));
         self.record_go_receiver_types(node, &id);
-        if self.language_name == "ruby" && crate::ruby::method_is_singleton(node, self.source) {
-            if let Some(method) = self.nodes.iter_mut().find(|method| method.id == id) {
-                method
-                    .extra
-                    .insert(crate::ruby::SINGLETON_METHOD.into(), true.into());
-            }
+        if self.language_name == "ruby"
+            && crate::ruby::method_is_singleton(node, self.source)
+            && let Some(method) = self.nodes.iter_mut().find(|method| method.id == id)
+        {
+            method
+                .extra
+                .insert(crate::ruby::SINGLETON_METHOD.into(), true.into());
         }
         self.emit_typescript_decorators(node, &id, true);
         self.mark_exported(&id, export_anchor);
@@ -1383,11 +1512,11 @@ impl State<'_> {
             // impact queries such as `affected my_decorator` work.
             let definition = node.child_by_field_name("definition").or_else(|| {
                 let mut cursor = node.walk();
-                let definition = node.named_children(&mut cursor).find(|child| {
+
+                node.named_children(&mut cursor).find(|child| {
                     self.spec.classes.contains(&child.kind())
                         || self.spec.functions.contains(&child.kind())
-                });
-                definition
+                })
             });
             let Some(definition) = definition else {
                 return;
@@ -1442,42 +1571,40 @@ impl State<'_> {
                 kind,
                 "public_field_definition" | "field_definition" | "property_signature"
             )
+            && let Some(owner) = class.as_deref().or(function.as_deref())
         {
-            if let Some(owner) = class.as_deref().or(function.as_deref()) {
-                self.emit_typescript_decorators(node, owner, false);
-            }
+            self.emit_typescript_decorators(node, owner, false);
         }
-        if self.language_name == "rust" && matches!(kind, "const_item" | "static_item") {
-            if let Some(name) = node.child_by_field_name("name") {
-                let name = self.text(name);
-                if !name.is_empty() {
-                    let owner = class.as_deref().or(function.as_deref());
-                    // Graphify-compatible IDs case-fold their components. Rust
-                    // does not: a value named `PATH` and a type named `Path`
-                    // are distinct symbols in distinct namespaces. Keep value
-                    // declarations in an explicit namespace and append a short
-                    // digest of the exact spelling so neither symbol silently
-                    // wins insertion order.
-                    let exact_name = hex::encode(Sha256::digest(name.as_bytes()));
-                    let value_kind = if kind == "const_item" {
-                        "const"
-                    } else {
-                        "static"
-                    };
-                    let id = owner
-                        .map(|owner| make_id(&[owner, value_kind, &name, &exact_name[..12]]))
-                        .unwrap_or_else(|| {
-                            make_id(&[self.stem, value_kind, &name, &exact_name[..12]])
-                        });
-                    self.add_node(id.clone(), name, line, Some("variable"));
-                    self.add_edge(
-                        owner.unwrap_or(&self.file_id).to_owned(),
-                        id,
-                        "contains",
-                        line,
-                        Confidence::Extracted,
-                    );
-                }
+        if self.language_name == "rust"
+            && matches!(kind, "const_item" | "static_item")
+            && let Some(name) = node.child_by_field_name("name")
+        {
+            let name = self.text(name);
+            if !name.is_empty() {
+                let owner = class.as_deref().or(function.as_deref());
+                // Graphify-compatible IDs case-fold their components. Rust
+                // does not: a value named `PATH` and a type named `Path`
+                // are distinct symbols in distinct namespaces. Keep value
+                // declarations in an explicit namespace and append a short
+                // digest of the exact spelling so neither symbol silently
+                // wins insertion order.
+                let exact_name = hex::encode(Sha256::digest(name.as_bytes()));
+                let value_kind = if kind == "const_item" {
+                    "const"
+                } else {
+                    "static"
+                };
+                let id = owner
+                    .map(|owner| make_id(&[owner, value_kind, &name, &exact_name[..12]]))
+                    .unwrap_or_else(|| make_id(&[self.stem, value_kind, &name, &exact_name[..12]]));
+                self.add_node(id.clone(), name, line, Some("variable"));
+                self.add_edge(
+                    owner.unwrap_or(&self.file_id).to_owned(),
+                    id,
+                    "contains",
+                    line,
+                    Confidence::Extracted,
+                );
             }
         }
         if self.language_name == "rust" && kind == "impl_item" {
@@ -1615,21 +1742,21 @@ impl State<'_> {
                 make_id(&[self.stem, &name])
             };
             self.add_node(id.clone(), name.clone(), line, Some("class"));
-            if self.language_name == "java" {
-                if let Some(declaration) = self.nodes.iter_mut().find(|node| node.id == id) {
-                    declaration.extra.insert(
-                        crate::java::PACKAGE.into(),
-                        self.java_package.clone().into(),
-                    );
-                    let qualified = if self.java_package.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{}.{}", self.java_package, name)
-                    };
-                    declaration
-                        .extra
-                        .insert(crate::java::QUALIFIED_TYPE.into(), qualified.into());
-                }
+            if self.language_name == "java"
+                && let Some(declaration) = self.nodes.iter_mut().find(|node| node.id == id)
+            {
+                declaration.extra.insert(
+                    crate::java::PACKAGE.into(),
+                    self.java_package.clone().into(),
+                );
+                let qualified = if self.java_package.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}.{}", self.java_package, name)
+                };
+                declaration
+                    .extra
+                    .insert(crate::java::QUALIFIED_TYPE.into(), qualified.into());
             }
             if self.language_name == "ruby" {
                 self.stamp_ruby_declaration(&id, if kind == "module" { "module" } else { "class" });
@@ -1765,12 +1892,12 @@ impl State<'_> {
             if self.emit_javascript_dynamic_import(node, function.as_deref(), line) {
                 return;
             }
-            if self.language_name == "java" && kind == "object_creation_expression" {
-                if let (Some(owner), Some(type_node)) =
+            if self.language_name == "java"
+                && kind == "object_creation_expression"
+                && let (Some(owner), Some(type_node)) =
                     (function.as_deref(), node.child_by_field_name("type"))
-                {
-                    self.emit_type_node(owner, type_node, "constructor_call", line);
-                }
+            {
+                self.emit_type_node(owner, type_node, "constructor_call", line);
             }
             if let Some(owner) = function.clone() {
                 let callee = node
@@ -1905,11 +2032,11 @@ impl State<'_> {
                         }
                     }
                 }
-                if self.language_name == "python" {
-                    if let Some((name, line)) = python_getattr_reference(node, self.source) {
-                        self.indirect_calls
-                            .push((indirect_owner, name, line, "getattr"));
-                    }
+                if self.language_name == "python"
+                    && let Some((name, line)) = python_getattr_reference(node, self.source)
+                {
+                    self.indirect_calls
+                        .push((indirect_owner, name, line, "getattr"));
                 }
             }
         }
@@ -1980,21 +2107,21 @@ impl State<'_> {
                 let module = halves.next().unwrap_or("").trim();
                 let imported = halves.next().unwrap_or("").trim();
                 if !module.is_empty() {
-                    let module_target = self.python_module_id(module, None);
-                    if !module_target.is_empty() {
-                        let start = self.edges.len();
-                        self.add_edge(
-                            self.file_id.clone(),
-                            module_target.clone(),
-                            "imports_from",
-                            line,
-                            Confidence::Extracted,
-                        );
-                        if self.edges.len() > start {
-                            self.edges[start]
-                                .extra
-                                .insert("target_module".into(), module_target.clone().into());
-                        }
+                    let Some(module_target) = self.python_module_id(module, None) else {
+                        return;
+                    };
+                    let start = self.edges.len();
+                    self.add_edge(
+                        self.file_id.clone(),
+                        module_target.clone(),
+                        "imports_from",
+                        line,
+                        Confidence::Extracted,
+                    );
+                    if self.edges.len() > start {
+                        self.edges[start]
+                            .extra
+                            .insert("target_module".into(), module_target.clone().into());
                     }
                     for item in imported.trim_matches(['(', ')']).split(',') {
                         let mut words = item.split_whitespace();
@@ -2007,10 +2134,9 @@ impl State<'_> {
                         } else {
                             name
                         };
-                        let target = self.python_module_id(module, Some(name));
-                        if target.is_empty() {
+                        let Some(target) = self.python_module_id(module, Some(name)) else {
                             continue;
-                        }
+                        };
                         let start = self.edges.len();
                         self.add_edge(
                             self.file_id.clone(),
@@ -2051,7 +2177,9 @@ impl State<'_> {
                         module.rsplit('.').next()
                     };
                     if !module.is_empty() {
-                        let target = self.python_module_id(module, None);
+                        let Some(target) = self.python_module_id(module, None) else {
+                            continue;
+                        };
                         let start = self.edges.len();
                         self.add_edge(
                             self.file_id.clone(),
@@ -2060,12 +2188,12 @@ impl State<'_> {
                             line,
                             Confidence::Extracted,
                         );
-                        if self.edges.len() > start {
-                            if let Some(local_alias) = local_alias {
-                                self.edges[start]
-                                    .extra
-                                    .insert("local_alias".into(), local_alias.into());
-                            }
+                        if self.edges.len() > start
+                            && let Some(local_alias) = local_alias
+                        {
+                            self.edges[start]
+                                .extra
+                                .insert("local_alias".into(), local_alias.into());
                         }
                     }
                 }
@@ -2165,17 +2293,11 @@ impl State<'_> {
                 .child_by_field_name("argument")
                 .map(|n| self.text(n))
                 .unwrap_or_else(|| self.text(node).trim_start_matches("use ").to_owned());
-            let name = argument
-                .trim_end_matches(';')
-                .trim_end_matches("::*")
-                .rsplit("::")
-                .next()
-                .unwrap_or("")
-                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-            if !name.is_empty() {
-                let target = make_id(&[name]);
+            let display = argument.trim_end_matches(';').trim();
+            if !display.is_empty() {
+                let target = make_id(&["rust_import", self.source_file, display]);
                 if !self.seen.contains(&target) {
-                    self.add_reference_node(target.clone(), name.to_owned());
+                    self.add_reference_node(target.clone(), display.to_owned());
                 }
                 self.add_edge(
                     self.file_id.clone(),
@@ -2184,6 +2306,11 @@ impl State<'_> {
                     line,
                     Confidence::Extracted,
                 );
+                if let Some(path) = rust_anchored_import_path(self.source_file, node, self.source)
+                    && let Some(edge) = self.edges.last_mut()
+                {
+                    edge.extra.insert(RUST_IMPORT_PATH.into(), path.into());
+                }
             }
             return;
         }
@@ -2198,55 +2325,98 @@ impl State<'_> {
                     .parent()
                     .unwrap_or_else(|| Path::new(""))
                     .join(module);
-                let logical = Path::new(self.source_file)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""))
-                    .join(module);
-                let logical_text = logical.to_string_lossy().replace('\\', "/");
-                let logical_stem = logical
+                let logical_source = normalize_project_path(self.source_file)
+                    .filter(|source| !source.is_empty())
+                    .or_else(|| {
+                        if !self.allow_path_probes {
+                            return None;
+                        }
+                        self.physical_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .and_then(normalize_project_path)
+                            .filter(|source| !source.is_empty())
+                    });
+                let Some(project_path) = logical_source
+                    .as_deref()
+                    .and_then(|source| source_relative_project_path(source, module))
+                else {
+                    return;
+                };
+                let logical_text = match project_path {
+                    ProjectPath::Contained(logical) => logical,
+                    ProjectPath::EscapesRoot(_) => {
+                        if self.allow_path_probes && physical.is_file() {
+                            let root = inferred_scan_root(&self.physical_path, self.source_file)
+                                .or_else(|| self.physical_path.parent().map(Path::to_path_buf));
+                            if let Some(root) = root {
+                                let resolved_root = fs::canonicalize(&root).unwrap_or(root);
+                                let resolved_physical =
+                                    fs::canonicalize(&physical).unwrap_or(physical.clone());
+                                let target =
+                                    portable_external_target_id(&resolved_root, &resolved_physical);
+                                self.add_edge(
+                                    self.file_id.clone(),
+                                    target,
+                                    "imports",
+                                    line,
+                                    Confidence::Extracted,
+                                );
+                            }
+                        }
+                        return;
+                    }
+                };
+                let logical_stem = Path::new(&logical_text)
                     .with_extension("")
                     .to_string_lossy()
                     .replace('\\', "/");
                 let base = make_id(&[&logical_stem]);
-                let paired = matches!(
-                    physical.extension().and_then(|value| value.to_str()),
-                    Some("h" | "hpp" | "hh")
-                ) && ["c", "cc", "cpp", "cxx", "m", "mm"]
-                    .iter()
-                    .any(|extension| physical.with_extension(extension).is_file());
-                let resolved_physical = fs::canonicalize(&physical).unwrap_or(physical.clone());
-                let target = inferred_scan_root(&self.physical_path, self.source_file)
-                    .and_then(|root| {
-                        let resolved_root = fs::canonicalize(&root).unwrap_or(root);
-                        if let Ok(relative) = resolved_physical.strip_prefix(&resolved_root) {
-                            let relative_stem = make_id(&[&relative
-                                .with_extension("")
-                                .to_string_lossy()
-                                .replace('\\', "/")]);
-                            Some(if paired {
-                                make_id(&[
-                                    &relative.to_string_lossy().replace('\\', "/"),
-                                    &relative_stem,
-                                ])
+                let paired = self.allow_path_probes
+                    && matches!(
+                        physical.extension().and_then(|value| value.to_str()),
+                        Some("h" | "hpp" | "hh")
+                    )
+                    && ["c", "cc", "cpp", "cxx", "m", "mm"]
+                        .iter()
+                        .any(|extension| physical.with_extension(extension).is_file());
+                let target = if self.allow_path_probes {
+                    let resolved_physical = fs::canonicalize(&physical).unwrap_or(physical.clone());
+                    inferred_scan_root(&self.physical_path, self.source_file)
+                        .and_then(|root| {
+                            let resolved_root = fs::canonicalize(&root).unwrap_or(root);
+                            if let Ok(relative) = resolved_physical.strip_prefix(&resolved_root) {
+                                let relative_stem = make_id(&[&relative
+                                    .with_extension("")
+                                    .to_string_lossy()
+                                    .replace('\\', "/")]);
+                                Some(if paired {
+                                    make_id(&[
+                                        &relative.to_string_lossy().replace('\\', "/"),
+                                        &relative_stem,
+                                    ])
+                                } else {
+                                    relative_stem
+                                })
+                            } else if resolved_physical.is_file() {
+                                Some(portable_external_target_id(
+                                    &resolved_root,
+                                    &resolved_physical,
+                                ))
                             } else {
-                                relative_stem
-                            })
-                        } else if resolved_physical.is_file() {
-                            Some(portable_external_target_id(
-                                &resolved_root,
-                                &resolved_physical,
-                            ))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| {
-                        if paired {
-                            make_id(&[&logical_text, &base])
-                        } else {
-                            base
-                        }
-                    });
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            if paired {
+                                make_id(&[&logical_text, &base])
+                            } else {
+                                base
+                            }
+                        })
+                } else {
+                    base
+                };
                 self.add_edge(
                     self.file_id.clone(),
                     target,
@@ -2283,7 +2453,7 @@ impl State<'_> {
             Confidence::Extracted,
         );
     }
-    fn python_module_id(&self, module: &str, imported: Option<&str>) -> String {
+    fn python_module_id(&self, module: &str, imported: Option<&str>) -> Option<String> {
         let level = module
             .chars()
             .take_while(|character| *character == '.')
@@ -2294,7 +2464,7 @@ impl State<'_> {
             if let Some(imported) = imported {
                 logical.push(imported);
             }
-            return make_id(&[&logical.to_string_lossy().replace('\\', "/")]);
+            return Some(make_id(&[&logical.to_string_lossy().replace('\\', "/")]));
         }
 
         let mut physical = self
@@ -2306,9 +2476,10 @@ impl State<'_> {
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
+        let mut contained = true;
         for _ in 1..level {
             physical.pop();
-            logical.pop();
+            contained &= logical.pop();
         }
         for part in module_tail.split('.').filter(|part| !part.is_empty()) {
             physical.push(part);
@@ -2322,21 +2493,25 @@ impl State<'_> {
         logical.set_extension("py");
 
         let root = inferred_scan_root(&self.physical_path, self.source_file);
-        if physical.is_file() {
-            if let Some(root) = root.as_deref() {
-                if let Ok(relative) = physical.strip_prefix(root) {
-                    return make_id(&[&relative
-                        .with_extension("")
-                        .to_string_lossy()
-                        .replace('\\', "/")]);
-                }
-                return portable_external_target_id(root, &physical);
+        if self.allow_path_probes
+            && physical.is_file()
+            && let Some(root) = root.as_deref()
+        {
+            if let Ok(relative) = physical.strip_prefix(root) {
+                return Some(make_id(&[&relative
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/")]));
             }
+            return Some(portable_external_target_id(root, &physical));
         }
-        make_id(&[&logical
+        if !contained {
+            return None;
+        }
+        Some(make_id(&[&logical
             .with_extension("")
             .to_string_lossy()
-            .replace('\\', "/")])
+            .replace('\\', "/")]))
     }
     fn emit_type_refs(&mut self, node: TsNode<'_>, owner: &str, line: usize) {
         if matches!(self.language_name, "java" | "c" | "cpp" | "csharp") {
@@ -2473,18 +2648,18 @@ impl State<'_> {
         if self.language_name == "java" {
             self.emit_java_annotations(node, owner, line);
         }
-        if node.kind() == "record_declaration" {
-            if let Some(parameters) = node.child_by_field_name("parameters") {
-                let mut candidates = Vec::new();
-                collect_descendants(
-                    parameters,
-                    &["formal_parameter", "spread_parameter"],
-                    &mut candidates,
-                );
-                for parameter in candidates {
-                    if let Some(type_node) = declaration_type_node(parameter) {
-                        self.emit_type_node(owner, type_node, "field", line);
-                    }
+        if node.kind() == "record_declaration"
+            && let Some(parameters) = node.child_by_field_name("parameters")
+        {
+            let mut candidates = Vec::new();
+            collect_descendants(
+                parameters,
+                &["formal_parameter", "spread_parameter"],
+                &mut candidates,
+            );
+            for parameter in candidates {
+                if let Some(type_node) = declaration_type_node(parameter) {
+                    self.emit_type_node(owner, type_node, "field", line);
                 }
             }
         }
@@ -3248,11 +3423,11 @@ impl State<'_> {
                 .map(|name| deepest_identifier(name, self.source))
                 .or_else(|| {
                     let mut cursor = parameter.walk();
-                    let name = parameter
+
+                    parameter
                         .named_children(&mut cursor)
                         .find(|child| child.kind() != "type")
-                        .map(|name| deepest_identifier(name, self.source));
-                    name
+                        .map(|name| deepest_identifier(name, self.source))
                 })
                 .unwrap_or_default();
             if parameter_name.is_empty() {
@@ -3636,12 +3811,12 @@ impl State<'_> {
                 if target != source {
                     let edge_start = self.edges.len();
                     self.add_edge(source, target, &relation, line, Confidence::Extracted);
-                    if self.edges.len() > edge_start {
-                        if let Some(context) = context {
-                            self.edges[edge_start]
-                                .extra
-                                .insert("context".into(), context.into());
-                        }
+                    if self.edges.len() > edge_start
+                        && let Some(context) = context
+                    {
+                        self.edges[edge_start]
+                            .extra
+                            .insert("context".into(), context.into());
                     }
                 }
             } else if !name.is_empty() {
@@ -3652,12 +3827,12 @@ impl State<'_> {
                 if target != source {
                     let edge_start = self.edges.len();
                     self.add_edge(source, target, &relation, line, Confidence::Extracted);
-                    if self.edges.len() > edge_start {
-                        if let Some(context) = context {
-                            self.edges[edge_start]
-                                .extra
-                                .insert("context".into(), context.into());
-                        }
+                    if self.edges.len() > edge_start
+                        && let Some(context) = context
+                    {
+                        self.edges[edge_start]
+                            .extra
+                            .insert("context".into(), context.into());
                     }
                 }
             }
@@ -3701,10 +3876,9 @@ fn binding_pattern_contains(node: TsNode<'_>, name: &str, source: &[u8]) -> bool
         return false;
     }
     let mut cursor = node.walk();
-    let found = node
-        .named_children(&mut cursor)
-        .any(|child| binding_pattern_contains(child, name, source));
-    found
+
+    node.named_children(&mut cursor)
+        .any(|child| binding_pattern_contains(child, name, source))
 }
 
 fn parameters_bind(scope: TsNode<'_>, name: &str, source: &[u8]) -> bool {
@@ -3733,17 +3907,16 @@ fn indirect_scope_binds(scope: TsNode<'_>, name: &str, source: &[u8], language: 
             return true;
         }
         let mut cursor = node.walk();
-        let found = node
-            .named_children(&mut cursor)
-            .any(|child| visit(child, name, source, language));
-        found
+
+        node.named_children(&mut cursor)
+            .any(|child| visit(child, name, source, language))
     }
 
     let mut cursor = scope.walk();
-    let found = scope
+
+    scope
         .named_children(&mut cursor)
-        .any(|child| visit(child, name, source, language));
-    found
+        .any(|child| visit(child, name, source, language))
 }
 
 fn indirect_module_rebinds(root: TsNode<'_>, name: &str, source: &[u8], language: &str) -> bool {
@@ -3774,17 +3947,15 @@ fn indirect_module_rebinds(root: TsNode<'_>, name: &str, source: &[u8], language
             return true;
         }
         let mut cursor = node.walk();
-        let found = node
-            .named_children(&mut cursor)
-            .any(|child| visit(child, name, source, language));
-        found
+
+        node.named_children(&mut cursor)
+            .any(|child| visit(child, name, source, language))
     }
 
     let mut cursor = root.walk();
-    let found = root
-        .named_children(&mut cursor)
-        .any(|child| visit(child, name, source, language));
-    found
+
+    root.named_children(&mut cursor)
+        .any(|child| visit(child, name, source, language))
 }
 
 fn python_getattr_reference(node: TsNode<'_>, source: &[u8]) -> Option<(String, usize)> {
@@ -3897,10 +4068,9 @@ fn descendant_text<'a>(node: TsNode<'a>, source: &'a [u8], kinds: &[&str]) -> Op
         return node.utf8_text(source).ok().map(str::to_owned);
     }
     let mut cursor = node.walk();
-    let found = node
-        .named_children(&mut cursor)
-        .find_map(|child| descendant_text(child, source, kinds));
-    found
+
+    node.named_children(&mut cursor)
+        .find_map(|child| descendant_text(child, source, kinds))
 }
 
 fn find_descendant_field<'tree>(node: TsNode<'tree>, field: &str) -> Option<TsNode<'tree>> {
@@ -3919,7 +4089,8 @@ fn find_descendant_field<'tree>(node: TsNode<'tree>, field: &str) -> Option<TsNo
 fn declaration_type_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
     find_descendant_field(node, "type").or_else(|| {
         let mut cursor = node.walk();
-        let found = node.named_children(&mut cursor).find(|child| {
+
+        node.named_children(&mut cursor).find(|child| {
             matches!(
                 child.kind(),
                 "type_identifier"
@@ -3933,8 +4104,7 @@ fn declaration_type_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
                     | "floating_point_type"
                     | "primitive_type"
             )
-        });
-        found
+        })
     })
 }
 
@@ -4320,6 +4490,131 @@ fn quoted_values(value: &str) -> Vec<String> {
     values
 }
 
+fn rust_simple_use_segments(value: &str) -> Option<Vec<String>> {
+    let value = value.trim().trim_end_matches(';').trim();
+    let mut words = value.split_whitespace();
+    let path = words.next()?;
+    match words.next() {
+        None => {}
+        Some("as") if words.next().is_some() && words.next().is_none() => {}
+        Some(_) => return None,
+    }
+    let path = path.strip_suffix("::*").unwrap_or(path);
+    if path.is_empty() || path.starts_with("::") || path.contains(['{', '}', ',']) {
+        return None;
+    }
+    path.split("::")
+        .map(|segment| {
+            let segment = segment.strip_prefix("r#").unwrap_or(segment);
+            let mut characters = segment.chars();
+            let first = characters.next()?;
+            if !(first == '_' || first.is_alphabetic())
+                || !characters.all(|character| character == '_' || character.is_alphanumeric())
+            {
+                return None;
+            }
+            Some(segment.to_owned())
+        })
+        .collect()
+}
+
+fn rust_anchored_import_path(
+    source_file: &str,
+    use_node: TsNode<'_>,
+    source: &[u8],
+) -> Option<String> {
+    let argument = use_node
+        .child_by_field_name("argument")
+        .and_then(|node| node.utf8_text(source).ok())
+        .unwrap_or_else(|| {
+            use_node
+                .utf8_text(source)
+                .unwrap_or("")
+                .trim_start_matches("use ")
+        });
+    let segments = rust_simple_use_segments(argument)?;
+    let anchor = segments.first()?.as_str();
+    if !matches!(anchor, "self" | "super" | "crate") || segments.len() == 1 {
+        return None;
+    }
+
+    let normalized_source = source_file.replace('\\', "/");
+    if normalized_source.starts_with('/') || normalized_source.contains(':') {
+        return None;
+    }
+    let mut source_parts = normalized_source
+        .split('/')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if source_parts
+        .iter()
+        .any(|part| part.is_empty() || matches!(part.as_str(), "." | ".."))
+    {
+        return None;
+    }
+    let filename = source_parts.pop()?;
+    let stem = filename.strip_suffix(".rs")?;
+    if stem.is_empty() {
+        return None;
+    }
+    let crate_root = source_parts
+        .iter()
+        .position(|part| part == "src")
+        .map(|position| source_parts[..=position].to_vec())
+        .or_else(|| matches!(stem, "lib" | "main").then(|| source_parts.clone()));
+    let mut current_module = source_parts;
+    if !matches!(stem, "mod" | "lib" | "main") {
+        current_module.push(stem.to_owned());
+    }
+
+    let mut lexical_modules = Vec::new();
+    let mut ancestor = use_node.parent();
+    while let Some(node) = ancestor {
+        if node.kind() == "mod_item" {
+            let name = node
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(source).ok())?;
+            lexical_modules.push(name.strip_prefix("r#").unwrap_or(name).to_owned());
+        }
+        ancestor = node.parent();
+    }
+    lexical_modules.reverse();
+    current_module.extend(lexical_modules);
+
+    let mut remaining = segments.as_slice();
+    let mut target = match anchor {
+        "crate" => {
+            remaining = &remaining[1..];
+            crate_root.clone()?
+        }
+        "self" => {
+            remaining = &remaining[1..];
+            current_module
+        }
+        "super" => {
+            let root_depth = crate_root?.len();
+            while remaining.first().is_some_and(|segment| segment == "super") {
+                if current_module.len() <= root_depth {
+                    return None;
+                }
+                current_module.pop();
+                remaining = &remaining[1..];
+            }
+            current_module
+        }
+        _ => return None,
+    };
+    if remaining.is_empty()
+        || remaining
+            .iter()
+            .any(|segment| matches!(segment.as_str(), "self" | "super" | "crate"))
+    {
+        return None;
+    }
+    target.extend(remaining.iter().cloned());
+    Some(target.join("/"))
+}
+
 /// Recover the logical scan root from the physical file and its already
 /// relativized `source_file`.  Extraction deliberately does not pass cache or
 /// checkout roots into the language walkers, so this inverse keeps import
@@ -4546,4 +4841,69 @@ fn go_predeclared_function(value: &str) -> bool {
             | "real"
             | "recover"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_as_bytes, parser_compatible_source};
+    use graphoxide_core::make_id;
+    use std::{borrow::Cow, collections::BTreeSet, path::Path};
+
+    #[test]
+    fn normal_parser_inputs_borrow_the_original_source() {
+        let source = b"fn main() {}";
+        let parser_source = parser_compatible_source(source, "rust", Path::new("main.rs"));
+
+        match parser_source {
+            Cow::Borrowed(bytes) => assert!(std::ptr::eq(bytes.as_ptr(), source.as_ptr())),
+            Cow::Owned(_) => panic!("ordinary parser input must not copy the source"),
+        }
+    }
+
+    #[test]
+    fn cuda_parser_inputs_only_allocate_for_compatibility_masking() {
+        let source = b"__global__ void run() {}";
+        let parser_source = parser_compatible_source(source, "cpp", Path::new("run.cu"));
+
+        assert_eq!(parser_source.as_ref(), b"           void run() {}");
+        assert!(matches!(parser_source, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn byte_c_includes_keep_only_contained_portable_quoted_paths() {
+        let extraction = extract_as_bytes(
+            Path::new("/missing/src/main.c"),
+            "src/main.c",
+            br#"#include "./local.h"
+#include "../include/root.h"
+#include "../../escape.h"
+#include "/absolute.h"
+#include "C:/absolute.h"
+#include "C:relative.h"
+#include "\\server\share\worker.h"
+#include "dir/node:worker.h"
+#include "dir/NUL.h"
+#include "dir/worker.h."
+#include "dir//worker.h"
+#include <vector>
+int main(void) { return 0; }
+"#,
+        )
+        .expect("extract C include bytes");
+        let targets = extraction
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports")
+            .map(|edge| edge.true_target().to_owned())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            targets,
+            BTreeSet::from([
+                make_id(&["include/root"]),
+                make_id(&["src/local"]),
+                make_id(&["vector"]),
+            ])
+        );
+    }
 }

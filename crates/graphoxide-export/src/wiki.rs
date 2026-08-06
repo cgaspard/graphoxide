@@ -255,12 +255,11 @@ fn community_article(
             (edge.true_source(), edge.true_target()),
             (edge.true_target(), edge.true_source()),
         ] {
-            if member_ids.contains(inside) {
-                if let Some(other) = node_community.get(outside).copied() {
-                    if other != community {
-                        cross.insert(other);
-                    }
-                }
+            if member_ids.contains(inside)
+                && let Some(other) = node_community.get(outside).copied()
+                && other != community
+            {
+                cross.insert(other);
             }
         }
     }

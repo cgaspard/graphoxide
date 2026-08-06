@@ -473,26 +473,41 @@ fn age_cache_files(paths: &[PathBuf]) {
     }
 }
 
-fn assert_cache_refreshed(paths: &[PathBuf]) {
-    assert!(!paths.is_empty());
-    assert!(paths.iter().all(|path| {
-        filetime::FileTime::from_last_modification_time(&fs::metadata(path).unwrap()).unix_seconds()
-            > 1
-    }));
+fn runtime_execution_model(path: &Path) -> String {
+    serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap()["runtime"]["execution_model"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 #[test]
-fn test_extract_force_flag_redispatches_and_stamps_manifest() {
+fn test_default_extract_force_does_not_reuse_legacy_ast_cache() {
     let fixture = TempDir::new().unwrap();
     code_corpus(fixture.path());
-    assert_success(&run(fixture.path(), &["extract", ".", "--no-cluster"]));
-    let cache = cache_json_files(&fixture.path().join("graphoxide-out/cache/ast"));
-    age_cache_files(&cache);
     assert_success(&run(
         fixture.path(),
-        &["extract", ".", "--no-cluster", "--force"],
+        &["extract", ".", "--no-cluster", "--legacy-executor"],
     ));
-    assert_cache_refreshed(&cache);
+    let cache = cache_json_files(&fixture.path().join("graphoxide-out/cache/ast"));
+    assert!(!cache.is_empty());
+    age_cache_files(&cache);
+    let report = fixture.path().join("runtime.json");
+    assert_success(&run(
+        fixture.path(),
+        &[
+            "extract",
+            ".",
+            "--no-cluster",
+            "--force",
+            "--runtime-report",
+            report.to_str().unwrap(),
+        ],
+    ));
+    assert!(cache.iter().all(|path| {
+        filetime::FileTime::from_last_modification_time(&fs::metadata(path).unwrap()).unix_seconds()
+            == 1
+    }));
+    assert_eq!(runtime_execution_model(&report), "isolated");
     assert_ne!(
         manifest_value(&manifest_path(fixture.path()))["auth.py"]["ast_hash"],
         ""
@@ -500,18 +515,200 @@ fn test_extract_force_flag_redispatches_and_stamps_manifest() {
 }
 
 #[test]
-fn test_extract_graphify_force_env_redispatches() {
+fn test_default_extract_graphify_force_does_not_reuse_legacy_ast_cache() {
     let fixture = TempDir::new().unwrap();
     code_corpus(fixture.path());
-    assert_success(&run(fixture.path(), &["extract", ".", "--no-cluster"]));
+    assert_success(&run(
+        fixture.path(),
+        &["extract", ".", "--no-cluster", "--legacy-executor"],
+    ));
     let cache = cache_json_files(&fixture.path().join("graphoxide-out/cache/ast"));
+    assert!(!cache.is_empty());
     age_cache_files(&cache);
+    let report = fixture.path().join("runtime.json");
     assert_success(&run_with_env(
         fixture.path(),
-        &["extract", ".", "--no-cluster"],
+        &[
+            "extract",
+            ".",
+            "--no-cluster",
+            "--runtime-report",
+            report.to_str().unwrap(),
+        ],
         &[("GRAPHIFY_FORCE", "1")],
     ));
-    assert_cache_refreshed(&cache);
+    assert!(cache.iter().all(|path| {
+        filetime::FileTime::from_last_modification_time(&fs::metadata(path).unwrap()).unix_seconds()
+            == 1
+    }));
+    assert_eq!(runtime_execution_model(&report), "isolated");
+}
+
+#[test]
+fn default_isolated_extract_cleans_fact_runs_and_enforces_graph_stage_budget() {
+    let fixture = TempDir::new().unwrap();
+    code_corpus(fixture.path());
+    let report = fixture.path().join("runtime.json");
+    assert_success(&run(
+        fixture.path(),
+        &[
+            "extract",
+            ".",
+            "--force",
+            "--memory-budget-bytes",
+            "2097152",
+            "--io-workers",
+            "1",
+            "--compute-workers",
+            "1",
+            "--runtime-report",
+            report.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(runtime_execution_model(&report), "isolated");
+    let staging = fixture.path().join("graphoxide-out/staging");
+    assert_eq!(
+        fs::read_dir(&staging)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("fact-runs-v1-"))
+            .count(),
+        0,
+        "successful graph staging must be cleaned"
+    );
+
+    write(
+        &fixture.path().join("auth.py"),
+        "def login(user):\n    return validate(user)\n\ndef validate(user):\n    return user != 'blocked'\n",
+    );
+    let update_report = fixture.path().join("update-runtime.json");
+    assert_success(&run(
+        fixture.path(),
+        &[
+            "update",
+            ".",
+            "--memory-budget-bytes",
+            "2097152",
+            "--io-workers",
+            "1",
+            "--compute-workers",
+            "1",
+            "--runtime-report",
+            update_report.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(runtime_execution_model(&update_report), "isolated");
+    assert_eq!(
+        fs::read_dir(&staging)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("fact-runs-v1-")
+            })
+            .count(),
+        0,
+        "successful update staging must be cleaned"
+    );
+
+    let constrained = TempDir::new().unwrap();
+    let mut source = String::new();
+    for ordinal in 0..5_000 {
+        source.push_str(&format!(
+            "def generated_{ordinal}(value):\n    return value + {ordinal}\n\n"
+        ));
+    }
+    write(&constrained.path().join("oversized.py"), &source);
+    let output = run(
+        constrained.path(),
+        &[
+            "extract",
+            ".",
+            "--force",
+            "--memory-budget-bytes",
+            "8388608",
+            "--io-workers",
+            "1",
+            "--compute-workers",
+            "1",
+        ],
+    );
+    assert!(!output.status.success(), "{}", combined(&output));
+    let output_text = combined(&output);
+    assert!(
+        output_text.contains("isolated retained extraction output exceeds")
+            || output_text.contains("graph-stage budget"),
+        "{output_text}"
+    );
+    assert!(!graph_path(constrained.path()).exists());
+    let constrained_staging = constrained.path().join("graphoxide-out/staging");
+    let retained_fact_runs = match fs::read_dir(constrained_staging) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("fact-runs-v1-")
+            })
+            .count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("inspect constrained staging cleanup: {error}"),
+    };
+    assert_eq!(
+        retained_fact_runs, 0,
+        "ordinary admission and graph-stage errors must clean their temporary fact runs"
+    );
+}
+
+#[test]
+fn default_update_uses_the_isolated_executor_and_legacy_is_explicit() {
+    let fixture = TempDir::new().unwrap();
+    code_corpus(fixture.path());
+    assert_success(&run(
+        fixture.path(),
+        &["extract", ".", "--no-cluster", "--legacy-executor"],
+    ));
+
+    write(
+        &fixture.path().join("auth.py"),
+        "def login(user):\n    return validate(user)\n\ndef validate(user):\n    return True\n\ndef audit(user):\n    return login(user)\n",
+    );
+    let isolated_report = fixture.path().join("runtime-isolated.json");
+    assert_success(&run(
+        fixture.path(),
+        &[
+            "update",
+            ".",
+            "--no-cluster",
+            "--runtime-report",
+            isolated_report.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(runtime_execution_model(&isolated_report), "isolated");
+
+    write(
+        &fixture.path().join("auth.py"),
+        "def login(user):\n    return validate(user)\n\ndef validate(user):\n    return True\n\ndef audit(user):\n    return login(user)\n\ndef legacy_audit(user):\n    return audit(user)\n",
+    );
+    let legacy_report = fixture.path().join("runtime-legacy.json");
+    assert_success(&run(
+        fixture.path(),
+        &[
+            "update",
+            ".",
+            "--no-cluster",
+            "--legacy-executor",
+            "--runtime-report",
+            legacy_report.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(runtime_execution_model(&legacy_report), "legacy");
 }
 
 #[test]

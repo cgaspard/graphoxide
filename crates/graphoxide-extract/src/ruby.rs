@@ -5,6 +5,7 @@
 //! those rules here prevents the language-neutral resolver from turning a
 //! same-named method into a false call edge.
 
+use crate::project_path::{source_relative_project_path, ProjectPath};
 use graphoxide_core::{make_id, normalize_id, Confidence, Extraction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -173,10 +174,10 @@ pub(crate) fn dynamic_type<'tree>(
     };
     let block = right.child_by_field_name("block").or_else(|| {
         let mut cursor = right.walk();
-        let found = right
+
+        right
             .named_children(&mut cursor)
-            .find(|child| matches!(child.kind(), "do_block" | "block"));
-        found
+            .find(|child| matches!(child.kind(), "do_block" | "block"))
     });
     Some(DynamicTypeFact {
         name: text(left, source),
@@ -247,6 +248,16 @@ pub(crate) fn require_relative(call: TsNode<'_>, source: &[u8]) -> Option<String
         .child_by_field_name("arguments")?
         .named_child(0)
         .filter(|argument| argument.kind() == "string")?;
+    if argument.has_error() {
+        return None;
+    }
+    let mut cursor = argument.walk();
+    if argument
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "interpolation")
+    {
+        return None;
+    }
     let module = text(argument, source)
         .trim_matches(['\'', '"'])
         .trim()
@@ -580,9 +591,60 @@ pub(crate) fn resolve(extractions: &mut [Extraction]) {
     }
 }
 
-pub(crate) fn require_target(source_file: &str, module: &str) -> String {
-    let base = Path::new(source_file)
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
-    make_id(&[&base.join(module).to_string_lossy()])
+pub(crate) fn require_target(source_file: &str, module: &str) -> Option<String> {
+    let module = module.replace('\\', "/");
+    if module
+        .split('/')
+        .next_back()
+        .is_none_or(|component| matches!(component, "" | "." | ".."))
+    {
+        return None;
+    }
+    match source_relative_project_path(source_file, &module)? {
+        ProjectPath::Contained(logical) => Some(make_id(&[&logical])),
+        ProjectPath::EscapesRoot(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_target;
+    use graphoxide_core::make_id;
+
+    #[test]
+    fn require_relative_targets_only_portable_contained_paths() {
+        for (module, logical) in [
+            ("./workers/job.rb", "app/workers/job.rb"),
+            ("../shared/job.rb", "shared/job.rb"),
+            (r".\workers\job.rb", "app/workers/job.rb"),
+            ("./naïve/東京.rb", "app/naïve/東京.rb"),
+        ] {
+            assert_eq!(
+                require_target("app/main.rb", module),
+                Some(make_id(&[logical])),
+                "module={module:?}",
+            );
+        }
+
+        for module in [
+            "../../escape.rb",
+            "/absolute.rb",
+            r"\\server\share\worker.rb",
+            "C:/absolute.rb",
+            "C:relative.rb",
+            "./dir/node:worker.rb",
+            "./NUL.rb",
+            "./worker.rb.",
+            "./dir//worker.rb",
+            ".",
+            "..",
+        ] {
+            assert_eq!(
+                require_target("app/main.rb", module),
+                None,
+                "unsafe module={module:?}",
+            );
+        }
+        assert_eq!(require_target("/absolute/main.rb", "./worker.rb"), None);
+    }
 }

@@ -4,6 +4,7 @@
 //! scanner mirrors Graphify's balanced-regex contract. It recognizes only
 //! declarations and framework constructs with explicit lexical evidence.
 
+use crate::project_path::{source_relative_project_path, ProjectPath};
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use regex::Regex;
 use std::{
@@ -145,6 +146,14 @@ impl<'a> Builder<'a> {
         id
     }
 
+    fn local_module(&self, logical: &str) -> String {
+        let stem = Path::new(logical)
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
+        make_id(&[&stem])
+    }
+
     fn concept(&mut self, id: String, label: &str, line: usize, local: bool) -> String {
         let source = local.then_some(self.source_file);
         self.add_node(id, label, "concept", source, line, "concept")
@@ -204,19 +213,45 @@ struct TypeScope {
 
 pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let source = fs::read_to_string(path)?;
-    let text = mask_comments(&source);
-    let parent = part_parent(path, &text);
-    let mut builder = Builder::new(path, source_file, parent.as_deref());
+    let text = mask_comments(source.as_str());
+    let parent = part_parent(path, source_file, &text);
+    extract_dart_text(path, source_file, &text, parent.as_deref())
+}
+
+/// Extract Dart declarations from source bytes supplied by the I/O plane.
+///
+/// A `part of` directive is resolved against the portable source identity,
+/// rather than probing the filesystem. The path-based wrapper retains the
+/// legacy existence/canonicalization behavior for existing callers.
+#[allow(dead_code)] // Activated by the byte-oriented engine dispatch.
+pub(crate) fn extract_dart_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    let source = std::str::from_utf8(bytes)?;
+    let text = mask_comments(source);
+    let parent = part_parent_from_source_file(source_file, &text);
+    extract_dart_text(path, source_file, &text, parent.as_deref())
+}
+
+fn extract_dart_text(
+    path: &Path,
+    source_file: &str,
+    text: &str,
+    parent: Option<&Path>,
+) -> anyhow::Result<Extraction> {
+    let mut builder = Builder::new(path, source_file, parent);
     let mut candidates = Vec::<Candidate>::new();
     let mut type_scopes = Vec::<TypeScope>::new();
 
     let classes = Regex::new(
         r"(?m)^\s*(?:(?:abstract|sealed|base|interface|final|mixin)\s+)*(?:class|mixin|enum|extension\s+type)\s+([A-Za-z_][A-Za-z0-9_]*)",
     )?;
-    for capture in classes.captures_iter(&text) {
+    for capture in classes.captures_iter(text) {
         let matched = capture.get(0).expect("Dart declaration");
         let name = &capture[1];
-        let line = line_of(&text, matched.start());
+        let line = line_of(text, matched.start());
         let id = builder.definition(name, "class", line);
         candidates.push(Candidate {
             start: matched.start(),
@@ -226,10 +261,10 @@ pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Ext
         });
         let rest_end = (matched.end() + 500).min(text.len());
         let rest = &text[matched.end()..rest_end];
-        let (header, body) = declaration_header_and_body(&text, matched.start(), rest);
+        let (header, body) = declaration_header_and_body(text, matched.start(), rest);
         emit_class_relationships(&mut builder, &id, &header, line)?;
         if let Some((body_start, body_end)) = body {
-            emit_framework_edges(&mut builder, &text, &id, body_start, body_end, false)?;
+            emit_framework_edges(&mut builder, text, &id, body_start, body_end, false)?;
             type_scopes.push(TypeScope {
                 id,
                 body_start,
@@ -241,9 +276,9 @@ pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Ext
     let extensions = Regex::new(
         r"(?m)^[ ]{0,4}extension\s+([A-Za-z_][A-Za-z0-9_]*)?(?:<[^>]+>)?\s+on\s+([A-Za-z_][A-Za-z0-9_]*)",
     )?;
-    for capture in extensions.captures_iter(&text) {
+    for capture in extensions.captures_iter(text) {
         let matched = capture.get(0).expect("Dart extension");
-        let line = line_of(&text, matched.start());
+        let line = line_of(text, matched.start());
         let target_name = &capture[2];
         let name = capture
             .get(1)
@@ -265,7 +300,7 @@ pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Ext
             name,
             is_class: true,
         });
-        if let Some((body_start, body_end)) = declaration_body_range(&text, matched.start()) {
+        if let Some((body_start, body_end)) = declaration_body_range(text, matched.start()) {
             type_scopes.push(TypeScope {
                 id,
                 body_start,
@@ -278,7 +313,7 @@ pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Ext
         r"(?m)^[ ]{0,2}(?:(?:factory|static|async|external|abstract)[ ]+)?(?:\([^)]+\)|[A-Za-z0-9_<>,.?]+)(?:[ ]+[A-Za-z0-9_<>,.?]+){0,3}[ ]+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)[ ]*\(",
     )?;
     let mut function_offsets = HashSet::new();
-    for capture in functions.captures_iter(&text) {
+    for capture in functions.captures_iter(text) {
         let matched = capture.get(0).expect("Dart function");
         let raw_name = &capture[1];
         let name = raw_name.rsplit('.').next().unwrap_or(raw_name);
@@ -286,7 +321,7 @@ pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Ext
             continue;
         }
         function_offsets.insert(matched.start());
-        let line = line_of(&text, matched.start());
+        let line = line_of(text, matched.start());
         let owner = enclosing_type(&type_scopes, matched.start());
         let id = if let Some(owner) = owner {
             builder.method(&owner.id, name, line)
@@ -301,20 +336,20 @@ pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Ext
         });
         let scope_end = owner.map_or(text.len(), |owner| owner.body_end);
         if let Some((body_start, body_end)) =
-            callable_body_range(&text, matched.end() - 1, scope_end)
+            callable_body_range(text, matched.end() - 1, scope_end)
         {
-            emit_framework_edges(&mut builder, &text, &id, body_start, body_end, true)?;
+            emit_framework_edges(&mut builder, text, &id, body_start, body_end, true)?;
         }
     }
     let factories = Regex::new(
         r"(?m)^[ ]{0,2}factory\s+[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)\s*\(",
     )?;
-    for capture in factories.captures_iter(&text) {
+    for capture in factories.captures_iter(text) {
         let matched = capture.get(0).expect("Dart factory");
         if function_offsets.contains(&matched.start()) {
             continue;
         }
-        let line = line_of(&text, matched.start());
+        let line = line_of(text, matched.start());
         let owner = enclosing_type(&type_scopes, matched.start());
         let id = if let Some(owner) = owner {
             builder.method(&owner.id, &capture[1], line)
@@ -329,24 +364,136 @@ pub(crate) fn extract_dart(path: &Path, source_file: &str) -> anyhow::Result<Ext
         });
     }
 
-    emit_annotations(&mut builder, &text, &candidates)?;
-    emit_typedefs(&mut builder, &text)?;
-    emit_variables(&mut builder, &text)?;
-    emit_directives(&mut builder, &text)?;
-    emit_generic_lookups(&mut builder, &text)?;
+    emit_annotations(&mut builder, text, &candidates)?;
+    emit_typedefs(&mut builder, text)?;
+    emit_variables(&mut builder, text)?;
+    emit_directives(&mut builder, text)?;
+    emit_generic_lookups(&mut builder, text)?;
     Ok(builder.finish())
 }
 
-fn part_parent(path: &Path, text: &str) -> Option<PathBuf> {
+fn part_parent(path: &Path, source_file: &str, text: &str) -> Option<PathBuf> {
     let directive = Regex::new(r#"(?m)^\s*part\s+of\s+['\"]([^'\"]+)['\"]"#).ok()?;
     let parent = directive.captures(text)?.get(1)?.as_str();
-    if !parent.ends_with(".dart") {
-        return None;
+    if normalized_dart_project_uri(source_file, parent, true).is_none() {
+        // The legacy single-file entrypoint supplies an absolute source name.
+        // Validate its static sibling reference against a synthetic logical
+        // basename, then require the physical sibling below before retaining
+        // the compatibility parent identity.
+        let basename = path.file_name()?.to_str()?;
+        normalized_dart_project_uri(basename, parent, true)?;
     }
     let candidate = path.parent()?.join(parent);
     candidate
         .is_file()
         .then(|| fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.to_path_buf()))
+}
+
+#[allow(dead_code)] // Used by the byte-oriented Dart dispatch.
+fn part_parent_from_source_file(source_file: &str, text: &str) -> Option<PathBuf> {
+    let directive = Regex::new(r#"(?m)^\s*part\s+of\s+['\"]([^'\"]+)['\"]"#).ok()?;
+    let parent = directive.captures(text)?.get(1)?.as_str();
+    normalized_dart_project_uri(source_file, parent, true).map(PathBuf::from)
+}
+
+/// Return a normalized project-relative identity for a static Dart URI.
+///
+/// Source bytes are untrusted, so URI spelling is interpreted with portable
+/// `/` separators only. This prevents host-specific absolute, drive-relative,
+/// UNC, interpolation, and parent-escape spellings from acquiring the identity
+/// of an independently admitted Dart source.
+fn normalized_dart_project_uri(
+    source_file: &str,
+    uri: &str,
+    require_dart_extension: bool,
+) -> Option<String> {
+    let uri = static_dart_uri_literal(uri)?;
+    let bytes = uri.as_bytes();
+    if uri.starts_with(['/', '\\'])
+        || bytes.get(1) == Some(&b':')
+        || uri.contains([':', '?', '#'])
+        || (require_dart_extension && !uri.ends_with(".dart"))
+    {
+        return None;
+    }
+
+    match source_relative_project_path(source_file, uri)? {
+        ProjectPath::Contained(logical) => Some(logical),
+        ProjectPath::EscapesRoot(_) => None,
+    }
+}
+
+fn static_dart_uri_literal(uri: &str) -> Option<&str> {
+    (!uri.is_empty()
+        && uri.trim() == uri
+        && !uri.chars().any(|character| {
+            character.is_control() || matches!(character, '$' | '`' | '\\' | '\'' | '"' | '{' | '}')
+        }))
+    .then_some(uri)
+}
+
+fn portable_dart_uri_segment(segment: &str) -> bool {
+    let device_stem = segment
+        .split('.')
+        .next()
+        .unwrap_or(segment)
+        .to_ascii_lowercase();
+    !segment.is_empty()
+        && !segment.ends_with(['.', ' '])
+        && !matches!(
+            device_stem.as_str(),
+            "con"
+                | "prn"
+                | "aux"
+                | "nul"
+                | "com1"
+                | "com2"
+                | "com3"
+                | "com4"
+                | "com5"
+                | "com6"
+                | "com7"
+                | "com8"
+                | "com9"
+                | "lpt1"
+                | "lpt2"
+                | "lpt3"
+                | "lpt4"
+                | "lpt5"
+                | "lpt6"
+                | "lpt7"
+                | "lpt8"
+                | "lpt9"
+        )
+        && !segment.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '$' | '`' | '{' | '}'
+                )
+        })
+}
+
+enum DartDirectiveUri<'a> {
+    Project { logical: String },
+    External(&'a str),
+}
+
+fn static_dart_directive_uri<'a>(source_file: &str, uri: &'a str) -> Option<DartDirectiveUri<'a>> {
+    let uri = static_dart_uri_literal(uri)?;
+    if let Some(rest) = uri
+        .strip_prefix("package:")
+        .or_else(|| uri.strip_prefix("dart:"))
+    {
+        return (!rest.is_empty()
+            && !rest.starts_with('/')
+            && rest
+                .split('/')
+                .all(|part| part != "." && part != ".." && portable_dart_uri_segment(part)))
+        .then_some(DartDirectiveUri::External(uri));
+    }
+    normalized_dart_project_uri(source_file, uri, false)
+        .map(|logical| DartDirectiveUri::Project { logical })
 }
 
 fn mask_comments(source: &str) -> String {
@@ -927,14 +1074,58 @@ fn emit_variables(builder: &mut Builder<'_>, text: &str) -> anyhow::Result<()> {
 }
 
 fn emit_directives(builder: &mut Builder<'_>, text: &str) -> anyhow::Result<()> {
+    let quoted_uris = Regex::new(r#"['\"]([^'\"]+)['\"]"#)?;
     for (keyword, relation) in [("import", "imports"), ("export", "exports")] {
         let regex = Regex::new(&format!(r#"(?m)^\s*{keyword}\s+['\"]([^'\"]+)['\"]"#))?;
         for capture in regex.captures_iter(text) {
             let matched = capture.get(0).expect("Dart directive");
+            let line_end = text[matched.end()..]
+                .find(['\r', '\n'])
+                .map_or(text.len(), |offset| matched.end() + offset);
+            let directive = &text[matched.start()..line_end];
+            let tail = text[matched.end()..line_end].trim();
+            let valid_tail = tail.is_empty()
+                || tail == ";"
+                || ["deferred", "as", "show", "hide", "if"]
+                    .iter()
+                    .any(|keyword| {
+                        tail.strip_prefix(keyword).is_some_and(|rest| {
+                            rest.chars().next().is_some_and(|character| {
+                                character.is_whitespace() || character == '('
+                            })
+                        })
+                    });
+            if !valid_tail
+                || directive
+                    .chars()
+                    .any(|character| matches!(character, '$' | '`' | '+' | '=' | '{' | '}'))
+                || quoted_uris.captures_iter(directive).any(|quoted| {
+                    static_dart_directive_uri(builder.source_file, &quoted[1]).is_none()
+                })
+            {
+                continue;
+            }
+            let Some(uri) = static_dart_directive_uri(builder.source_file, &capture[1]) else {
+                continue;
+            };
             let line = line_of(text, matched.start());
-            let target = builder.external(&capture[1], "module", line);
+            let (target, target_file) = match uri {
+                DartDirectiveUri::Project { logical } => {
+                    (builder.local_module(&logical), Some(logical))
+                }
+                DartDirectiveUri::External(uri) => (builder.external(uri, "module", line), None),
+            };
             let file_id = builder.file_id.clone();
             builder.edge(&file_id, &target, relation, None, line);
+            if let Some(target_file) = target_file
+                && let Some(edge) = builder
+                    .edges
+                    .iter_mut()
+                    .rev()
+                    .find(|edge| edge.relation == relation && edge.true_target() == target)
+            {
+                edge.extra.insert("target_file".into(), target_file.into());
+            }
         }
     }
     Ok(())
@@ -963,4 +1154,125 @@ fn emit_generic_lookups(builder: &mut Builder<'_>, text: &str) -> anyhow::Result
         builder.edge(&file_id, &target, "references", Some("type_lookup"), line);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn byte_entrypoint_does_not_require_a_source_file() {
+        let extraction = extract_dart_bytes(
+            Path::new("missing.dart"),
+            "lib/missing.dart",
+            b"class Widget {}\nvoid main() {}\n",
+        )
+        .expect("extract in-memory Dart source");
+        assert!(extraction.nodes.iter().any(|node| node.label == "Widget"));
+        assert!(extraction.nodes.iter().any(|node| node.label == "main()"));
+    }
+
+    #[test]
+    fn byte_part_of_requires_a_static_contained_project_uri() {
+        let static_part = extract_dart_bytes(
+            Path::new("/missing/lib/parts/child.dart"),
+            "lib/parts/child.dart",
+            "part of '.././données.dart';\nclass Child {}\n".as_bytes(),
+        )
+        .expect("extract static Dart part");
+        assert!(static_part
+            .nodes
+            .iter()
+            .any(|node| node.id == "lib_données_child"));
+        assert!(!static_part
+            .nodes
+            .iter()
+            .any(|node| node.id == "lib_parts_child" && node.extra["type"] == "file"));
+
+        for uri in [
+            "${page}.dart",
+            "$page.dart",
+            "../../../page.dart",
+            "/page.dart",
+            "C:page.dart",
+            "C:/page.dart",
+            "//server/share/page.dart",
+            r"\\server\share\page.dart",
+            "../NUL.dart",
+            "../page.dart.",
+            "../dir//page.dart",
+            "../dir/node:page.dart",
+        ] {
+            let source = format!("part of '{uri}';\nclass Child {{}}\n");
+            let extraction = extract_dart_bytes(
+                Path::new("/missing/lib/parts/child.dart"),
+                "lib/parts/child.dart",
+                source.as_bytes(),
+            )
+            .expect("extract rejected Dart part URI");
+            assert!(
+                extraction
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == "lib_parts_child" && node.extra["type"] == "file"),
+                "unsafe part URI acquired a parent identity: {uri}"
+            );
+            assert!(
+                extraction
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == "lib_parts_child_child"),
+                "unsafe part URI changed declaration identity: {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_and_export_directives_require_static_uris() {
+        let extraction = extract_dart_bytes(
+            Path::new("/missing/lib/consumer.dart"),
+            "lib/consumer.dart",
+            br#"import './page.dart';
+export 'package:example/api.dart';
+import '${page}.dart';
+export "$target.dart";
+import 'page.dart' + suffix;
+import '../../../escape.dart';
+import '/absolute.dart';
+import 'C:drive.dart';
+import './NUL.dart';
+import './page.dart.';
+import './dir//page.dart';
+import './dir/node:page.dart';
+"#,
+        )
+        .expect("extract Dart directives");
+        let targets = extraction
+            .edges
+            .iter()
+            .filter(|edge| matches!(edge.relation.as_str(), "imports" | "exports"))
+            .map(|edge| edge.true_target())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            targets,
+            BTreeSet::from(["lib_page", "package_example_api_dart"])
+        );
+    }
+
+    #[test]
+    fn local_uri_rejects_nonportable_source_identities() {
+        for source_file in [
+            "/absolute/consumer.dart",
+            r"C:\absolute\consumer.dart",
+            r"\\server\share\consumer.dart",
+            "lib/NUL.dart",
+        ] {
+            assert_eq!(
+                normalized_dart_project_uri(source_file, "./page.dart", true),
+                None,
+                "source_file={source_file:?}",
+            );
+        }
+    }
 }

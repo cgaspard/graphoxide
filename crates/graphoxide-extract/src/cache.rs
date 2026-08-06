@@ -1,6 +1,10 @@
 //! Incremental manifest and content-addressed AST cache.
 
 use graphoxide_core::Extraction;
+use graphoxide_index_runtime::cache::{
+    RuntimeCache, RuntimeCacheHit, RuntimeCacheIoPersistOutcome, RuntimeCacheIoService,
+    RuntimeCacheIoServiceError, RuntimeCacheKey,
+};
 use md5::{Digest as _, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,9 +13,163 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 pub const AST_CACHE_VERSION: u32 = 25;
+
+/// Binary framing for future cache artifacts.
+///
+/// The current on-disk cache remains JSON for compatibility. Readers accept
+/// this frame in addition to legacy JSON so a later append-only cache can
+/// reuse the validation boundary without breaking existing entries.
+const CACHE_FRAME_MAGIC: [u8; 8] = *b"GOXCACHE";
+const CACHE_FRAME_VERSION: u8 = 1;
+const CACHE_FRAME_ALGORITHM_BLAKE3: u8 = 1;
+const CACHE_FRAME_HEADER_LEN: usize = 56;
+
+/// Largest framed cache payload accepted by the default decoder.
+///
+/// The legacy JSON cache deliberately has no new size policy. This limit is
+/// only for the new framed representation, whose header advertises its size
+/// before a decoder is allowed to inspect the payload. I/O owners may use a
+/// smaller limit for a particular queue or cache partition.
+pub const DEFAULT_CACHE_FRAME_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why a framed cache record could not be used. Callers must treat these as a
+/// cache miss rather than allowing malformed cache data to reach a decoder.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum CacheFrameError {
+    #[error("truncated cache frame header")]
+    TruncatedHeader,
+    #[error("unsupported cache frame version {0}")]
+    UnsupportedVersion(u8),
+    #[error("unsupported cache frame digest algorithm {0}")]
+    UnsupportedAlgorithm(u8),
+    #[error("cache frame reserved bytes are non-zero")]
+    ReservedBytes,
+    #[error("cache frame payload length does not match the record")]
+    LengthMismatch,
+    #[error(
+        "cache frame payload is {payload_len} bytes, exceeding the {max_payload_bytes}-byte limit"
+    )]
+    PayloadTooLarge {
+        payload_len: u64,
+        max_payload_bytes: usize,
+    },
+    #[error("cache frame CRC32 mismatch")]
+    ChecksumMismatch,
+    #[error("cache frame BLAKE3 mismatch")]
+    DigestMismatch,
+}
+
+/// Frame cache bytes with a version, CRC, and BLAKE3 digest.
+///
+/// The resulting record is intentionally self-contained, has no allocations
+/// beyond the returned buffer, and is safe to pass directly between an I/O
+/// owner and a cache decoder. The current JSON cache writers do not call this
+/// yet; it is an additive compatibility boundary for the runtime cache.
+pub fn frame_cache_bytes(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(CACHE_FRAME_HEADER_LEN + payload.len());
+    frame.extend_from_slice(&CACHE_FRAME_MAGIC);
+    frame.push(CACHE_FRAME_VERSION);
+    frame.push(CACHE_FRAME_ALGORITHM_BLAKE3);
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    frame.extend_from_slice(&crate::bytes::crc32(payload).to_le_bytes());
+    frame.extend_from_slice(&crate::bytes::blake3_digest(payload));
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Frame a cache artifact only when its payload fits the caller's byte budget.
+///
+/// New runtime cache writers should use this function so an artifact accepted
+/// for writing is also accepted by the corresponding bounded reader. The
+/// infallible [`frame_cache_bytes`] remains for compatibility with the initial
+/// framing API and test fixtures.
+pub fn try_frame_cache_bytes(
+    payload: &[u8],
+    max_payload_bytes: usize,
+) -> Result<Vec<u8>, CacheFrameError> {
+    if payload.len() > max_payload_bytes {
+        return Err(CacheFrameError::PayloadTooLarge {
+            payload_len: payload.len() as u64,
+            max_payload_bytes,
+        });
+    }
+    Ok(frame_cache_bytes(payload))
+}
+
+/// Return a validated framed payload, or `Ok(None)` for a legacy unframed
+/// value. The returned slice borrows `bytes`; decoding therefore does not copy
+/// cache payloads before JSON deserialization.
+pub fn unframe_cache_bytes(bytes: &[u8]) -> Result<Option<&[u8]>, CacheFrameError> {
+    unframe_cache_bytes_with_limit(bytes, DEFAULT_CACHE_FRAME_MAX_PAYLOAD_BYTES)
+}
+
+/// Return a validated framed payload subject to a caller-owned size limit.
+///
+/// This function validates the complete header and declared payload size
+/// before checksumming or deserializing. It returns `Ok(None)` for legacy JSON
+/// bytes so existing cache entries continue to use their historical contract.
+/// A malformed frame is an error for observability; cache callers deliberately
+/// map that error to a cache miss through [`cache_payload`].
+pub fn unframe_cache_bytes_with_limit(
+    bytes: &[u8],
+    max_payload_bytes: usize,
+) -> Result<Option<&[u8]>, CacheFrameError> {
+    if !bytes.starts_with(&CACHE_FRAME_MAGIC) {
+        return Ok(None);
+    }
+    if bytes.len() < CACHE_FRAME_HEADER_LEN {
+        return Err(CacheFrameError::TruncatedHeader);
+    }
+    if bytes[8] != CACHE_FRAME_VERSION {
+        return Err(CacheFrameError::UnsupportedVersion(bytes[8]));
+    }
+    if bytes[9] != CACHE_FRAME_ALGORITHM_BLAKE3 {
+        return Err(CacheFrameError::UnsupportedAlgorithm(bytes[9]));
+    }
+    if bytes[10..12] != [0, 0] {
+        return Err(CacheFrameError::ReservedBytes);
+    }
+    let payload_len = u64::from_le_bytes(bytes[12..20].try_into().expect("fixed header"));
+    let payload_len = usize::try_from(payload_len).map_err(|_| CacheFrameError::LengthMismatch)?;
+    let record_len = CACHE_FRAME_HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or(CacheFrameError::LengthMismatch)?;
+    if bytes.len() != record_len {
+        return Err(CacheFrameError::LengthMismatch);
+    }
+    if payload_len > max_payload_bytes {
+        return Err(CacheFrameError::PayloadTooLarge {
+            payload_len: payload_len as u64,
+            max_payload_bytes,
+        });
+    }
+    let expected_crc = u32::from_le_bytes(bytes[20..24].try_into().expect("fixed header"));
+    let expected_digest = &bytes[24..56];
+    let payload = &bytes[CACHE_FRAME_HEADER_LEN..];
+    if crate::bytes::crc32(payload) != expected_crc {
+        return Err(CacheFrameError::ChecksumMismatch);
+    }
+    if crate::bytes::blake3_digest(payload).as_slice() != expected_digest {
+        return Err(CacheFrameError::DigestMismatch);
+    }
+    Ok(Some(payload))
+}
+
+fn cache_payload(bytes: &[u8]) -> Option<&[u8]> {
+    match unframe_cache_bytes(bytes) {
+        Ok(Some(payload)) => Some(payload),
+        Ok(None) => Some(bytes),
+        Err(_) => None,
+    }
+}
+
+fn decode_cache_json(bytes: &[u8]) -> Option<Value> {
+    serde_json::from_slice(cache_payload(bytes)?).ok()
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub mtime: f64,
@@ -32,24 +190,47 @@ struct StatIndexEntry {
     word_count: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct StatIndex {
     anchor: PathBuf,
     entries: BTreeMap<PathBuf, StatIndexEntry>,
+    /// Cache-file writes for a given root must remain serialized after the
+    /// registry lock is released; otherwise two snapshots can race and lose
+    /// an entry. The lock is per index, not process-global.
+    flush_lock: Arc<Mutex<()>>,
+}
+
+impl Default for StatIndex {
+    fn default() -> Self {
+        Self {
+            anchor: PathBuf::new(),
+            entries: BTreeMap::new(),
+            flush_lock: Arc::new(Mutex::new(())),
+        }
+    }
 }
 
 type StatIndexKey = (PathBuf, PathBuf);
 
-static STAT_INDEXES: OnceLock<Mutex<BTreeMap<StatIndexKey, StatIndex>>> = OnceLock::new();
+static STAT_INDEXES: OnceLock<RwLock<BTreeMap<StatIndexKey, StatIndex>>> = OnceLock::new();
 
-fn stat_indexes() -> &'static Mutex<BTreeMap<StatIndexKey, StatIndex>> {
-    STAT_INDEXES.get_or_init(|| Mutex::new(BTreeMap::new()))
+fn stat_indexes() -> &'static RwLock<BTreeMap<StatIndexKey, StatIndex>> {
+    STAT_INDEXES.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
 /// Strip a leading, well-formed YAML frontmatter block without changing any
 /// byte after the closing delimiter. Delimiters must be whole `---` lines;
 /// thematic breaks (`----`) and prose (`--- title`) are ordinary content.
 pub fn body_content(content: &[u8]) -> Vec<u8> {
+    markdown_body_start(content)
+        .map(|start| content[start..].to_vec())
+        .unwrap_or_else(|| content.to_vec())
+}
+
+/// Return the first byte after the closing YAML frontmatter delimiter.
+/// Keeping this as a slice offset lets content hashing avoid allocating a
+/// second copy of a Markdown file merely to skip metadata.
+fn markdown_body_start(content: &[u8]) -> Option<usize> {
     fn delimiter(line: &[u8]) -> bool {
         let line = line.strip_suffix(b"\n").unwrap_or(line);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
@@ -65,7 +246,7 @@ pub fn body_content(content: &[u8]) -> Vec<u8> {
         .position(|byte| *byte == b'\n')
         .map_or(content.len(), |index| index + 1);
     if !delimiter(&content[..first_end]) {
-        return content.to_vec();
+        return None;
     }
 
     let mut start = first_end;
@@ -75,11 +256,11 @@ pub fn body_content(content: &[u8]) -> Vec<u8> {
             .position(|byte| *byte == b'\n')
             .map_or(content.len(), |index| start + index + 1);
         if delimiter(&content[start..end]) {
-            return content[start + 3..].to_vec();
+            return Some(start + 3);
         }
         start = end;
     }
-    content.to_vec()
+    None
 }
 
 /// SHA-256 over effective file contents plus a lower-cased, root-relative path.
@@ -89,7 +270,30 @@ pub fn file_hash(path: &Path, root: &Path) -> anyhow::Result<String> {
     file_hash_at(path, root, root)
 }
 
-fn file_hash_at(path: &Path, root: &Path, index_root: &Path) -> anyhow::Result<String> {
+/// SHA-256 content key using bytes already read by an I/O owner.
+///
+/// This is equivalent to [`file_hash`] for a current regular file while
+/// avoiding a second source read at cache boundaries. The size check prevents
+/// callers from accidentally keying an entry with an incomplete read.
+pub fn file_hash_from_bytes(path: &Path, root: &Path, bytes: &[u8]) -> anyhow::Result<String> {
+    file_hash_from_bytes_at(path, root, root, bytes)
+}
+
+struct FileHashContext {
+    resolved: PathBuf,
+    root_resolved: PathBuf,
+    index_root: PathBuf,
+    index_key: StatIndexKey,
+    salt: String,
+    size: u64,
+    mtime_ns: u64,
+}
+
+fn file_hash_context(
+    path: &Path,
+    root: &Path,
+    index_root: &Path,
+) -> anyhow::Result<FileHashContext> {
     anyhow::ensure!(
         path.is_file(),
         "file_hash requires a regular file: {}",
@@ -106,47 +310,91 @@ fn file_hash_at(path: &Path, root: &Path, index_root: &Path) -> anyhow::Result<S
         .to_lowercase();
     let (size, mtime_ns) = stat_signature(&resolved)?;
     ensure_stat_index_loaded(&root_resolved, &index_root)?;
-    if let Some(hash) = stat_indexes()
-        .lock()
-        .expect("stat index mutex poisoned")
-        .get(&index_key)
-        .and_then(|index| index.entries.get(&resolved))
-        .filter(|entry| entry.size == size && entry.mtime_ns == mtime_ns)
-        .and_then(|entry| entry.hashes.get(&salt))
-        .cloned()
-    {
-        return Ok(hash);
-    }
+    Ok(FileHashContext {
+        resolved,
+        root_resolved,
+        index_root,
+        index_key,
+        salt,
+        size,
+        mtime_ns,
+    })
+}
 
-    let raw = fs::read(path)?;
+fn indexed_file_hash(context: &FileHashContext) -> Option<String> {
+    stat_indexes()
+        .read()
+        .expect("stat index rwlock poisoned")
+        .get(&context.index_key)
+        .and_then(|index| index.entries.get(&context.resolved))
+        .filter(|entry| entry.size == context.size && entry.mtime_ns == context.mtime_ns)
+        .and_then(|entry| entry.hashes.get(&context.salt))
+        .cloned()
+}
+
+fn hash_bytes_with_salt(path: &Path, bytes: &[u8], salt: &str) -> String {
     let content = if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
     {
-        body_content(&raw)
+        markdown_body_start(bytes)
+            .map(|start| &bytes[start..])
+            .unwrap_or(bytes)
     } else {
-        raw
+        bytes
     };
     let mut hash = Sha256::new();
     hash.update(content);
     hash.update(b"\0");
     hash.update(salt.as_bytes());
-    let digest = hex::encode(hash.finalize());
+    hex::encode(hash.finalize())
+}
+
+fn record_file_hash(context: &FileHashContext, digest: String) -> anyhow::Result<String> {
     {
-        let mut indexes = stat_indexes().lock().expect("stat index mutex poisoned");
-        let index = indexes.get_mut(&index_key).expect("stat index was loaded");
-        let entry = index.entries.entry(resolved).or_default();
-        if entry.size != size || entry.mtime_ns != mtime_ns {
+        let mut indexes = stat_indexes().write().expect("stat index rwlock poisoned");
+        let index = indexes
+            .get_mut(&context.index_key)
+            .expect("stat index was loaded");
+        let entry = index.entries.entry(context.resolved.clone()).or_default();
+        if entry.size != context.size || entry.mtime_ns != context.mtime_ns {
             *entry = StatIndexEntry {
-                size,
-                mtime_ns,
+                size: context.size,
+                mtime_ns: context.mtime_ns,
                 ..StatIndexEntry::default()
             };
         }
-        entry.hashes.insert(salt, digest.clone());
+        entry.hashes.insert(context.salt.clone(), digest.clone());
     }
-    flush_stat_index_at(&root_resolved, &index_root)?;
+    flush_stat_index_at(&context.root_resolved, &context.index_root)?;
     Ok(digest)
+}
+
+fn file_hash_at(path: &Path, root: &Path, index_root: &Path) -> anyhow::Result<String> {
+    let context = file_hash_context(path, root, index_root)?;
+    if let Some(hash) = indexed_file_hash(&context) {
+        return Ok(hash);
+    }
+    let raw = fs::read(path)?;
+    record_file_hash(&context, hash_bytes_with_salt(path, &raw, &context.salt))
+}
+
+fn file_hash_from_bytes_at(
+    path: &Path,
+    root: &Path,
+    index_root: &Path,
+    bytes: &[u8],
+) -> anyhow::Result<String> {
+    let context = file_hash_context(path, root, index_root)?;
+    anyhow::ensure!(
+        bytes.len() as u64 == context.size,
+        "provided bytes do not match file size for {}",
+        path.display()
+    );
+    if let Some(hash) = indexed_file_hash(&context) {
+        return Ok(hash);
+    }
+    record_file_hash(&context, hash_bytes_with_salt(path, bytes, &context.salt))
 }
 
 /// Return a cached word count while the file's size and nanosecond mtime are
@@ -167,8 +415,8 @@ where
     let (size, mtime_ns) = stat_signature(&resolved)?;
     ensure_stat_index_loaded(&root_resolved, &index_root)?;
     if let Some(word_count) = stat_indexes()
-        .lock()
-        .expect("stat index mutex poisoned")
+        .read()
+        .expect("stat index rwlock poisoned")
         .get(&index_key)
         .and_then(|index| index.entries.get(&resolved))
         .filter(|entry| entry.size == size && entry.mtime_ns == mtime_ns)
@@ -178,7 +426,7 @@ where
     }
     let word_count = compute(path)?;
     {
-        let mut indexes = stat_indexes().lock().expect("stat index mutex poisoned");
+        let mut indexes = stat_indexes().write().expect("stat index rwlock poisoned");
         let index = indexes.get_mut(&index_key).expect("stat index was loaded");
         let entry = index.entries.entry(resolved).or_default();
         if entry.size != size || entry.mtime_ns != mtime_ns {
@@ -205,10 +453,34 @@ pub fn flush_stat_index(root: &Path) -> anyhow::Result<()> {
 fn flush_stat_index_at(anchor: &Path, index_root: &Path) -> anyhow::Result<()> {
     let key = (anchor.to_path_buf(), index_root.to_path_buf());
     ensure_stat_index_loaded(anchor, index_root)?;
+    let flush_lock = stat_indexes()
+        .read()
+        .expect("stat index rwlock poisoned")
+        .get(&key)
+        .expect("stat index was loaded")
+        .flush_lock
+        .clone();
+    let _flush = flush_lock.lock().expect("stat index flush mutex poisoned");
+    // Metadata probes may block on a remote or contended filesystem. Gather
+    // stale paths under a shared lock, probe them without the registry lock,
+    // then apply only those removals while taking the short write lock.
+    let paths = stat_indexes()
+        .read()
+        .expect("stat index rwlock poisoned")
+        .get(&key)
+        .expect("stat index was loaded")
+        .entries
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let stale = paths
+        .into_iter()
+        .filter(|path| !path.is_file())
+        .collect::<BTreeSet<_>>();
     let stored = {
-        let mut indexes = stat_indexes().lock().expect("stat index mutex poisoned");
+        let mut indexes = stat_indexes().write().expect("stat index rwlock poisoned");
         let index = indexes.get_mut(&key).expect("stat index was loaded");
-        index.entries.retain(|path, _| path.is_file());
+        index.entries.retain(|path, _| !stale.contains(path));
         index
             .entries
             .iter()
@@ -241,11 +513,17 @@ fn stat_storage_key(path: &Path, anchor: &Path) -> String {
 }
 
 fn ensure_stat_index_loaded(anchor: &Path, index_root: &Path) -> anyhow::Result<()> {
-    let mut indexes = stat_indexes().lock().expect("stat index mutex poisoned");
     let key = (anchor.to_path_buf(), index_root.to_path_buf());
-    if indexes.contains_key(&key) {
+    if stat_indexes()
+        .read()
+        .expect("stat index rwlock poisoned")
+        .contains_key(&key)
+    {
         return Ok(());
     }
+    // Do not hold the process-wide registry lock during cache I/O or JSON
+    // decoding. Concurrent first readers may duplicate this cheap load, but
+    // the first writer wins and all callers observe one stable index.
     let raw: BTreeMap<String, StatIndexEntry> = fs::read(stat_index_path(index_root))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -268,13 +546,12 @@ fn ensure_stat_index_loaded(anchor: &Path, index_root: &Path) -> anyhow::Result<
             entries.insert(absolute, entry.clone());
         }
     }
-    indexes.insert(
-        key,
-        StatIndex {
-            anchor: anchor.to_owned(),
-            entries,
-        },
-    );
+    let mut indexes = stat_indexes().write().expect("stat index rwlock poisoned");
+    indexes.entry(key).or_insert_with(|| StatIndex {
+        anchor: anchor.to_owned(),
+        entries,
+        flush_lock: Arc::new(Mutex::new(())),
+    });
     Ok(())
 }
 
@@ -345,10 +622,10 @@ fn absolute_lexical(path: &Path) -> PathBuf {
 fn root_path_spellings(root: &Path) -> Vec<PathBuf> {
     let lexical = absolute_lexical(root);
     let mut spellings = vec![lexical.clone()];
-    if let Ok(canonical) = fs::canonicalize(&lexical) {
-        if canonical != lexical {
-            spellings.push(canonical);
-        }
+    if let Ok(canonical) = fs::canonicalize(&lexical)
+        && canonical != lexical
+    {
+        spellings.push(canonical);
     }
     spellings
 }
@@ -521,6 +798,52 @@ pub fn save_cached_value(
     save_cached_value_at(path, value, root, root, kind, prompt_fingerprint)
 }
 
+/// Save a cache value keyed from source bytes that were already read by an I/O
+/// owner. This avoids a second file read while preserving the legacy JSON
+/// cache layout and SHA-256 key contract.
+pub fn save_cached_value_from_bytes(
+    path: &Path,
+    source_bytes: &[u8],
+    value: &Value,
+    root: &Path,
+    kind: &str,
+    prompt_fingerprint: Option<&str>,
+) -> anyhow::Result<()> {
+    save_cached_value_from_bytes_at(
+        path,
+        source_bytes,
+        value,
+        root,
+        root,
+        kind,
+        prompt_fingerprint,
+    )
+}
+
+/// Byte-aware variant of [`save_cached_value_at`] for a storage root that is
+/// distinct from the portable content-key root.
+pub fn save_cached_value_from_bytes_at(
+    path: &Path,
+    source_bytes: &[u8],
+    value: &Value,
+    root: &Path,
+    cache_root: &Path,
+    kind: &str,
+    prompt_fingerprint: Option<&str>,
+) -> anyhow::Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let hash = file_hash_from_bytes_at(path, root, cache_root, source_bytes)?;
+    let entry =
+        cache_dir_with_ast_version(cache_root, kind, prompt_fingerprint, AST_CACHE_VERSION)?
+            .join(format!("{hash}.json"));
+    let mut portable = value.clone();
+    relativize_source_files(&mut portable, root);
+    anchor_portable_strings(&mut portable, root);
+    atomic_json(&entry, &portable)
+}
+
 /// Save an entry while keeping its portable content-key anchor (`root`)
 /// independent from the directory that owns the cache (`cache_root`).
 pub fn save_cached_value_at(
@@ -593,6 +916,41 @@ pub fn load_cached_value(
     load_cached_value_at(path, root, root, kind, prompt_fingerprint)
 }
 
+/// Load a cache value with a key calculated from caller-owned source bytes.
+/// The helper reads only the cache artifact; it never rereads `path` to derive
+/// the content key.
+pub fn load_cached_value_from_bytes(
+    path: &Path,
+    source_bytes: &[u8],
+    root: &Path,
+    kind: &str,
+    prompt_fingerprint: Option<&str>,
+) -> Option<Value> {
+    load_cached_value_from_bytes_at(path, source_bytes, root, root, kind, prompt_fingerprint)
+}
+
+/// Byte-aware variant of [`load_cached_value_at`] for a storage root that is
+/// distinct from the portable content-key root.
+pub fn load_cached_value_from_bytes_at(
+    path: &Path,
+    source_bytes: &[u8],
+    root: &Path,
+    cache_root: &Path,
+    kind: &str,
+    prompt_fingerprint: Option<&str>,
+) -> Option<Value> {
+    let hash = file_hash_from_bytes_at(path, root, cache_root, source_bytes).ok()?;
+    load_cached_value_for_hash(
+        &hash,
+        root,
+        cache_root,
+        kind,
+        prompt_fingerprint,
+        AST_CACHE_VERSION,
+        false,
+    )
+}
+
 /// Load an entry whose hash/path identity is anchored at `root` but whose
 /// bytes are stored below `cache_root`.
 pub fn load_cached_value_at(
@@ -661,12 +1019,32 @@ fn load_cached_value_internal(
     allow_partial: bool,
 ) -> Option<Value> {
     let hash = file_hash_at(path, root, cache_root).ok()?;
+    load_cached_value_for_hash(
+        &hash,
+        root,
+        cache_root,
+        kind,
+        prompt_fingerprint,
+        ast_version,
+        allow_partial,
+    )
+}
+
+fn load_cached_value_for_hash(
+    hash: &str,
+    root: &Path,
+    cache_root: &Path,
+    kind: &str,
+    prompt_fingerprint: Option<&str>,
+    ast_version: u32,
+    allow_partial: bool,
+) -> Option<Value> {
     let entry = cache_dir_with_ast_version(cache_root, kind, prompt_fingerprint, ast_version)
         .ok()?
         .join(format!("{hash}.json"));
-    let mut value: Value = fs::read(entry)
+    let mut value = fs::read(entry)
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
+        .and_then(|bytes| decode_cache_json(&bytes))?;
     if !allow_partial
         && kind.starts_with("semantic")
         && value.get("partial").and_then(Value::as_bool) == Some(true)
@@ -724,8 +1102,8 @@ pub fn clear_cache(root: &Path) -> anyhow::Result<usize> {
     }
     let index_root = absolute_lexical(root);
     stat_indexes()
-        .lock()
-        .expect("stat index mutex poisoned")
+        .write()
+        .expect("stat index rwlock poisoned")
         .retain(|(_, storage_root), _| storage_root != &index_root);
     Ok(removed)
 }
@@ -975,8 +1353,8 @@ pub fn save_semantic_cache(
 
         let path = resolved_source_path(root, Path::new(&source));
         let mut previous_partial = false;
-        if options.merge_existing {
-            if let Some(existing) = load_cached_value_internal(
+        if options.merge_existing
+            && let Some(existing) = load_cached_value_internal(
                 &path,
                 root,
                 cache_root,
@@ -984,21 +1362,21 @@ pub fn save_semantic_cache(
                 fingerprint.as_deref(),
                 AST_CACHE_VERSION,
                 true,
-            ) {
-                previous_partial = existing.get("partial").and_then(Value::as_bool) == Some(true);
-                for (index, key) in ["nodes", "edges", "hyperedges"].into_iter().enumerate() {
-                    let prior = existing
-                        .get(key)
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .cloned();
-                    let incoming = std::mem::take(&mut buckets[index]);
-                    let mut merged = Vec::new();
-                    append_unique(&mut merged, prior);
-                    append_unique(&mut merged, incoming);
-                    buckets[index] = merged;
-                }
+            )
+        {
+            previous_partial = existing.get("partial").and_then(Value::as_bool) == Some(true);
+            for (index, key) in ["nodes", "edges", "hyperedges"].into_iter().enumerate() {
+                let prior = existing
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned();
+                let incoming = std::mem::take(&mut buckets[index]);
+                let mut merged = Vec::new();
+                append_unique(&mut merged, prior);
+                append_unique(&mut merged, incoming);
+                buckets[index] = merged;
             }
         }
         let is_partial = previous_partial
@@ -1145,10 +1523,11 @@ pub fn changed_files(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
-        if let Some(old) = manifest.get(relative) {
-            if old.mtime == mtime && !old.ast_hash.is_empty() {
-                continue;
-            }
+        if let Some(old) = manifest.get(relative)
+            && old.mtime == mtime
+            && !old.ast_hash.is_empty()
+        {
+            continue;
         }
         let bytes = fs::read(path)?;
         let hash = format!("{:x}", Md5::digest(&bytes));
@@ -1180,9 +1559,9 @@ pub fn ast_cache_get_from_output(
         return None;
     }
     let path = cache_path(output_dir, relative, bytes);
-    fs::read(path)
-        .ok()
-        .and_then(|v| serde_json::from_slice(&v).ok())
+    let bytes = fs::read(path).ok()?;
+    let payload = cache_payload(&bytes)?;
+    serde_json::from_slice(payload).ok()
 }
 pub fn ast_cache_put(
     root: &Path,
@@ -1203,6 +1582,82 @@ pub fn ast_cache_put_to_output(
     }
     atomic_json(&cache_path(output_dir, relative, bytes), value)
 }
+
+/// Derive the runtime-v1 AST artifact key from bytes already materialized by
+/// an I/O owner. This is a pure operation and can be performed before a CPU
+/// extractor consumes the source lease.
+#[must_use]
+pub fn runtime_ast_cache_key(relative: &str, bytes: &[u8]) -> RuntimeCacheKey {
+    RuntimeCacheKey::for_versioned_bytes("ast", AST_CACHE_VERSION, relative, bytes)
+}
+
+/// Read an AST payload from runtime-v1, falling back to the legacy AST cache
+/// without modifying it.
+///
+/// This is intentionally an I/O-plane helper. It returns raw JSON bytes so a
+/// CPU consumer can deserialize an extraction without receiving a filesystem
+/// path or cache capability. Existing JS/TS/SFC cache exclusions remain in
+/// force for both tiers.
+#[must_use]
+pub fn runtime_ast_cache_payload_from_output(
+    runtime_cache: &RuntimeCache,
+    output_dir: &Path,
+    relative: &str,
+    source_bytes: &[u8],
+) -> Option<RuntimeCacheHit> {
+    if bypass(relative) {
+        return None;
+    }
+    let key = runtime_ast_cache_key(relative, source_bytes);
+    runtime_cache.get_or_legacy(key, || {
+        let bytes = fs::read(cache_path(output_dir, relative, source_bytes)).ok()?;
+        cache_payload(&bytes).map(ToOwned::to_owned)
+    })
+}
+
+/// Serialize and append an AST artifact to runtime-v1. Call only from an I/O
+/// owner after a CPU extractor has returned its result; it performs no source
+/// read and does not touch legacy cache files.
+pub fn runtime_ast_cache_put(
+    runtime_cache: &mut RuntimeCache,
+    key: RuntimeCacheKey,
+    relative: &str,
+    extraction: &Extraction,
+) -> Result<(), graphoxide_index_runtime::cache::RuntimeCacheError> {
+    if bypass(relative) || extraction.nodes.is_empty() {
+        return Ok(());
+    }
+    let payload = serde_json::to_vec(extraction).map_err(|error| {
+        graphoxide_index_runtime::cache::RuntimeCacheError::Encode(error.to_string())
+    })?;
+    runtime_cache.put(key, &payload)
+}
+
+/// Serialize an AST extraction and submit it to the dedicated runtime-cache
+/// I/O owner.
+///
+/// The service performs both the existing-artifact probe and any append on its
+/// own thread. This helper is intentionally for the isolated extraction
+/// control plane after CPU extraction has completed; `RuntimeCacheIoService`
+/// is `!Sync`, so it cannot be captured by a `read_files_concurrently` CPU
+/// callback.
+pub fn runtime_ast_cache_persist_on_io_owner(
+    service: &RuntimeCacheIoService,
+    key: RuntimeCacheKey,
+    relative: &str,
+    extraction: &Extraction,
+) -> Result<Option<RuntimeCacheIoPersistOutcome>, RuntimeCacheIoServiceError> {
+    if bypass(relative) || extraction.nodes.is_empty() {
+        return Ok(None);
+    }
+    let payload = serde_json::to_vec(extraction).map_err(|error| {
+        RuntimeCacheIoServiceError::Cache(
+            graphoxide_index_runtime::cache::RuntimeCacheError::Encode(error.to_string()),
+        )
+    })?;
+    service.persist_if_absent(key, payload).map(Some)
+}
+
 fn cache_path(output_dir: &Path, relative: &str, bytes: &[u8]) -> std::path::PathBuf {
     let mut hash = Sha256::new();
     hash.update(bytes);
@@ -1227,6 +1682,109 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_frame_round_trips_without_copying_payload() {
+        let payload = br#"{"nodes":[]}"#;
+        let framed = frame_cache_bytes(payload);
+
+        assert_eq!(unframe_cache_bytes(&framed), Ok(Some(payload.as_slice())));
+        assert_eq!(unframe_cache_bytes(payload), Ok(None));
+        assert_eq!(
+            decode_cache_json(&framed),
+            Some(serde_json::json!({ "nodes": [] }))
+        );
+    }
+
+    #[test]
+    fn corrupted_cache_frames_are_rejected_before_json_decode() {
+        let payload = br#"{"nodes":[]}"#;
+        let mut crc_corrupt = frame_cache_bytes(payload);
+        *crc_corrupt.last_mut().expect("payload byte") ^= 1;
+        assert_eq!(
+            unframe_cache_bytes(&crc_corrupt),
+            Err(CacheFrameError::ChecksumMismatch)
+        );
+        assert_eq!(decode_cache_json(&crc_corrupt), None);
+
+        let mut digest_corrupt = frame_cache_bytes(payload);
+        digest_corrupt[24] ^= 1;
+        assert_eq!(
+            unframe_cache_bytes(&digest_corrupt),
+            Err(CacheFrameError::DigestMismatch)
+        );
+
+        let mut length_corrupt = frame_cache_bytes(payload);
+        length_corrupt[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            unframe_cache_bytes(&length_corrupt),
+            Err(CacheFrameError::LengthMismatch)
+        );
+    }
+
+    #[test]
+    fn framed_cache_payloads_have_explicit_byte_limits() {
+        let payload = b"1234";
+        assert_eq!(
+            try_frame_cache_bytes(payload, 3),
+            Err(CacheFrameError::PayloadTooLarge {
+                payload_len: 4,
+                max_payload_bytes: 3,
+            })
+        );
+
+        let framed = frame_cache_bytes(payload);
+        assert_eq!(
+            unframe_cache_bytes_with_limit(&framed, 3),
+            Err(CacheFrameError::PayloadTooLarge {
+                payload_len: 4,
+                max_payload_bytes: 3,
+            })
+        );
+        assert_eq!(unframe_cache_bytes(payload), Ok(None));
+    }
+
+    #[test]
+    fn byte_aware_cache_helpers_preserve_legacy_json_contract() {
+        let temp = tempfile::tempdir().expect("temporary cache root");
+        let source = temp.path().join("example.py");
+        let source_bytes = b"def example():\n    return 1\n";
+        fs::write(&source, source_bytes).expect("source file");
+        let value = serde_json::json!({"nodes": [], "edges": []});
+
+        let byte_hash = file_hash_from_bytes(&source, temp.path(), source_bytes)
+            .expect("hash caller-owned bytes");
+        assert_eq!(
+            byte_hash,
+            file_hash(&source, temp.path()).expect("legacy hash")
+        );
+        save_cached_value_from_bytes(&source, source_bytes, &value, temp.path(), "semantic", None)
+            .expect("save caller-owned bytes");
+        assert_eq!(
+            load_cached_value_from_bytes(&source, source_bytes, temp.path(), "semantic", None),
+            Some(value.clone())
+        );
+
+        let entry = cache_dir(temp.path(), "semantic", None)
+            .expect("cache dir")
+            .join(format!("{byte_hash}.json"));
+        let json = serde_json::to_vec(&value).expect("cache json");
+        fs::write(&entry, frame_cache_bytes(&json)).expect("framed cache entry");
+        assert_eq!(
+            load_cached_value_from_bytes(&source, source_bytes, temp.path(), "semantic", None),
+            Some(value)
+        );
+
+        let mut corrupt = frame_cache_bytes(&json);
+        corrupt[20] ^= 1;
+        fs::write(&entry, corrupt).expect("corrupt framed cache entry");
+        assert_eq!(
+            load_cached_value_from_bytes(&source, source_bytes, temp.path(), "semantic", None),
+            None,
+            "corrupt framed artifacts must fail open as cache misses"
+        );
+    }
+
     #[test]
     fn sibling_dependent_sources_bypass_cache() {
         for path in [
@@ -1240,5 +1798,58 @@ mod tests {
             assert!(bypass(path), "cache should be bypassed for {path}");
         }
         assert!(!bypass("src/a.py"));
+    }
+
+    #[test]
+    fn runtime_ast_payload_uses_legacy_as_read_only_fallback_then_runtime_v1() {
+        let temp = tempfile::tempdir().expect("temporary cache root");
+        let output = temp.path().join("graphoxide-out");
+        let relative = "src/example.py";
+        let source = b"def example():\n    return 1\n";
+        let extraction = Extraction {
+            nodes: vec![graphoxide_core::Node {
+                id: "example".into(),
+                label: "example()".into(),
+                file_type: "code".into(),
+                source_file: relative.into(),
+                source_location: Some("L1".into()),
+                community: None,
+                extra: BTreeMap::new(),
+            }],
+            ..Extraction::default()
+        };
+        ast_cache_put_to_output(&output, relative, source, &extraction).expect("legacy cache");
+        let mut runtime = RuntimeCache::open(&output).expect("runtime cache");
+        let legacy = runtime_ast_cache_payload_from_output(&runtime, &output, relative, source)
+            .expect("legacy fallback");
+        assert_eq!(
+            legacy.source,
+            graphoxide_index_runtime::cache::RuntimeCacheSource::Legacy
+        );
+        assert_eq!(
+            serde_json::from_slice::<Extraction>(&legacy.payload)
+                .expect("legacy payload")
+                .nodes[0]
+                .id,
+            "example"
+        );
+
+        let key = runtime_ast_cache_key(relative, source);
+        runtime_ast_cache_put(&mut runtime, key, relative, &extraction)
+            .expect("runtime cache write");
+        let runtime_hit =
+            runtime_ast_cache_payload_from_output(&runtime, &output, relative, source)
+                .expect("runtime hit");
+        assert_eq!(
+            runtime_hit.source,
+            graphoxide_index_runtime::cache::RuntimeCacheSource::RuntimeV1
+        );
+        assert_eq!(
+            serde_json::from_slice::<Extraction>(&runtime_hit.payload)
+                .expect("runtime payload")
+                .nodes[0]
+                .id,
+            "example"
+        );
     }
 }

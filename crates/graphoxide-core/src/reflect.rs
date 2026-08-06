@@ -249,12 +249,12 @@ fn yaml_unescape(value: &str) -> String {
         };
         if digits > 0 && index + 2 + digits <= chars.len() {
             let encoded: String = chars[index + 2..index + 2 + digits].iter().collect();
-            if let Ok(codepoint) = u32::from_str_radix(&encoded, 16) {
-                if let Some(character) = char::from_u32(codepoint) {
-                    output.push(character);
-                    index += 2 + digits;
-                    continue;
-                }
+            if let Ok(codepoint) = u32::from_str_radix(&encoded, 16)
+                && let Some(character) = char::from_u32(codepoint)
+            {
+                output.push(character);
+                index += 2 + digits;
+                continue;
             }
         }
         output.push('\\');
@@ -385,10 +385,10 @@ pub fn save_query_result(
     memory_dir: &Path,
     options: &SaveResultOptions,
 ) -> Result<PathBuf> {
-    if let Some(outcome) = options.outcome.as_deref() {
-        if !OUTCOMES.contains(&outcome) {
-            anyhow::bail!("outcome must be one of useful, dead_end, corrected, got {outcome:?}");
-        }
+    if let Some(outcome) = options.outcome.as_deref()
+        && !OUTCOMES.contains(&outcome)
+    {
+        anyhow::bail!("outcome must be one of useful, dead_end, corrected, got {outcome:?}");
     }
     fs::create_dir_all(memory_dir)
         .with_context(|| format!("create memory directory {}", memory_dir.display()))?;

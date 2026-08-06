@@ -160,10 +160,9 @@ fn declarator_binds(node: TsNode<'_>, receiver: &str, source: &[u8]) -> bool {
         return declarator_binds(declarator, receiver, source);
     }
     let mut cursor = node.walk();
-    let binds = node
-        .named_children(&mut cursor)
-        .any(|child| declarator_binds(child, receiver, source));
-    binds
+
+    node.named_children(&mut cursor)
+        .any(|child| declarator_binds(child, receiver, source))
 }
 
 pub(crate) fn objc_receiver_type(body_prefix: &str, receiver: &str) -> Option<String> {
@@ -229,16 +228,16 @@ pub(crate) fn resolve_calls(extractions: &mut [Extraction]) {
     let mut parent_types = BTreeMap::<String, BTreeSet<String>>::new();
     for extraction in extractions.iter() {
         for edge in &extraction.edges {
-            if edge.relation == "inherits" {
-                if let (Some(child), Some(parent)) = (
+            if edge.relation == "inherits"
+                && let (Some(child), Some(parent)) = (
                     labels.get(edge.true_source()),
                     labels.get(edge.true_target()),
-                ) {
-                    parent_types
-                        .entry(normalize_id(child))
-                        .or_default()
-                        .insert(normalize_id(parent));
-                }
+                )
+            {
+                parent_types
+                    .entry(normalize_id(child))
+                    .or_default()
+                    .insert(normalize_id(parent));
             }
             if edge.relation == "method" {
                 let Some(owner) = labels.get(edge.true_source()) else {

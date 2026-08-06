@@ -8,22 +8,29 @@
 //! extract(path)       -> Extraction { nodes, edges }
 //! ```
 //!
-//! Extraction runs in-process on a rayon pool (upstream used a subprocess
-//! pool to dodge the GIL — unnecessary here, and one of the main speed wins).
+//! Legacy compatibility wrappers retain their existing path-based behavior.
+//! The additive runtime API below admits source files through fixed I/O owners
+//! and invokes byte-only extractors on fixed CPU owners.
 
 use anyhow::Context as _;
 
 mod bash;
+mod bytes;
 pub mod cache;
 pub mod cargo_introspect;
 mod compat;
+pub mod containers;
 mod csharp;
 mod dart;
 pub mod detect;
+mod diagrams;
 mod dotnet;
 pub mod engine;
+mod engineering;
 pub mod extractor_registry;
 mod fallback;
+mod format_adapter;
+pub mod format_registry;
 mod java;
 mod js_resolution;
 mod json_config;
@@ -31,17 +38,22 @@ pub mod languages;
 pub mod llm;
 pub mod manifest_ingest;
 mod native;
+mod parser_budget;
 mod pascal;
 pub mod pg_introspect;
 mod php;
+mod project_path;
+mod protocols;
 pub mod resolution;
 pub mod resolver_registry;
 mod ruby;
 pub mod scip_ingest;
 pub mod semantic_pipeline;
 mod sfc;
+mod simulation;
 mod sql;
 pub mod stale;
+mod structured;
 mod swift;
 pub mod terraform;
 pub mod vision;
@@ -49,8 +61,148 @@ pub mod vision;
 pub use detect::collect_files;
 pub use engine::extract;
 pub use js_resolution::resolve_js_module_path;
+pub use protocols::{
+    extract_binary_protocol_with_binding_or_inventory, extract_bound_binary_protocol_bytes,
+    BinaryProtocolKind, SchemaBindingError, VerifiedBinarySchemaBinding,
+};
 pub use sfc::mask_vue_non_script;
 pub use terraform::extract_terraform;
+
+/// Result of the byte-only I/O/CPU extraction substrate.
+///
+/// This intentionally stops before project-wide resolution, cache persistence,
+/// and graph publication. Those stages still use compatibility adapters while
+/// their path-based sibling probes are moved behind I/O-owned snapshots. Each
+/// contained extraction was nevertheless produced without a source filesystem
+/// call from a CPU extractor.
+#[derive(Debug)]
+pub struct RuntimeProjectExtraction {
+    /// Per-file facts in deterministic normalized-path order.
+    pub extractions: Vec<graphoxide_core::Extraction>,
+    /// Discovery result used to create the I/O tickets.
+    pub detection: detect::DetectResult,
+    /// Stable diagnostics for sources rejected before CPU extraction.
+    pub read_failures: Vec<graphoxide_index_runtime::FileReadFailure>,
+}
+
+/// Divide the CPU-arena partition across the workers the runtime will actually
+/// start. The deferred scan reserves half of that partition for source bytes
+/// retained by the project resolver while other workers are still parsing.
+fn isolated_parser_layout(
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    request_count: usize,
+    reserve_resolver_snapshot: bool,
+) -> (usize, usize) {
+    let evidence = config.execution_evidence(request_count);
+    let resolver_snapshot_bytes = if reserve_resolver_snapshot {
+        evidence.cpu_arenas_bytes / 2
+    } else {
+        0
+    };
+    let parser_pool_bytes = evidence
+        .cpu_arenas_bytes
+        .saturating_sub(resolver_snapshot_bytes);
+    let parser_allowance_bytes = parser_pool_bytes / evidence.effective_compute_workers.max(1);
+    (parser_allowance_bytes, resolver_snapshot_bytes)
+}
+
+/// Run the byte-only extraction substrate with dedicated I/O and CPU owners.
+///
+/// The supplied configuration is validated before any input is opened. Inputs
+/// are sorted before admission and results are restored to that same order;
+/// worker-count changes therefore do not perturb per-file fact order.
+pub fn extract_project_with_runtime(
+    root: &std::path::Path,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+) -> anyhow::Result<RuntimeProjectExtraction> {
+    use graphoxide_index_runtime::{read_files_concurrently, FileReadRequest, InputIdentity};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    // Office containers must enter the same bounded byte-admission path as
+    // every other isolated source; legacy sidecar conversion remains
+    // available through the explicit non-isolated entrypoint.
+    let detect_options = detect::DetectOptions {
+        convert_office_sidecars: false,
+        ..detect::DetectOptions::default()
+    };
+    let detection = detect::detect(root, &detect_options)?;
+    let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut files = detection
+        .files
+        .values()
+        .flatten()
+        .map(std::path::PathBuf::from)
+        .filter(|path| detection.is_supported_source(path))
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+
+    let mut contexts = BTreeMap::new();
+    for path in files {
+        let physical_path = detection.physical_source(&path);
+        let relative = path
+            .strip_prefix(&resolved_root)
+            .or_else(|_| path.strip_prefix(root))
+            .map_or_else(
+                |_| normalized_project_key(&path, &resolved_root, root),
+                |relative| normalized_project_key(relative, &resolved_root, root),
+            );
+        if let Some((existing, _)) =
+            contexts.insert(relative.clone(), (path.clone(), physical_path))
+        {
+            anyhow::bail!(
+                "distinct source paths {} and {} normalize to the same runtime identity {relative:?}",
+                existing.display(),
+                path.display()
+            );
+        }
+    }
+    let requests = contexts
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (relative, (_, physical_path)))| {
+            FileReadRequest::new_verified_under(
+                InputIdentity::new(relative.clone(), ordinal as u64),
+                physical_path.clone(),
+                &resolved_root,
+            )
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let contexts = Arc::new(contexts);
+    let (parser_allowance_bytes, _) = isolated_parser_layout(config, requests.len(), false);
+    let output_budget = config.memory_budget().cache_and_runs_bytes;
+    let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
+    let completed = read_files_concurrently(config, requests, move |input| {
+        let relative = input.identity.normalized_path.as_ref();
+        let (path, _) = contexts
+            .get(relative)
+            .expect("runtime ticket context must exist");
+        let extraction = engine::extract_as_bytes_with_parser_allowance(
+            path,
+            relative,
+            input.bytes(),
+            parser_allowance_bytes,
+        )
+        .with_context(|| format!("extract {relative}"))?;
+        let retained_bytes = extraction_retained_bytes(&extraction)?;
+        anyhow::ensure!(
+            output_admission.try_reserve(retained_bytes),
+            "isolated retained extraction output exceeds its {output_budget}-byte budget at {relative}"
+        );
+        Ok(extraction)
+    })
+    .map_err(|error| anyhow::anyhow!("isolated extraction runtime failed: {error:?}"))?;
+
+    let mut extractions = Vec::with_capacity(completed.completed.len());
+    for completed in completed.completed {
+        extractions.push(completed.value?);
+    }
+    Ok(RuntimeProjectExtraction {
+        extractions,
+        detection,
+        read_failures: completed.failures,
+    })
+}
 
 /// Collect and extract a project in parallel, storing repo-relative paths.
 pub fn extract_project(root: &std::path::Path) -> anyhow::Result<Vec<graphoxide_core::Extraction>> {
@@ -154,10 +306,41 @@ impl PendingProjectManifest {
 #[must_use = "the pending manifest must be committed or deliberately discarded"]
 pub struct DeferredProjectExtractionResult {
     pub extractions: Vec<graphoxide_core::Extraction>,
+    /// Conservative retained-byte estimate for the returned extraction facts.
+    ///
+    /// The isolated executor admits this total against the runtime's
+    /// cache-and-run partition before all per-file results can accumulate.
+    /// Legacy execution reports the same estimate without claiming admission.
+    pub retained_output_bytes: usize,
     pub detection: detect::DetectResult,
     pub progress: ProjectExtractionProgress,
     /// One entry per file that could not be read or extracted.
     pub warnings: Vec<String>,
+    /// Canonical physical identities whose current extraction completed.
+    ///
+    /// Incremental graph replacement must use this authoritative scan
+    /// evidence rather than inferring ownership from fact provenance. Failed
+    /// reads/extractions are deliberately absent so their committed facts can
+    /// survive a retry.
+    pub rebuilt_sources: Vec<std::path::PathBuf>,
+    /// Sources whose bytes differed from the previously committed manifest.
+    ///
+    /// The isolated runtime reads and hashes every candidate through its I/O
+    /// owners, but only schedules a parser for these sources. Callers merge
+    /// this delta with the committed graph to retain unchanged facts.
+    pub changed_sources: usize,
+    /// Sources whose content hash matched the previously committed manifest.
+    pub unchanged_sources: usize,
+    /// Previously-manifested sources that are no longer part of this scan.
+    pub deleted_sources: usize,
+    /// Fail-open runtime-v1 cache persistence diagnostics. Cache failures do
+    /// not invalidate a completed extraction or alter graph publication.
+    pub runtime_cache_diagnostics: Vec<String>,
+    /// Fail-open diagnostics from optional resolver metadata reads. Indexed
+    /// source failures remain fatal; missing metadata simply leaves the
+    /// isolated resolver with the same unresolved evidence it would have when
+    /// legacy metadata reads fail.
+    pub resolution_snapshot_diagnostics: Vec<String>,
     pub pending_manifest: PendingProjectManifest,
 }
 
@@ -201,6 +384,218 @@ fn extract_one_project_file(
         .as_secs_f64();
     let hash = format!("{:x}", md5::Md5::digest(&bytes));
     Ok((relative.to_owned(), extraction, mtime, hash))
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeFileContext {
+    /// Logical path retained as graph provenance and format identity.
+    path: std::path::PathBuf,
+    /// Once-canonicalized regular target used only by runtime I/O.
+    physical_path: std::path::PathBuf,
+    indexed: bool,
+}
+
+#[derive(Debug)]
+struct RuntimeScanRow {
+    relative: String,
+    extraction: Option<graphoxide_core::Extraction>,
+    mtime: f64,
+    hash: String,
+    changed: bool,
+    indexed: bool,
+    snapshot_source: Option<Vec<u8>>,
+    warning: Option<String>,
+}
+
+#[derive(Debug)]
+struct RuntimeOutputAdmission {
+    byte_limit: usize,
+    retained_bytes: std::sync::atomic::AtomicUsize,
+}
+
+impl RuntimeOutputAdmission {
+    const fn new(byte_limit: usize) -> Self {
+        Self {
+            byte_limit,
+            retained_bytes: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn try_reserve(&self, bytes: usize) -> bool {
+        use std::sync::atomic::Ordering;
+
+        self.retained_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |retained| {
+                retained
+                    .checked_add(bytes)
+                    .filter(|next| *next <= self.byte_limit)
+            })
+            .is_ok()
+    }
+
+    fn retained_bytes(&self) -> usize {
+        use std::sync::atomic::Ordering;
+
+        self.retained_bytes.load(Ordering::Acquire)
+    }
+}
+
+fn extraction_retained_bytes(extraction: &graphoxide_core::Extraction) -> anyhow::Result<usize> {
+    use graphoxide_core::{Edge, Node};
+    use std::mem::size_of;
+
+    let mut retained = size_of::<graphoxide_core::Extraction>();
+    retained = retained
+        .saturating_add(
+            extraction
+                .nodes
+                .capacity()
+                .saturating_mul(size_of::<Node>()),
+        )
+        .saturating_add(
+            extraction
+                .edges
+                .capacity()
+                .saturating_mul(size_of::<Edge>()),
+        )
+        .saturating_add(
+            extraction
+                .hyperedges
+                .capacity()
+                .saturating_mul(size_of::<serde_json::Value>()),
+        );
+    for node in &extraction.nodes {
+        retained = retained.saturating_add(node_dynamic_retained_bytes(node));
+    }
+    for edge in &extraction.edges {
+        retained = retained.saturating_add(edge_dynamic_retained_bytes(edge));
+    }
+    for hyperedge in &extraction.hyperedges {
+        retained = retained.saturating_add(json_value_retained_bytes(hyperedge));
+    }
+
+    // Serialized size supplies conservative headroom for allocator metadata,
+    // B-tree nodes, and extractor-owned capacity that is not visible through
+    // public schema fields. Count without allocating a duplicate payload.
+    let mut serialized = RetainedCountingWriter::default();
+    serde_json::to_writer(&mut serialized, extraction)?;
+    Ok(retained.saturating_add(serialized.bytes))
+}
+
+/// Conservatively estimate the retained memory owned by extraction facts.
+///
+/// Callers that append post-scan facts should measure the final extraction
+/// vector before reserving memory for a graph baseline or materialization.
+pub fn extractions_retained_bytes(
+    extractions: &[graphoxide_core::Extraction],
+) -> anyhow::Result<usize> {
+    extractions.iter().try_fold(0usize, |retained, extraction| {
+        extraction_retained_bytes(extraction).map(|bytes| retained.saturating_add(bytes))
+    })
+}
+
+fn node_dynamic_retained_bytes(node: &graphoxide_core::Node) -> usize {
+    node.id
+        .capacity()
+        .saturating_add(node.label.capacity())
+        .saturating_add(node.file_type.capacity())
+        .saturating_add(node.source_file.capacity())
+        .saturating_add(node.source_location.as_ref().map_or(0, String::capacity))
+        .saturating_add(json_map_retained_bytes(&node.extra))
+}
+
+fn edge_dynamic_retained_bytes(edge: &graphoxide_core::Edge) -> usize {
+    edge.source
+        .capacity()
+        .saturating_add(edge.target.capacity())
+        .saturating_add(edge.relation.capacity())
+        .saturating_add(edge.source_file.capacity())
+        .saturating_add(json_map_retained_bytes(&edge.extra))
+}
+
+/// Conservative charge for one node appended by a corpus resolver. The
+/// serialized contribution supplies allocator/map headroom in the same way as
+/// the whole-extraction admission calculation.
+pub(crate) fn resolver_node_admission_bytes(node: &graphoxide_core::Node) -> usize {
+    use std::mem::size_of;
+
+    size_of::<graphoxide_core::Node>()
+        .saturating_add(node_dynamic_retained_bytes(node))
+        .saturating_add(serialized_retained_bytes(node))
+}
+
+/// Conservative charge for one edge appended by a corpus resolver.
+pub(crate) fn resolver_edge_admission_bytes(edge: &graphoxide_core::Edge) -> usize {
+    use std::mem::size_of;
+
+    size_of::<graphoxide_core::Edge>()
+        .saturating_add(edge_dynamic_retained_bytes(edge))
+        .saturating_add(serialized_retained_bytes(edge))
+}
+
+fn serialized_retained_bytes(value: &impl serde::Serialize) -> usize {
+    let mut serialized = RetainedCountingWriter::default();
+    serde_json::to_writer(&mut serialized, value).map_or(usize::MAX, |()| serialized.bytes)
+}
+
+fn json_map_retained_bytes(map: &std::collections::BTreeMap<String, serde_json::Value>) -> usize {
+    use std::mem::size_of;
+
+    map.iter().fold(
+        map.len().saturating_mul(
+            size_of::<String>()
+                .saturating_add(size_of::<serde_json::Value>())
+                .saturating_add(3 * size_of::<usize>()),
+        ),
+        |retained, (key, value)| {
+            retained
+                .saturating_add(key.capacity())
+                .saturating_add(json_value_retained_bytes(value))
+        },
+    )
+}
+
+fn json_value_retained_bytes(value: &serde_json::Value) -> usize {
+    use std::mem::size_of;
+
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+        serde_json::Value::String(value) => value.capacity(),
+        serde_json::Value::Array(values) => values
+            .capacity()
+            .saturating_mul(size_of::<serde_json::Value>())
+            .saturating_add(values.iter().fold(0usize, |retained, value| {
+                retained.saturating_add(json_value_retained_bytes(value))
+            })),
+        serde_json::Value::Object(values) => values.iter().fold(
+            values.len().saturating_mul(
+                size_of::<String>()
+                    .saturating_add(size_of::<serde_json::Value>())
+                    .saturating_add(3 * size_of::<usize>()),
+            ),
+            |retained, (key, value)| {
+                retained
+                    .saturating_add(key.capacity())
+                    .saturating_add(json_value_retained_bytes(value))
+            },
+        ),
+    }
+}
+
+#[derive(Default)]
+struct RetainedCountingWriter {
+    bytes: usize,
+}
+
+impl std::io::Write for RetainedCountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buffer.len());
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn normalized_project_key(
@@ -256,6 +651,120 @@ fn normalized_previous_manifest(
     normalized
 }
 
+const RESOLUTION_BASELINE_WORKING_SET_MULTIPLIER: usize = 8;
+
+#[derive(Debug)]
+struct ResolverBaselineContext {
+    extractions: Vec<graphoxide_core::Extraction>,
+    retained_bytes: usize,
+    working_set_charge: usize,
+}
+
+fn eligible_resolver_owner_keys(
+    contexts: &std::collections::BTreeMap<String, RuntimeFileContext>,
+    changed_owner_keys: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    contexts
+        .iter()
+        .filter(|(source, context)| {
+            context.indexed && !changed_owner_keys.contains(source.as_str())
+        })
+        .map(|(source, _)| source.clone())
+        .collect()
+}
+
+fn baseline_owner_key(
+    source_file: &str,
+    container_source: Option<&str>,
+    resolved_root: &std::path::Path,
+    original_root: &std::path::Path,
+) -> Option<String> {
+    let owner = container_source.unwrap_or(source_file);
+    (!owner.is_empty()).then(|| normalized_manifest_key(owner, resolved_root, original_root))
+}
+
+fn baseline_group_key(
+    source_file: &str,
+    owner_key: &str,
+    resolved_root: &std::path::Path,
+    original_root: &std::path::Path,
+) -> String {
+    if source_file.is_empty() {
+        owner_key.to_owned()
+    } else {
+        normalized_manifest_key(source_file, resolved_root, original_root)
+    }
+}
+
+/// Move eligible JavaScript-family nodes from one capped committed graph into
+/// deterministic per-logical-source resolver chunks. Ownership eligibility
+/// follows the physical outer source (`_container_source` when present);
+/// partitioning uses each node's logical source so multi-module containers
+/// never collapse into a chunk that exposes only its first file node. Edges,
+/// hyperedges, and non-JS nodes are lookup-dead for JS module resolution and
+/// are dropped with the consumed scan-local graph.
+fn load_resolver_baseline_context(
+    graph_path: &std::path::Path,
+    graph_byte_cap: u64,
+    eligible_owners: &std::collections::BTreeSet<String>,
+    resolved_root: &std::path::Path,
+    original_root: &std::path::Path,
+) -> anyhow::Result<ResolverBaselineContext> {
+    use graphoxide_core::{CappedGraphRead, CONTAINER_SOURCE_ATTRIBUTE};
+    use std::collections::BTreeMap;
+
+    anyhow::ensure!(
+        graph_byte_cap > 0,
+        "isolated resolver baseline has no remaining graph-read budget"
+    );
+    let CappedGraphRead {
+        graph,
+        admitted_bytes,
+        ..
+    } = graphoxide_core::read_graph_capped(graph_path, graph_byte_cap)?;
+    let working_set_charge = admitted_bytes
+        .checked_mul(RESOLUTION_BASELINE_WORKING_SET_MULTIPLIER)
+        .ok_or_else(|| anyhow::anyhow!("resolver baseline working-set charge exceeds usize"))?;
+    let mut groups = BTreeMap::<String, graphoxide_core::Extraction>::new();
+
+    for mut node in graph.nodes {
+        if !crate::js_resolution::is_javascript_source(&node.source_file) {
+            continue;
+        }
+        let container_source = node
+            .extra
+            .get(CONTAINER_SOURCE_ATTRIBUTE)
+            .and_then(serde_json::Value::as_str)
+            .filter(|source| !source.is_empty());
+        let Some(owner_key) = baseline_owner_key(
+            &node.source_file,
+            container_source,
+            resolved_root,
+            original_root,
+        ) else {
+            continue;
+        };
+        if eligible_owners.contains(&owner_key) {
+            let group_key =
+                baseline_group_key(&node.source_file, &owner_key, resolved_root, original_root);
+            node.source_file.clone_from(&group_key);
+            groups.entry(group_key).or_default().nodes.push(node);
+        }
+    }
+
+    let extractions = groups.into_values().collect::<Vec<_>>();
+    let retained_bytes = extractions_retained_bytes(&extractions)?;
+    anyhow::ensure!(
+        retained_bytes <= working_set_charge,
+        "resolver baseline context retains {retained_bytes} bytes, exceeding its {working_set_charge}-byte graph working-set charge"
+    );
+    Ok(ResolverBaselineContext {
+        extractions,
+        retained_bytes,
+        working_set_charge,
+    })
+}
+
 impl DeferredProjectExtractionResult {
     /// Preserve the legacy extract-only behavior by publishing the manifest and
     /// returning the ordinary result shape.
@@ -274,6 +783,441 @@ impl DeferredProjectExtractionResult {
             warnings,
         })
     }
+}
+
+/// Extract through the dedicated I/O/CPU runtime and defer manifest publication
+/// until the caller has committed the matching graph.
+///
+/// This is the production indexing entrypoint. Discovery and manifest I/O stay
+/// in the control/I/O plane; every source is materialized once by an I/O owner
+/// and is then passed to CPU extraction as a byte lease. The legacy AST cache
+/// is deliberately not consulted here because it is path-I/O based.
+pub fn extract_project_with_runtime_scan_options_deferred_manifest(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+) -> anyhow::Result<DeferredProjectExtractionResult> {
+    use graphoxide_index_runtime::{read_files_concurrently, FileReadRequest, InputIdentity};
+    use md5::Digest as _;
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let managed_output_dir = if managed_output_dir.is_absolute() {
+        managed_output_dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(managed_output_dir)
+    };
+    let mut detect_options = detect_options.clone();
+    detect_options.output_dir = Some(managed_output_dir.clone());
+    detect_options.convert_office_sidecars = false;
+    let detection = detect::detect(root, &detect_options)?;
+    let mut indexed_files = detection
+        .files
+        .iter()
+        .filter(|(kind, _)| !code_only || kind.as_str() == detect::FileType::Code.as_str())
+        .flat_map(|(_, paths)| paths)
+        .map(std::path::PathBuf::from)
+        .filter(|path| detection.is_supported_source(path))
+        .collect::<Vec<_>>();
+    indexed_files.sort();
+    indexed_files.dedup();
+    let indexed_paths = indexed_files
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let total_work = indexed_paths
+        .len()
+        .saturating_add(detection.walk_errors.len());
+    let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    // Metadata needed by JS/TS/SFC resolution is admitted by I/O owners even
+    // in `--code-only` mode. It is retained only in the bounded project
+    // snapshot and never becomes a manifest/output row unless it was already
+    // selected for indexing.
+    let mut snapshot_paths = indexed_paths.clone();
+    snapshot_paths.extend(
+        detection
+            .files
+            .values()
+            .flatten()
+            .map(std::path::PathBuf::from)
+            .filter(|path| detection.is_supported_source(path))
+            .filter(|path| {
+                crate::js_resolution::ProjectSnapshot::needs_file(path.to_string_lossy().as_ref())
+            }),
+    );
+    let mut contexts = BTreeMap::<String, RuntimeFileContext>::new();
+    for path in snapshot_paths {
+        let indexed = indexed_paths.contains(&path);
+        let physical_path = detection.physical_source(&path);
+        let relative = path
+            .strip_prefix(&resolved_root)
+            .or_else(|_| path.strip_prefix(root))
+            .map_or_else(
+                |_| normalized_project_key(&path, &resolved_root, root),
+                |relative| normalized_project_key(relative, &resolved_root, root),
+            );
+        match contexts.entry(relative) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(RuntimeFileContext {
+                    path,
+                    physical_path,
+                    indexed,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if entry.get().path != path || entry.get().physical_path != physical_path {
+                    anyhow::bail!(
+                        "distinct source paths {} and {} normalize to the same runtime identity {:?}",
+                        entry.get().path.display(),
+                        path.display(),
+                        entry.key()
+                    );
+                }
+                entry.get_mut().indexed |= indexed;
+            }
+        }
+    }
+    let manifest_path = managed_output_dir.join("manifest.json");
+    let baseline_graph_path = managed_output_dir.join("graph.json");
+    let committed_manifest_exists = manifest_path.is_file();
+    let committed_baseline_eligible = committed_manifest_exists && baseline_graph_path.is_file();
+    let previous = if committed_manifest_exists && !baseline_graph_path.is_file() {
+        // A manifest without its matching committed graph cannot authorize a
+        // delta: there are no unchanged facts to retain or use for resolution.
+        // Treat every indexed row as fresh and republish both artifacts.
+        cache::Manifest::new()
+    } else {
+        normalized_previous_manifest(
+            &cache::load_manifest_from_output(&managed_output_dir),
+            &resolved_root,
+            root,
+        )
+    };
+    // Runtime-v1 payload persistence remains disabled until this entrypoint has
+    // a validated read-through path. Serializing every completed extraction
+    // into a write-only cache would duplicate retained output and consume the
+    // cache/run memory partition without avoiding any parser work.
+    let runtime_cache_diagnostics = Vec::new();
+    let requests = contexts
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (relative, context))| {
+            FileReadRequest::new_verified_under(
+                InputIdentity::new(relative.clone(), ordinal as u64),
+                context.physical_path.clone(),
+                &resolved_root,
+            )
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let contexts = Arc::new(contexts);
+    let contexts_for_compute = Arc::clone(&contexts);
+    let previous_for_compute = Arc::new(previous.clone());
+    // Resolver source bytes remain live while sibling workers may still parse.
+    // Give each phase a disjoint portion of the shared CPU-arena partition.
+    let (parser_allowance_bytes, snapshot_budget) =
+        isolated_parser_layout(config, requests.len(), true);
+    let snapshot_admission = Arc::new(crate::js_resolution::ProjectSnapshotAdmission::new(
+        snapshot_budget,
+    ));
+    let output_budget = config.memory_budget().cache_and_runs_bytes;
+    let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
+    let output_admission_for_compute = Arc::clone(&output_admission);
+    let completed = read_files_concurrently(config, requests, move |input| -> anyhow::Result<_> {
+        let relative = input.identity.normalized_path.to_string();
+        let context = contexts_for_compute
+            .get(relative.as_str())
+            .expect("runtime ticket context must exist");
+        let path = &context.path;
+        let indexed = context.indexed;
+        let mtime = input
+            .file_identity
+            .modified
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .unwrap_or_default()
+            .as_secs_f64();
+        let snapshot_required = crate::js_resolution::ProjectSnapshot::needs_file(&relative);
+        if snapshot_required
+            && !snapshot_admission.try_reserve(
+                crate::js_resolution::ProjectSnapshot::admission_bytes(
+                    &relative,
+                    input.retained_capacity_bytes(),
+                ),
+            )
+        {
+            anyhow::bail!(
+                "isolated project resolution snapshot exceeds its {snapshot_budget}-byte budget"
+            );
+        }
+        let hash = indexed.then(|| format!("{:x}", md5::Md5::digest(input.bytes())));
+        let changed = indexed
+            && (force
+                || previous_for_compute
+                    .get(relative.as_str())
+                    .is_none_or(|entry| entry.ast_hash != hash.as_deref().unwrap_or_default()));
+        let (extraction, warning) = if changed {
+            match engine::extract_as_bytes_with_parser_allowance(
+                path,
+                &relative,
+                input.bytes(),
+                parser_allowance_bytes,
+            )
+            .with_context(|| format!("extract {relative}"))
+            {
+                Ok(extraction) => (Some(extraction), None),
+                Err(error) => (None, Some(format!("skipped {relative}: {error:#}"))),
+            }
+        } else {
+            (None, None)
+        };
+        if let Some(extraction) = &extraction {
+            let retained_bytes = extraction_retained_bytes(extraction)?;
+            anyhow::ensure!(
+                output_admission_for_compute.try_reserve(retained_bytes),
+                "isolated retained extraction output exceeds its {output_budget}-byte budget at {relative}"
+            );
+        }
+        let snapshot_source = snapshot_required.then(|| input.into_buffer().into_vec());
+        Ok(RuntimeScanRow {
+            relative,
+            extraction,
+            mtime,
+            hash: hash.unwrap_or_default(),
+            changed,
+            indexed,
+            snapshot_source,
+            warning,
+        })
+    })
+    .map_err(|error| anyhow::anyhow!("isolated extraction runtime failed: {error:?}"))?;
+
+    let mut rows = Vec::with_capacity(completed.completed.len());
+    for completed in completed.completed {
+        rows.push(completed.value?);
+    }
+    let mut warnings = completed
+        .failures
+        .iter()
+        .filter(|failure| {
+            contexts
+                .get(failure.identity.normalized_path.as_ref())
+                .is_some_and(|context| context.indexed)
+        })
+        .map(|failure| {
+            format!(
+                "skipped {}: isolated I/O failed: {:?}",
+                failure.identity.normalized_path, failure.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    warnings.extend(rows.iter().filter_map(|row| row.warning.clone()));
+    warnings.sort();
+    for warning in &warnings {
+        tracing::warn!("{warning}");
+    }
+    let succeeded = rows
+        .iter()
+        .filter(|row| row.indexed && row.warning.is_none())
+        .count();
+    if succeeded == 0
+        && let Some(warning) = warnings.first()
+    {
+        anyhow::bail!("{warning}");
+    }
+    let resolution_snapshot_diagnostics = completed
+        .failures
+        .iter()
+        .filter(|failure| {
+            contexts
+                .get(failure.identity.normalized_path.as_ref())
+                .is_some_and(|context| !context.indexed)
+        })
+        .map(|failure| {
+            format!(
+                "resolver metadata unavailable for {}: {:?}",
+                failure.identity.normalized_path, failure.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut project_snapshot =
+        crate::js_resolution::ProjectSnapshot::with_byte_limit(snapshot_budget);
+    for row in &mut rows {
+        let Some(source) = row.snapshot_source.take() else {
+            continue;
+        };
+        project_snapshot
+            .insert_owned(row.relative.clone(), source)
+            .map_err(|error| match error {
+                crate::js_resolution::ProjectSnapshotError::ExceedsBudget { byte_limit } => {
+                    anyhow::anyhow!(
+                        "isolated project resolution snapshot exceeds its {byte_limit}-byte budget"
+                    )
+                }
+                crate::js_resolution::ProjectSnapshotError::InvalidPath(path) => {
+                    anyhow::anyhow!("invalid project snapshot path: {path}")
+                }
+            })?;
+    }
+    let mut manifest = rows
+        .iter()
+        .filter(|row| row.indexed && row.warning.is_none())
+        .map(|row| {
+            let semantic_hash = previous
+                .get(&row.relative)
+                .filter(|entry| entry.ast_hash == row.hash)
+                .map(|entry| entry.semantic_hash.clone())
+                .unwrap_or_default();
+            (
+                row.relative.clone(),
+                cache::ManifestEntry {
+                    mtime: row.mtime,
+                    ast_hash: row.hash.clone(),
+                    semantic_hash,
+                },
+            )
+        })
+        .collect::<cache::Manifest>();
+    if code_only {
+        for paths in detection
+            .files
+            .iter()
+            .filter(|(kind, _)| kind.as_str() != detect::FileType::Code.as_str())
+            .map(|(_, paths)| paths)
+        {
+            for path in paths {
+                let path = std::path::Path::new(path);
+                let key = normalized_project_key(path, &resolved_root, root);
+                if let Some(entry) = previous.get(&key) {
+                    manifest.entry(key).or_insert_with(|| entry.clone());
+                }
+            }
+        }
+    }
+    let changed_sources = rows
+        .iter()
+        .filter(|row| row.indexed && row.changed && row.warning.is_none())
+        .count();
+    let changed_resolver_owner_keys = rows
+        .iter()
+        .filter(|row| row.indexed && row.changed)
+        .map(|row| row.relative.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    // Only byte-identical live sources are valid lookup context. A changed
+    // source whose extraction failed keeps its committed graph facts for a
+    // later retry, but combining those stale nodes with its current snapshot
+    // text would create a hybrid module revision.
+    let eligible_resolver_owners =
+        eligible_resolver_owner_keys(&contexts, &changed_resolver_owner_keys);
+    let mut rebuilt_sources = rows
+        .iter()
+        .filter(|row| row.indexed && row.changed && row.warning.is_none())
+        .filter_map(|row| {
+            contexts
+                .get(row.relative.as_str())
+                .map(|context| context.physical_path.clone())
+        })
+        .collect::<Vec<_>>();
+    rebuilt_sources.sort();
+    rebuilt_sources.dedup();
+    let unchanged_sources = succeeded.saturating_sub(changed_sources);
+    let deleted_sources = previous
+        .keys()
+        .filter(|source| {
+            contexts
+                .get(source.as_str())
+                .is_none_or(|context| !context.indexed)
+        })
+        .count();
+    let mut extractions = Vec::new();
+    for row in rows {
+        if let Some(extraction) = row.extraction {
+            extractions.push(extraction);
+        }
+    }
+    let fresh_has_javascript = extractions.iter().any(|extraction| {
+        extraction.nodes.iter().any(|node| {
+            node.extra.get("type").and_then(serde_json::Value::as_str) == Some("file")
+                && crate::js_resolution::is_javascript_source(&node.source_file)
+        })
+    });
+    let fresh_before_resolution = extractions_retained_bytes(&extractions)?;
+    let mut resolver_context = Vec::new();
+    let mut baseline_working_set_charge = 0usize;
+    let mut fresh_output_limit = output_budget;
+    if !force
+        && fresh_has_javascript
+        && committed_baseline_eligible
+        && !eligible_resolver_owners.is_empty()
+    {
+        let remaining = output_budget
+            .checked_sub(fresh_before_resolution)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "isolated fresh extraction output exceeds its {output_budget}-byte cache/run budget before resolver baseline admission"
+                )
+            })?;
+        let graph_byte_cap = remaining / RESOLUTION_BASELINE_WORKING_SET_MULTIPLIER;
+        let context = load_resolver_baseline_context(
+            &baseline_graph_path,
+            u64::try_from(graph_byte_cap).unwrap_or(u64::MAX),
+            &eligible_resolver_owners,
+            &resolved_root,
+            root,
+        )?;
+        if !context.extractions.is_empty() {
+            anyhow::ensure!(
+                context.working_set_charge <= remaining,
+                "resolver baseline requires a {}-byte graph working set, exceeding {remaining} remaining cache/run bytes",
+                context.working_set_charge
+            );
+            debug_assert_eq!(
+                context.retained_bytes,
+                extractions_retained_bytes(&context.extractions)?
+            );
+            baseline_working_set_charge = context.working_set_charge;
+            fresh_output_limit = output_budget
+                .checked_sub(baseline_working_set_charge)
+                .expect("admitted baseline charge fits output budget");
+            resolver_context = context.extractions;
+        }
+    }
+    resolution::resolve_with_snapshot_context_bounded(
+        &mut extractions,
+        resolver_context,
+        &project_snapshot,
+        fresh_output_limit,
+        config.memory_budget().cpu_arenas_bytes,
+    )?;
+    let retained_output_bytes = extractions_retained_bytes(&extractions)?;
+    let cache_run_total = retained_output_bytes
+        .checked_add(baseline_working_set_charge)
+        .ok_or_else(|| anyhow::anyhow!("isolated resolver cache/run charge exceeds usize"))?;
+    anyhow::ensure!(
+        cache_run_total <= output_budget,
+        "isolated resolver retains {retained_output_bytes} fresh bytes plus a {baseline_working_set_charge}-byte baseline working-set charge, exceeding its {output_budget}-byte cache/run budget"
+    );
+    debug_assert!(output_admission.retained_bytes() <= output_budget);
+    Ok(DeferredProjectExtractionResult {
+        extractions,
+        retained_output_bytes,
+        detection,
+        progress: ProjectExtractionProgress {
+            total: total_work,
+            succeeded,
+        },
+        warnings,
+        rebuilt_sources,
+        changed_sources,
+        unchanged_sources,
+        deleted_sources,
+        runtime_cache_diagnostics,
+        resolution_snapshot_diagnostics,
+        pending_manifest: PendingProjectManifest {
+            output_directory: managed_output_dir,
+            entries: manifest,
+        },
+    })
 }
 
 /// Extract a project with caller-controlled ignore policy and retain the full
@@ -324,7 +1268,7 @@ pub fn extract_project_with_scan_options_deferred_manifest(
         .filter(|(kind, _)| !code_only || kind.as_str() == detect::FileType::Code.as_str())
         .flat_map(|(_, paths)| paths)
         .map(std::path::PathBuf::from)
-        .filter(|path| detect::is_supported_path(path))
+        .filter(|path| detection.is_supported_source(path))
         .collect::<Vec<_>>();
     files.sort();
     files.dedup();
@@ -363,12 +1307,21 @@ pub fn extract_project_with_scan_options_deferred_manifest(
     }
     // Individual bad files are tolerated; a corpus in which nothing at all
     // could be extracted is a broken backend, not an empty success.
-    if rows.is_empty() {
-        if let Some(first) = failures.into_iter().next() {
-            return Err(first);
-        }
+    if rows.is_empty()
+        && let Some(first) = failures.into_iter().next()
+    {
+        return Err(first);
     }
     let succeeded = rows.len();
+    let mut rebuilt_sources = rows
+        .iter()
+        .map(|(relative, _, _, _)| {
+            let logical = resolved_root.join(relative);
+            detection.physical_source(&logical)
+        })
+        .collect::<Vec<_>>();
+    rebuilt_sources.sort();
+    rebuilt_sources.dedup();
     let previous = normalized_previous_manifest(
         &cache::load_manifest_from_output(&managed_output_dir),
         &resolved_root,
@@ -413,14 +1366,22 @@ pub fn extract_project_with_scan_options_deferred_manifest(
         .map(|(_, extraction, _, _)| extraction)
         .collect();
     resolution::resolve_with_root(&mut extractions, &resolved_root);
+    let retained_output_bytes = extractions_retained_bytes(&extractions)?;
     Ok(DeferredProjectExtractionResult {
         extractions,
+        retained_output_bytes,
         detection,
         progress: ProjectExtractionProgress {
             total: total_work,
             succeeded,
         },
         warnings,
+        rebuilt_sources,
+        changed_sources: succeeded,
+        unchanged_sources: 0,
+        deleted_sources: 0,
+        runtime_cache_diagnostics: Vec::new(),
+        resolution_snapshot_diagnostics: Vec::new(),
         pending_manifest: PendingProjectManifest {
             output_directory: managed_output_dir,
             entries: manifest,
@@ -644,10 +1605,10 @@ where
         };
         rows.push((relative, extraction, mtime, hash));
     }
-    if rows.is_empty() {
-        if let Some(first) = failures.into_iter().next() {
-            return Err(first);
-        }
+    if rows.is_empty()
+        && let Some(first) = failures.into_iter().next()
+    {
+        return Err(first);
     }
     if !missing_extractors.is_empty() {
         let summary = missing_extractors
@@ -699,7 +1660,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use graphoxide_core::make_id;
+    use graphoxide_core::{make_id, Edge, Extraction};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -725,6 +1686,9 @@ mod tests {
 
         fn write(&self, name: &str, contents: &str) -> PathBuf {
             let path = self.root.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create extraction fixture parent");
+            }
             fs::write(&path, contents).expect("write extraction fixture");
             path
         }
@@ -738,6 +1702,1118 @@ mod tests {
 
     fn extract(path: &Path, source_file: &str) -> graphoxide_core::Extraction {
         super::engine::extract_as(path, source_file).expect("extract fixture file")
+    }
+
+    fn runtime_config(memory_budget_bytes: usize) -> graphoxide_index_runtime::IndexRuntimeConfig {
+        graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes,
+            io_workers: 2,
+            compute_workers: 2,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        }
+    }
+
+    fn commit_runtime_baseline(
+        result: super::DeferredProjectExtractionResult,
+        root: &Path,
+        output: &Path,
+    ) -> graphoxide_core::KnowledgeGraph {
+        fs::create_dir_all(output).expect("create managed output");
+        let graph = graphoxide_graph::build_graph_with_options_and_root(
+            &result.extractions,
+            root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build committed baseline");
+        graphoxide_core::write_graph_atomic(output.join("graph.json"), &graph, true)
+            .expect("write committed graph");
+        result
+            .pending_manifest
+            .commit()
+            .expect("commit matching manifest");
+        graph
+    }
+
+    fn js_edge_topology(
+        graph: &graphoxide_core::KnowledgeGraph,
+        source_file: &str,
+    ) -> std::collections::BTreeSet<(String, String, String, Option<String>)> {
+        graph
+            .links
+            .iter()
+            .filter(|edge| {
+                edge.source_file == source_file
+                    && matches!(
+                        edge.relation.as_str(),
+                        "imports" | "imports_from" | "re_exports"
+                    )
+            })
+            .map(|edge| {
+                (
+                    edge.true_source().to_owned(),
+                    edge.true_target().to_owned(),
+                    edge.relation.clone(),
+                    edge.extra
+                        .get("target_file")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                )
+            })
+            .collect()
+    }
+
+    fn byond_include_edge(extraction: &Extraction) -> &Edge {
+        extraction
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.extra
+                    .get("context")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("import")
+            })
+            .expect("BYOND include edge")
+    }
+
+    #[test]
+    fn byte_engine_extracts_without_source_path_access() {
+        let missing = Path::new("/graphoxide-byte-only-does-not-exist.rs");
+        let extraction = super::engine::extract_as_bytes(
+            missing,
+            "byte_only.rs",
+            b"pub fn admitted_source() {}\n",
+        )
+        .expect("extract admitted source bytes");
+        assert!(
+            extraction
+                .nodes
+                .iter()
+                .any(|node| node.label == "admitted_source()"),
+            "the byte entrypoint must not reopen its source path"
+        );
+    }
+
+    #[test]
+    fn byond_byte_engine_never_probes_include_siblings() {
+        let source = "#include \"helpers.dm\"\n/proc/RunTest()\n\treturn\n";
+        for extension in ["dm", "dme"] {
+            let with_sibling = Fixture::new();
+            let with_sibling_path = with_sibling.write(&format!("main.{extension}"), source);
+            with_sibling.write("helpers.dm", "/proc/Helper()\n\treturn\n");
+
+            let without_sibling = Fixture::new();
+            let without_sibling_path = without_sibling.write(&format!("main.{extension}"), source);
+            let source_file = format!("project/main.{extension}");
+
+            let existing = super::engine::extract_as_bytes(
+                &with_sibling_path,
+                &source_file,
+                source.as_bytes(),
+            )
+            .expect("extract BYOND bytes beside an existing include");
+            let missing = super::engine::extract_as_bytes(
+                &without_sibling_path,
+                &source_file,
+                source.as_bytes(),
+            )
+            .expect("extract BYOND bytes beside a missing include");
+
+            assert_eq!(
+                serde_json::to_value(&existing).expect("serialize existing-sibling extraction"),
+                serde_json::to_value(&missing).expect("serialize missing-sibling extraction"),
+                ".{extension} byte extraction must be independent of sibling existence",
+            );
+            let include = byond_include_edge(&existing);
+            assert_eq!(include.relation, "imports");
+            assert_eq!(include.true_target(), make_id(&["project/helpers"]));
+            assert_eq!(
+                include
+                    .extra
+                    .get("target_file")
+                    .and_then(serde_json::Value::as_str),
+                Some("project/helpers.dm"),
+            );
+            assert_eq!(
+                include
+                    .extra
+                    .get("external")
+                    .and_then(serde_json::Value::as_bool),
+                Some(true),
+                ".{extension} byte extraction must fail closed to an unresolved include",
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_byond_path_engine_preserves_include_resolution() {
+        let source = "#include \"helpers.dm\"\n/proc/RunTest()\n\treturn\n";
+        for extension in ["dm", "dme"] {
+            let with_sibling = Fixture::new();
+            let with_sibling_path = with_sibling.write(&format!("main.{extension}"), source);
+            let sibling_path = with_sibling.write("helpers.dm", "/proc/Helper()\n\treturn\n");
+            let source_file = format!("project/main.{extension}");
+            let resolved = extract(&with_sibling_path, &source_file);
+            let resolved_include = byond_include_edge(&resolved);
+
+            assert_eq!(resolved_include.relation, "imports_from");
+            assert_eq!(
+                resolved_include.true_target(),
+                make_id(&["project/helpers"])
+            );
+            assert_eq!(
+                resolved_include
+                    .extra
+                    .get("target_file")
+                    .and_then(serde_json::Value::as_str),
+                Some("project/helpers.dm"),
+            );
+            assert!(!resolved_include.extra.contains_key("external"));
+            let expected_sibling_source = sibling_path.to_string_lossy().replace('\\', "/");
+            assert!(resolved.nodes.iter().any(|node| {
+                node.id == resolved_include.true_target()
+                    && node.source_file == expected_sibling_source
+            }));
+
+            let without_sibling = Fixture::new();
+            let without_sibling_path = without_sibling.write(&format!("main.{extension}"), source);
+            let unresolved = extract(&without_sibling_path, &source_file);
+            let unresolved_include = byond_include_edge(&unresolved);
+
+            assert_eq!(unresolved_include.relation, "imports");
+            assert_eq!(
+                unresolved_include.true_target(),
+                make_id(&["project/helpers"])
+            );
+            assert_eq!(
+                unresolved_include
+                    .extra
+                    .get("target_file")
+                    .and_then(serde_json::Value::as_str),
+                Some("project/helpers.dm"),
+            );
+            assert_eq!(
+                unresolved_include
+                    .extra
+                    .get("external")
+                    .and_then(serde_json::Value::as_bool),
+                Some(true),
+            );
+        }
+    }
+
+    #[test]
+    fn c_byte_engine_normalizes_only_contained_quoted_includes() {
+        let fixture = Fixture::new();
+        fixture.write("include/worker.h", "int root_worker(void);\n");
+        fixture.write("src/include/worker.h", "int nested_worker(void);\n");
+
+        let parent_source = "#include \"../include/worker.h\"\nint main(void) { return 0; }\n";
+        let parent_path = fixture.write("src/main.c", parent_source);
+        let parent =
+            super::engine::extract_as_bytes(&parent_path, "src/main.c", parent_source.as_bytes())
+                .expect("extract parent-relative C include bytes");
+        let parent_targets = parent
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "imports")
+            .map(Edge::true_target)
+            .collect::<Vec<_>>();
+        assert_eq!(parent_targets, [make_id(&["include/worker"])]);
+        assert!(!parent_targets.contains(&make_id(&["src/include/worker"]).as_str()));
+
+        let static_source =
+            "#include \"./include/./worker.h\"\nint static_main(void) { return 0; }\n";
+        let static_path = fixture.write("src/static.c", static_source);
+        let static_extraction =
+            super::engine::extract_as_bytes(&static_path, "src/static.c", static_source.as_bytes())
+                .expect("extract contained C include bytes");
+        assert!(static_extraction.edges.iter().any(|edge| {
+            edge.relation == "imports" && edge.true_target() == make_id(&["src/include/worker"])
+        }));
+
+        let unsafe_source = concat!(
+            "#include \"/src/include/worker.h\"\n",
+            "#include \"C:/src/include/worker.h\"\n",
+            "#include \"C:src/include/worker.h\"\n",
+            "#include \"\\\\server\\share\\src\\include\\worker.h\"\n",
+            "#include \"../../src/include/worker.h\"\n",
+        );
+        let unsafe_path = fixture.write("src/unsafe.c", unsafe_source);
+        let unsafe_extraction =
+            super::engine::extract_as_bytes(&unsafe_path, "src/unsafe.c", unsafe_source.as_bytes())
+                .expect("extract unsafe C include bytes");
+        assert!(unsafe_extraction
+            .edges
+            .iter()
+            .all(|edge| edge.relation != "imports"));
+    }
+
+    #[test]
+    fn byte_engine_keeps_sfc_and_pascal_path_access_in_the_io_plane() {
+        let missing_vue = Path::new("/graphoxide-byte-only-does-not-exist/component.vue");
+        let vue = super::engine::extract_as_bytes(
+            missing_vue,
+            "src/component.vue",
+            b"<template><main /></template>\n<script lang=\"ts\">export const admitted = 1;</script>\n",
+        )
+        .expect("extract admitted SFC source bytes");
+        assert!(
+            vue.nodes.iter().any(|node| node.label == "component.vue"),
+            "SFC byte extraction must not reopen the physical source path"
+        );
+
+        let missing_pascal = Path::new("/graphoxide-byte-only-does-not-exist/main.pas");
+        let pascal = super::engine::extract_as_bytes(
+            missing_pascal,
+            "src/main.pas",
+            b"unit Main; uses Sibling; interface implementation end.",
+        )
+        .expect("extract admitted Pascal source bytes");
+        assert!(
+            pascal.edges.iter().any(|edge| {
+                edge.relation == "imports" && edge.target == graphoxide_core::make_id(&["Sibling"])
+            }),
+            "Pascal byte extraction must use a stable unresolved unit identity instead of probing siblings"
+        );
+    }
+
+    #[test]
+    fn isolated_runtime_restores_deterministic_input_order() {
+        let fixture = Fixture::new();
+        fixture.write("z.rs", "pub fn zed() {}\n");
+        fixture.write("a.rs", "pub fn alpha() {}\n");
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 2,
+            compute_workers: 2,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let result = super::extract_project_with_runtime(&fixture.root, runtime)
+            .expect("isolated runtime extraction");
+        assert!(result.read_failures.is_empty());
+        let source_files = result
+            .extractions
+            .iter()
+            .filter_map(|extraction| extraction.nodes.first())
+            .map(|node| node.source_file.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(source_files, ["a.rs", "z.rs"]);
+    }
+
+    #[test]
+    fn isolated_runtime_admits_office_container_before_any_sidecar_conversion() {
+        let fixture = Fixture::new();
+        let office = fixture.root.join("report.docx");
+        fs::write(&office, vec![b'x'; 256 * 1024]).expect("write oversized Office fixture");
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 256 * 1024,
+            io_workers: 1,
+            compute_workers: 1,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+
+        let result = super::extract_project_with_runtime(&fixture.root, runtime)
+            .expect("isolated runtime reports bounded source rejection");
+        assert!(result.detection.files["document"]
+            .iter()
+            .any(|path| path.ends_with("report.docx")));
+        assert!(result.extractions.is_empty());
+        assert_eq!(result.read_failures.len(), 1);
+        assert!(matches!(
+            result.read_failures[0].kind,
+            graphoxide_index_runtime::FileReadFailureKind::ExceedsReadyBudget { .. }
+        ));
+        assert!(
+            !fixture.root.join("graphoxide-out/converted").exists(),
+            "isolated discovery must not materialize Office sidecars before runtime admission"
+        );
+    }
+
+    #[test]
+    fn isolated_parser_allowance_uses_effective_workers_and_disjoint_snapshot_space() {
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 64,
+            compute_workers: 64,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let evidence = runtime.execution_evidence(2);
+        assert_eq!(evidence.effective_compute_workers, 2);
+        let (extract_only, no_snapshot) = super::isolated_parser_layout(runtime, 2, false);
+        assert_eq!(no_snapshot, 0);
+        assert_eq!(
+            extract_only * evidence.effective_compute_workers,
+            evidence.cpu_arenas_bytes
+        );
+
+        let (scan_parser, snapshot) = super::isolated_parser_layout(runtime, 2, true);
+        assert!(
+            scan_parser
+                .saturating_mul(evidence.effective_compute_workers)
+                .saturating_add(snapshot)
+                <= evidence.cpu_arenas_bytes
+        );
+        assert_eq!(snapshot, evidence.cpu_arenas_bytes / 2);
+    }
+
+    #[test]
+    fn isolated_runtime_facts_are_byte_identical_across_worker_counts() {
+        let fixture = Fixture::new();
+        fixture.write("z.rs", "pub fn zed() {}\n");
+        fixture.write("a.rs", "pub fn alpha() { zed(); }\n");
+        fixture.write("config.json", r#"{"services":{"api":{"port":8080}}}"#);
+        fixture.write("design.dot", "digraph { api -> database; }\n");
+
+        let mut expected = None;
+        for workers in [1, 2, 3, 4, 8] {
+            let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+                memory_budget_bytes: 4 * 1024 * 1024,
+                io_workers: workers,
+                compute_workers: workers,
+                io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+                read_batch_bytes: 4 * 1024,
+            };
+            let result = super::extract_project_with_runtime(&fixture.root, runtime)
+                .expect("isolated runtime extraction");
+            assert!(
+                result.read_failures.is_empty(),
+                "worker count {workers} produced read failures: {:?}",
+                result.read_failures
+            );
+            let bytes = serde_json::to_vec(&result.extractions)
+                .expect("serialize deterministic extraction facts");
+            if let Some(expected) = &expected {
+                assert_eq!(
+                    &bytes, expected,
+                    "worker count {workers} changed deterministic extraction facts"
+                );
+            } else {
+                expected = Some(bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_runtime_rejects_large_semantic_parsers_before_they_allocate() {
+        let fixture = Fixture::new();
+        fixture.write("large.dot", &"node_a -> node_b;\n".repeat(4_096));
+        fixture.write(
+            "large.proto",
+            &"message Item { string value = 1; }\n".repeat(2_048),
+        );
+        fixture.write(
+            "large.gltf",
+            &format!("{{\"nodes\":[{}]}}", "{},".repeat(24_000)),
+        );
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 3,
+            compute_workers: 3,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let result = super::extract_project_with_runtime(&fixture.root, runtime)
+            .expect("arena-rejected inputs retain stable inventory");
+        assert!(result.read_failures.is_empty());
+        assert_eq!(result.extractions.len(), 3);
+        for extraction in result.extractions {
+            assert_eq!(extraction.nodes.len(), 1);
+            assert!(extraction.edges.is_empty());
+            let root = extraction.nodes.first().expect("inventory root");
+            assert_eq!(
+                root.extra
+                    .get("parse_status")
+                    .and_then(serde_json::Value::as_str),
+                Some("rejected")
+            );
+            assert_eq!(
+                root.extra
+                    .get("diagnostic")
+                    .and_then(serde_json::Value::as_str),
+                Some("parser_arena_budget")
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_runtime_scan_uses_the_preloaded_project_snapshot_for_resolution() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { utility } from './utility'; export const run = utility;\n",
+        );
+        fixture.write("utility.ts", "export const utility = 1;\n");
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 2,
+            compute_workers: 2,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &fixture.root.join("graphoxide-out"),
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("isolated runtime scan");
+        assert!(
+            result.resolution_snapshot_diagnostics.is_empty(),
+            "fixture has no unavailable resolver metadata: {:?}",
+            result.resolution_snapshot_diagnostics
+        );
+        let main = result
+            .extractions
+            .iter()
+            .find(|extraction| {
+                extraction
+                    .nodes
+                    .first()
+                    .is_some_and(|node| node.source_file == "main.ts")
+            })
+            .expect("main extraction");
+        assert!(main.edges.iter().any(|edge| {
+            edge.relation == "imports_from"
+                && edge.true_source() == make_id(&["main"])
+                && edge.true_target() == make_id(&["utility"])
+        }));
+    }
+
+    #[test]
+    fn isolated_incremental_js_context_matches_full_named_barrel_resolution() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { utility } from './barrel'; export const run = utility;\n",
+        );
+        fixture.write("barrel.ts", "export { utility } from './utility';\n");
+        fixture.write("utility.ts", "export const utility = 1;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial isolated scan");
+        let baseline = commit_runtime_baseline(initial, &fixture.root, &output);
+        let mut legacy_resolver_baseline = baseline.clone();
+        for node in &mut legacy_resolver_baseline.nodes {
+            if matches!(node.source_file.as_str(), "barrel.ts" | "utility.ts") {
+                node.source_file = fixture
+                    .root
+                    .join(&node.source_file)
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+        graphoxide_core::write_graph_atomic(
+            output.join("graph.json"),
+            &legacy_resolver_baseline,
+            true,
+        )
+        .expect("write legacy absolute-path resolver baseline");
+
+        fixture.write(
+            "main.ts",
+            "import { utility } from './barrel'; export const run = utility; export const changed = true;\n",
+        );
+        let incremental = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("incremental isolated scan");
+        assert_eq!(incremental.changed_sources, 1);
+        assert_eq!(incremental.unchanged_sources, 2);
+        let fresh = graphoxide_graph::dedupe_raw_extractions(&incremental.extractions);
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            fresh,
+            &baseline,
+            &incremental.rebuilt_sources,
+            &[],
+            &[],
+            Some(&fixture.root),
+            64 * 1024 * 1024,
+        )
+        .expect("merge incremental JS delta");
+        let incremental_graph = graphoxide_graph::build_graph_with_options_and_root(
+            &[merged],
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build incremental graph");
+
+        let full = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("forced full comparison scan");
+        let full_graph = graphoxide_graph::build_graph_with_options_and_root(
+            &full.extractions,
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build full comparison graph");
+
+        let incremental_edges = js_edge_topology(&incremental_graph, "main.ts");
+        let full_edges = js_edge_topology(&full_graph, "main.ts");
+        assert_eq!(incremental_edges, full_edges);
+        assert!(incremental_edges
+            .iter()
+            .any(|(_, _, relation, _)| relation == "imports"));
+    }
+
+    #[test]
+    fn changed_failed_owner_is_excluded_from_resolver_baseline_context() {
+        let fixture = Fixture::new();
+        let changed_path = fixture.write("changed.ts", "export const stale = 1;\n");
+        let unchanged_path = fixture.write("unchanged.ts", "export const stable = 1;\n");
+        let graph = graphoxide_graph::build_graph_with_options_and_root(
+            &[
+                extract(&changed_path, "changed.ts"),
+                extract(&unchanged_path, "unchanged.ts"),
+            ],
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build resolver eligibility graph");
+        let graph_path = fixture.root.join("baseline.json");
+        graphoxide_core::write_graph_atomic(&graph_path, &graph, true)
+            .expect("write resolver eligibility graph");
+        let contexts = [
+            (
+                "changed.ts".to_owned(),
+                super::RuntimeFileContext {
+                    path: changed_path.clone(),
+                    physical_path: changed_path,
+                    indexed: true,
+                },
+            ),
+            (
+                "unchanged.ts".to_owned(),
+                super::RuntimeFileContext {
+                    path: unchanged_path.clone(),
+                    physical_path: unchanged_path,
+                    indexed: true,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        let changed = ["changed.ts".to_owned()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let eligible = super::eligible_resolver_owner_keys(&contexts, &changed);
+        assert!(!eligible.contains("changed.ts"));
+        assert!(eligible.contains("unchanged.ts"));
+
+        let resolved_root = fs::canonicalize(&fixture.root).expect("canonical fixture root");
+        let baseline = super::load_resolver_baseline_context(
+            &graph_path,
+            u64::MAX,
+            &eligible,
+            &resolved_root,
+            &fixture.root,
+        )
+        .expect("load only byte-identical resolver owners");
+        let sources = baseline
+            .extractions
+            .iter()
+            .flat_map(|extraction| extraction.nodes.iter())
+            .map(|node| node.source_file.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(sources, std::collections::BTreeSet::from(["unchanged.ts"]));
+    }
+
+    #[test]
+    fn isolated_incremental_sfc_context_matches_full_named_import_resolution() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "component.vue",
+            "<template><main /></template>\n<script lang=\"ts\">import { utility } from './utility'; export const run = utility;</script>\n",
+        );
+        fixture.write("utility.ts", "export const utility = 1;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial SFC scan");
+        let baseline = commit_runtime_baseline(initial, &fixture.root, &output);
+
+        fixture.write(
+            "component.vue",
+            "<template><main class=\"changed\" /></template>\n<script lang=\"ts\">import { utility } from './utility'; export const run = utility;</script>\n",
+        );
+        let incremental = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("incremental SFC scan");
+        let fresh = graphoxide_graph::dedupe_raw_extractions(&incremental.extractions);
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            fresh,
+            &baseline,
+            &incremental.rebuilt_sources,
+            &[],
+            &[],
+            Some(&fixture.root),
+            64 * 1024 * 1024,
+        )
+        .expect("merge SFC delta");
+        let incremental_graph = graphoxide_graph::build_graph_with_options_and_root(
+            &[merged],
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build incremental SFC graph");
+        let full = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("full SFC comparison scan");
+        let full_graph = graphoxide_graph::build_graph_with_options_and_root(
+            &full.extractions,
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build full SFC graph");
+
+        let incremental_edges = js_edge_topology(&incremental_graph, "component.vue");
+        assert_eq!(
+            incremental_edges,
+            js_edge_topology(&full_graph, "component.vue")
+        );
+        assert!(incremental_edges
+            .iter()
+            .any(|(_, _, relation, _)| relation == "imports"));
+    }
+
+    #[test]
+    fn isolated_incremental_deleted_js_target_is_not_loaded_as_baseline_context() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { utility } from './utility'; export const run = utility;\n",
+        );
+        let utility = fixture.write("utility.ts", "export const utility = 1;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial deleted-target baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+
+        fs::remove_file(utility).expect("delete target fixture");
+        fixture.write(
+            "main.ts",
+            "import { utility } from './utility'; export const changed = utility;\n",
+        );
+        let incremental = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("scan with deleted JS target");
+
+        assert_eq!(incremental.changed_sources, 1);
+        assert_eq!(incremental.deleted_sources, 1);
+        let main = incremental
+            .extractions
+            .iter()
+            .find(|extraction| {
+                extraction
+                    .nodes
+                    .iter()
+                    .any(|node| node.source_file == "main.ts")
+            })
+            .expect("changed main extraction");
+        assert!(main.edges.iter().all(|edge| {
+            edge.extra
+                .get("target_file")
+                .and_then(serde_json::Value::as_str)
+                != Some("utility.ts")
+        }));
+    }
+
+    #[test]
+    fn isolated_manifest_without_graph_forces_every_indexed_source_fresh() {
+        let fixture = Fixture::new();
+        fixture.write("main.ts", "export const main = 1;\n");
+        fixture.write("utility.ts", "export const utility = 1;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial manifest-only scan");
+        let indexed = initial.progress.succeeded;
+        initial
+            .pending_manifest
+            .commit()
+            .expect("commit manifest without a graph");
+        assert!(!output.join("graph.json").exists());
+
+        let rebuilt = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("manifest without graph triggers full rebuild");
+        assert_eq!(rebuilt.changed_sources, indexed);
+        assert_eq!(rebuilt.unchanged_sources, 0);
+        assert_eq!(rebuilt.extractions.len(), indexed);
+    }
+
+    #[test]
+    fn isolated_no_change_and_deletion_only_scans_skip_baseline_graph_reads() {
+        let fixture = Fixture::new();
+        fixture.write("main.ts", "export const main = 1;\n");
+        let deleted = fixture.write("deleted.ts", "export const deleted = 1;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial skip-read baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+        fs::write(output.join("graph.json"), b"not valid graph JSON")
+            .expect("poison committed graph read");
+
+        let unchanged = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("no-change scan skips graph read");
+        assert_eq!(unchanged.changed_sources, 0);
+        assert!(unchanged.extractions.is_empty());
+
+        fs::remove_file(deleted).expect("delete unchanged fixture source");
+        let deletion_only = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("deletion-only scan skips graph read");
+        assert_eq!(deletion_only.changed_sources, 0);
+        assert_eq!(deletion_only.deleted_sources, 1);
+        assert!(deletion_only.extractions.is_empty());
+    }
+
+    #[test]
+    fn isolated_low_baseline_budget_fails_without_mutating_committed_artifacts() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { utility } from './utility'; export const run = utility;\n",
+        );
+        fixture.write("utility.ts", "export const utility = 1;\n");
+        fixture.write("notes.md", "baseline padding owner\n");
+        let output = fixture.root.join("graphoxide-out");
+        let initial_runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            initial_runtime,
+        )
+        .expect("initial large baseline scan");
+        let mut padded_graph = commit_runtime_baseline(initial, &fixture.root, &output);
+        for index in 0..1_000 {
+            padded_graph.nodes.push(graphoxide_core::Node {
+                id: format!("budget_padding_{index}"),
+                label: "x".repeat(512),
+                file_type: "text".into(),
+                source_file: "notes.md".into(),
+                source_location: None,
+                community: None,
+                extra: std::collections::BTreeMap::new(),
+            });
+        }
+        let graph_path = output.join("graph.json");
+        let manifest_path = output.join("manifest.json");
+        graphoxide_core::write_graph_atomic(&graph_path, &padded_graph, true)
+            .expect("write padded committed graph");
+        let graph_before = fs::read(&graph_path).expect("read committed graph");
+        let manifest_before = fs::read(&manifest_path).expect("read committed manifest");
+        let low_runtime = runtime_config(8 * 1024 * 1024);
+        assert!(
+            graph_before.len()
+                > low_runtime.memory_budget().cache_and_runs_bytes
+                    / super::RESOLUTION_BASELINE_WORKING_SET_MULTIPLIER
+        );
+
+        fixture.write(
+            "main.ts",
+            "import { utility } from './utility'; export const changed = utility;\n",
+        );
+        let error = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            low_runtime,
+        )
+        .expect_err("oversized baseline must fail closed");
+        assert!(error.to_string().contains("graph"));
+        assert_eq!(fs::read(&graph_path).expect("reread graph"), graph_before);
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread manifest"),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn isolated_runtime_code_only_preloads_tsconfig_metadata_for_resolution() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { shared } from '@shared'; export const run = shared;\n",
+        );
+        fixture.write("shared.ts", "export const shared = 1;\n");
+        fixture.write(
+            "tsconfig.json",
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@shared":["shared"]}}}"#,
+        );
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            // Unicode-safe derived-ID normalization now has an explicit peak
+            // charge; keep this a small-runtime test while admitting that
+            // proven resolver scratch alongside tsconfig metadata.
+            memory_budget_bytes: 5 * 1024 * 1024,
+            io_workers: 2,
+            compute_workers: 2,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &fixture.root.join("graphoxide-out"),
+            true,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("isolated code-only runtime scan");
+        let main = result
+            .extractions
+            .iter()
+            .find(|extraction| {
+                extraction
+                    .nodes
+                    .first()
+                    .is_some_and(|node| node.source_file == "main.ts")
+            })
+            .expect("main extraction");
+        assert!(main.edges.iter().any(|edge| {
+            edge.relation == "imports_from"
+                && edge.true_source() == make_id(&["main"])
+                && edge.true_target() == make_id(&["shared"])
+        }));
+    }
+
+    #[test]
+    fn isolated_runtime_skips_one_bad_source_with_a_warning() {
+        let fixture = Fixture::new();
+        fixture.write("app.py", "def app():\n    return 1\n");
+        fixture.write("tsconfig.json", "{not valid json");
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 2,
+            compute_workers: 2,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+
+        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &fixture.root.join("graphoxide-out"),
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("one malformed source must not abort the isolated scan");
+
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert!(result.warnings[0].contains("tsconfig.json"));
+        assert!(!result.progress.is_complete());
+        assert_eq!(result.progress.succeeded, result.progress.total - 1);
+        assert_eq!(result.changed_sources, 1);
+        assert!(result
+            .extractions
+            .iter()
+            .any(|extraction| extraction.nodes.iter().any(|node| node.label == "app()")));
+        assert!(!result
+            .pending_manifest
+            .entries
+            .contains_key("tsconfig.json"));
+    }
+
+    #[test]
+    fn isolated_runtime_rejects_a_corpus_when_every_source_fails() {
+        let fixture = Fixture::new();
+        fixture.write("tsconfig.json", "{not valid json");
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 1,
+            compute_workers: 1,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+
+        let error = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &fixture.root.join("graphoxide-out"),
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect_err("an entirely failed isolated scan must remain an error");
+        assert!(
+            error.to_string().contains("tsconfig.json"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn isolated_runtime_scan_does_not_persist_write_only_runtime_payloads() {
+        let fixture = Fixture::new();
+        fixture.write("lib.rs", "pub fn indexed() {}\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 2,
+            compute_workers: 2,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("isolated runtime scan");
+        assert!(result.runtime_cache_diagnostics.is_empty());
+        assert_eq!(result.changed_sources, 1);
+        assert!(
+            !output.join("cache/runtime-v1").exists(),
+            "production must not duplicate extraction output into a cache that has no read-through path"
+        );
+
+        let second = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("forced isolated runtime rescan");
+        assert_eq!(
+            second.retained_output_bytes, result.retained_output_bytes,
+            "disabling write-only persistence must not perturb deterministic output admission"
+        );
+        assert!(!output.join("cache/runtime-v1").exists());
+    }
+
+    #[test]
+    fn isolated_runtime_rejects_high_fanout_before_all_outputs_accumulate() {
+        let fixture = Fixture::new();
+        for file in 0..8 {
+            let mut source = String::new();
+            for function in 0..64 {
+                source.push_str(&format!("pub fn f_{file}_{function}() {{}}\n"));
+            }
+            fixture.write(&format!("fanout_{file}.rs"), &source);
+        }
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 128 * 1024,
+            io_workers: 2,
+            compute_workers: 2,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let error = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &fixture.root.join("graphoxide-out"),
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect_err("high-fanout facts must exceed the retained-output partition");
+        assert!(
+            error
+                .to_string()
+                .contains("isolated retained extraction output exceeds"),
+            "unexpected admission error: {error:#}"
+        );
     }
 
     fn definition_labels(extraction: &graphoxide_core::Extraction) -> Vec<&str> {

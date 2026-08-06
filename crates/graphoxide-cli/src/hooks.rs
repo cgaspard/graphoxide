@@ -193,10 +193,18 @@ pub fn find_git_root(path: &Path) -> Option<PathBuf> {
     } else {
         start
     };
-    start
-        .ancestors()
-        .find(|candidate| candidate.join(".git").exists())
-        .map(Path::to_path_buf)
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&start)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?;
+    let root = root.trim();
+    (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
 fn windows_style_path(value: &str) -> bool {

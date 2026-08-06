@@ -6,7 +6,7 @@
 mod site;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use graphoxide_cli::watch as watch_service;
 use std::{fs, io::Write, path::PathBuf};
 
@@ -19,6 +19,94 @@ use std::{fs, io::Write, path::PathBuf};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// Explicit controls for the isolated I/O/CPU indexing runtime.
+///
+/// These flags apply only to the default executor. The legacy executor has no
+/// equivalent resource-isolation contract, so combining it with any override
+/// is rejected instead of silently ignoring the requested limit.
+#[derive(Args, Debug, Clone, Default)]
+struct RuntimeOptions {
+    /// Managed-memory budget for runtime queues, registered parser allowances,
+    /// completed-output admission, caches, and graph staging, in bytes.
+    #[arg(long, value_name = "BYTES")]
+    memory_budget_bytes: Option<usize>,
+    /// Number of dedicated filesystem/cache I/O workers.
+    #[arg(long, value_name = "COUNT")]
+    io_workers: Option<usize>,
+    /// Number of fixed-owner extraction CPU workers.
+    #[arg(long, value_name = "COUNT")]
+    compute_workers: Option<usize>,
+    /// I/O backend selection for the isolated runtime.
+    #[arg(long, value_enum, value_name = "BACKEND")]
+    io_backend: Option<RuntimeIoBackendArg>,
+    /// Maximum byte count requested for one I/O read operation.
+    #[arg(long, value_name = "BYTES")]
+    read_batch_bytes: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RuntimeIoBackendArg {
+    Auto,
+    Threaded,
+    IoUring,
+}
+
+impl RuntimeOptions {
+    fn is_empty(&self) -> bool {
+        self.memory_budget_bytes.is_none()
+            && self.io_workers.is_none()
+            && self.compute_workers.is_none()
+            && self.io_backend.is_none()
+            && self.read_batch_bytes.is_none()
+    }
+
+    fn resolve(&self) -> anyhow::Result<graphoxide_index_runtime::IndexRuntimeConfig> {
+        let mut config = graphoxide_index_runtime::IndexRuntimeConfig::default();
+        if let Some(memory_budget_bytes) = self.memory_budget_bytes {
+            config.memory_budget_bytes = memory_budget_bytes;
+        }
+        if let Some(io_workers) = self.io_workers {
+            config.io_workers = io_workers;
+        }
+        if let Some(compute_workers) = self.compute_workers {
+            config.compute_workers = compute_workers;
+        }
+        if let Some(io_backend) = self.io_backend {
+            config.io_backend = match io_backend {
+                RuntimeIoBackendArg::Auto => graphoxide_index_runtime::IoBackendSelection::Auto,
+                RuntimeIoBackendArg::Threaded => {
+                    graphoxide_index_runtime::IoBackendSelection::Threaded
+                }
+                RuntimeIoBackendArg::IoUring => {
+                    graphoxide_index_runtime::IoBackendSelection::IoUring
+                }
+            };
+        }
+        if let Some(read_batch_bytes) = self.read_batch_bytes {
+            config.read_batch_bytes = read_batch_bytes;
+        }
+        config.validate().map_err(|error| {
+            anyhow::anyhow!("invalid isolated runtime configuration: {error:?}")
+        })?;
+        Ok(config)
+    }
+
+    fn resolve_for_executor(
+        &self,
+        legacy_executor: bool,
+    ) -> anyhow::Result<Option<graphoxide_index_runtime::IndexRuntimeConfig>> {
+        if legacy_executor {
+            if self.is_empty() {
+                return Ok(None);
+            }
+            anyhow::bail!(
+                "isolated runtime options cannot be combined with --legacy-executor; remove the overrides or use the default executor"
+            );
+        }
+        self.resolve().map(Some)
+    }
 }
 
 #[derive(Subcommand)]
@@ -48,6 +136,18 @@ enum Command {
         /// Emit one machine-readable build report to stdout.
         #[arg(long)]
         json: bool,
+        /// Atomically write additive runtime telemetry to this JSON sidecar.
+        ///
+        /// This never changes stdout, including the stable `--json` build
+        /// report. The sidecar is intended for benchmark and runtime analysis.
+        #[arg(long)]
+        runtime_report: Option<PathBuf>,
+        /// Use the retired path-based/Rayon extractor instead of the default
+        /// dedicated I/O and CPU execution runtime.
+        #[arg(long)]
+        legacy_executor: bool,
+        #[command(flatten)]
+        runtime: RuntimeOptions,
         /// Place the managed graphoxide-out directory beneath this root.
         #[arg(long, visible_alias = "output")]
         out: Option<PathBuf>,
@@ -89,6 +189,25 @@ enum Command {
         #[arg(long)]
         no_cluster: bool,
         /// Emit one machine-readable build report to stdout.
+        #[arg(long)]
+        json: bool,
+        /// Atomically write additive runtime telemetry to this JSON sidecar.
+        ///
+        /// This never changes stdout, including the stable `--json` build
+        /// report. The sidecar is intended for benchmark and runtime analysis.
+        #[arg(long)]
+        runtime_report: Option<PathBuf>,
+        /// Use the retired path-based/Rayon update executor instead of the
+        /// default dedicated I/O and CPU execution runtime.
+        #[arg(long)]
+        legacy_executor: bool,
+        #[command(flatten)]
+        runtime: RuntimeOptions,
+    },
+    /// List the bounded structured-format capability contract used by the default executor.
+    #[command(visible_alias = "capabilities")]
+    Formats {
+        /// Emit the complete registry contract as machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
@@ -290,7 +409,24 @@ enum Command {
         path: PathBuf,
     },
     /// Watch a project and rebuild after source changes
-    Watch { path: PathBuf },
+    Watch {
+        path: PathBuf,
+        /// Allow an intentional graph reduction after files or relationships are removed.
+        #[arg(long)]
+        force: bool,
+        /// Preserve the raw, unclustered extraction shape.
+        #[arg(long)]
+        no_cluster: bool,
+        /// Atomically write additive runtime telemetry after each rebuild.
+        #[arg(long)]
+        runtime_report: Option<PathBuf>,
+        /// Use the retired path-based/Rayon rebuild executor instead of the
+        /// default dedicated I/O and CPU execution runtime.
+        #[arg(long)]
+        legacy_executor: bool,
+        #[command(flatten)]
+        runtime: RuntimeOptions,
+    },
     /// Install a coding-agent skill and its project integration
     Install {
         /// Host name, accepted positionally for compatibility
@@ -380,7 +516,15 @@ enum Command {
     HookSupervise { mode: String, root: PathBuf },
     /// Internal: execute a Git-hook rebuild
     #[command(hide = true)]
-    HookRebuild { mode: String, root: PathBuf },
+    HookRebuild {
+        mode: String,
+        root: PathBuf,
+        /// Compatibility escape hatch for the retired path-based hook rebuild.
+        #[arg(long, hide = true)]
+        legacy_executor: bool,
+        #[command(flatten)]
+        runtime: RuntimeOptions,
+    },
     /// Start the MCP server over stdio or Streamable HTTP
     Serve {
         #[arg(default_value = "graphoxide-out/graph.json")]
@@ -490,6 +634,76 @@ fn flatten_extractions(
     flattened
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IncrementalGraphBudget {
+    max_baseline_file_bytes: u64,
+}
+
+/// Reserve baseline headroom while the fresh extraction vector is still live.
+/// The merged-graph limit is derived from the exact byte slice admitted by the
+/// capped reader, so unused baseline headroom remains available to materialization.
+fn incremental_graph_budget_after_retained_output(
+    cache_and_runs_bytes: usize,
+    retained_output_bytes: usize,
+) -> anyhow::Result<IncrementalGraphBudget> {
+    let remaining = cache_and_runs_bytes
+        .checked_sub(retained_output_bytes)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "fresh extraction output retains {retained_output_bytes} bytes, exceeding the {cache_and_runs_bytes}-byte cache/run memory budget"
+            )
+        })?;
+    let max_baseline_file_bytes =
+        remaining / graphoxide_graph::incremental::INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER;
+    anyhow::ensure!(
+        max_baseline_file_bytes > 0,
+        "fresh extraction output retains {retained_output_bytes} bytes of the {cache_and_runs_bytes}-byte cache/run memory budget, leaving insufficient incremental graph headroom"
+    );
+    Ok(IncrementalGraphBudget {
+        max_baseline_file_bytes: u64::try_from(max_baseline_file_bytes).unwrap_or(u64::MAX),
+    })
+}
+
+fn read_incremental_baseline(
+    path: &std::path::Path,
+    cache_and_runs_bytes: usize,
+    budget: IncrementalGraphBudget,
+) -> anyhow::Result<(graphoxide_core::KnowledgeGraph, usize)> {
+    let admitted = graphoxide_core::read_graph_capped(path, budget.max_baseline_file_bytes)
+        .with_context(|| {
+            format!(
+                "load incremental baseline {} within the cache/run memory budget; increase --memory-budget-bytes or request a full rebuild",
+                path.display()
+            )
+        })?;
+    let baseline_working_set = admitted
+        .admitted_bytes
+        .saturating_mul(graphoxide_graph::incremental::INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER);
+    // Fresh facts are a separate admission constraint while the baseline
+    // loads. Do not subtract them a second time here: the graph-stage 8x
+    // multiplier already includes its source-fact representation alongside
+    // normalized facts, graph objects, and indexes.
+    let max_merged_materialized_bytes = cache_and_runs_bytes
+        .checked_sub(baseline_working_set)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "incremental baseline {} requires an estimated {baseline_working_set}-byte working set, exhausting the {cache_and_runs_bytes}-byte cache/run memory budget",
+                path.display()
+            )
+        })?;
+    Ok((admitted.graph, max_merged_materialized_bytes))
+}
+
+fn optional_baseline_leaves_full_graph_headroom(
+    retained_output_bytes: usize,
+    max_materialized_bytes: usize,
+) -> bool {
+    retained_output_bytes
+        .saturating_mul(graphoxide_graph::incremental::INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER)
+        <= max_materialized_bytes
+}
+
 fn stale_local_sources(
     graph: &graphoxide_core::KnowledgeGraph,
     root: &std::path::Path,
@@ -510,17 +724,28 @@ fn stale_local_sources(
         })
         .collect::<std::collections::BTreeSet<_>>();
     let mut stale = std::collections::BTreeSet::new();
-    for source in graph
-        .nodes
-        .iter()
-        .map(|node| node.source_file.as_str())
-        .filter(|source| !source.is_empty())
-    {
-        if source.contains("://") || source.contains(":/") || source.contains(":\\") {
+    for node in &graph.nodes {
+        let source = node.source_file.as_str();
+        if source.is_empty() {
             continue;
         }
-        let source_path = std::path::Path::new(source);
-        let candidate = if source_path.is_absolute() {
+        // Marked member facts are lifecycle-owned by the scanned outer
+        // container. Unmarked facts, including real paths whose spelling
+        // contains `!/`, remain owned by their complete source path.
+        let tracked_source = node
+            .extra
+            .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+            .and_then(|value| value.as_str())
+            .filter(|owner| !owner.is_empty())
+            .unwrap_or(source);
+        if tracked_source.contains("://")
+            || tracked_source.contains(":/")
+            || tracked_source.contains(":\\")
+        {
+            continue;
+        }
+        let source_path = std::path::Path::new(tracked_source);
+        let source_candidate = if source_path.is_absolute() {
             if !source_path.starts_with(&root) {
                 continue;
             }
@@ -534,10 +759,12 @@ fn stale_local_sources(
             }
             root.join(source_path)
         };
-        let normalized = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-        if !live.contains(&normalized) {
-            stale.insert(candidate);
+        let normalized_source =
+            fs::canonicalize(&source_candidate).unwrap_or_else(|_| source_candidate.clone());
+        if live.contains(&normalized_source) {
+            continue;
         }
+        stale.insert(source_candidate);
     }
     stale.into_iter().collect()
 }
@@ -583,10 +810,85 @@ fn emit_build_report(
     }
 }
 
+fn write_runtime_report_if_requested(
+    report: &graphoxide_cli::build_telemetry::BuildTelemetry,
+    runtime_report: Option<&std::path::Path>,
+    runtime: Option<&graphoxide_cli::build_telemetry::IndexRuntimeConfiguration>,
+) -> anyhow::Result<()> {
+    let Some(path) = runtime_report else {
+        return Ok(());
+    };
+    let sidecar = runtime.map_or_else(
+        || graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV1::legacy(report.clone()),
+        |runtime| {
+            graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV1::isolated(
+                report.clone(),
+                runtime.clone(),
+            )
+        },
+    );
+    graphoxide_cli::build_telemetry::write_runtime_report(path, &sidecar)
+        .with_context(|| format!("write runtime telemetry sidecar {}", path.display()))
+}
+
+fn isolated_runtime_configuration(
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    admitted_requests: usize,
+) -> graphoxide_cli::build_telemetry::IndexRuntimeConfiguration {
+    let backend_resolution = config.io_backend.resolve();
+    let io_backend = match backend_resolution.effective {
+        graphoxide_index_runtime::EffectiveIoBackend::Threaded => {
+            graphoxide_cli::build_telemetry::RuntimeIoBackend::Threaded
+        }
+    };
+    let io_backend_request = match backend_resolution.requested {
+        graphoxide_index_runtime::IoBackendSelection::Auto => {
+            graphoxide_cli::build_telemetry::RuntimeIoBackendRequest::Auto
+        }
+        graphoxide_index_runtime::IoBackendSelection::Threaded => {
+            graphoxide_cli::build_telemetry::RuntimeIoBackendRequest::Threaded
+        }
+        graphoxide_index_runtime::IoBackendSelection::IoUring => {
+            graphoxide_cli::build_telemetry::RuntimeIoBackendRequest::IoUring
+        }
+    };
+    let evidence = config.execution_evidence(admitted_requests);
+    graphoxide_cli::build_telemetry::IndexRuntimeConfiguration {
+        execution_model: graphoxide_cli::build_telemetry::RuntimeExecutionModel::Isolated,
+        io_backend,
+        io_backend_request: Some(io_backend_request),
+        io_backend_fallback: backend_resolution.fallback_reason.map(str::to_owned),
+        memory_budget_bytes: Some(config.memory_budget_bytes),
+        io_workers: Some(config.io_workers),
+        compute_workers: Some(config.compute_workers),
+        read_batch_bytes: Some(config.read_batch_bytes),
+        cache_partitions: Some(graphoxide_index_runtime::cache::RUNTIME_CACHE_SHARDS),
+        admission: Some(graphoxide_cli::build_telemetry::RuntimeAdmissionTelemetry {
+            admitted_requests: evidence.admitted_requests,
+            effective_io_workers: evidence.effective_io_workers,
+            effective_compute_workers: evidence.effective_compute_workers,
+            effective_read_batch_bytes: evidence.effective_read_batch_bytes,
+            io_pool_bytes_per_worker: evidence.io_pool_bytes_per_worker,
+            io_buffers_bytes: evidence.io_buffers_bytes,
+            ready_inputs_bytes: evidence.ready_inputs_bytes,
+            cpu_arenas_bytes: evidence.cpu_arenas_bytes,
+            cache_and_runs_bytes: evidence.cache_and_runs_bytes,
+            query_reserve_bytes: evidence.query_reserve_bytes,
+            emergency_reserve_bytes: evidence.emergency_reserve_bytes,
+        }),
+    }
+}
+
+fn cluster_with_resource_gate(graph: &mut graphoxide_core::KnowledgeGraph) -> anyhow::Result<()> {
+    graphoxide_graph::ClusterResourceLimits::default().check(graph)?;
+    graphoxide_graph::cluster(graph)
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.command {
+        Command::Formats { json } => write_output(&format_capability_output(json)?),
         Command::Extract {
             path,
             code_only,
@@ -596,6 +898,9 @@ fn main() -> anyhow::Result<()> {
             allow_partial,
             timing,
             json,
+            runtime_report,
+            legacy_executor,
+            runtime,
             out,
             exclude,
             no_gitignore,
@@ -615,7 +920,11 @@ fn main() -> anyhow::Result<()> {
             let incremental_mode =
                 !effective_force && output.is_file() && (manifest_path.is_file() || code_only);
             if incremental_mode && !json {
-                write_output("Incremental scan: reusing unchanged extraction cache entries.")?;
+                write_output(if legacy_executor {
+                    "Incremental scan: reusing unchanged extraction cache entries."
+                } else {
+                    "Incremental scan: isolating I/O and extracting only content-hash changes."
+                })?;
             }
             let mode = if incremental_mode {
                 graphoxide_cli::build_telemetry::BuildMode::Incremental
@@ -635,23 +944,45 @@ fn main() -> anyhow::Result<()> {
                 exclude.clone()
             };
             let honor_gitignore = !no_gitignore && persisted.honor_gitignore;
+            let runtime_config = runtime.resolve_for_executor(legacy_executor)?;
+            let graph_memory_budget = runtime_config.map_or(
+                graphoxide_graph::DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
+                |config| config.memory_budget().cache_and_runs_bytes,
+            );
             let scan_started = std::time::Instant::now();
-            let scan = graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
-                &path,
-                effective_force,
-                &output_directory,
-                code_only,
-                &graphoxide_extract::detect::DetectOptions {
-                    extra_excludes: effective_excludes,
-                    output_dir: Some(output_directory.clone()),
-                    honor_gitignore,
-                    ..Default::default()
-                },
-            )?;
+            let detect_options = graphoxide_extract::detect::DetectOptions {
+                extra_excludes: effective_excludes,
+                output_dir: Some(output_directory.clone()),
+                honor_gitignore,
+                ..Default::default()
+            };
+            let scan = if let Some(runtime_config) = runtime_config {
+                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+                    &path,
+                    effective_force,
+                    &output_directory,
+                    code_only,
+                    &detect_options,
+                    runtime_config,
+                )?
+            } else {
+                graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
+                    &path,
+                    effective_force,
+                    &output_directory,
+                    code_only,
+                    &detect_options,
+                )?
+            };
+            let runtime_telemetry = runtime_config
+                .map(|config| isolated_runtime_configuration(config, scan.detection.total_files));
             telemetry.stages_ms.scan_extract =
                 graphoxide_cli::build_telemetry::elapsed_millis(scan_started);
             telemetry.files.detected = scan.detection.total_files;
-            telemetry.files.processed = scan.progress.succeeded;
+            telemetry.files.processed = scan.changed_sources;
+            telemetry.files.changed = scan.changed_sources;
+            telemetry.files.unchanged = scan.unchanged_sources;
+            telemetry.files.deleted = scan.deleted_sources;
             telemetry.files.unclassified = scan.detection.unclassified.len();
             telemetry.files.sensitive = scan.detection.skipped_sensitive.len();
             telemetry.warnings.extend(scan.detection.warning.clone());
@@ -686,13 +1017,59 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("skipped as potentially sensitive: {skipped}");
             }
             let mut extractions = scan.extractions;
+            let rebuilt_sources = scan.rebuilt_sources;
             let pending_manifest = scan.pending_manifest;
+            let mut rebuilt_provider_sources = Vec::new();
             if let Some(dsn) = postgres.as_deref() {
-                extractions.push(graphoxide_extract::pg_introspect::introspect_postgres(
+                let extraction = graphoxide_extract::pg_introspect::introspect_postgres(
                     (!dsn.is_empty()).then_some(dsn),
-                )?);
+                )?;
+                if let Some(source) = extraction
+                    .nodes
+                    .first()
+                    .map(|node| node.source_file.clone())
+                {
+                    rebuilt_provider_sources.push(source);
+                }
+                extractions.push(extraction);
             }
-            let previous = graphoxide_core::read_graph(&output).ok();
+            rebuilt_provider_sources.sort();
+            rebuilt_provider_sources.dedup();
+            let retained_output_bytes =
+                graphoxide_extract::extractions_retained_bytes(&extractions)?;
+            debug_assert!(retained_output_bytes >= scan.retained_output_bytes);
+            let (previous, graph_materialization_budget) = if incremental_mode {
+                let budget = incremental_graph_budget_after_retained_output(
+                    graph_memory_budget,
+                    retained_output_bytes,
+                )?;
+                let (previous, materialization_budget) =
+                    read_incremental_baseline(&output, graph_memory_budget, budget)?;
+                (Some(previous), materialization_budget)
+            } else if !no_cluster && output.is_file() {
+                // A forced/full rebuild may recover from an unreadable or
+                // over-budget baseline; community remapping is best-effort in
+                // that mode and never weakens the new build's own bound.
+                incremental_graph_budget_after_retained_output(
+                    graph_memory_budget,
+                    retained_output_bytes,
+                )
+                .ok()
+                .and_then(|budget| {
+                    read_incremental_baseline(&output, graph_memory_budget, budget).ok()
+                })
+                .filter(|(_, materialization_budget)| {
+                    optional_baseline_leaves_full_graph_headroom(
+                        retained_output_bytes,
+                        *materialization_budget,
+                    )
+                })
+                .map_or((None, graph_memory_budget), |(previous, budget)| {
+                    (Some(previous), budget)
+                })
+            } else {
+                (None, graph_memory_budget)
+            };
             let live_sources = scan
                 .detection
                 .files
@@ -709,16 +1086,26 @@ fn main() -> anyhow::Result<()> {
                 graphoxide_graph::disambiguate_file_labels_in_extractions(&mut extractions);
                 if incremental_mode {
                     let fresh = flatten_extractions(extractions);
-                    extractions = vec![graphoxide_graph::merge_raw_extraction(
-                        &fresh,
-                        &output,
+                    let baseline = previous
+                        .as_ref()
+                        .expect("incremental mode loads a required baseline");
+                    extractions = vec![graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+                        fresh,
+                        baseline,
+                        &rebuilt_sources,
+                        &rebuilt_provider_sources,
                         &prune_sources,
                         Some(&path),
+                        graph_materialization_budget,
                     )?];
                 }
                 extractions = vec![graphoxide_graph::dedupe_raw_extractions(&extractions)];
                 telemetry.stages_ms.build =
                     graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+                // An incomplete-build shrink check may read the committed
+                // graph again. Release the inspected baseline first so that
+                // check cannot create a second retained whole-graph copy.
+                drop(previous);
                 let write_started = std::time::Instant::now();
                 let outcome = graphoxide_cli::build_guard::commit_build(
                     &output,
@@ -750,20 +1137,55 @@ fn main() -> anyhow::Result<()> {
                     output.display(),
                     graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
                 );
+                write_runtime_report_if_requested(
+                    &telemetry,
+                    runtime_report.as_deref(),
+                    runtime_telemetry.as_ref(),
+                )?;
                 return emit_build_report(&telemetry, json, timing, &human);
             }
-            let mut graph = if incremental_mode {
-                graphoxide_graph::build_merge(&extractions, &output, &prune_sources, Some(&path))?
+            let (staged_extractions, build_options, normalization_root) = if incremental_mode {
+                let fresh = flatten_extractions(extractions);
+                let baseline = previous
+                    .as_ref()
+                    .expect("incremental mode loads a required baseline");
+                let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+                    fresh,
+                    baseline,
+                    &rebuilt_sources,
+                    &rebuilt_provider_sources,
+                    &prune_sources,
+                    Some(&path),
+                    graph_materialization_budget,
+                )?;
+                (
+                    vec![merged],
+                    graphoxide_graph::BuildOptions {
+                        directed: previous.as_ref().is_some_and(|graph| graph.directed),
+                        ..graphoxide_graph::BuildOptions::default()
+                    },
+                    Some(path.as_path()),
+                )
             } else {
-                graphoxide_graph::build_graph(&extractions)?
+                (extractions, graphoxide_graph::BuildOptions::default(), None)
             };
+            let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root(
+                staged_extractions,
+                &output_directory,
+                build_options,
+                graph_materialization_budget,
+                normalization_root,
+            )?
+            .into_parts()
+            .0;
             telemetry.stages_ms.build =
                 graphoxide_cli::build_telemetry::elapsed_millis(build_started);
             let cluster_started = std::time::Instant::now();
-            graphoxide_graph::cluster(&mut graph)?;
+            cluster_with_resource_gate(&mut graph)?;
             if let Some(previous) = &previous {
                 graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
             }
+            drop(previous);
             telemetry.stages_ms.cluster =
                 graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
             let write_started = std::time::Instant::now();
@@ -796,6 +1218,11 @@ fn main() -> anyhow::Result<()> {
                 output.display(),
                 graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
             );
+            write_runtime_report_if_requested(
+                &telemetry,
+                runtime_report.as_deref(),
+                runtime_telemetry.as_ref(),
+            )?;
             emit_build_report(&telemetry, json, timing, &human)
         }
         Command::Audit {
@@ -977,7 +1404,18 @@ fn main() -> anyhow::Result<()> {
             force,
             no_cluster,
             json,
-        } => rebuild(&path, no_cluster, force, json),
+            runtime_report,
+            legacy_executor,
+            runtime,
+        } => rebuild(
+            &path,
+            no_cluster,
+            force,
+            json,
+            runtime_report.as_deref(),
+            legacy_executor,
+            runtime,
+        ),
         Command::ClusterOnly {
             path,
             graph: graph_override,
@@ -1029,7 +1467,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             remove_placeholder_community_names(&mut previous);
-            graphoxide_graph::cluster(&mut graph)?;
+            cluster_with_resource_gate(&mut graph)?;
             graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, &previous);
             graphoxide_core::write_graph_atomic(&graph_path, &graph, true)?;
             write_cluster_sidecars(&sidecar_directory, &graph, !no_label)?;
@@ -1142,7 +1580,21 @@ fn main() -> anyhow::Result<()> {
             output,
         } => merge_driver(&base, &ours, &theirs, output.as_deref()),
         Command::CheckUpdate { path } => check_update(&path),
-        Command::Watch { path } => watch(path),
+        Command::Watch {
+            path,
+            force,
+            no_cluster,
+            runtime_report,
+            legacy_executor,
+            runtime,
+        } => watch(
+            path,
+            force,
+            no_cluster,
+            runtime_report.as_deref(),
+            legacy_executor,
+            runtime,
+        ),
         Command::Install {
             platform,
             platform_flag,
@@ -1177,7 +1629,12 @@ fn main() -> anyhow::Result<()> {
         Command::HookSupervise { mode, root } => {
             graphoxide_cli::hooks::supervise(mode.parse()?, &root)
         }
-        Command::HookRebuild { mode, root } => graphoxide_cli::hooks::rebuild(mode.parse()?, &root),
+        Command::HookRebuild {
+            mode,
+            root,
+            legacy_executor,
+            runtime,
+        } => rebuild_hook(mode.parse()?, &root, legacy_executor, runtime),
         Command::Serve {
             graph,
             transport,
@@ -1735,8 +2192,16 @@ fn render_audit_report(report: &AuditReport) -> anyhow::Result<String> {
     Ok(output.trim_end().to_owned())
 }
 
-fn watch(path: PathBuf) -> anyhow::Result<()> {
+fn watch(
+    path: PathBuf,
+    force: bool,
+    no_cluster: bool,
+    runtime_report: Option<&std::path::Path>,
+    legacy_executor: bool,
+    runtime: RuntimeOptions,
+) -> anyhow::Result<()> {
     use notify::{RecursiveMode, Watcher};
+    let runtime_config = runtime.resolve_for_executor(legacy_executor)?;
     let output_directory = managed_output_directory(&path, None);
     watch_service::validate_watch_output_directory(&path, &output_directory)?;
     let filter = watch_service::WatchEventFilter::with_output_directory(
@@ -1805,11 +2270,14 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
             let options = watch_service::RebuildOptions {
                 changed_paths: Some(code_changes),
                 output_directory: Some(output_directory.clone()),
+                force,
+                no_cluster,
                 acquire_lock: true,
                 block_on_lock: false,
                 ..Default::default()
             };
-            match watch_service::rebuild_project(&path, &options) {
+            let rebuild = rebuild_watch_project(&path, &options, runtime_config, runtime_report);
+            match rebuild {
                 Ok(result) => {
                     for warning in result.warnings {
                         eprintln!("[graphoxide watch] {warning}");
@@ -1827,6 +2295,45 @@ fn watch(path: PathBuf) -> anyhow::Result<()> {
         }) {
             watch_service::notify_only_in(&output_directory)?;
         }
+    }
+}
+
+/// Execute one admitted watch rebuild. The filesystem-notification loop above
+/// is intentionally thin; this boundary keeps the durable lock/journal state
+/// in `watch` while making the default isolated executor directly testable.
+fn rebuild_watch_project(
+    path: &std::path::Path,
+    options: &watch_service::RebuildOptions,
+    runtime_config: Option<graphoxide_index_runtime::IndexRuntimeConfig>,
+    runtime_report: Option<&std::path::Path>,
+) -> anyhow::Result<watch_service::RebuildResult> {
+    if let Some(runtime_config) = runtime_config {
+        watch_service::rebuild_project_with_executor(path, options, |request| {
+            let outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
+                path: &request.watch_root,
+                output_directory: &request.output_directory,
+                marker_value: &request.marker_value,
+                no_cluster: request.no_cluster,
+                force: request.force,
+                scope: request.scope,
+                pass: request.pass,
+                runtime_config,
+            })?;
+            write_runtime_report_if_requested(
+                &outcome.telemetry,
+                runtime_report,
+                Some(&outcome.runtime_telemetry),
+            )?;
+            Ok(outcome.result)
+        })
+    } else {
+        let result = watch_service::rebuild_project(path, options)?;
+        write_runtime_report_if_requested(
+            &legacy_rebuild_telemetry(&result),
+            runtime_report,
+            None,
+        )?;
+        Ok(result)
     }
 }
 
@@ -2419,6 +2926,60 @@ fn hook(command: HookCommand) -> anyhow::Result<()> {
     write_output(&message)
 }
 
+/// Execute the supervised hook rebuild through the same isolated watch
+/// dispatcher used by the interactive watcher. The hidden command defaults to
+/// isolation as well; the retired executor remains reachable only through its
+/// explicit compatibility flag.
+fn rebuild_hook(
+    mode: graphoxide_cli::hooks::HookMode,
+    root: &std::path::Path,
+    legacy_executor: bool,
+    runtime: RuntimeOptions,
+) -> anyhow::Result<()> {
+    let force = ["GRAPHOXIDE_FORCE", "GRAPHIFY_FORCE"]
+        .into_iter()
+        .any(|name| {
+            std::env::var(name).is_ok_and(|value| {
+                matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+            })
+        });
+    let changed_paths = match mode {
+        graphoxide_cli::hooks::HookMode::PostCommit => Some(
+            std::env::var("GRAPHOXIDE_CHANGED")
+                .or_else(|_| std::env::var("GRAPHIFY_CHANGED"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>(),
+        ),
+        graphoxide_cli::hooks::HookMode::PostCheckout => None,
+    };
+    if changed_paths.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(());
+    }
+    let runtime_config = runtime.resolve_for_executor(legacy_executor)?;
+    let result = rebuild_watch_project(
+        root,
+        &watch_service::RebuildOptions {
+            changed_paths,
+            output_directory: watch_service::output_directory_from_env(root),
+            force,
+            acquire_lock: true,
+            block_on_lock: false,
+            ..Default::default()
+        },
+        runtime_config,
+        None,
+    )?;
+    for warning in result.warnings {
+        eprintln!("[graphoxide hook] {warning}");
+    }
+    println!("[graphoxide hook] rebuild status: {:?}", result.status);
+    Ok(())
+}
+
 fn hook_guard(mode: Option<&str>, strict: bool) -> anyhow::Result<()> {
     use std::io::Read;
     use std::io::Write as _;
@@ -2452,6 +3013,50 @@ fn rebuild(
     no_cluster: bool,
     force: bool,
     json: bool,
+    runtime_report: Option<&std::path::Path>,
+    legacy_executor: bool,
+    runtime: RuntimeOptions,
+) -> anyhow::Result<()> {
+    rebuild_with_executor(
+        path,
+        no_cluster,
+        force,
+        json,
+        runtime_report,
+        legacy_executor,
+        runtime,
+    )
+}
+
+fn rebuild_with_executor(
+    path: &std::path::Path,
+    no_cluster: bool,
+    force: bool,
+    json: bool,
+    runtime_report: Option<&std::path::Path>,
+    legacy_executor: bool,
+    runtime: RuntimeOptions,
+) -> anyhow::Result<()> {
+    if legacy_executor {
+        runtime.resolve_for_executor(true)?;
+        return rebuild_legacy(path, no_cluster, force, json, runtime_report);
+    }
+    rebuild_isolated(
+        path,
+        no_cluster,
+        force,
+        json,
+        runtime_report,
+        runtime.resolve()?,
+    )
+}
+
+fn rebuild_legacy(
+    path: &std::path::Path,
+    no_cluster: bool,
+    force: bool,
+    json: bool,
+    runtime_report: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let result = watch_service::rebuild_project(
         path,
@@ -2468,6 +3073,44 @@ fn rebuild(
     for warning in &result.warnings {
         eprintln!("[graphoxide update] {warning}");
     }
+    let telemetry = legacy_rebuild_telemetry(&result);
+    let elapsed = graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms);
+    let human = match result.status {
+        watch_service::RebuildStatus::Rebuilt => {
+            format!(
+                "Wrote {} nodes and {} edges to {} in {elapsed}",
+                telemetry.graph.nodes,
+                telemetry.graph.edges,
+                result.graph_path.display()
+            )
+        }
+        watch_service::RebuildStatus::Unchanged => {
+            format!("No code-graph topology changes detected in {elapsed}; outputs left untouched.")
+        }
+        watch_service::RebuildStatus::NoTrackedChanges => {
+            format!("No tracked code files in change set; nothing to rebuild ({elapsed}).")
+        }
+        watch_service::RebuildStatus::Queued => {
+            format!("A rebuild is already running; changes were queued in {elapsed}.")
+        }
+        watch_service::RebuildStatus::RefusedShrink => String::new(),
+    };
+    write_runtime_report_if_requested(&telemetry, runtime_report, None)?;
+    if result.status == watch_service::RebuildStatus::RefusedShrink {
+        if json {
+            emit_build_report(&telemetry, true, false, "")?;
+        }
+        anyhow::bail!(
+            "refusing to overwrite a smaller graph because the loss is not explained by rebuilt or deleted sources; pass --force after verifying the reduction"
+        )
+    } else {
+        emit_build_report(&telemetry, json, false, &human)
+    }
+}
+
+fn legacy_rebuild_telemetry(
+    result: &watch_service::RebuildResult,
+) -> graphoxide_cli::build_telemetry::BuildTelemetry {
     let mode = match result.scope {
         watch_service::RebuildScope::Full => graphoxide_cli::build_telemetry::BuildMode::Full,
         watch_service::RebuildScope::Incremental => {
@@ -2513,44 +3156,408 @@ fn rebuild(
     telemetry.graph.clustered = result.clustered;
     telemetry.passes = result.passes;
     telemetry.warnings = result.warnings.clone();
-    if result.status != watch_service::RebuildStatus::RefusedShrink {
-        if let Ok(graph) = graphoxide_core::read_graph(&result.graph_path) {
-            telemetry.graph.nodes = graph.nodes.len();
-            telemetry.graph.edges = graph.links.len();
-            telemetry.graph.clustered = graph.nodes.iter().any(|node| node.community.is_some());
-        }
+    if result.status != watch_service::RebuildStatus::RefusedShrink
+        && let Ok(graph) = graphoxide_core::read_graph(&result.graph_path)
+    {
+        telemetry.graph.nodes = graph.nodes.len();
+        telemetry.graph.edges = graph.links.len();
+        telemetry.graph.clustered = graph.nodes.iter().any(|node| node.community.is_some());
     }
-    let elapsed = graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms);
-    let human = match result.status {
-        watch_service::RebuildStatus::Rebuilt => {
-            format!(
-                "Wrote {} nodes and {} edges to {} in {elapsed}",
-                telemetry.graph.nodes,
-                telemetry.graph.edges,
-                result.graph_path.display()
-            )
-        }
-        watch_service::RebuildStatus::Unchanged => {
-            format!("No code-graph topology changes detected in {elapsed}; outputs left untouched.")
-        }
-        watch_service::RebuildStatus::NoTrackedChanges => {
-            format!("No tracked code files in change set; nothing to rebuild ({elapsed}).")
-        }
-        watch_service::RebuildStatus::Queued => {
-            format!("A rebuild is already running; changes were queued in {elapsed}.")
-        }
-        watch_service::RebuildStatus::RefusedShrink => String::new(),
-    };
-    if result.status == watch_service::RebuildStatus::RefusedShrink {
+    telemetry
+}
+
+fn rebuild_isolated(
+    path: &std::path::Path,
+    no_cluster: bool,
+    force: bool,
+    json: bool,
+    runtime_report: Option<&std::path::Path>,
+    runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
+) -> anyhow::Result<()> {
+    let output_directory = managed_output_directory(path, None);
+    let outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
+        path,
+        output_directory: &output_directory,
+        marker_value: &path.to_string_lossy(),
+        no_cluster,
+        force,
+        scope: watch_service::RebuildScope::Incremental,
+        pass: 1,
+        runtime_config,
+    })?;
+    write_runtime_report_if_requested(
+        &outcome.telemetry,
+        runtime_report,
+        Some(&outcome.runtime_telemetry),
+    )?;
+    if outcome.result.status == watch_service::RebuildStatus::RefusedShrink {
         if json {
-            emit_build_report(&telemetry, true, false, "")?;
+            emit_build_report(&outcome.telemetry, true, false, "")?;
         }
         anyhow::bail!(
             "refusing to overwrite a smaller graph because the loss is not explained by rebuilt or deleted sources; pass --force after verifying the reduction"
+        );
+    }
+    let human = match outcome.result.status {
+        watch_service::RebuildStatus::Rebuilt => format!(
+            "Wrote {} nodes and {} edges to {} in {}",
+            outcome.result.stats.nodes,
+            outcome.result.stats.edges,
+            outcome.result.graph_path.display(),
+            graphoxide_cli::build_telemetry::format_elapsed(outcome.telemetry.elapsed_ms)
+        ),
+        watch_service::RebuildStatus::Unchanged => format!(
+            "No code-graph topology changes detected in {}; outputs left untouched.",
+            graphoxide_cli::build_telemetry::format_elapsed(outcome.telemetry.elapsed_ms)
+        ),
+        watch_service::RebuildStatus::NoTrackedChanges => format!(
+            "No tracked code files in change set; nothing to rebuild ({}).",
+            graphoxide_cli::build_telemetry::format_elapsed(outcome.telemetry.elapsed_ms)
+        ),
+        watch_service::RebuildStatus::Queued => format!(
+            "A rebuild is already running; changes were queued in {}.",
+            graphoxide_cli::build_telemetry::format_elapsed(outcome.telemetry.elapsed_ms)
+        ),
+        watch_service::RebuildStatus::RefusedShrink => unreachable!("handled above"),
+    };
+    emit_build_report(&outcome.telemetry, json, false, &human)
+}
+
+struct IsolatedRebuildOutcome {
+    result: watch_service::RebuildResult,
+    telemetry: graphoxide_cli::build_telemetry::BuildTelemetry,
+    runtime_telemetry: graphoxide_cli::build_telemetry::IndexRuntimeConfiguration,
+}
+
+struct IsolatedRebuildRequest<'a> {
+    path: &'a std::path::Path,
+    output_directory: &'a std::path::Path,
+    marker_value: &'a str,
+    no_cluster: bool,
+    force: bool,
+    scope: watch_service::RebuildScope,
+    pass: usize,
+    runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
+}
+
+fn telemetry_status(
+    status: watch_service::RebuildStatus,
+) -> graphoxide_cli::build_telemetry::BuildStatus {
+    match status {
+        watch_service::RebuildStatus::Rebuilt => {
+            graphoxide_cli::build_telemetry::BuildStatus::Rebuilt
+        }
+        watch_service::RebuildStatus::Unchanged => {
+            graphoxide_cli::build_telemetry::BuildStatus::Unchanged
+        }
+        watch_service::RebuildStatus::NoTrackedChanges => {
+            graphoxide_cli::build_telemetry::BuildStatus::NoTrackedChanges
+        }
+        watch_service::RebuildStatus::Queued => {
+            graphoxide_cli::build_telemetry::BuildStatus::Queued
+        }
+        watch_service::RebuildStatus::RefusedShrink => {
+            graphoxide_cli::build_telemetry::BuildStatus::RefusedShrink
+        }
+    }
+}
+
+fn write_watch_markers(
+    output_directory: &std::path::Path,
+    marker_value: &str,
+) -> anyhow::Result<()> {
+    for marker in [
+        watch_service::ROOT_MARKER,
+        watch_service::COMPAT_ROOT_MARKER,
+    ] {
+        graphoxide_core::write_text_atomic(output_directory.join(marker), marker_value)?;
+    }
+    Ok(())
+}
+
+fn rebuild_isolated_pass(
+    request: IsolatedRebuildRequest<'_>,
+) -> anyhow::Result<IsolatedRebuildOutcome> {
+    let IsolatedRebuildRequest {
+        path,
+        output_directory,
+        marker_value,
+        no_cluster,
+        force,
+        scope,
+        pass,
+        runtime_config,
+    } = request;
+    let started = std::time::Instant::now();
+    let output = output_directory.join("graph.json");
+    let manifest_path = output_directory.join("manifest.json");
+    let persisted = watch_service::read_build_config(output_directory);
+    let scan_started = std::time::Instant::now();
+    let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+        path,
+        force,
+        output_directory,
+        false,
+        &graphoxide_extract::detect::DetectOptions {
+            output_dir: Some(output_directory.to_path_buf()),
+            extra_excludes: persisted.excludes,
+            honor_gitignore: persisted.honor_gitignore,
+            ..Default::default()
+        },
+        runtime_config,
+    )?;
+    if !scan.detection.walk_errors.is_empty() {
+        let preview = scan
+            .detection
+            .walk_errors
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let remaining = scan.detection.walk_errors.len().saturating_sub(5);
+        let suffix = (remaining > 0).then(|| format!("; and {remaining} more"));
+        anyhow::bail!(
+            "refusing to rebuild from an incomplete filesystem scan ({} walk error(s)): {preview}{}",
+            scan.detection.walk_errors.len(),
+            suffix.unwrap_or_default()
+        );
+    }
+    let runtime_telemetry =
+        isolated_runtime_configuration(runtime_config, scan.detection.total_files);
+    let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
+        graphoxide_cli::build_telemetry::BuildOperation::Update,
+        match scope {
+            watch_service::RebuildScope::Full => graphoxide_cli::build_telemetry::BuildMode::Full,
+            watch_service::RebuildScope::Incremental => {
+                graphoxide_cli::build_telemetry::BuildMode::Incremental
+            }
+        },
+        graphoxide_cli::build_telemetry::BuildStatus::Rebuilt,
+        output.clone(),
+    );
+    telemetry.stages_ms.extract = graphoxide_cli::build_telemetry::elapsed_millis(scan_started);
+    telemetry.files.detected = scan.detection.total_files;
+    telemetry.files.processed = scan.changed_sources;
+    telemetry.files.changed = scan.changed_sources;
+    telemetry.files.unchanged = scan.unchanged_sources;
+    telemetry.files.deleted = scan.deleted_sources;
+    telemetry.files.unclassified = scan.detection.unclassified.len();
+    telemetry.files.sensitive = scan.detection.skipped_sensitive.len();
+    telemetry.warnings.extend(scan.detection.warning.clone());
+    telemetry
+        .warnings
+        .extend(scan.detection.walk_errors.iter().cloned());
+    telemetry
+        .warnings
+        .extend(scan.runtime_cache_diagnostics.iter().cloned());
+    telemetry.warnings.extend(scan.warnings.iter().cloned());
+    let live_sources = scan
+        .detection
+        .files
+        .values()
+        .flatten()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let scan_retained_output_bytes = scan.retained_output_bytes;
+    let extractions = scan.extractions;
+    let rebuilt_sources = scan.rebuilt_sources;
+    let pending_manifest = scan.pending_manifest;
+    let mut result = watch_service::RebuildResult {
+        status: watch_service::RebuildStatus::Rebuilt,
+        scope,
+        graph_path: output.clone(),
+        manifest_path,
+        passes: pass,
+        clustered: !no_cluster,
+        warnings: telemetry.warnings.clone(),
+        stats: watch_service::RebuildStats {
+            detected_files: telemetry.files.detected,
+            processed_files: telemetry.files.processed,
+            changed_files: telemetry.files.changed,
+            unchanged_files: telemetry.files.unchanged,
+            deleted_files: telemetry.files.deleted,
+            ..Default::default()
+        },
+        timings: watch_service::RebuildTimings::default(),
+    };
+    let finish = |mut result: watch_service::RebuildResult,
+                  mut telemetry: graphoxide_cli::build_telemetry::BuildTelemetry,
+                  runtime_telemetry: graphoxide_cli::build_telemetry::IndexRuntimeConfiguration|
+     -> IsolatedRebuildOutcome {
+        telemetry.status = telemetry_status(result.status);
+        telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(started);
+        result.timings.extract_ms = telemetry.stages_ms.extract;
+        result.timings.build_ms = telemetry.stages_ms.build;
+        result.timings.cluster_ms = telemetry.stages_ms.cluster;
+        result.timings.write_ms = telemetry.stages_ms.write;
+        result.timings.total_ms = telemetry.elapsed_ms;
+        IsolatedRebuildOutcome {
+            result,
+            telemetry,
+            runtime_telemetry,
+        }
+    };
+    if telemetry.files.changed == 0 && telemetry.files.deleted == 0 && output.is_file() {
+        pending_manifest.commit()?;
+        watch_service::clear_needs_update(output_directory)?;
+        result.status = watch_service::RebuildStatus::Unchanged;
+        return Ok(finish(result, telemetry, runtime_telemetry));
+    }
+    if scan.progress.total == 0 && !output.is_file() {
+        result.status = watch_service::RebuildStatus::NoTrackedChanges;
+        result.clustered = false;
+        return Ok(finish(result, telemetry, runtime_telemetry));
+    }
+    let build_progress = graphoxide_cli::build_guard::BuildProgress::new(
+        scan.progress.total,
+        scan.progress.succeeded,
+    )?
+    .ensure_any_success("isolated local extraction")?;
+    let graph_memory_budget = runtime_config.memory_budget().cache_and_runs_bytes;
+    let retained_output_bytes = graphoxide_extract::extractions_retained_bytes(&extractions)?;
+    debug_assert_eq!(retained_output_bytes, scan_retained_output_bytes);
+    let (previous, graph_materialization_budget) = if output.is_file() {
+        let budget = incremental_graph_budget_after_retained_output(
+            graph_memory_budget,
+            retained_output_bytes,
+        )?;
+        let (previous, materialization_budget) =
+            read_incremental_baseline(&output, graph_memory_budget, budget)?;
+        (Some(previous), materialization_budget)
+    } else {
+        (None, graph_memory_budget)
+    };
+    let prune_sources = previous
+        .as_ref()
+        .map(|graph| stale_local_sources(graph, path, &live_sources))
+        .unwrap_or_default();
+    let build_started = std::time::Instant::now();
+    let (staged_extractions, build_options, normalization_root) = if let Some(baseline) = &previous
+    {
+        let fresh = flatten_extractions(extractions);
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            fresh,
+            baseline,
+            &rebuilt_sources,
+            &[],
+            &prune_sources,
+            Some(path),
+            graph_materialization_budget,
+        )?;
+        (
+            vec![merged],
+            graphoxide_graph::BuildOptions {
+                directed: previous.as_ref().is_some_and(|graph| graph.directed),
+                ..graphoxide_graph::BuildOptions::default()
+            },
+            Some(path),
         )
     } else {
-        emit_build_report(&telemetry, json, false, &human)
+        (extractions, graphoxide_graph::BuildOptions::default(), None)
+    };
+    let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root(
+        staged_extractions,
+        output_directory,
+        build_options,
+        graph_materialization_budget,
+        normalization_root,
+    )?
+    .into_parts()
+    .0;
+    if no_cluster {
+        for node in &mut graph.nodes {
+            node.community = None;
+        }
+        telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+        result.stats.nodes = graph.nodes.len();
+        result.stats.edges = graph.links.len();
+        if previous
+            .as_ref()
+            .is_some_and(|existing| watch_service::same_topology(existing, &graph))
+        {
+            let write_started = std::time::Instant::now();
+            pending_manifest.commit()?;
+            watch_service::clear_needs_update(output_directory)?;
+            telemetry.stages_ms.write =
+                graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+            result.status = watch_service::RebuildStatus::Unchanged;
+            result.clustered = false;
+            return Ok(finish(result, telemetry, runtime_telemetry));
+        }
+        drop(previous);
+        let write_started = std::time::Instant::now();
+        let outcome = graphoxide_cli::build_guard::commit_build(
+            &output,
+            graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
+            build_progress,
+            force,
+            || {
+                write_watch_markers(output_directory, marker_value)?;
+                pending_manifest.commit()
+            },
+        )?;
+        if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+            telemetry.stages_ms.write =
+                graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+            result.status = watch_service::RebuildStatus::RefusedShrink;
+            result.clustered = false;
+            return Ok(finish(result, telemetry, runtime_telemetry));
+        }
+        telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+        telemetry.graph.nodes = result.stats.nodes;
+        telemetry.graph.edges = result.stats.edges;
+        save_build_config_in(output_directory, true, None, None)?;
+        watch_service::clear_needs_update(output_directory)?;
+        result.clustered = false;
+        return Ok(finish(result, telemetry, runtime_telemetry));
     }
+    telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+    result.stats.nodes = graph.nodes.len();
+    result.stats.edges = graph.links.len();
+    if previous
+        .as_ref()
+        .is_some_and(|existing| watch_service::same_topology(existing, &graph))
+    {
+        let write_started = std::time::Instant::now();
+        pending_manifest.commit()?;
+        watch_service::clear_needs_update(output_directory)?;
+        telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+        result.status = watch_service::RebuildStatus::Unchanged;
+        result.clustered = false;
+        return Ok(finish(result, telemetry, runtime_telemetry));
+    }
+    let cluster_started = std::time::Instant::now();
+    cluster_with_resource_gate(&mut graph)?;
+    if let Some(previous) = &previous {
+        graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
+    }
+    drop(previous);
+    telemetry.stages_ms.cluster = graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
+    let write_started = std::time::Instant::now();
+    let outcome = graphoxide_cli::build_guard::commit_build(
+        &output,
+        graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
+        build_progress,
+        force,
+        || {
+            write_watch_markers(output_directory, marker_value)?;
+            pending_manifest.commit()
+        },
+    )?;
+    if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+        telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+        result.status = watch_service::RebuildStatus::RefusedShrink;
+        result.clustered = false;
+        return Ok(finish(result, telemetry, runtime_telemetry));
+    }
+    save_build_config_in(output_directory, false, None, None)?;
+    telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+    telemetry.graph.nodes = result.stats.nodes;
+    telemetry.graph.edges = result.stats.edges;
+    telemetry.graph.clustered = true;
+    watch_service::clear_needs_update(output_directory)?;
+    Ok(finish(result, telemetry, runtime_telemetry))
 }
 
 fn save_build_config_in(
@@ -2601,7 +3608,7 @@ fn global_graph(roots: &[PathBuf], output: &std::path::Path, force: bool) -> any
         });
     }
     let mut graph = graphoxide_graph::build_graph(&chunks)?;
-    graphoxide_graph::cluster(&mut graph)?;
+    cluster_with_resource_gate(&mut graph)?;
     if !graphoxide_core::write_graph_atomic(output, &graph, force)? {
         anyhow::bail!("refusing to shrink existing global graph; pass --force")
     }
@@ -3161,6 +4168,36 @@ fn write_output(output: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Render the immutable, byte-oriented format contract without touching the
+/// filesystem. This is intentionally driven directly by `FormatRegistry`, so
+/// CLI capability reporting cannot drift from detector/adaptor ownership.
+fn format_capability_output(json: bool) -> anyhow::Result<String> {
+    let reports = graphoxide_extract::format_registry::format_registry()
+        .capability_reports()
+        .collect::<Vec<_>>();
+    if json {
+        return serde_json::to_string_pretty(&reports).map_err(Into::into);
+    }
+
+    let mut output = String::new();
+    for report in reports {
+        let extensions = report.extensions.join(",");
+        let file_names = report.file_names.join(",");
+        use std::fmt::Write as _;
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            report.id.as_str(),
+            report.capability.as_str(),
+            report.schema_requirement.as_str(),
+            report.adapter.as_str(),
+            extensions,
+            file_names,
+        )?;
+    }
+    Ok(output.trim_end_matches('\n').to_owned())
+}
+
 fn annotate_query_context(output: &mut String, contexts: &[String], source: &str) {
     if contexts.is_empty() {
         return;
@@ -3215,8 +4252,11 @@ fn load_learning_overlay(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_query_context, audit_report, format_god_nodes, load_learning_overlay,
-        relevant_watch_paths, Cli, Command,
+        annotate_query_context, audit_report, format_capability_output, format_god_nodes,
+        incremental_graph_budget_after_retained_output, load_learning_overlay,
+        optional_baseline_leaves_full_graph_headroom, read_incremental_baseline,
+        relevant_watch_paths, stale_local_sources, Cli, Command, IncrementalGraphBudget,
+        RuntimeIoBackendArg, RuntimeOptions,
     };
     use clap::Parser;
     use std::path::{Path, PathBuf};
@@ -3298,6 +4338,565 @@ mod tests {
         let cli = Cli::try_parse_from(["graphoxide", "update", ".", "--force"])
             .expect("parse update --force");
         assert!(matches!(cli.command, Command::Update { force: true, .. }));
+    }
+
+    #[test]
+    fn extract_and_update_accept_opt_in_runtime_reports() {
+        let extract = Cli::try_parse_from([
+            "graphoxide",
+            "extract",
+            ".",
+            "--runtime-report",
+            "runtime/extract.json",
+        ])
+        .expect("parse extract runtime report");
+        assert!(matches!(
+            extract.command,
+            Command::Extract {
+                runtime_report: Some(path),
+                ..
+            } if path.as_path() == Path::new("runtime/extract.json")
+        ));
+
+        let update = Cli::try_parse_from([
+            "graphoxide",
+            "update",
+            ".",
+            "--runtime-report=runtime/update.json",
+        ])
+        .expect("parse update runtime report");
+        assert!(matches!(
+            update.command,
+            Command::Update {
+                runtime_report: Some(path),
+                ..
+            } if path.as_path() == Path::new("runtime/update.json")
+        ));
+
+        let watch = Cli::try_parse_from([
+            "graphoxide",
+            "watch",
+            ".",
+            "--runtime-report",
+            "runtime/watch.json",
+        ])
+        .expect("parse watch runtime report");
+        assert!(matches!(
+            watch.command,
+            Command::Watch {
+                runtime_report: Some(path),
+                ..
+            } if path.as_path() == Path::new("runtime/watch.json")
+        ));
+    }
+
+    #[test]
+    fn isolated_runtime_controls_are_available_for_extract_update_and_watch() {
+        let extract = Cli::try_parse_from([
+            "graphoxide",
+            "extract",
+            ".",
+            "--memory-budget-bytes",
+            "1048576",
+            "--io-workers=2",
+            "--compute-workers",
+            "3",
+            "--io-backend",
+            "io-uring",
+            "--read-batch-bytes=4096",
+        ])
+        .expect("parse extract runtime controls");
+        let Command::Extract { runtime, .. } = extract.command else {
+            panic!("expected extract command");
+        };
+        assert_eq!(runtime.memory_budget_bytes, Some(1_048_576));
+        assert_eq!(runtime.io_workers, Some(2));
+        assert_eq!(runtime.compute_workers, Some(3));
+        assert_eq!(runtime.io_backend, Some(RuntimeIoBackendArg::IoUring));
+        assert_eq!(runtime.read_batch_bytes, Some(4096));
+        let resolved = runtime.resolve().expect("valid explicit runtime controls");
+        assert_eq!(resolved.memory_budget_bytes, 1_048_576);
+        assert_eq!(resolved.io_workers, 2);
+        assert_eq!(resolved.compute_workers, 3);
+        assert_eq!(
+            resolved.io_backend,
+            graphoxide_index_runtime::IoBackendSelection::IoUring
+        );
+        assert_eq!(resolved.read_batch_bytes, 4096);
+
+        let update = Cli::try_parse_from([
+            "graphoxide",
+            "update",
+            ".",
+            "--memory-budget-bytes=1048576",
+            "--io-workers=1",
+            "--compute-workers=1",
+            "--io-backend=threaded",
+            "--read-batch-bytes=1024",
+        ])
+        .expect("parse update runtime controls");
+        assert!(matches!(
+            update.command,
+            Command::Update {
+                runtime: RuntimeOptions {
+                    memory_budget_bytes: Some(1_048_576),
+                    io_workers: Some(1),
+                    compute_workers: Some(1),
+                    io_backend: Some(RuntimeIoBackendArg::Threaded),
+                    read_batch_bytes: Some(1024),
+                },
+                ..
+            }
+        ));
+
+        let watch = Cli::try_parse_from([
+            "graphoxide",
+            "watch",
+            ".",
+            "--memory-budget-bytes=1048576",
+            "--io-workers=1",
+            "--compute-workers=1",
+            "--io-backend=threaded",
+            "--read-batch-bytes=1024",
+        ])
+        .expect("parse watch runtime controls");
+        assert!(matches!(
+            watch.command,
+            Command::Watch {
+                runtime: RuntimeOptions {
+                    memory_budget_bytes: Some(1_048_576),
+                    io_workers: Some(1),
+                    compute_workers: Some(1),
+                    io_backend: Some(RuntimeIoBackendArg::Threaded),
+                    read_batch_bytes: Some(1024),
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_executor_rejects_isolated_runtime_controls() {
+        let options = RuntimeOptions {
+            io_workers: Some(2),
+            ..RuntimeOptions::default()
+        };
+        assert!(options.resolve_for_executor(true).is_err());
+        assert!(RuntimeOptions::default()
+            .resolve_for_executor(true)
+            .expect("legacy without overrides")
+            .is_none());
+    }
+
+    #[test]
+    fn isolated_executor_is_the_default_and_legacy_requires_an_explicit_flag() {
+        let extract =
+            Cli::try_parse_from(["graphoxide", "extract", "."]).expect("parse default extract");
+        assert!(matches!(
+            extract.command,
+            Command::Extract {
+                legacy_executor: false,
+                ..
+            }
+        ));
+        let update =
+            Cli::try_parse_from(["graphoxide", "update", "."]).expect("parse default update");
+        assert!(matches!(
+            update.command,
+            Command::Update {
+                legacy_executor: false,
+                ..
+            }
+        ));
+        let watch = Cli::try_parse_from(["graphoxide", "watch", "."]).expect("parse default watch");
+        assert!(matches!(
+            watch.command,
+            Command::Watch {
+                legacy_executor: false,
+                ..
+            }
+        ));
+        let legacy = Cli::try_parse_from(["graphoxide", "extract", ".", "--legacy-executor"])
+            .expect("parse legacy escape hatch");
+        assert!(matches!(
+            legacy.command,
+            Command::Extract {
+                legacy_executor: true,
+                ..
+            }
+        ));
+        let legacy = Cli::try_parse_from(["graphoxide", "update", ".", "--legacy-executor"])
+            .expect("parse legacy update escape hatch");
+        assert!(matches!(
+            legacy.command,
+            Command::Update {
+                legacy_executor: true,
+                ..
+            }
+        ));
+        let legacy = Cli::try_parse_from(["graphoxide", "watch", ".", "--legacy-executor"])
+            .expect("parse legacy watch escape hatch");
+        assert!(matches!(
+            legacy.command,
+            Command::Watch {
+                legacy_executor: true,
+                ..
+            }
+        ));
+        let hook = Cli::try_parse_from(["graphoxide", "hook-rebuild", "post-checkout", "."])
+            .expect("parse default hook rebuild");
+        assert!(matches!(
+            hook.command,
+            Command::HookRebuild {
+                legacy_executor: false,
+                ..
+            }
+        ));
+        let legacy = Cli::try_parse_from([
+            "graphoxide",
+            "hook-rebuild",
+            "post-checkout",
+            ".",
+            "--legacy-executor",
+        ])
+        .expect("parse legacy hook rebuild escape hatch");
+        assert!(matches!(
+            legacy.command,
+            Command::HookRebuild {
+                legacy_executor: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn isolated_watch_pass_publishes_graph_before_manifest_and_reports_unchanged() {
+        let project = tempfile::tempdir().expect("temporary project");
+        std::fs::write(project.path().join("app.py"), "def app():\n    return 1\n")
+            .expect("write source");
+        let output = project.path().join("graphoxide-out");
+        let first = super::rebuild_isolated_pass(super::IsolatedRebuildRequest {
+            path: project.path(),
+            output_directory: &output,
+            marker_value: ".",
+            no_cluster: true,
+            force: false,
+            scope: graphoxide_cli::watch::RebuildScope::Incremental,
+            pass: 1,
+            runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+        })
+        .expect("isolated watch pass");
+        assert_eq!(
+            first.result.status,
+            graphoxide_cli::watch::RebuildStatus::Rebuilt
+        );
+        assert_eq!(
+            first.runtime_telemetry.execution_model,
+            graphoxide_cli::build_telemetry::RuntimeExecutionModel::Isolated
+        );
+        assert!(output.join("graph.json").is_file());
+        assert!(output.join("manifest.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(output.join(graphoxide_cli::watch::ROOT_MARKER))
+                .expect("root marker"),
+            "."
+        );
+
+        let second = super::rebuild_isolated_pass(super::IsolatedRebuildRequest {
+            path: project.path(),
+            output_directory: &output,
+            marker_value: ".",
+            no_cluster: true,
+            force: false,
+            scope: graphoxide_cli::watch::RebuildScope::Incremental,
+            pass: 2,
+            runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+        })
+        .expect("unchanged isolated watch pass");
+        assert_eq!(
+            second.result.status,
+            graphoxide_cli::watch::RebuildStatus::Unchanged
+        );
+    }
+
+    #[test]
+    fn incremental_budget_charges_fresh_output_before_baseline_admission() {
+        let after_fresh = incremental_graph_budget_after_retained_output(2_000, 400)
+            .expect("fresh output leaves graph headroom");
+        assert_eq!(after_fresh.max_baseline_file_bytes, 200);
+        let error = incremental_graph_budget_after_retained_output(2_000, 1_999)
+            .expect_err("one byte cannot hold the baseline and merged graph");
+        assert!(error
+            .to_string()
+            .contains("insufficient incremental graph headroom"));
+
+        assert!(
+            optional_baseline_leaves_full_graph_headroom(1_000, 8_000),
+            "a proven in-budget full graph may retain the optional baseline"
+        );
+        assert!(
+            !optional_baseline_leaves_full_graph_headroom(1_000, 7_999),
+            "an otherwise in-budget full graph must skip optional remapping when the loaded baseline removes required headroom"
+        );
+    }
+
+    #[test]
+    fn stale_sources_follow_explicit_outer_container_ownership() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let root = project
+            .path()
+            .canonicalize()
+            .expect("canonical project root");
+        let archive = root.join("archives/structured.tar");
+        std::fs::create_dir_all(archive.parent().expect("archive parent"))
+            .expect("create archive directory");
+        std::fs::write(&archive, b"deterministic archive placeholder")
+            .expect("write archive placeholder");
+        let literal = root.join("literal!/file.rs");
+        std::fs::create_dir_all(literal.parent().expect("literal parent"))
+            .expect("create literal directory");
+        std::fs::write(&literal, b"fn literal() {}\n").expect("write literal source");
+        let node = |id: &str, source_file: &str| graphoxide_core::Node {
+            id: id.into(),
+            label: id.into(),
+            file_type: "structured_file".into(),
+            source_file: source_file.into(),
+            source_location: None,
+            community: None,
+            extra: Default::default(),
+        };
+        let member_node = |id: &str, source_file: &str| {
+            let mut node = node(id, source_file);
+            node.extra.insert(
+                graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE.into(),
+                "archives/structured.tar".into(),
+            );
+            node
+        };
+        let graph = graphoxide_core::KnowledgeGraph {
+            nodes: vec![
+                node("archive", "archives/structured.tar"),
+                member_node("csv_member", "archives/structured.tar!/inventory/ports.csv"),
+                member_node(
+                    "nested_member",
+                    "archives/structured.tar!/nested/config.zip!/runtime.toml",
+                ),
+                node("literal", "literal!/file.rs"),
+            ],
+            ..Default::default()
+        };
+
+        assert!(
+            stale_local_sources(&graph, &root, &[archive.clone(), literal.clone()]).is_empty(),
+            "member facts must remain live with their explicitly recorded outer container"
+        );
+
+        assert_eq!(
+            stale_local_sources(&graph, &root, std::slice::from_ref(&literal)),
+            vec![archive.clone()],
+            "deleted container members must collapse to their shared outer prune identity"
+        );
+        assert_eq!(
+            stale_local_sources(&graph, &root, std::slice::from_ref(&archive)),
+            vec![literal],
+            "an unmarked path containing the reserved spelling remains independently tracked"
+        );
+    }
+
+    #[test]
+    fn isolated_incremental_pass_rejects_an_over_budget_baseline_without_committing() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let source = project.path().join("app.py");
+        std::fs::write(&source, "def app():\n    return 1\n").expect("write source");
+        let output = project.path().join("graphoxide-out");
+        super::rebuild_isolated_pass(super::IsolatedRebuildRequest {
+            path: project.path(),
+            output_directory: &output,
+            marker_value: ".",
+            no_cluster: true,
+            force: false,
+            scope: graphoxide_cli::watch::RebuildScope::Incremental,
+            pass: 1,
+            runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+        })
+        .expect("initial isolated pass");
+
+        let graph_path = output.join("graph.json");
+        let manifest_path = output.join("manifest.json");
+        let mut graph_value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&graph_path).expect("read initial graph"))
+                .expect("parse initial graph");
+        graph_value["budget_regression_padding"] = "x".repeat(64 * 1024).into();
+        std::fs::write(
+            &graph_path,
+            serde_json::to_vec_pretty(&graph_value).expect("serialize padded graph"),
+        )
+        .expect("write padded graph");
+        let graph_before = std::fs::read(&graph_path).expect("snapshot graph");
+        let manifest_before = std::fs::read(&manifest_path).expect("snapshot manifest");
+        std::fs::write(
+            &source,
+            "def app():\n    return 1\n\ndef changed():\n    return app()\n",
+        )
+        .expect("change source");
+
+        let error = match super::rebuild_isolated_pass(super::IsolatedRebuildRequest {
+            path: project.path(),
+            output_directory: &output,
+            marker_value: ".",
+            no_cluster: true,
+            force: false,
+            scope: graphoxide_cli::watch::RebuildScope::Incremental,
+            pass: 2,
+            runtime_config: graphoxide_index_runtime::IndexRuntimeConfig {
+                memory_budget_bytes: 1024 * 1024,
+                io_workers: 1,
+                compute_workers: 1,
+                io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+                read_batch_bytes: 4 * 1024,
+            },
+        }) {
+            Ok(_) => panic!("oversized baseline must fail"),
+            Err(error) => error,
+        };
+
+        let error = format!("{error:#}");
+        assert!(error.contains("load incremental baseline"), "{error}");
+        assert!(
+            error.contains("exceeds") && error.contains("byte cap"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&graph_path).unwrap(), graph_before);
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+    }
+
+    #[test]
+    fn incremental_baseline_charges_exact_admitted_generation_bytes() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let graph_path = project.path().join("graph.json");
+        let mut bytes =
+            br#"{"directed":true,"multigraph":false,"graph":{},"nodes":[],"links":[]}"#.to_vec();
+        bytes.extend(std::iter::repeat_n(b' ', 257));
+        std::fs::write(&graph_path, &bytes).expect("write padded graph generation");
+        let multiplier = graphoxide_graph::incremental::INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER;
+        let expected_remaining = 997;
+        let cache_and_runs_bytes = bytes.len() * multiplier + expected_remaining;
+
+        let (graph, remaining) = read_incremental_baseline(
+            &graph_path,
+            cache_and_runs_bytes,
+            IncrementalGraphBudget {
+                max_baseline_file_bytes: u64::try_from(bytes.len())
+                    .expect("fixture length fits in u64"),
+            },
+        )
+        .expect("load baseline within exact accounting budget");
+
+        assert!(graph.nodes.is_empty());
+        assert_eq!(remaining, expected_remaining);
+    }
+
+    #[test]
+    fn watch_rebuild_dispatcher_defaults_to_isolated_and_requires_legacy_opt_in() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let source = project.path().join("app.py");
+        std::fs::write(&source, "def app():\n    return 1\n").expect("write source");
+        let output = project.path().join("graphoxide-out");
+        let isolated_report = project.path().join("isolated-runtime.json");
+        let options = graphoxide_cli::watch::RebuildOptions {
+            changed_paths: Some(vec![source.clone()]),
+            output_directory: Some(output.clone()),
+            no_cluster: true,
+            acquire_lock: true,
+            block_on_lock: false,
+            ..Default::default()
+        };
+        let isolated = super::rebuild_watch_project(
+            project.path(),
+            &options,
+            Some(graphoxide_index_runtime::IndexRuntimeConfig::default()),
+            Some(&isolated_report),
+        )
+        .expect("isolated watch dispatch");
+        assert_eq!(
+            isolated.status,
+            graphoxide_cli::watch::RebuildStatus::Rebuilt
+        );
+        let isolated_value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&isolated_report).expect("isolated runtime report"),
+        )
+        .expect("parse isolated runtime report");
+        assert_eq!(isolated_value["runtime"]["execution_model"], "isolated");
+
+        std::fs::write(
+            &source,
+            "def app():\n    return 1\n\ndef legacy():\n    return app()\n",
+        )
+        .expect("update source");
+        let legacy_report = project.path().join("legacy-runtime.json");
+        let legacy =
+            super::rebuild_watch_project(project.path(), &options, None, Some(&legacy_report))
+                .expect("legacy watch dispatch");
+        assert!(legacy.succeeded());
+        let legacy_value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&legacy_report).expect("legacy runtime report"))
+                .expect("parse legacy runtime report");
+        assert_eq!(legacy_value["runtime"]["execution_model"], "legacy");
+    }
+
+    #[test]
+    fn formats_command_reports_the_registry_contract_without_path_probing() {
+        for spelling in ["formats", "capabilities"] {
+            let cli = Cli::try_parse_from(["graphoxide", spelling, "--json"])
+                .unwrap_or_else(|error| panic!("parse {spelling} command: {error}"));
+            assert!(matches!(cli.command, Command::Formats { json: true }));
+        }
+
+        let text = format_capability_output(false).expect("render text contract");
+        assert!(text.contains("delimited-data\tstructural_partial"));
+        assert!(text.contains("protobuf-binary\tinventory_only\trequired"));
+        assert!(text.contains("source-code\tstructural_partial"));
+        assert!(text.contains("package-manifest\tinventory_only"));
+        assert!(text.contains("tar-archive\tstructural_partial"));
+        assert!(text.contains("json5\tstructural_partial\tnot_required\tstructured\tjson5"));
+        assert!(text.contains("json-lines\tsemantic_full\tnot_required\tstructured\tjsonl,ndjson"));
+        assert!(text.contains("yaml\tstructural_partial\tnot_required\tstructured\tyaml,yml"));
+
+        let json = format_capability_output(true).expect("render JSON contract");
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_str(&json).expect("deserialize format contract");
+        assert_eq!(
+            reports.len(),
+            graphoxide_extract::format_registry::format_registry()
+                .specs()
+                .len()
+        );
+        assert!(reports.iter().any(|report| {
+            report["id"] == "openusd-ascii" && report["capability"] == "structural_partial"
+        }));
+        for id in ["json5", "yaml", "named-yaml-configuration"] {
+            let report = reports
+                .iter()
+                .find(|report| report["id"] == id)
+                .unwrap_or_else(|| panic!("missing {id} capability report"));
+            assert_eq!(report["capability"], "structural_partial", "{id}");
+            assert_eq!(
+                report["limits"]["max_input_bytes"],
+                16 * 1024 * 1024,
+                "{id}"
+            );
+            assert_eq!(report["limits"]["max_nesting"], 32, "{id}");
+            assert_eq!(report["limits"]["max_records"], 4_096, "{id}");
+        }
+        for extension in ["jsonl", "ndjson"] {
+            assert!(reports.iter().any(|report| {
+                report["id"] == "json-lines"
+                    && report["capability"] == "semantic_full"
+                    && report["extensions"]
+                        .as_array()
+                        .is_some_and(|extensions| extensions.iter().any(|value| value == extension))
+            }));
+        }
     }
 
     #[test]

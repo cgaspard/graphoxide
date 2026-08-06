@@ -55,6 +55,144 @@ fn test_cluster_covers_all_nodes() {
 }
 
 #[test]
+fn test_cluster_is_deterministic_across_link_order_and_duplicate_direction() {
+    let nodes = ["a", "b", "c", "d", "e", "f"];
+    let links = [
+        ("a", "b"),
+        ("a", "c"),
+        ("b", "c"),
+        ("c", "d"),
+        ("d", "e"),
+        ("d", "f"),
+        ("e", "f"),
+    ];
+    let build = |links: Vec<(&str, &str)>| KnowledgeGraph {
+        nodes: nodes.into_iter().map(node).collect(),
+        links: links
+            .into_iter()
+            .map(|(source, target)| edge(source, target))
+            .collect(),
+        ..KnowledgeGraph::default()
+    };
+
+    let mut first = build(links.to_vec());
+    let mut reordered = links.to_vec();
+    reordered.reverse();
+    reordered.extend([("b", "a"), ("f", "e"), ("d", "c")]);
+    let mut second = build(reordered);
+    second.nodes.reverse();
+    cluster(&mut first).unwrap();
+    cluster(&mut second).unwrap();
+
+    let assignments = |graph: &KnowledgeGraph| {
+        graph
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.id.clone(),
+                    (node.community, node.extra.get("community_name").cloned()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(assignments(&first), assignments(&second));
+}
+
+#[test]
+fn test_cluster_ignores_links_with_unknown_endpoints() {
+    let mut clean = KnowledgeGraph {
+        nodes: ["a", "b", "c", "d"].into_iter().map(node).collect(),
+        links: [("a", "b"), ("c", "d")]
+            .into_iter()
+            .map(|(source, target)| edge(source, target))
+            .collect(),
+        ..KnowledgeGraph::default()
+    };
+    let mut with_dangling_links = clean.clone();
+    with_dangling_links.links.extend(
+        [
+            ("c", "unknown-x"),
+            ("c", "unknown-y"),
+            ("unknown-x", "unknown-y"),
+        ]
+        .into_iter()
+        .map(|(source, target)| edge(source, target)),
+    );
+
+    cluster(&mut clean).unwrap();
+    cluster(&mut with_dangling_links).unwrap();
+
+    let assignments = |graph: &KnowledgeGraph| {
+        graph
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.community))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(assignments(&clean), assignments(&with_dangling_links));
+}
+
+#[test]
+fn test_cluster_keeps_an_isolate_separate_from_connected_nodes() {
+    let mut graph = KnowledgeGraph {
+        nodes: ["a", "b", "isolated"].into_iter().map(node).collect(),
+        links: vec![edge("a", "b")],
+        ..KnowledgeGraph::default()
+    };
+
+    cluster(&mut graph).unwrap();
+
+    let community = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .and_then(|node| node.community)
+            .unwrap()
+    };
+    assert_eq!(community("a"), community("b"));
+    assert_ne!(community("a"), community("isolated"));
+}
+
+#[test]
+fn test_cluster_preserves_dense_groups_across_a_single_bridge() {
+    let mut graph = KnowledgeGraph {
+        nodes: ["a", "b", "c", "d", "e", "f"]
+            .into_iter()
+            .map(node)
+            .collect(),
+        links: [
+            ("a", "b"),
+            ("a", "c"),
+            ("b", "c"),
+            ("c", "d"),
+            ("d", "e"),
+            ("d", "f"),
+            ("e", "f"),
+        ]
+        .into_iter()
+        .map(|(source, target)| edge(source, target))
+        .collect(),
+        ..KnowledgeGraph::default()
+    };
+    cluster(&mut graph).unwrap();
+    let community = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .and_then(|node| node.community)
+            .unwrap()
+    };
+    assert_eq!(community("a"), community("b"));
+    assert_eq!(community("a"), community("c"));
+    assert_eq!(community("d"), community("e"));
+    assert_eq!(community("d"), community("f"));
+    assert_ne!(community("a"), community("d"));
+}
+
+#[test]
 fn test_cohesion_score_complete_graph() {
     let ids = ["0", "1", "2", "3"];
     let graph = KnowledgeGraph {

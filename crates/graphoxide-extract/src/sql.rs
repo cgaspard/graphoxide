@@ -22,8 +22,188 @@ struct Definition {
     start: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DollarMask {
+    All,
+    PreserveDelimiters,
+}
+
+fn mask_range(bytes: &mut [u8], start: usize, end: usize) {
+    for byte in &mut bytes[start..end] {
+        if !matches!(*byte, b'\n' | b'\r') {
+            *byte = b' ';
+        }
+    }
+}
+
+fn dollar_delimiter_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+    let mut cursor = start + 1;
+    if bytes.get(cursor) == Some(&b'$') {
+        return Some(cursor + 1);
+    }
+    if !bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+    {
+        return None;
+    }
+    cursor += 1;
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        cursor += 1;
+    }
+    (bytes.get(cursor) == Some(&b'$')).then_some(cursor + 1)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    (!needle.is_empty())
+        .then(|| {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        })
+        .flatten()
+}
+
+/// Replace non-code SQL bytes with spaces while retaining byte offsets and
+/// line breaks. Double-quoted identifiers remain visible to the DDL regexes.
+fn mask_sql(text: &str, dollar_mask: DollarMask) -> String {
+    let original = text.as_bytes();
+    let mut masked = original.to_vec();
+    let mut cursor = 0;
+    while cursor < original.len() {
+        if original[cursor..].starts_with(b"--") {
+            let start = cursor;
+            cursor += 2;
+            while cursor < original.len() && !matches!(original[cursor], b'\n' | b'\r') {
+                cursor += 1;
+            }
+            mask_range(&mut masked, start, cursor);
+            continue;
+        }
+        if original[cursor..].starts_with(b"/*") {
+            let start = cursor;
+            let mut depth = 1usize;
+            cursor += 2;
+            while cursor < original.len() && depth > 0 {
+                if original[cursor..].starts_with(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if original[cursor..].starts_with(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            mask_range(&mut masked, start, cursor);
+            continue;
+        }
+        if original[cursor] == b'\'' {
+            let start = cursor;
+            cursor += 1;
+            while cursor < original.len() {
+                if original[cursor] == b'\\' {
+                    cursor = (cursor + 2).min(original.len());
+                } else if original[cursor] == b'\'' && original.get(cursor + 1) == Some(&b'\'') {
+                    cursor += 2;
+                } else if original[cursor] == b'\'' {
+                    cursor += 1;
+                    break;
+                } else {
+                    cursor += 1;
+                }
+            }
+            mask_range(&mut masked, start, cursor);
+            continue;
+        }
+        if original[cursor] == b'"' {
+            let start = cursor;
+            cursor += 1;
+            while cursor < original.len() {
+                if original[cursor] == b'"' && original.get(cursor + 1) == Some(&b'"') {
+                    cursor += 2;
+                } else if original[cursor] == b'"' {
+                    cursor += 1;
+                    break;
+                } else {
+                    cursor += 1;
+                }
+            }
+            for byte in &mut masked[start..cursor] {
+                if matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+            continue;
+        }
+        let separated = cursor == 0
+            || !original[cursor - 1].is_ascii_alphanumeric()
+                && !matches!(original[cursor - 1], b'_' | b'$');
+        if separated && let Some(delimiter_end) = dollar_delimiter_end(original, cursor) {
+            let delimiter = &original[cursor..delimiter_end];
+            let content_start = delimiter_end;
+            if let Some(relative_close) = find_bytes(&original[content_start..], delimiter) {
+                let close_start = content_start + relative_close;
+                let close_end = close_start + delimiter.len();
+                if dollar_mask == DollarMask::All {
+                    mask_range(&mut masked, cursor, close_end);
+                } else {
+                    mask_range(&mut masked, content_start, close_start);
+                }
+                cursor = close_end;
+            } else {
+                let mask_start = if dollar_mask == DollarMask::All {
+                    cursor
+                } else {
+                    content_start
+                };
+                mask_range(&mut masked, mask_start, original.len());
+                cursor = original.len();
+            }
+            continue;
+        }
+        cursor += 1;
+    }
+    String::from_utf8(masked).expect("SQL lexical masking preserves UTF-8")
+}
+
+fn routine_dollar_body(text: &str) -> Option<std::ops::Range<usize>> {
+    let visible = mask_sql(text, DollarMask::PreserveDelimiters);
+    let body_start = Regex::new(r"(?i)\bAS\s*(\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)")
+        .expect("valid SQL routine-body regex");
+    for captures in body_start.captures_iter(&visible) {
+        let delimiter_match = captures.get(1).expect("routine dollar delimiter");
+        let delimiter = &text[delimiter_match.start()..delimiter_match.end()];
+        let start = delimiter_match.end();
+        if let Some(relative_end) = text[start..].find(delimiter) {
+            return Some(start..start + relative_end);
+        }
+    }
+    None
+}
+
 pub(crate) fn extract_sql(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let text = fs::read_to_string(path)?;
+    extract_sql_bytes(path, source_file, text.as_bytes())
+}
+
+/// Extract SQL DDL from an already-read source buffer.
+///
+/// The byte-oriented path performs no filesystem access so it is safe to run
+/// on an extraction worker after the I/O service has completed the read.
+#[allow(dead_code)] // Activated by the byte-oriented engine dispatch.
+pub(crate) fn extract_sql_bytes(
+    path: &Path,
+    source_file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<Extraction> {
+    let text = std::str::from_utf8(bytes)?;
     let stem = Path::new(source_file)
         .with_extension("")
         .to_string_lossy()
@@ -45,19 +225,21 @@ pub(crate) fn extract_sql(path: &Path, source_file: &str) -> anyhow::Result<Extr
 
     // A SQL identifier is either an ordinary identifier or a double-quoted
     // identifier. Qualified names may mix both forms.
-    let identifier =
-        r#"(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))*"#;
+    let identifier = r#"(?:"(?:""|[^"])+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"(?:""|[^"])+"|[A-Za-z_][A-Za-z0-9_$]*))*"#;
     let create = Regex::new(&format!(
         r"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(TABLE|VIEW|FUNCTION|PROCEDURE)\s+(?:IF\s+NOT\s+EXISTS\s+)?({identifier})"
     ))?;
+    let top_level = mask_sql(text, DollarMask::All);
     let mut definitions = Vec::new();
     let mut definitions_by_name = HashMap::<String, String>::new();
-    for captures in create.captures_iter(&text) {
+    for captures in create.captures_iter(&top_level) {
         let matched = captures.get(0).expect("CREATE match");
-        let kind = captures[1].to_ascii_lowercase();
-        let name = compact_identifier(&captures[2]);
+        let kind_match = captures.get(1).expect("CREATE kind");
+        let name_match = captures.get(2).expect("CREATE identifier");
+        let kind = text[kind_match.start()..kind_match.end()].to_ascii_lowercase();
+        let name = compact_identifier(&text[name_match.start()..name_match.end()]);
         let id = make_id(&[&stem, &name]);
-        let line = line_of(&text, matched.start());
+        let line = line_of(text, matched.start());
         if seen_nodes.insert(id.clone()) {
             let label = if matches!(kind.as_str(), "function" | "procedure") {
                 format!("{name}()")
@@ -87,38 +269,49 @@ pub(crate) fn extract_sql(path: &Path, source_file: &str) -> anyhow::Result<Extr
         });
     }
 
-    // Split dependency scans at the next CREATE declaration. Dollar-quoted
-    // PL/pgSQL can contain semicolons freely, so semicolon splitting is unsafe.
+    // Split dependency scans at the next top-level CREATE declaration.
+    // Dollar-quoted PL/pgSQL can contain semicolons freely, so semicolon
+    // splitting is unsafe.
+    let reads = Regex::new(&format!(r"(?i)\b(?:FROM|JOIN)\s+({identifier})"))?;
     for (index, definition) in definitions.iter().enumerate() {
         let end = definitions
             .get(index + 1)
             .map_or(text.len(), |next| next.start);
-        let body = &text[definition.start..end];
-        let reads = Regex::new(&format!(r"(?i)\b(?:FROM|JOIN)\s+({identifier})"))?;
         if matches!(definition.kind.as_str(), "view" | "function" | "procedure") {
-            for captures in reads.captures_iter(body) {
-                let target_name = compact_identifier(&captures[1]);
-                let line = line_of(
-                    &text,
-                    definition.start + captures.get(0).expect("FROM match").start(),
-                );
-                let target = target_id(
-                    &target_name,
-                    line,
+            let statement = &text[definition.start..end];
+            let statement_mask = mask_sql(statement, DollarMask::All);
+            emit_reads_from_masked(
+                text,
+                statement,
+                &statement_mask,
+                definition.start,
+                definition,
+                &reads,
+                source_file,
+                &definitions_by_name,
+                &mut nodes,
+                &mut seen_nodes,
+                &mut edges,
+                &mut seen_edges,
+            );
+            if matches!(definition.kind.as_str(), "function" | "procedure")
+                && let Some(body_range) = routine_dollar_body(statement)
+            {
+                let body = &statement[body_range.clone()];
+                let body_mask = mask_sql(body, DollarMask::All);
+                emit_reads_from_masked(
+                    text,
+                    body,
+                    &body_mask,
+                    definition.start + body_range.start,
+                    definition,
+                    &reads,
                     source_file,
                     &definitions_by_name,
                     &mut nodes,
                     &mut seen_nodes,
-                );
-                push_edge(
                     &mut edges,
                     &mut seen_edges,
-                    &definition.id,
-                    &target,
-                    "reads_from",
-                    source_file,
-                    line,
-                    Some("query"),
                 );
             }
         }
@@ -126,12 +319,13 @@ pub(crate) fn extract_sql(path: &Path, source_file: &str) -> anyhow::Result<Extr
 
     let references = Regex::new(&format!(r"(?i)\bREFERENCES\s+({identifier})"))?;
     let alter = Regex::new(&format!(r"(?im)^\s*ALTER\s+TABLE\s+({identifier})"))?;
-    for captures in references.captures_iter(&text) {
+    for captures in references.captures_iter(&top_level) {
         let matched = captures.get(0).expect("REFERENCES match");
-        let target_name = compact_identifier(&captures[1]);
-        let line = line_of(&text, matched.start());
+        let target_match = captures.get(1).expect("REFERENCES identifier");
+        let target_name = compact_identifier(&text[target_match.start()..target_match.end()]);
+        let line = line_of(text, matched.start());
         let source_name = alter
-            .captures_iter(&text[..matched.start()])
+            .captures_iter(&top_level[..matched.start()])
             .last()
             .filter(|capture| {
                 // An ALTER belongs to this reference only when no later CREATE
@@ -144,7 +338,10 @@ pub(crate) fn extract_sql(path: &Path, source_file: &str) -> anyhow::Result<Extr
                     .max()
                     .is_none_or(|create_start| alter_start > create_start)
             })
-            .map(|capture| compact_identifier(&capture[1]))
+            .map(|capture| {
+                let source_match = capture.get(1).expect("ALTER identifier");
+                compact_identifier(&text[source_match.start()..source_match.end()])
+            })
             .or_else(|| {
                 definitions
                     .iter()
@@ -205,6 +402,48 @@ pub(crate) fn extract_sql(path: &Path, source_file: &str) -> anyhow::Result<Extr
         edges,
         hyperedges: Vec::new(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_reads_from_masked(
+    full_text: &str,
+    original_region: &str,
+    masked_region: &str,
+    region_start: usize,
+    definition: &Definition,
+    reads: &Regex,
+    source_file: &str,
+    definitions: &HashMap<String, String>,
+    nodes: &mut Vec<Node>,
+    seen_nodes: &mut HashSet<String>,
+    edges: &mut Vec<Edge>,
+    seen_edges: &mut HashSet<(String, String, String)>,
+) {
+    for captures in reads.captures_iter(masked_region) {
+        let matched = captures.get(0).expect("FROM match");
+        let identifier = captures.get(1).expect("FROM identifier");
+        let target_name =
+            compact_identifier(&original_region[identifier.start()..identifier.end()]);
+        let line = line_of(full_text, region_start + matched.start());
+        let target = target_id(
+            &target_name,
+            line,
+            source_file,
+            definitions,
+            nodes,
+            seen_nodes,
+        );
+        push_edge(
+            edges,
+            seen_edges,
+            &definition.id,
+            &target,
+            "reads_from",
+            source_file,
+            line,
+            Some("query"),
+        );
+    }
 }
 
 fn target_id(
@@ -313,6 +552,17 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn byte_entrypoint_does_not_require_a_source_file() {
+        let extraction = extract_sql_bytes(
+            Path::new("missing.sql"),
+            "db/missing.sql",
+            b"CREATE TABLE accounts (id int);",
+        )
+        .expect("extract in-memory SQL source");
+        assert!(extraction.nodes.iter().any(|node| node.label == "accounts"));
+    }
+
+    #[test]
     fn recovers_quoted_routines_and_schema_names_without_duplicates() {
         let mut fixture = tempfile::NamedTempFile::new().expect("SQL fixture");
         fixture
@@ -346,5 +596,87 @@ CREATE TABLE Sales.Customer (id int REFERENCES "public"."accounts");"#,
             .edges
             .iter()
             .any(|edge| edge.relation == "references"));
+    }
+
+    #[test]
+    fn masks_non_code_at_the_top_level_and_inside_routines() {
+        let source = br#"-- CREATE TABLE line_ghost (id int REFERENCES line_target);
+/* CREATE TABLE block_ghost (id int);
+   /* ALTER TABLE accounts ADD FOREIGN KEY (id) REFERENCES block_target; */
+*/
+CREATE TABLE users_ (id int);
+CREATE TABLE "public"."accounts" (id int REFERENCES users_);
+CREATE OR REPLACE FUNCTION "public"."read_accounts"() RETURNS void AS $fn$
+BEGIN
+  RAISE NOTICE 'FROM users_';
+  -- JOIN users_
+  EXECUTE 'SELECT * FROM users_' || suffix;
+  PERFORM $sql$SELECT * FROM users_$sql$;
+  CREATE TABLE body_ghost (id int);
+  SELECT * FROM "public"."accounts";
+END;
+$fn$ LANGUAGE plpgsql;
+CREATE PROCEDURE refresh_accounts() AS $proc$
+BEGIN
+  /* FROM users_ */
+  SELECT * FROM "public"."accounts";
+END;
+$proc$ LANGUAGE plpgsql;
+CREATE VIEW report AS
+SELECT * FROM "public"."accounts"
+WHERE note = 'FROM users_';
+SELECT 'REFERENCES string_ghost';
+-- ALTER TABLE accounts ADD FOREIGN KEY (id) REFERENCES trailing_ghost;
+"#;
+        let extraction = extract_sql_bytes(Path::new("schema.sql"), "db/schema.sql", source)
+            .expect("extract masked SQL");
+
+        for ghost in [
+            "line_ghost",
+            "line_target",
+            "block_ghost",
+            "block_target",
+            "body_ghost",
+            "string_ghost",
+            "trailing_ghost",
+        ] {
+            assert!(
+                extraction
+                    .nodes
+                    .iter()
+                    .all(|node| !node.label.contains(ghost)),
+                "phantom SQL node {ghost}"
+            );
+        }
+
+        let node_id = |label: &str| {
+            extraction
+                .nodes
+                .iter()
+                .find(|node| node.label == label)
+                .unwrap_or_else(|| panic!("SQL node {label}"))
+                .id
+                .clone()
+        };
+        let users = node_id("users_");
+        let accounts = node_id(r#""public"."accounts""#);
+        let function = node_id(r#""public"."read_accounts"()"#);
+        let procedure = node_id("refresh_accounts()");
+        let view = node_id("report");
+        let has_edge = |source: &str, target: &str, relation: &str| {
+            extraction.edges.iter().any(|edge| {
+                edge.true_source() == source
+                    && edge.true_target() == target
+                    && edge.relation == relation
+            })
+        };
+
+        assert!(has_edge(&accounts, &users, "references"));
+        assert!(has_edge(&function, &accounts, "reads_from"));
+        assert!(has_edge(&procedure, &accounts, "reads_from"));
+        assert!(has_edge(&view, &accounts, "reads_from"));
+        assert!(!has_edge(&function, &users, "reads_from"));
+        assert!(!has_edge(&procedure, &users, "reads_from"));
+        assert!(!has_edge(&view, &users, "reads_from"));
     }
 }
