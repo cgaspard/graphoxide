@@ -343,7 +343,7 @@ pub fn count_words(path: &Path) -> usize {
     count_words_with_cap(path, WORD_COUNT_MAX_BYTES).map_or(0, |count| count.words)
 }
 
-fn open_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn open_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1015,7 +1015,7 @@ pub(crate) fn shebang_interpreter_bytes(bytes: &[u8]) -> Option<String> {
     Some(interpreter)
 }
 
-fn has_code_shebang(path: &Path) -> bool {
+pub(crate) fn has_code_shebang(path: &Path) -> bool {
     shebang_interpreter(path).is_some_and(|interpreter| {
         SHEBANG_CODE_INTERPRETERS
             .iter()
@@ -1141,6 +1141,56 @@ fn prose_note(path: &Path) -> bool {
 
 /// Whether a path is likely to be a live credential or key store.
 pub fn is_sensitive(path: &Path) -> bool {
+    is_sensitive_with_path_policy(path, true)
+}
+
+/// Apply the sensitive-path policy without opening or inspecting the payload.
+///
+/// Coverage discovery uses this conservative variant before it attempts any
+/// source handle. Extensionless names that would require shebang inspection
+/// therefore remain sensitive when their names match credential policy.
+pub(crate) fn is_sensitive_path_only(path: &Path) -> bool {
+    is_sensitive_with_path_policy(path, false)
+}
+
+fn is_graphable_path_without_content(path: &Path) -> bool {
+    let code = is_package_manifest(path)
+        || path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.to_lowercase().ends_with(".blade.php"))
+        || format_registry()
+            .find_by_path(path)
+            .and_then(|spec| spec.legacy_file_type)
+            == Some(FileType::Code);
+    code && !matches!(
+        lower_extension(path).as_str(),
+        "json"
+            | "jsonl"
+            | "ndjson"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "config"
+            | "xml"
+            | "properties"
+            | "env"
+            | "txt"
+            | "tfvars"
+    )
+}
+
+fn is_sensitive_with_path_policy(path: &Path, inspect_content: bool) -> bool {
+    let graphable = || {
+        if inspect_content {
+            is_graphable_source(path)
+        } else {
+            is_graphable_path_without_content(path)
+        }
+    };
     let parent_names: Vec<String> = path
         .parent()
         .map(|parent| {
@@ -1162,7 +1212,7 @@ pub fn is_sensitive(path: &Path) -> bool {
     if parent_names
         .iter()
         .any(|part| ["secrets", ".secrets", "credentials"].contains(&part.as_str()))
-        && !is_graphable_source(path)
+        && !graphable()
     {
         return true;
     }
@@ -1206,7 +1256,7 @@ pub fn is_sensitive(path: &Path) -> bool {
         return true;
     }
     if generic_keyword_hit(name) {
-        return !(is_graphable_source(path) || prose_note(path));
+        return !(graphable() || prose_note(path));
     }
     false
 }
@@ -1275,7 +1325,7 @@ pub fn is_noise_dir(name: &str, parent: Option<&Path>) -> bool {
             .is_some_and(|parent| parent.starts_with('.'))
 }
 
-fn parse_ignore_line(raw: &str) -> Option<String> {
+pub(crate) fn parse_ignore_line(raw: &str) -> Option<String> {
     let mut line = raw.trim_end_matches(['\n', '\r']).trim_start().to_owned();
     if line.is_empty() || line.starts_with('#') {
         return None;
@@ -1398,7 +1448,7 @@ fn git_info_exclude(vcs_root: &Path) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-fn load_dir_ignore(directory: &Path, honor_gitignore: bool) -> Vec<IgnorePattern> {
+pub(crate) fn load_dir_ignore(directory: &Path, honor_gitignore: bool) -> Vec<IgnorePattern> {
     let mut patterns = Vec::new();
     if honor_gitignore {
         patterns.extend(read_ignore_file(&directory.join(".gitignore"), directory));
@@ -1590,7 +1640,7 @@ fn resolves_under(path: &Path, root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn output_dir(root: &Path, options: &DetectOptions) -> PathBuf {
+pub(crate) fn output_dir(root: &Path, options: &DetectOptions) -> PathBuf {
     options.output_dir.clone().map_or_else(
         || {
             std::env::var_os("GRAPH_OXIDE_OUT")
@@ -2053,6 +2103,18 @@ pub fn collect_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// Whether discovery intentionally excludes this exact file name from the
+/// legacy extraction queue.
+///
+/// Coverage reporting uses this policy predicate to keep such files visible
+/// without claiming that a registered suffix means they are currently routed
+/// to an extractor.
+pub(crate) fn is_policy_excluded_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| SKIP_FILES.contains(&name))
 }
 
 /// Whether a changed path belongs to the offline structural extraction tier.

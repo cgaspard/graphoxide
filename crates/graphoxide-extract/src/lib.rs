@@ -20,6 +20,7 @@ pub mod cache;
 pub mod cargo_introspect;
 mod compat;
 pub mod containers;
+pub mod coverage;
 mod csharp;
 mod dart;
 pub mod detect;
