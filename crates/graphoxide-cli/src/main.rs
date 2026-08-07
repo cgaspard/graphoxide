@@ -158,17 +158,25 @@ enum Command {
         #[arg(long)]
         no_gitignore: bool,
     },
-    /// Audit extraction and graph construction for silent loss or malformed facts
+    /// Audit graph integrity or report bounded file-indexing coverage
+    #[command(
+        after_help = "Coverage report: graphoxide audit coverage [PATH] [--json] [--strict]\nGraph-audit a directory literally named coverage with: graphoxide audit ./coverage"
+    )]
     Audit {
+        /// Project path, or `coverage` to report bounded file-indexing coverage.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Project path for `audit coverage`; use `./coverage` to graph-audit a
+        /// directory whose literal name is `coverage`.
+        #[arg(value_name = "COVERAGE_PATH")]
+        coverage_path: Option<PathBuf>,
         /// Emit a machine-readable JSON report
         #[arg(long)]
         json: bool,
-        /// Exit unsuccessfully when extraction or graph construction loses facts
+        /// Exit for graph conservation failures or incomplete coverage scans
         #[arg(long)]
         strict: bool,
-        /// Bypass the incremental AST cache
+        /// Bypass the incremental AST cache for a graph audit
         #[arg(long)]
         force: bool,
     },
@@ -1227,10 +1235,32 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Audit {
             path,
+            coverage_path,
             json,
             strict,
             force,
-        } => run_audit(&path, json, strict, force),
+        } => {
+            if path.as_os_str() == std::ffi::OsStr::new("coverage") {
+                run_coverage_audit(
+                    coverage_path
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new(".")),
+                    json,
+                    strict,
+                    force,
+                )
+            } else {
+                anyhow::ensure!(
+                    coverage_path.is_none(),
+                    "unexpected second audit path {}; use `graphoxide audit coverage [PATH]` for a coverage report",
+                    coverage_path
+                        .as_deref()
+                        .expect("checked as present")
+                        .display()
+                );
+                run_audit(&path, json, strict, force)
+            }
+        }
         Command::Diagnose { args } => run_diagnose(&args),
         Command::Query {
             question,
@@ -1793,6 +1823,31 @@ struct AuditReport {
     findings: Vec<AuditFinding>,
     build: graphoxide_graph::BuildReport,
     strict_violations: usize,
+}
+
+fn run_coverage_audit(
+    path: &std::path::Path,
+    json: bool,
+    strict: bool,
+    force: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !force,
+        "--force applies to graph extraction audits and cannot be used with `audit coverage`"
+    );
+    let report = graphoxide_extract::coverage::audit_coverage(
+        path,
+        &graphoxide_extract::coverage::CoverageOptions::detector_defaults(),
+    )?;
+    let output = graphoxide_cli::coverage::render_coverage_report(&report, json)?;
+    write_output(&output)?;
+    let strict_failures = report.strict_failure_count();
+    if strict && strict_failures > 0 {
+        anyhow::bail!(
+            "strict coverage audit failed with {strict_failures} incomplete scan or unreadable file outcome(s)"
+        );
+    }
+    Ok(())
 }
 
 fn run_audit(path: &std::path::Path, json: bool, strict: bool, force: bool) -> anyhow::Result<()> {
@@ -4912,6 +4967,75 @@ mod tests {
                 force: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn audit_coverage_accepts_an_optional_path_and_flags_in_either_order() {
+        for arguments in [
+            vec![
+                "graphoxide",
+                "audit",
+                "coverage",
+                "workspace",
+                "--json",
+                "--strict",
+            ],
+            vec![
+                "graphoxide",
+                "audit",
+                "coverage",
+                "--strict",
+                "--json",
+                "workspace",
+            ],
+            vec![
+                "graphoxide",
+                "audit",
+                "--json",
+                "coverage",
+                "workspace",
+                "--strict",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(arguments).expect("parse coverage audit flags");
+            assert!(matches!(
+                cli.command,
+                Command::Audit {
+                    path,
+                    coverage_path: Some(coverage_path),
+                    json: true,
+                    strict: true,
+                    force: false,
+                } if path == Path::new("coverage") && coverage_path == Path::new("workspace")
+            ));
+        }
+
+        let cli = Cli::try_parse_from(["graphoxide", "audit", "coverage", "--json"])
+            .expect("parse coverage audit with default path");
+        assert!(matches!(
+            cli.command,
+            Command::Audit {
+                path,
+                coverage_path: None,
+                json: true,
+                ..
+            } if path == Path::new("coverage")
+        ));
+    }
+
+    #[test]
+    fn audit_dot_coverage_remains_a_legacy_graph_audit_path() {
+        let cli = Cli::try_parse_from(["graphoxide", "audit", "./coverage", "--json"])
+            .expect("parse literal coverage directory");
+        assert!(matches!(
+            cli.command,
+            Command::Audit {
+                path,
+                coverage_path: None,
+                json: true,
+                ..
+            } if path.as_os_str() == std::ffi::OsStr::new("./coverage")
         ));
     }
 

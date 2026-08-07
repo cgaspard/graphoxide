@@ -96,6 +96,9 @@ graphoxide extract . --code-only --json
 # Inspect the deterministic structured-format capability contract
 graphoxide formats --json
 
+# Report which project files are covered, inventory-only, or unsupported
+graphoxide audit coverage . --json
+
 # Bound an isolated build explicitly and write additive runtime telemetry
 graphoxide extract . --memory-budget-bytes 1073741824 \
   --compute-workers 4 --runtime-report graphoxide-out/runtime.json
@@ -258,6 +261,13 @@ Use `graphoxide audit . --json` for a machine-readable conservation report. Add
 `--strict` in CI to return a failure whenever extraction or graph construction
 loses an unexplained node or edge; the report still prints before the command
 exits so the exact reason counters and source findings remain available.
+
+Use `graphoxide audit coverage . --json` for a deterministic, read-only file
+coverage report. It includes unknown and extensionless files without adding them
+to `graph.json`, records sensitive and policy-excluded paths without reading
+their contents, and reports ignored or pruned boundaries separately. Coverage
+`--strict` fails only when the scan is incomplete or an in-scope file is
+unreadable; unsupported formats remain valid, visible outcomes.
 
 ## Supported source formats
 
