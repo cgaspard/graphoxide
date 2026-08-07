@@ -1,0 +1,12 @@
+version: 0.8.1
+date: 2026-08-07
+highlights:
+  - Audit indexing coverage for every in-scope regular file without changing graph semantics.
+added:
+  - Add graphoxide audit coverage with deterministic human-readable output and root-relative coverage/v1 JSON.
+  - Report truthful outcomes for covered, inventory-only, unsupported, sensitive, policy-excluded, and unreadable files, including unknown and extensionless files.
+  - Add strict failure only for incomplete traversal or unreadable in-scope files.
+changed:
+  - Screen sensitive paths before opening payloads and report ignored or pruned traversal boundaries separately.
+fixed: []
+removed: []

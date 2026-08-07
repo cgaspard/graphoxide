@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 — 2026-08-07
+
+- Added deterministic file-coverage auditing through
+  `graphoxide audit coverage`, including visible outcomes for unknown,
+  extensionless, excluded, and unreadable files.
+- Kept sensitive payloads unopened during coverage classification and exposed
+  truthful format capabilities in root-relative human and JSON reports.
+
 ## 0.8.0 — 2026-08-05
 
 - Bundled the bounded universal indexer with isolated I/O and compute lanes,

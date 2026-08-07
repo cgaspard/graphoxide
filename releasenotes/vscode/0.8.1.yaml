@@ -1,0 +1,10 @@
+version: 0.8.1
+date: 2026-08-07
+highlights:
+  - Bundle deterministic indexing-coverage auditing with Graphoxide for VS Code.
+added:
+  - Include the new graphoxide audit coverage command in every platform-specific bundled CLI.
+changed:
+  - Update the bundled Graphoxide executable to report unknown, excluded, unsupported, and unreadable file coverage without changing graph output.
+fixed: []
+removed: []
