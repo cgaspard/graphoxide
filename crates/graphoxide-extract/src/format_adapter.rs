@@ -350,20 +350,13 @@ fn extract_registered_format_at_depth(
             semantic_parser_allowance,
             "structured_parse_failed",
         )),
-        // `pdf-extract` owns compressed-stream decoding internally and cannot
-        // consume the runtime's pre-allocation credits. Keep isolated PDF
-        // extraction inventory-only until that decoder exposes an allocator or
-        // decompressed-byte ceiling; the legacy facade retains fixed behavior.
-        ByteAdapterKind::Pdf if dispatch_budget.parser_allowance_bytes.is_some() => {
-            let mut extraction =
-                rejected_inventory_extraction(path, source_file, "parser_arena_unenforceable");
-            if let Some(root) = extraction.nodes.first_mut() {
-                root.extra
-                    .insert("format_capability".into(), "inventory_only".into());
-            }
-            Some(extraction)
-        }
-        ByteAdapterKind::Pdf => Some(extract_pdf_bytes(path, source_file, source)),
+        ByteAdapterKind::Pdf => Some(extract_pdf_for_spec(
+            path,
+            source_file,
+            source,
+            semantic_parser_allowance,
+            dispatch_budget.cancellation(),
+        )),
         // A suffix can identify a container/media representation even when a
         // malformed buffer lacks a recognizable signature. Claim it with an
         // explicit rejection instead of leaking it to a generic text parser.
@@ -506,14 +499,50 @@ fn adapter_or_rejected(
         .unwrap_or_else(|| rejected_inventory_extraction(path, source_file, diagnostic))
 }
 
-fn extract_pdf_bytes(path: &Path, source_file: &str, source: &[u8]) -> Extraction {
-    let Ok(text) = pdf_extract::extract_text_from_mem(source) else {
-        return rejected_inventory_extraction(path, source_file, "pdf_parse_failed");
-    };
-    let mut virtual_markdown = path.to_path_buf();
-    virtual_markdown.set_extension("md");
-    crate::fallback::extract_text_bytes(&virtual_markdown, source_file, text.as_bytes())
-        .unwrap_or_else(|_| rejected_inventory_extraction(path, source_file, "pdf_text_rejected"))
+fn extract_pdf_for_spec(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    parser_allowance_bytes: Option<usize>,
+    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+) -> Extraction {
+    let result = extract_with_parser_plan(parser_allowance_bytes, source.len(), || {
+        let limits = match parser_allowance_bytes {
+            Some(allowance_bytes) => {
+                let Some(limits) =
+                    crate::pdf::PdfLimits::for_parser_allowance(allowance_bytes, source.len())
+                else {
+                    anyhow::ensure!(
+                        crate::parser_budget::try_reserve_facts(1),
+                        "PDF rejection root exceeded its dynamic fact allowance"
+                    );
+                    return Ok(rejected_pdf_extraction(
+                        path,
+                        source_file,
+                        "parser_arena_budget",
+                    ));
+                };
+                limits
+            }
+            None => crate::pdf::PdfLimits::default(),
+        };
+        let is_cancelled = || {
+            cancellation.is_some_and(graphoxide_index_runtime::RuntimeCancellation::is_cancelled)
+        };
+        match crate::pdf::extract_pdf_bytes(path, source_file, source, limits, Some(&is_cancelled))
+        {
+            Ok(extraction) if !extraction.nodes.is_empty() => Ok(extraction),
+            Ok(_) => anyhow::bail!("PDF parser returned an empty extraction"),
+            Err(error) => {
+                anyhow::ensure!(
+                    crate::parser_budget::try_reserve_facts(1),
+                    "PDF rejection root exceeded its dynamic fact allowance"
+                );
+                Ok(rejected_pdf_extraction(path, source_file, error.code()))
+            }
+        }
+    });
+    result.unwrap_or_else(|_| rejected_pdf_extraction(path, source_file, "parser_arena_budget"))
 }
 
 /// Aggregate admission guard for one root archive tree.
@@ -1892,6 +1921,23 @@ fn rejected_inventory_extraction(
     }
 }
 
+fn rejected_pdf_extraction(path: &Path, source_file: &str, diagnostic: &'static str) -> Extraction {
+    let file_id = make_id(&[&source_stem(source_file)]);
+    let mut node = inventory_file_node(path, source_file, &file_id, "pdf_document");
+    node.file_type = "paper".into();
+    node.extra.insert("format".into(), "pdf".into());
+    node.extra.insert("_origin".into(), "pdf".into());
+    node.extra
+        .insert("format_capability".into(), "structural_partial".into());
+    node.extra.insert("parse_status".into(), "rejected".into());
+    node.extra.insert("diagnostic".into(), diagnostic.into());
+    Extraction {
+        nodes: vec![node],
+        edges: Vec::new(),
+        hyperedges: Vec::new(),
+    }
+}
+
 fn registered_inventory_extraction(
     path: &Path,
     source_file: &str,
@@ -2002,6 +2048,43 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(value).expect("write gzip fixture");
         encoder.finish().expect("finish gzip fixture")
+    }
+
+    fn one_page_pdf(text: &str) -> Vec<u8> {
+        assert!(text.is_ascii());
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('(', "\\(")
+            .replace(')', "\\)");
+        let content = format!("BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET\n");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+                .to_owned(),
+        ];
+        let mut pdf = b"%PDF-1.4\n%\x80\x80\x80\x80\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
     }
 
     fn has_relation(extraction: &Extraction, relation: &str) -> bool {
@@ -2594,21 +2677,94 @@ mod tests {
     }
 
     #[test]
-    fn isolated_pdf_is_inventory_only_before_unbounded_stream_decoding() {
-        let extraction = extract_with_allowance("document.pdf", b"%PDF-1.7\ninvalid", 1024 * 1024);
-        let root = extraction.nodes.first().expect("PDF inventory root");
+    fn isolated_pdf_budget_rejection_preserves_structural_document_identity() {
+        let extraction = extract_with_allowance("document.pdf", b"%PDF-1.7\ninvalid", 16 * 1024);
+        assert_eq!(extraction.nodes.len(), 1);
+        assert!(extraction.edges.is_empty());
+        assert!(extraction.hyperedges.is_empty());
+        let root = extraction.nodes.first().expect("PDF rejected root");
+        assert_eq!(root.file_type, "paper");
+        assert_eq!(root.source_location, None);
         assert_eq!(
             root.extra
                 .get("diagnostic")
                 .and_then(serde_json::Value::as_str),
-            Some("parser_arena_unenforceable")
+            Some("parser_arena_budget")
         );
         assert_eq!(
             root.extra
                 .get("format_capability")
                 .and_then(serde_json::Value::as_str),
-            Some("inventory_only")
+            Some("structural_partial")
         );
+        assert_eq!(
+            root.extra.get("type").and_then(serde_json::Value::as_str),
+            Some("pdf_document")
+        );
+        assert_eq!(
+            root.extra.get("format").and_then(serde_json::Value::as_str),
+            Some("pdf")
+        );
+        assert_eq!(
+            root.extra
+                .get("_origin")
+                .and_then(serde_json::Value::as_str),
+            Some("pdf")
+        );
+        assert_eq!(
+            root.extra
+                .get("parse_status")
+                .and_then(serde_json::Value::as_str),
+            Some("rejected")
+        );
+    }
+
+    #[test]
+    fn isolated_pdf_routes_to_bounded_page_facts_without_source_locations() {
+        let source = one_page_pdf("Bounded adapter text");
+        let extraction = extract_with_allowance("document.pdf", &source, 16 * 1024 * 1024);
+        assert_eq!(extraction.nodes.len(), 2);
+        assert_eq!(extraction.edges.len(), 1);
+        assert!(extraction.hyperedges.is_empty());
+
+        let root = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("pdf_document")
+            })
+            .expect("PDF document root");
+        let page = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("pdf_page")
+            })
+            .expect("PDF page node");
+        assert_eq!(root.file_type, "paper");
+        assert_eq!(page.file_type, "paper");
+        assert_eq!(root.source_location, None);
+        assert_eq!(page.source_location, None);
+        assert_eq!(
+            page.extra
+                .get("page_number")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert!(page
+            .extra
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| text.contains("Bounded adapter text")));
+        assert!(extraction.edges.iter().all(|edge| {
+            edge.relation == "contains"
+                && edge.source_file == "document.pdf"
+                && edge
+                    .extra
+                    .get("_origin")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("pdf")
+        }));
     }
 
     #[test]
@@ -3085,7 +3241,6 @@ mod tests {
                         | ByteAdapterKind::Diagram
                         | ByteAdapterKind::Engineering
                         | ByteAdapterKind::Simulation
-                        | ByteAdapterKind::Pdf
                         // SVG is semantically parsed by the media adapter.
                         | ByteAdapterKind::ContainerMedia
                 ),
@@ -3107,6 +3262,7 @@ mod tests {
                         | ByteAdapterKind::Diagram
                         | ByteAdapterKind::Engineering
                         | ByteAdapterKind::Simulation
+                        | ByteAdapterKind::Pdf
                         | ByteAdapterKind::ContainerMedia
                 ),
                 "{} claims structural extraction outside a partial-structure adapter",
@@ -3118,15 +3274,7 @@ mod tests {
                 "{} claims container extraction outside the container adapter",
                 spec.id.as_str()
             ),
-            FormatCapability::InventoryOnly => {
-                if spec.adapter() == ByteAdapterKind::Pdf {
-                    assert_eq!(
-                        spec.id.as_str(),
-                        "pdf",
-                        "only the bounded PDF inventory route may own the PDF adapter"
-                    );
-                }
-            }
+            FormatCapability::InventoryOnly => {}
         }
     }
 
@@ -3194,9 +3342,7 @@ mod tests {
                 spec.id.as_str()
             );
             match spec.capability {
-                crate::format_registry::FormatCapability::SemanticFull
-                    if spec.id.as_str() != "pdf" =>
-                {
+                crate::format_registry::FormatCapability::SemanticFull => {
                     assert!(
                         !has_inventory_only_status(&extraction),
                         "{} advertised semantic extraction but its valid routing seed is inventory-only",
