@@ -1,0 +1,9 @@
+{
+  "choices": [
+    {
+      "message": {
+        "content": "{\"summary\":\"A replacement briefing.\",\"topics\":[\"determinism\",\"bounded enrichment\"]}"
+      }
+    }
+  ]
+}

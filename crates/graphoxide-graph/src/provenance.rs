@@ -5,7 +5,7 @@
 /// `None` so callers can fall back to source-location evidence.
 pub fn origin_is_structural(origin: &str) -> Option<bool> {
     match origin {
-        "semantic" => Some(false),
+        "semantic" | "enrichment" => Some(false),
         // Some deterministic extractors are tree-sitter based; others are
         // specialized parsers or conservative fallback scanners. They retain
         // distinct origins for diagnostics but share build/replacement policy.
@@ -24,6 +24,7 @@ mod tests {
         assert_eq!(origin_is_structural("pdf"), Some(true));
         assert_eq!(origin_is_structural("document_package"), Some(true));
         assert_eq!(origin_is_structural("semantic"), Some(false));
+        assert_eq!(origin_is_structural("enrichment"), Some(false));
         assert_eq!(origin_is_structural("future-origin"), None);
     }
 }

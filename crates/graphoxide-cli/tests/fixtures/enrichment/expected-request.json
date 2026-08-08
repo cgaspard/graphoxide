@@ -1,0 +1,18 @@
+{
+  "model": "fixture-model",
+  "max_tokens": 512,
+  "temperature": 0,
+  "response_format": {
+    "type": "json_object"
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "Summarize the supplied redacted media transcript. Return exactly one JSON object with string field \"summary\" and array-of-string field \"topics\"; include no other fields."
+    },
+    {
+      "role": "user",
+      "content": "Release briefing\nGraphoxide keeps default indexing deterministic.\n"
+    }
+  ]
+}
