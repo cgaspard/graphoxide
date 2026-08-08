@@ -16,9 +16,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
 // Bump whenever a built-in extractor's persisted fact schema changes. Version
-// 28 replaces PDF inventory/text fallback entries with bounded document and
-// page facts, which must not mix with an incremental build's older cache rows.
-pub const AST_CACHE_VERSION: u32 = 28;
+// 29 replaces OOXML, ODF, and EPUB inventory entries with bounded package-part,
+// document-structure, and internal-relationship facts. Those facts must not
+// mix with an incremental build's older cache rows.
+pub const AST_CACHE_VERSION: u32 = 29;
 
 /// Wire version for the extraction-owned payload stored inside runtime-v1.
 ///

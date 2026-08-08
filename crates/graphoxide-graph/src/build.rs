@@ -273,7 +273,9 @@ pub fn shortest_unique_suffix(source_file: &str, all_source_files: &BTreeSet<Str
 pub fn disambiguate_file_labels_in_nodes(nodes: &mut [Node]) {
     let mut groups: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
     for (index, node) in nodes.iter().enumerate() {
-        if is_declared_graphviz_entity(node) || !is_file_node_label(&node.label, &node.source_file)
+        if is_declared_graphviz_entity(node)
+            || is_document_package_child(node)
+            || !is_file_node_label(&node.label, &node.source_file)
         {
             continue;
         }
@@ -606,19 +608,22 @@ fn build_graph_with_report_normalized(
     for node in nodes.values() {
         let path = std::path::Path::new(&node.source_file);
         let stem = path.file_stem().and_then(|v| v.to_str()).unwrap_or("");
-        add_legacy_alias(
-            &mut legacy,
-            normalize_id(&format!(
-                "{stem}_{}",
-                node.label.trim_start_matches('.').trim_end_matches("()")
-            )),
-            &node.id,
-        );
+        if !is_document_package_child(node) {
+            add_legacy_alias(
+                &mut legacy,
+                normalize_id(&format!(
+                    "{stem}_{}",
+                    node.label.trim_start_matches('.').trim_end_matches("()")
+                )),
+                &node.id,
+            );
+        }
         let basename = path
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("");
-        if !stem.is_empty()
+        if !is_document_package_child(node)
+            && !stem.is_empty()
             && (node.label == basename
                 || node
                     .label
@@ -992,6 +997,15 @@ fn is_declared_graphviz_entity(node: &Node) -> bool {
             .is_some()
 }
 
+fn is_document_package_entity(node: &Node) -> bool {
+    node.extra.get("_origin").and_then(|value| value.as_str()) == Some("document_package")
+}
+
+fn is_document_package_child(node: &Node) -> bool {
+    is_document_package_entity(node)
+        && (node.extra.contains_key("unit_ordinal") || node.extra.contains_key("internal_part"))
+}
+
 fn document_twin_remap(nodes: &BTreeMap<String, Node>) -> BTreeMap<String, String> {
     let mut remap = BTreeMap::new();
     for (id, canonical) in nodes {
@@ -1003,6 +1017,8 @@ fn document_twin_remap(nodes: &BTreeMap<String, Node>) -> BTreeMap<String, Strin
         };
         if !is_declared_graphviz_entity(canonical)
             && !is_declared_graphviz_entity(bare)
+            && !is_document_package_entity(canonical)
+            && !is_document_package_entity(bare)
             && canonical.file_type == "document"
             && bare.file_type == "document"
             && !canonical.source_file.is_empty()
