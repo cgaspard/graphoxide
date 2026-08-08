@@ -11,7 +11,10 @@
     "benchmark:diagrams": "node scripts/benchmark-graph-build.mjs --scenario diagrams",
     "benchmark:facility-models": "node scripts/benchmark-graph-build.mjs --scenario facility-models",
     "benchmark:openusd-assets": "node scripts/benchmark-graph-build.mjs --scenario openusd-assets",
-    "test:benchmark": "node --test scripts/benchmark-graph-build.test.mjs",
+    "qualification:universal": "node scripts/qualify-universal-indexing.mjs",
+    "qualification:ci": "node scripts/qualify-universal-indexing.mjs --profile ci-mixed-v1",
+    "test:qualification": "node --test scripts/qualify-universal-indexing.test.mjs",
+    "test:benchmark": "node --test scripts/benchmark-graph-build.test.mjs scripts/qualify-universal-indexing.test.mjs",
     "verify:pre-push": "node scripts/verify.mjs --pre-push",
     "verify:release": "node scripts/verify.mjs --release"
   },

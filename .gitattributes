@@ -1,3 +1,9 @@
 # This generated report preserves third-party license text byte-for-byte,
 # including upstream line endings and significant trailing spaces.
 THIRD_PARTY_LICENSES.html -whitespace
+
+# Universal qualification metadata has canonical LF JSON while content-addressed
+# objects must reach every checkout byte-for-byte, regardless of autocrlf.
+benchmarks/universal/catalog.json text eol=lf
+benchmarks/universal/manifests/*.json text eol=lf
+benchmarks/universal/objects/sha256/** -text

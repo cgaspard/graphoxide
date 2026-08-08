@@ -1,6 +1,6 @@
 # HANDOFF — Graphoxide Rust port
 
-**Goal:** a faster, single-binary Rust implementation derived from
+**Goal:** a single-binary Rust implementation, originally intended to reduce runtime overhead, derived from
 [Graphify](https://github.com/Graphify-Labs/graphify) that requires **no Python runtime**,
 uses the same graph schema in its renamed `graphoxide-out/` directory, and covers the
 offline core first (extract → build → cluster → analyze → report/export → query → MCP).
@@ -19,8 +19,8 @@ distills the parts that matter so you don't have to re-derive them.
 > resolution, build/dedup/Leiden/analyze, reports and exports, MCP stdio, watch,
 > hooks/Claude integration, global/merge workflows, benchmarks, structured fallback
 > extraction for the remaining language matrix, and optional HTTP community labeling.
-> See `README.md` for the current command surface and `BENCHMARKS.md` for measured
-> differential and performance results. The bullets immediately below describe the
+> See `README.md` for the current command surface and `BENCHMARKS.md` for the
+> reproducible benchmark methodology and observation schema. The bullets immediately below describe the
 > original scaffold at handoff time and are retained as historical context.
 
 - Cargo workspace scaffolded and **compiling** (`cargo build` passes, Rust 1.95).
@@ -61,14 +61,14 @@ conversion, PostgreSQL introspection, neo4j/falkordb live export, the ~20 platfo
 installers (keep `claude install` + `hook install` only at first), SVG export
 (matplotlib upstream — either skip or write a small deterministic spring layout later).
 
-**Where the speed comes from:**
+**Implementation differences considered in the original plan:**
 1. Extraction: upstream uses a `ProcessPoolExecutor` (only when ≥20 uncached files) to
    dodge the GIL, paying subprocess spawn + JSON pickle per file. Rust: rayon in-process,
-   zero serialization. This is the single biggest win.
+   with no per-file process boundary or JSON serialization.
 2. Query startup: `graphoxide query` runs on *every agent question*; interpreter + import
-   time dominates small queries. A Rust binary is ~5 ms to first instruction.
+   startup is avoided by the standalone native binary.
 3. Trigram/IDF indexes are rebuilt per process upstream (cached only inside the MCP
-   server); Rust can build them 10-50x faster and/or persist them.
+   server); the Rust design can persist them and avoid repeated rebuild work.
 
 ## 3. graph.json schema (byte-compat contract)
 
@@ -307,7 +307,7 @@ formats. HTTP transport (axum) + API-key middleware later.
 | 3 ✅ | Extraction tier 1 (python, js/ts, go, rust, java) + detect + second pass | Node/edge sets match Python `extract --code-only` on fixture corpora (see §11) |
 | 4 ✅ | build + dedup + cluster (network_partitions) + analyze + report/export | `graphoxide extract --code-only` end-to-end parity on upstream's own repo |
 | 5 ✅ | MCP server + watch + hooks + incremental manifest | MCP protocol compatibility with upstream Graphify; hook-driven rebuilds |
-| 6 ✅ | Language tiers 2-3, global graph, merge-graphs, benchmark, LLM labeling via reqwest | feature parity for the offline surface + `BENCHMARKS.md` numbers vs Python |
+| 6 ✅ | Language tiers 2-3, global graph, merge-graphs, benchmark, LLM labeling via reqwest | feature parity for the offline surface + reproducible observational benchmark methodology |
 
 ## 11. Testing strategy: differential against upstream
 

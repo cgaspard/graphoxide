@@ -15,7 +15,7 @@
 
 use crate::{
     ByteCreditLease, ByteCreditLedger, CreditReservationError, FileReadRequest,
-    RuntimeCancellation, SourceIdentityEvidence,
+    RuntimeCancellation, SourceIdentityEvidence, TrackedCreditReservationError,
 };
 use std::{
     cell::Cell,
@@ -58,6 +58,15 @@ const FRAME_HEADER_LEN: usize = 56;
 const CATALOG_RECORD_VERSION: u8 = 1;
 const CATALOG_RECORD_LEN: usize = 1 + 32 + 8 + 8 + 8 + 32;
 const CATALOG_FRAME_LEN: usize = FRAME_HEADER_LEN + CATALOG_RECORD_LEN;
+
+/// Framed artifact bytes written for one decoded payload.
+///
+/// This excludes the separately framed catalog record. The conversion is
+/// saturating so telemetry cannot wrap even on a narrower host.
+#[must_use]
+pub fn runtime_cache_artifact_bytes(payload_bytes: usize) -> u64 {
+    u64::try_from(FRAME_HEADER_LEN.saturating_add(payload_bytes)).unwrap_or(u64::MAX)
+}
 
 /// Bounded number of control-plane cache commands retained ahead of the
 /// dedicated cache I/O owner.
@@ -150,6 +159,9 @@ pub struct RuntimeCacheHit {
     pub payload: Vec<u8>,
     /// Cache tier that supplied the payload.
     pub source: RuntimeCacheSource,
+    // Completed bytes read by the cache I/O owner for this validated payload.
+    // Runtime-v1 values include the frame header; catalog reads are excluded.
+    artifact_bytes_read: u64,
     // Service reads retain shared byte credit until the consumer finishes
     // decoding and drops the hit. Direct `RuntimeCache` reads use `None`.
     transfer_credit: Option<ByteCreditLease>,
@@ -172,6 +184,19 @@ impl PartialEq for RuntimeCacheHit {
 }
 
 impl Eq for RuntimeCacheHit {}
+
+impl RuntimeCacheHit {
+    /// Completed artifact bytes read to return this validated payload.
+    ///
+    /// Runtime-v1 values include the frame header and exclude catalog records.
+    /// Legacy service values are the exact file length observed by the owner;
+    /// a direct caller-supplied `get_or_legacy` closure reports zero because
+    /// this cache did not observe that closure's I/O.
+    #[must_use]
+    pub const fn artifact_bytes_read(&self) -> u64 {
+        self.artifact_bytes_read
+    }
+}
 
 /// Detailed result of probing one cache key.
 ///
@@ -548,6 +573,60 @@ pub struct RuntimeCacheMemoryUsage {
     pub max_resident_bytes: usize,
 }
 
+/// Run-local, label-free byte evidence observed by the dedicated cache owner.
+///
+/// Reads count completed validated payloads. Artifact totals include runtime
+/// frame headers and exclude catalog records. Writes count commands that
+/// successfully published both artifact and catalog state. The transfer peak
+/// is live reserved credit, not a resident-payload estimate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeCacheIoTelemetry {
+    pub payload_bytes_read: u64,
+    pub payload_bytes_written: u64,
+    pub artifact_bytes_read: u64,
+    pub artifact_bytes_written: u64,
+    pub peak_in_flight_transfer_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeCacheIoTelemetryCounters {
+    payload_bytes_read: u64,
+    payload_bytes_written: u64,
+    artifact_bytes_read: u64,
+    artifact_bytes_written: u64,
+}
+
+impl RuntimeCacheIoTelemetryCounters {
+    fn record_read(&mut self, hit: &RuntimeCacheHit) {
+        self.payload_bytes_read = self
+            .payload_bytes_read
+            .saturating_add(u64::try_from(hit.payload.len()).unwrap_or(u64::MAX));
+        self.artifact_bytes_read = self
+            .artifact_bytes_read
+            .saturating_add(hit.artifact_bytes_read());
+    }
+
+    fn record_write(&mut self, payload_bytes: usize) {
+        self.payload_bytes_written = self
+            .payload_bytes_written
+            .saturating_add(u64::try_from(payload_bytes).unwrap_or(u64::MAX));
+        self.artifact_bytes_written = self
+            .artifact_bytes_written
+            .saturating_add(runtime_cache_artifact_bytes(payload_bytes));
+    }
+
+    fn snapshot(&self, peak_in_flight_transfer_bytes: usize) -> RuntimeCacheIoTelemetry {
+        RuntimeCacheIoTelemetry {
+            payload_bytes_read: self.payload_bytes_read,
+            payload_bytes_written: self.payload_bytes_written,
+            artifact_bytes_read: self.artifact_bytes_read,
+            artifact_bytes_written: self.artifact_bytes_written,
+            peak_in_flight_transfer_bytes: u64::try_from(peak_in_flight_transfer_bytes)
+                .unwrap_or(u64::MAX),
+        }
+    }
+}
+
 /// Strict writer backed by byte credit acquired before serialization.
 ///
 /// It deliberately exposes only [`Write`], so an encoder cannot reserve or
@@ -614,6 +693,10 @@ enum RuntimeCacheIoCommand {
         cancellation: RuntimeCancellation,
         _credit: ByteCreditLease,
         response: SyncSender<Result<RuntimeCacheIoPersistOutcome, RuntimeCacheIoServiceError>>,
+    },
+    SnapshotTelemetry {
+        transfer_credits: ByteCreditLedger,
+        response: SyncSender<Result<RuntimeCacheIoTelemetry, RuntimeCacheIoServiceError>>,
     },
     Shutdown {
         response: SyncSender<()>,
@@ -863,6 +946,37 @@ impl RuntimeCacheIoClient {
         }
     }
 
+    /// Peak live transfer credit observed by this run-local cache service.
+    #[must_use]
+    pub fn peak_in_flight_transfer_bytes(&self) -> usize {
+        self.transfer_credits.peak_reserved_bytes()
+    }
+
+    /// Ask the I/O owner for a coherent snapshot after all commands admitted
+    /// ahead of this barrier.
+    pub fn telemetry_snapshot(
+        &self,
+    ) -> Result<RuntimeCacheIoTelemetry, RuntimeCacheIoServiceError> {
+        self.telemetry_snapshot_with_cancellation(&RuntimeCancellation::new())
+    }
+
+    /// Cancellation-aware I/O-owner telemetry barrier.
+    pub fn telemetry_snapshot_with_cancellation(
+        &self,
+        cancellation: &RuntimeCancellation,
+    ) -> Result<RuntimeCacheIoTelemetry, RuntimeCacheIoServiceError> {
+        let (response, receiver) = mpsc::sync_channel(0);
+        send_cache_command(
+            &self.sender,
+            RuntimeCacheIoCommand::SnapshotTelemetry {
+                transfer_credits: self.transfer_credits.clone(),
+                response,
+            },
+            cancellation,
+        )?;
+        wait_cache_response(receiver, cancellation)
+    }
+
     fn persist_owned(
         &self,
         key: RuntimeCacheKey,
@@ -917,19 +1031,26 @@ fn reserve_cache_credit(
         if cancellation.is_cancelled() {
             return Err(RuntimeCacheIoServiceError::Cancelled);
         }
-        match credits.try_reserve(bytes) {
+        match credits.try_reserve_tracked(bytes) {
             Ok(credit) => return Ok(credit),
-            Err(CreditReservationError::TooLarge {
+            Err(TrackedCreditReservationError::Public(CreditReservationError::TooLarge {
                 requested,
                 capacity,
-            }) => {
+            })) => {
                 return Err(RuntimeCacheIoServiceError::TransferTooLarge {
                     requested_bytes: requested,
                     capacity_bytes: capacity,
                 });
             }
-            Err(CreditReservationError::Insufficient { .. }) => {
+            Err(TrackedCreditReservationError::Public(CreditReservationError::Insufficient {
+                ..
+            })) => {
                 thread::park_timeout(CACHE_RESPONSE_POLL_INTERVAL);
+            }
+            Err(TrackedCreditReservationError::ReservationCountOverflow) => {
+                return Err(RuntimeCacheIoServiceError::Cache(RuntimeCacheError::Io(
+                    io::Error::other("runtime cache transfer lease counter overflowed"),
+                )));
             }
         }
     }
@@ -990,6 +1111,15 @@ fn cache_io_probe(
     probe
 }
 
+fn record_completed_cache_read(
+    telemetry: &mut RuntimeCacheIoTelemetryCounters,
+    outcome: &RuntimeCacheProbeOutcome,
+) {
+    if let RuntimeCacheProbeOutcome::Hit(hit) = outcome {
+        telemetry.record_read(hit);
+    }
+}
+
 fn attach_transfer_credit(outcome: &mut RuntimeCacheProbeOutcome, credit: ByteCreditLease) {
     if let RuntimeCacheProbeOutcome::Hit(hit) = outcome {
         hit.transfer_credit = Some(credit);
@@ -998,6 +1128,7 @@ fn attach_transfer_credit(outcome: &mut RuntimeCacheProbeOutcome, credit: ByteCr
 
 fn probe_metadata_only_on_owner(
     cache: &RuntimeCache,
+    telemetry: &mut RuntimeCacheIoTelemetryCounters,
     request: RuntimeCacheMetadataProbeRequest,
     cancellation: RuntimeCancellation,
     io_thread_id: ThreadId,
@@ -1054,6 +1185,9 @@ fn probe_metadata_only_on_owner(
         ));
     }
     let outcome = cache.probe(request.key);
+    // Count the completed validated artifact read even if the held source
+    // changes during the final metadata-only acceptance check.
+    record_completed_cache_read(telemetry, &outcome);
     match guard.finish(&cancellation) {
         Ok(true) => Ok(cache_io_probe(outcome, false, io_thread_id, credit)),
         Ok(false) => Ok(cache_io_probe(
@@ -1152,6 +1286,7 @@ impl RuntimeCacheIoService {
                         return;
                     }
                 };
+                let mut telemetry_for_worker = RuntimeCacheIoTelemetryCounters::default();
                 while let Ok(command) = receiver.recv() {
                     let io_thread_id = thread::current().id();
                     match command {
@@ -1164,12 +1299,12 @@ impl RuntimeCacheIoService {
                             let outcome = if cancellation.is_cancelled() {
                                 Err(RuntimeCacheIoServiceError::Cancelled)
                             } else {
-                                Ok(cache_io_probe(
-                                    cache.probe(key),
-                                    false,
-                                    io_thread_id,
-                                    credit,
-                                ))
+                                let cache_outcome = cache.probe(key);
+                                record_completed_cache_read(
+                                    &mut telemetry_for_worker,
+                                    &cache_outcome,
+                                );
+                                Ok(cache_io_probe(cache_outcome, false, io_thread_id, credit))
                             };
                             let _ = response.send(outcome);
                         }
@@ -1181,6 +1316,7 @@ impl RuntimeCacheIoService {
                         } => {
                             let outcome = probe_metadata_only_on_owner(
                                 &cache,
+                                &mut telemetry_for_worker,
                                 request,
                                 cancellation,
                                 io_thread_id,
@@ -1200,6 +1336,10 @@ impl RuntimeCacheIoService {
                                 cache
                                     .probe_or_legacy_file(&request)
                                     .map(|(outcome, runtime_rejected_before_legacy)| {
+                                        record_completed_cache_read(
+                                            &mut telemetry_for_worker,
+                                            &outcome,
+                                        );
                                         RuntimeCacheIoProbe {
                                             outcome,
                                             runtime_rejected_before_legacy,
@@ -1233,7 +1373,8 @@ impl RuntimeCacheIoService {
                                     })
                                 } else {
                                     match cache.probe(key) {
-                                        RuntimeCacheProbeOutcome::Hit(_) => {
+                                        RuntimeCacheProbeOutcome::Hit(hit) => {
+                                            telemetry_for_worker.record_read(&hit);
                                             Ok(RuntimeCacheIoPersistOutcome::AlreadyPresent {
                                                 io_thread_id,
                                             })
@@ -1258,9 +1399,24 @@ impl RuntimeCacheIoService {
                                         }
                                     }
                                 };
+                                if matches!(
+                                    cache_outcome,
+                                    Ok(RuntimeCacheIoPersistOutcome::Stored { .. }
+                                        | RuntimeCacheIoPersistOutcome::RepairedRejected { .. }
+                                        | RuntimeCacheIoPersistOutcome::ReplacedExisting { .. })
+                                ) {
+                                    telemetry_for_worker.record_write(payload.len());
+                                }
                                 cache_outcome.map_err(RuntimeCacheIoServiceError::Cache)
                             };
                             let _ = response.send(outcome);
+                        }
+                        RuntimeCacheIoCommand::SnapshotTelemetry {
+                            transfer_credits,
+                            response,
+                        } => {
+                            let _ = response.send(Ok(telemetry_for_worker
+                                .snapshot(transfer_credits.peak_reserved_bytes())));
                         }
                         RuntimeCacheIoCommand::Shutdown { response } => {
                             let _ = response.send(());
@@ -1365,6 +1521,28 @@ impl RuntimeCacheIoService {
     #[must_use]
     pub fn memory_usage(&self) -> RuntimeCacheMemoryUsage {
         self.client.memory_usage()
+    }
+
+    /// Peak live transfer credit observed by this run-local cache service.
+    #[must_use]
+    pub fn peak_in_flight_transfer_bytes(&self) -> usize {
+        self.client.peak_in_flight_transfer_bytes()
+    }
+
+    /// Ask the I/O owner for a coherent telemetry barrier snapshot.
+    pub fn telemetry_snapshot(
+        &self,
+    ) -> Result<RuntimeCacheIoTelemetry, RuntimeCacheIoServiceError> {
+        self.client.telemetry_snapshot()
+    }
+
+    /// Cancellation-aware I/O-owner telemetry barrier.
+    pub fn telemetry_snapshot_with_cancellation(
+        &self,
+        cancellation: &RuntimeCancellation,
+    ) -> Result<RuntimeCacheIoTelemetry, RuntimeCacheIoServiceError> {
+        self.client
+            .telemetry_snapshot_with_cancellation(cancellation)
     }
 
     /// Shut down and join the dedicated cache owner after earlier admitted
@@ -1719,6 +1897,7 @@ impl RuntimeCache {
         RuntimeCacheProbeOutcome::Hit(RuntimeCacheHit {
             payload: frame,
             source: RuntimeCacheSource::RuntimeV1,
+            artifact_bytes_read: location.frame_len,
             transfer_credit: None,
         })
     }
@@ -1769,6 +1948,7 @@ impl RuntimeCache {
             RuntimeCacheProbeOutcome::Hit(RuntimeCacheHit {
                 payload: bytes,
                 source: RuntimeCacheSource::Legacy,
+                artifact_bytes_read: u64::try_from(length).unwrap_or(u64::MAX),
                 transfer_credit: None,
             }),
             runtime_rejected,
@@ -1785,6 +1965,7 @@ impl RuntimeCache {
     {
         self.get(key).or_else(|| {
             legacy().map(|payload| RuntimeCacheHit {
+                artifact_bytes_read: 0,
                 payload,
                 source: RuntimeCacheSource::Legacy,
                 transfer_credit: None,
@@ -2800,6 +2981,20 @@ mod tests {
             RuntimeCacheIoPersistOutcome::AlreadyPresent { io_thread_id },
             "the worker combines the probe and append decision without a caller-side cache race"
         );
+        let telemetry = service
+            .telemetry_snapshot()
+            .expect("owner telemetry barrier");
+        assert_eq!(telemetry.payload_bytes_read, 14);
+        assert_eq!(
+            telemetry.artifact_bytes_read,
+            runtime_cache_artifact_bytes(7).saturating_mul(2)
+        );
+        assert_eq!(telemetry.payload_bytes_written, 7);
+        assert_eq!(
+            telemetry.artifact_bytes_written,
+            runtime_cache_artifact_bytes(7)
+        );
+        assert!(telemetry.peak_in_flight_transfer_bytes > 0);
         service.shutdown().expect("join dedicated I/O owner");
 
         let reopened = RuntimeCache::open(temp.path()).expect("reopen persisted cache");

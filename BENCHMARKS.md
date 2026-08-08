@@ -88,12 +88,22 @@ Raw CLI reports are preserved under every sample. Separate min, median, and max
 summaries are computed for external and CLI-reported timings. The runner rejects
 a successful command that does not produce one parseable JSON object with a
 finite, non-negative `elapsed_ms`, the expected operation/mode/status, and—for
-the incremental sample—exactly one processed changed file.
+the incremental sample—exactly one processed changed file and a mutation-visible
+graph digest.
 
-Every benchmark command also requests an atomically written `IndexRuntimeTelemetryV1`
+Every benchmark command also requests an atomically written `IndexRuntimeTelemetryV2`
 sidecar. It embeds the unchanged build report and records the isolated execution
 model, I/O backend, configured managed-memory/pool/cache limits when available, and
-runtime-detected SIMD capabilities. The runner rejects a legacy sidecar: its
+runtime-detected SIMD capabilities. Version 2 additionally records aggregate
+source-I/O and parser work, cache transfer counters and admission-credit peaks,
+and the process peak-RSS source/value. `peak_ready_bytes`, `peak_ready_items`,
+and `peak_in_flight_transfer_bytes` are peak live reserved admission credits,
+including pre-open or maximum-bound reservations; they do not claim resident
+payload bytes or actual completed transfers. Completed totals are the separate
+`payload_bytes_read`, `payload_bytes_written`, `artifact_bytes_read`, and
+`artifact_bytes_written` counters. `process.peak_rss_bytes` is the separately
+sourced resident-memory observation when the operating system makes it
+available. The runner rejects a legacy sidecar: its
 measurements must exercise the default dedicated I/O and CPU execution path.
 A detected CPU feature does not by itself mean a specific extractor used that
 instruction set. This sidecar is opt-in and never changes the `--json` object

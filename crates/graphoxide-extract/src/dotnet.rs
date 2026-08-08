@@ -133,6 +133,20 @@ impl<'a> Builder<'a> {
         id
     }
 
+    fn external(&mut self, name: &str, kind: &str, line: usize) -> String {
+        let id = make_id(&[name]);
+        let before = self.nodes.len();
+        self.node(id.clone(), name, kind, "code", "", line);
+        if self.nodes.len() > before {
+            self.nodes
+                .last_mut()
+                .expect("new external node")
+                .extra
+                .insert("origin_file".into(), self.source_file.into());
+        }
+        id
+    }
+
     fn existing_node(&mut self, node: &Node) {
         if self.seen_nodes.insert(node.id.clone()) {
             self.nodes.push(node.clone());
@@ -1553,8 +1567,7 @@ fn extract_razor(path: &Path, source_file: &str, bytes: &[u8]) -> anyhow::Result
         for capture in regex.captures_iter(&text) {
             let name = &capture[1];
             let line = line_of(&text, capture.get(0).expect("Razor directive").start());
-            let id = make_id(&[name]);
-            builder.node(id.clone(), name, "reference", "code", "", line);
+            let id = builder.external(name, "reference", line);
             builder.edge(
                 &builder.file_id.clone(),
                 &id,
@@ -1599,8 +1612,7 @@ fn extract_razor(path: &Path, source_file: &str, bytes: &[u8]) -> anyhow::Result
             continue;
         }
         let line = line_of(&text, capture.get(0).expect("Razor component").start());
-        let id = make_id(&[name]);
-        builder.node(id.clone(), name, "component", "code", "", line);
+        let id = builder.external(name, "component", line);
         builder.edge(
             &builder.file_id.clone(),
             &id,
@@ -1679,6 +1691,30 @@ EndProject
             "razor",
             "@using Sample.Services\n@page \"/sample\"\n<Widget />\n",
         );
+    }
+
+    #[test]
+    fn razor_external_nodes_retain_their_source_provenance() {
+        let relative = "dotnet/WorkerPage.razor";
+        let extraction = extract_dotnet_bytes(
+            Path::new(relative),
+            relative,
+            "razor",
+            b"@inject Matrix.Runtime.IWorker Worker\n<WorkerPanel />\n",
+        )
+        .expect("Razor extraction");
+        let external_nodes = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.source_file.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(external_nodes.len(), 2);
+        assert!(external_nodes.iter().all(|node| {
+            node.extra
+                .get("origin_file")
+                .and_then(serde_json::Value::as_str)
+                == Some(relative)
+        }));
     }
 
     #[test]

@@ -13,6 +13,9 @@ pub const BUILD_TELEMETRY_SCHEMA_VERSION: u8 = 1;
 /// is the stable stdout contract for `extract --json` and `update --json`; new
 /// runtime fields must be added here instead of extending that contract.
 pub const INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION: u8 = 1;
+/// Schema for the additive runtime telemetry sidecar emitted by current CLI
+/// commands. V1 remains available as a source- and wire-compatible API.
+pub const INDEX_RUNTIME_TELEMETRY_V2_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -259,6 +262,213 @@ impl From<graphoxide_extract::cache::RuntimeCacheTelemetry> for RuntimeCacheTele
     }
 }
 
+/// V2 cache evidence. The original [`RuntimeCacheTelemetry`] DTO remains
+/// unchanged for V1 source and wire compatibility.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RuntimeCacheTelemetryV2 {
+    pub enabled: bool,
+    pub metadata_hits: u64,
+    pub runtime_hits: u64,
+    pub legacy_hits: u64,
+    pub misses: u64,
+    pub bypasses: u64,
+    pub stale_or_corrupt: u64,
+    pub probe_failures: u64,
+    pub payload_reads_avoided: u64,
+    pub parses_avoided: u64,
+    pub stores: u64,
+    pub already_present: u64,
+    pub store_failures: u64,
+    pub payload_bytes_read: u64,
+    pub payload_bytes_written: u64,
+    pub artifact_bytes_read: u64,
+    pub artifact_bytes_written: u64,
+    pub peak_in_flight_transfer_bytes: u64,
+}
+
+impl RuntimeCacheTelemetryV2 {
+    /// Combine stable cache decisions with exact owner-observed byte evidence.
+    #[must_use]
+    pub fn from_runtime(
+        cache: graphoxide_extract::cache::RuntimeCacheTelemetry,
+        io: graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry,
+    ) -> Self {
+        Self {
+            enabled: cache.enabled,
+            metadata_hits: cache.metadata_hits,
+            runtime_hits: cache.runtime_hits,
+            legacy_hits: cache.legacy_hits,
+            misses: cache.misses,
+            bypasses: cache.bypasses,
+            stale_or_corrupt: cache.stale_or_corrupt,
+            probe_failures: cache.probe_failures,
+            payload_reads_avoided: cache.payload_reads_avoided,
+            parses_avoided: cache.parses_avoided,
+            stores: cache.stores,
+            already_present: cache.already_present,
+            store_failures: cache.store_failures,
+            payload_bytes_read: io.payload_bytes_read,
+            payload_bytes_written: io.payload_bytes_written,
+            artifact_bytes_read: io.artifact_bytes_read,
+            artifact_bytes_written: io.artifact_bytes_written,
+            peak_in_flight_transfer_bytes: io.peak_in_flight_transfer_bytes,
+        }
+    }
+}
+
+impl From<RuntimeCacheTelemetry> for RuntimeCacheTelemetryV2 {
+    fn from(cache: RuntimeCacheTelemetry) -> Self {
+        Self {
+            enabled: cache.enabled,
+            metadata_hits: cache.metadata_hits,
+            runtime_hits: cache.runtime_hits,
+            legacy_hits: cache.legacy_hits,
+            misses: cache.misses,
+            bypasses: cache.bypasses,
+            stale_or_corrupt: cache.stale_or_corrupt,
+            probe_failures: cache.probe_failures,
+            payload_reads_avoided: cache.payload_reads_avoided,
+            parses_avoided: cache.parses_avoided,
+            stores: cache.stores,
+            already_present: cache.already_present,
+            store_failures: cache.store_failures,
+            ..Self::default()
+        }
+    }
+}
+
+/// Aggregate source I/O evidence from the isolated runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RuntimeIoTelemetry {
+    pub sources_selected: u64,
+    pub source_bytes_selected: u64,
+    pub sources_read: u64,
+    pub source_bytes_read: u64,
+    pub sources_delivered: u64,
+    pub source_bytes_delivered: u64,
+    pub source_bytes_avoided: u64,
+    pub read_failures: u64,
+    /// Peak live ready-input admission credit, including pre-open tickets.
+    pub peak_ready_bytes: u64,
+    pub peak_ready_items: u64,
+}
+
+impl From<graphoxide_index_runtime::RuntimeIoTelemetry> for RuntimeIoTelemetry {
+    fn from(io: graphoxide_index_runtime::RuntimeIoTelemetry) -> Self {
+        Self {
+            sources_selected: io.sources_selected,
+            source_bytes_selected: io.source_bytes_selected,
+            sources_read: io.sources_read,
+            source_bytes_read: io.source_bytes_read,
+            sources_delivered: io.sources_delivered,
+            source_bytes_delivered: io.source_bytes_delivered,
+            source_bytes_avoided: io.source_bytes_avoided,
+            read_failures: io.read_failures,
+            peak_ready_bytes: io.peak_ready_bytes,
+            peak_ready_items: io.peak_ready_items,
+        }
+    }
+}
+
+/// Aggregate parser work after cache decisions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RuntimeWorkTelemetry {
+    pub parses: u64,
+}
+
+impl From<graphoxide_extract::RuntimeWorkTelemetry> for RuntimeWorkTelemetry {
+    fn from(work: graphoxide_extract::RuntimeWorkTelemetry) -> Self {
+        Self {
+            parses: work.parses,
+        }
+    }
+}
+
+/// Operating-system source used for the process high-water mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePeakRssSource {
+    Unavailable,
+    GetrusageMaxrssBytes,
+    GetrusageMaxrssKib,
+}
+
+/// Process-wide peak resident set observed when the sidecar is finalized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RuntimeProcessTelemetry {
+    pub peak_rss_bytes: Option<u64>,
+    pub peak_rss_source: RuntimePeakRssSource,
+}
+
+impl Default for RuntimeProcessTelemetry {
+    fn default() -> Self {
+        Self {
+            peak_rss_bytes: None,
+            peak_rss_source: RuntimePeakRssSource::Unavailable,
+        }
+    }
+}
+
+impl RuntimeProcessTelemetry {
+    /// Detect the process-wide RSS high-water mark without adding sampling
+    /// threads or changing the default execution path.
+    #[must_use]
+    pub fn detect() -> Self {
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "linux",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            if let Some(value) = getrusage_maxrss() {
+                return value
+                    .checked_mul(1024)
+                    .map_or_else(Self::default, |bytes| Self {
+                        peak_rss_bytes: Some(bytes),
+                        peak_rss_source: RuntimePeakRssSource::GetrusageMaxrssKib,
+                    });
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(bytes) = getrusage_maxrss() {
+                return Self {
+                    peak_rss_bytes: Some(bytes),
+                    peak_rss_source: RuntimePeakRssSource::GetrusageMaxrssBytes,
+                };
+            }
+        }
+
+        Self::default()
+    }
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn getrusage_maxrss() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `usage` points to writable storage for `rusage`, and it is read
+    // only after getrusage reports success for the current process.
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if status != 0 {
+        return None;
+    }
+    // SAFETY: a successful getrusage initialized the complete output object.
+    let usage = unsafe { usage.assume_init() };
+    u64::try_from(usage.ru_maxrss).ok()
+}
+
 impl RuntimeSimdTelemetry {
     pub fn detect() -> Self {
         let mut detected_features = Vec::new();
@@ -306,12 +516,7 @@ impl RuntimeSimdTelemetry {
     }
 }
 
-/// Additive, opt-in runtime telemetry written outside graph artifacts.
-///
-/// The embedded build report lets benchmark tools correlate the stable build
-/// result with runtime configuration without changing the existing stdout JSON
-/// schema. Stage durations can overlap in a future isolated pipeline and must
-/// not be summed by consumers.
+/// Original opt-in runtime telemetry contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IndexRuntimeTelemetryV1 {
     pub schema_version: u8,
@@ -343,10 +548,77 @@ impl IndexRuntimeTelemetryV1 {
         }
     }
 
-    /// Attach the cache evidence collected by the isolated extraction run.
     #[must_use]
     pub const fn with_cache(mut self, cache: RuntimeCacheTelemetry) -> Self {
         self.cache = cache;
+        self
+    }
+}
+
+/// Additive V2 opt-in runtime telemetry written outside graph artifacts.
+///
+/// The embedded build report lets benchmark tools correlate the stable build
+/// result with runtime configuration without changing the existing stdout JSON
+/// schema. Stage durations can overlap in a future isolated pipeline and must
+/// not be summed by consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexRuntimeTelemetryV2 {
+    pub schema_version: u8,
+    pub build: BuildTelemetry,
+    pub runtime: IndexRuntimeConfiguration,
+    pub io: RuntimeIoTelemetry,
+    pub work: RuntimeWorkTelemetry,
+    pub cache: RuntimeCacheTelemetryV2,
+    pub process: RuntimeProcessTelemetry,
+    pub simd: RuntimeSimdTelemetry,
+}
+
+impl IndexRuntimeTelemetryV2 {
+    pub fn legacy(build: BuildTelemetry) -> Self {
+        Self {
+            schema_version: INDEX_RUNTIME_TELEMETRY_V2_SCHEMA_VERSION,
+            build,
+            runtime: IndexRuntimeConfiguration::legacy(),
+            io: RuntimeIoTelemetry::default(),
+            work: RuntimeWorkTelemetry::default(),
+            cache: RuntimeCacheTelemetryV2::default(),
+            process: RuntimeProcessTelemetry::detect(),
+            simd: RuntimeSimdTelemetry::detect(),
+        }
+    }
+
+    #[must_use]
+    pub fn isolated(build: BuildTelemetry, runtime: IndexRuntimeConfiguration) -> Self {
+        Self {
+            schema_version: INDEX_RUNTIME_TELEMETRY_V2_SCHEMA_VERSION,
+            build,
+            runtime,
+            io: RuntimeIoTelemetry::default(),
+            work: RuntimeWorkTelemetry::default(),
+            cache: RuntimeCacheTelemetryV2::default(),
+            process: RuntimeProcessTelemetry::detect(),
+            simd: RuntimeSimdTelemetry::detect(),
+        }
+    }
+
+    /// Attach the cache evidence collected by the isolated extraction run.
+    #[must_use]
+    pub const fn with_cache(mut self, cache: RuntimeCacheTelemetryV2) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// Attach aggregate source-I/O evidence collected by extraction.
+    #[must_use]
+    pub const fn with_io(mut self, io: RuntimeIoTelemetry) -> Self {
+        self.io = io;
+        self
+    }
+
+    /// Attach aggregate parser work collected by extraction.
+    #[must_use]
+    pub const fn with_work(mut self, work: RuntimeWorkTelemetry) -> Self {
+        self.work = work;
         self
     }
 }
@@ -357,6 +629,14 @@ impl IndexRuntimeTelemetryV1 {
 pub fn write_runtime_report(
     path: impl AsRef<std::path::Path>,
     report: &IndexRuntimeTelemetryV1,
+) -> anyhow::Result<()> {
+    graphoxide_core::write_json_atomic(path, report, true)
+}
+
+/// Atomically write an additive V2 runtime sidecar.
+pub fn write_runtime_report_v2(
+    path: impl AsRef<std::path::Path>,
+    report: &IndexRuntimeTelemetryV2,
 ) -> anyhow::Result<()> {
     graphoxide_core::write_json_atomic(path, report, true)
 }
@@ -417,6 +697,7 @@ mod tests {
         let sidecar = IndexRuntimeTelemetryV1::legacy(build.clone());
         let value = serde_json::to_value(&sidecar).unwrap();
 
+        assert_eq!(INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION, 1);
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["build"]["schema_version"], 1);
         assert_eq!(value["build"]["operation"], "extract");
@@ -425,6 +706,9 @@ mod tests {
         assert_eq!(value["runtime"]["admission"], serde_json::Value::Null);
         assert_eq!(value["cache"]["enabled"], false);
         assert_eq!(value["cache"]["runtime_hits"], 0);
+        assert!(value.get("io").is_none());
+        assert!(value.get("work").is_none());
+        assert!(value.get("process").is_none());
         assert!(value["simd"]["detected_features"].is_array());
         assert!(value["simd"]["enabled_kernels"]
             .as_array()
@@ -435,8 +719,92 @@ mod tests {
     }
 
     #[test]
+    fn runtime_sidecar_v2_is_separate_and_additive() {
+        let sidecar = IndexRuntimeTelemetryV2::legacy(BuildTelemetry::new(
+            BuildOperation::Extract,
+            BuildMode::Full,
+            BuildStatus::Rebuilt,
+            PathBuf::from("graphoxide-out/graph.json"),
+        ));
+        let value = serde_json::to_value(sidecar).unwrap();
+
+        assert_eq!(INDEX_RUNTIME_TELEMETRY_V2_SCHEMA_VERSION, 2);
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["build"]["schema_version"], 1);
+        assert_eq!(value["io"]["sources_selected"], 0);
+        assert_eq!(value["work"]["parses"], 0);
+        assert!(value["process"]["peak_rss_source"].is_string());
+    }
+
+    #[test]
+    fn runtime_sidecar_v1_cache_dto_remains_wire_exact() {
+        let cache = RuntimeCacheTelemetry {
+            enabled: true,
+            metadata_hits: 1,
+            runtime_hits: 2,
+            legacy_hits: 3,
+            misses: 4,
+            bypasses: 5,
+            stale_or_corrupt: 6,
+            probe_failures: 7,
+            payload_reads_avoided: 8,
+            parses_avoided: 9,
+            stores: 10,
+            already_present: 11,
+            store_failures: 12,
+        };
+        let value = serde_json::to_value(
+            IndexRuntimeTelemetryV1::legacy(BuildTelemetry::new(
+                BuildOperation::Index,
+                BuildMode::Full,
+                BuildStatus::Rebuilt,
+                PathBuf::from("graphoxide-out/graph.json"),
+            ))
+            .with_cache(cache),
+        )
+        .unwrap();
+
+        let mut top_level = value
+            .as_object()
+            .expect("V1 sidecar object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        top_level.sort_unstable();
+        assert_eq!(
+            top_level,
+            ["build", "cache", "runtime", "schema_version", "simd"]
+        );
+        let mut cache_fields = value["cache"]
+            .as_object()
+            .expect("V1 cache object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        cache_fields.sort_unstable();
+        assert_eq!(
+            cache_fields,
+            [
+                "already_present",
+                "bypasses",
+                "enabled",
+                "legacy_hits",
+                "metadata_hits",
+                "misses",
+                "parses_avoided",
+                "payload_reads_avoided",
+                "probe_failures",
+                "runtime_hits",
+                "stale_or_corrupt",
+                "store_failures",
+                "stores",
+            ]
+        );
+    }
+
+    #[test]
     fn isolated_sidecar_records_its_resolved_runtime() {
-        let sidecar = IndexRuntimeTelemetryV1::isolated(
+        let sidecar = IndexRuntimeTelemetryV2::isolated(
             BuildTelemetry::new(
                 BuildOperation::Extract,
                 BuildMode::Full,
@@ -467,7 +835,20 @@ mod tests {
                     emergency_reserve_bytes: 47 * 1024 * 1024,
                 }),
             },
-        );
+        )
+        .with_io(RuntimeIoTelemetry {
+            sources_selected: 3,
+            source_bytes_selected: 30,
+            sources_read: 2,
+            source_bytes_read: 20,
+            sources_delivered: 2,
+            source_bytes_delivered: 20,
+            source_bytes_avoided: 10,
+            read_failures: 0,
+            peak_ready_bytes: 8192,
+            peak_ready_items: 2,
+        })
+        .with_work(RuntimeWorkTelemetry { parses: 2 });
         let value = serde_json::to_value(sidecar).unwrap();
         assert_eq!(value["runtime"]["execution_model"], "isolated");
         assert_eq!(value["runtime"]["io_backend"], "threaded");
@@ -479,11 +860,16 @@ mod tests {
             2
         );
         assert_eq!(value["cache"]["enabled"], false);
+        assert_eq!(value["io"]["sources_selected"], 3);
+        assert_eq!(value["io"]["source_bytes_avoided"], 10);
+        assert_eq!(value["io"]["peak_ready_bytes"], 8192);
+        assert_eq!(value["work"]["parses"], 2);
+        assert_eq!(value["build"]["schema_version"], 1);
     }
 
     #[test]
     fn isolated_sidecar_records_truthful_cache_counters() {
-        let report = IndexRuntimeTelemetryV1::isolated(
+        let report = IndexRuntimeTelemetryV2::isolated(
             BuildTelemetry::new(
                 BuildOperation::Index,
                 BuildMode::Incremental,
@@ -492,7 +878,7 @@ mod tests {
             ),
             IndexRuntimeConfiguration::legacy(),
         )
-        .with_cache(RuntimeCacheTelemetry {
+        .with_cache(RuntimeCacheTelemetryV2 {
             enabled: true,
             metadata_hits: 2,
             runtime_hits: 3,
@@ -506,6 +892,11 @@ mod tests {
             stores: 8,
             already_present: 9,
             store_failures: 10,
+            payload_bytes_read: 11,
+            payload_bytes_written: 12,
+            artifact_bytes_read: 13,
+            artifact_bytes_written: 14,
+            peak_in_flight_transfer_bytes: 15,
         });
         let value = serde_json::to_value(report).unwrap();
 
@@ -522,6 +913,11 @@ mod tests {
         assert_eq!(value["cache"]["stores"], 8);
         assert_eq!(value["cache"]["already_present"], 9);
         assert_eq!(value["cache"]["store_failures"], 10);
+        assert_eq!(value["cache"]["payload_bytes_read"], 11);
+        assert_eq!(value["cache"]["payload_bytes_written"], 12);
+        assert_eq!(value["cache"]["artifact_bytes_read"], 13);
+        assert_eq!(value["cache"]["artifact_bytes_written"], 14);
+        assert_eq!(value["cache"]["peak_in_flight_transfer_bytes"], 15);
     }
 
     #[test]
@@ -540,5 +936,29 @@ mod tests {
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(written["schema_version"], 1);
         assert_eq!(written["build"]["status"], "unchanged");
+
+        let v2_path = directory.path().join("runtime-v2.json");
+        let report = IndexRuntimeTelemetryV2::legacy(BuildTelemetry::new(
+            BuildOperation::Update,
+            BuildMode::Incremental,
+            BuildStatus::Unchanged,
+            PathBuf::from("graphoxide-out/graph.json"),
+        ));
+        write_runtime_report_v2(&v2_path, &report).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(v2_path).unwrap()).unwrap();
+        assert_eq!(written["schema_version"], 2);
+    }
+
+    #[test]
+    fn process_peak_rss_reports_value_and_units_together() {
+        let process = RuntimeProcessTelemetry::detect();
+        match process.peak_rss_source {
+            RuntimePeakRssSource::Unavailable => assert_eq!(process.peak_rss_bytes, None),
+            RuntimePeakRssSource::GetrusageMaxrssBytes
+            | RuntimePeakRssSource::GetrusageMaxrssKib => {
+                assert!(process.peak_rss_bytes.is_some());
+            }
+        }
     }
 }

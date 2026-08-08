@@ -9,6 +9,38 @@ permissions:
   contents: read
 
 jobs:
+  qualification:
+    name: Universal indexing qualification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: qualification
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --release --locked --bin graphoxide
+      - name: Run small deterministic qualification
+        run: |
+          report_parent="${RUNNER_TEMP}/graphoxide-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "${report_parent}"
+          install -d -m 0700 "${report_parent}"
+          report_parent="$(realpath "${report_parent}")"
+          node scripts/qualify-universal-indexing.mjs \
+            --profile ci-mixed-v1 \
+            --binary target/release/graphoxide \
+            --report "${report_parent}/universal-qualification.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: universal-indexing-qualification
+          path: ${{ runner.temp }}/graphoxide-qualification-${{ github.run_id }}-${{ github.run_attempt }}/universal-qualification.json
+          if-no-files-found: error
+
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
