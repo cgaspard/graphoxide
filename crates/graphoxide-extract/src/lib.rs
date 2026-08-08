@@ -299,6 +299,13 @@ impl PendingProjectManifest {
     pub fn commit(self) -> anyhow::Result<()> {
         cache::save_manifest_to_output(&self.output_directory, &self.entries)
     }
+
+    /// Publish the prepared manifest only when the destination can be replaced
+    /// atomically. Unlike the legacy extract-only commit, this never falls
+    /// back to an in-place copy after a rename failure.
+    pub fn commit_strict(self) -> anyhow::Result<()> {
+        graphoxide_core::write_json_atomic_strict(self.path(), &self.entries, true)
+    }
 }
 
 /// Project extraction whose manifest is intentionally deferred until the graph
@@ -801,10 +808,40 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
     detect_options: &detect::DetectOptions,
     config: graphoxide_index_runtime::IndexRuntimeConfig,
 ) -> anyhow::Result<DeferredProjectExtractionResult> {
-    use graphoxide_index_runtime::{read_files_concurrently, FileReadRequest, InputIdentity};
+    extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        graphoxide_index_runtime::RuntimeCancellation::new(),
+    )
+}
+
+/// Extract through the dedicated I/O/CPU runtime with cooperative
+/// cancellation, deferring manifest publication until the caller commits the
+/// matching graph.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+) -> anyhow::Result<DeferredProjectExtractionResult> {
+    use graphoxide_index_runtime::{
+        read_files_concurrently_with_cancellation, FileReadRequest, InputIdentity,
+    };
     use md5::Digest as _;
     use std::{collections::BTreeMap, sync::Arc};
 
+    anyhow::ensure!(
+        !cancellation.is_cancelled(),
+        "isolated extraction cancelled"
+    );
     let managed_output_dir = if managed_output_dir.is_absolute() {
         managed_output_dir.to_path_buf()
     } else {
@@ -814,6 +851,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
     detect_options.output_dir = Some(managed_output_dir.clone());
     detect_options.convert_office_sidecars = false;
     let detection = detect::detect(root, &detect_options)?;
+    anyhow::ensure!(
+        !cancellation.is_cancelled(),
+        "isolated extraction cancelled"
+    );
     let mut indexed_files = detection
         .files
         .iter()
@@ -850,6 +891,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
     );
     let mut contexts = BTreeMap::<String, RuntimeFileContext>::new();
     for path in snapshot_paths {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
         let indexed = indexed_paths.contains(&path);
         let physical_path = detection.physical_source(&path);
         let relative = path
@@ -925,7 +970,16 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
     let output_budget = config.memory_budget().cache_and_runs_bytes;
     let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
     let output_admission_for_compute = Arc::clone(&output_admission);
-    let completed = read_files_concurrently(config, requests, move |input| -> anyhow::Result<_> {
+    let compute_cancellation = cancellation.clone();
+    let completed = read_files_concurrently_with_cancellation(
+        config,
+        requests,
+        cancellation.clone(),
+        move |input| -> anyhow::Result<_> {
+        anyhow::ensure!(
+            !compute_cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
         let relative = input.identity.normalized_path.to_string();
         let context = contexts_for_compute
             .get(relative.as_str())
@@ -979,6 +1033,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
                 "isolated retained extraction output exceeds its {output_budget}-byte budget at {relative}"
             );
         }
+        anyhow::ensure!(
+            !compute_cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
         let snapshot_source = snapshot_required.then(|| input.into_buffer().into_vec());
         Ok(RuntimeScanRow {
             relative,
@@ -990,11 +1048,20 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
             snapshot_source,
             warning,
         })
-    })
+    },
+    )
     .map_err(|error| anyhow::anyhow!("isolated extraction runtime failed: {error:?}"))?;
 
+    anyhow::ensure!(
+        !cancellation.is_cancelled(),
+        "isolated extraction cancelled"
+    );
     let mut rows = Vec::with_capacity(completed.completed.len());
     for completed in completed.completed {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
         rows.push(completed.value?);
     }
     let mut warnings = completed
@@ -1044,6 +1111,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
     let mut project_snapshot =
         crate::js_resolution::ProjectSnapshot::with_byte_limit(snapshot_budget);
     for row in &mut rows {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
         let Some(source) = row.snapshot_source.take() else {
             continue;
         };
@@ -1132,6 +1203,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
         .count();
     let mut extractions = Vec::new();
     for row in rows {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
         if let Some(extraction) = row.extraction {
             extractions.push(extraction);
         }
@@ -1183,6 +1258,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
             resolver_context = context.extractions;
         }
     }
+    anyhow::ensure!(
+        !cancellation.is_cancelled(),
+        "isolated extraction cancelled"
+    );
     resolution::resolve_with_snapshot_context_bounded(
         &mut extractions,
         resolver_context,
@@ -1190,6 +1269,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
         fresh_output_limit,
         config.memory_budget().cpu_arenas_bytes,
     )?;
+    anyhow::ensure!(
+        !cancellation.is_cancelled(),
+        "isolated extraction cancelled"
+    );
     let retained_output_bytes = extractions_retained_bytes(&extractions)?;
     let cache_run_total = retained_output_bytes
         .checked_add(baseline_working_set_charge)
@@ -2138,6 +2221,34 @@ mod tests {
                 Some("parser_arena_budget")
             );
         }
+    }
+
+    #[test]
+    fn cancelled_runtime_scan_preserves_the_committed_manifest() {
+        let fixture = Fixture::new();
+        fixture.write("main.rs", "fn main() {}\n");
+        let output = fixture.root.join("graphoxide-out");
+        let manifest = fixture.write("graphoxide-out/manifest.json", "committed-manifest\n");
+        let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+        cancellation.cancel();
+
+        let error =
+            super::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+                &fixture.root,
+                true,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime_config(4 * 1024 * 1024),
+                cancellation,
+            )
+            .expect_err("pre-cancelled isolated scan");
+
+        assert!(error.to_string().contains("isolated extraction cancelled"));
+        assert_eq!(
+            fs::read_to_string(manifest).expect("read committed manifest"),
+            "committed-manifest\n"
+        );
     }
 
     #[test]

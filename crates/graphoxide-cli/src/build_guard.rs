@@ -377,9 +377,331 @@ where
     Ok(BuildCommitOutcome::Written)
 }
 
+/// Commit an index graph, then its manifest, then its associated coverage.
+///
+/// Coverage is deliberately last. If its atomic replacement fails, the newly
+/// accepted graph and matching manifest remain usable while the previous
+/// coverage digest truthfully identifies that report as stale.
+pub fn commit_index_build<M, C>(
+    graph_path: &Path,
+    artifact: BuildArtifact<'_>,
+    progress: BuildProgress,
+    allow_partial: bool,
+    cancellation: &graphoxide_index_runtime::RuntimeCancellation,
+    persist_manifest: M,
+    publish_coverage: C,
+) -> anyhow::Result<BuildCommitOutcome>
+where
+    M: FnOnce() -> anyhow::Result<()>,
+    C: FnOnce() -> anyhow::Result<()>,
+{
+    anyhow::ensure!(
+        !cancellation.is_cancelled(),
+        "index cancelled before publication"
+    );
+    let force = progress.force_write(allow_partial);
+    let wrote = match artifact {
+        BuildArtifact::Graph(graph) => {
+            graphoxide_core::write_graph_atomic_strict(graph_path, graph, force)
+        }
+        BuildArtifact::Raw(extractions) => {
+            graphoxide_core::write_raw_extractions_atomic_strict(graph_path, extractions, force)
+        }
+    }?;
+    if !wrote {
+        return Ok(BuildCommitOutcome::RefusedShrink);
+    }
+    persist_manifest()?;
+    publish_coverage()?;
+    Ok(BuildCommitOutcome::Written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn graph_with_nodes(count: usize) -> KnowledgeGraph {
+        KnowledgeGraph {
+            nodes: (0..count)
+                .map(|index| graphoxide_core::Node {
+                    id: format!("node-{index}"),
+                    label: format!("Node {index}"),
+                    file_type: "code".into(),
+                    source_file: "main.rs".into(),
+                    source_location: None,
+                    community: None,
+                    extra: Default::default(),
+                })
+                .collect(),
+            ..KnowledgeGraph::default()
+        }
+    }
+
+    #[test]
+    fn index_commit_publishes_manifest_before_coverage() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let temp = tempfile::tempdir().expect("temporary output");
+        let graph_path = temp.path().join("graph.json");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let manifest_events = Rc::clone(&events);
+        let coverage_events = Rc::clone(&events);
+        let outcome = commit_index_build(
+            &graph_path,
+            BuildArtifact::Graph(&graph_with_nodes(1)),
+            BuildProgress::complete(),
+            false,
+            &graphoxide_index_runtime::RuntimeCancellation::new(),
+            || {
+                assert!(graph_path.is_file(), "graph must already be accepted");
+                manifest_events.borrow_mut().push("manifest");
+                Ok(())
+            },
+            || {
+                assert!(graph_path.is_file(), "graph must remain accepted");
+                coverage_events.borrow_mut().push("coverage");
+                Ok(())
+            },
+        )
+        .expect("index commit");
+        assert_eq!(outcome, BuildCommitOutcome::Written);
+        assert_eq!(&*events.borrow(), &["manifest", "coverage"]);
+    }
+
+    #[test]
+    fn refused_index_graph_does_not_publish_manifest_or_coverage() {
+        use std::{cell::Cell, rc::Rc};
+
+        let temp = tempfile::tempdir().expect("temporary output");
+        let graph_path = temp.path().join("graph.json");
+        graphoxide_core::write_graph_atomic(&graph_path, &graph_with_nodes(2), true)
+            .expect("seed graph");
+        let manifest_called = Rc::new(Cell::new(false));
+        let coverage_called = Rc::new(Cell::new(false));
+        let manifest_flag = Rc::clone(&manifest_called);
+        let coverage_flag = Rc::clone(&coverage_called);
+        let outcome = commit_index_build(
+            &graph_path,
+            BuildArtifact::Graph(&graph_with_nodes(1)),
+            BuildProgress::new(2, 1).expect("partial progress"),
+            false,
+            &graphoxide_index_runtime::RuntimeCancellation::new(),
+            move || {
+                manifest_flag.set(true);
+                Ok(())
+            },
+            move || {
+                coverage_flag.set(true);
+                Ok(())
+            },
+        )
+        .expect("shrink decision");
+        assert_eq!(outcome, BuildCommitOutcome::RefusedShrink);
+        assert!(!manifest_called.get());
+        assert!(!coverage_called.get());
+        assert_eq!(
+            graphoxide_core::read_graph(&graph_path)
+                .unwrap()
+                .nodes
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn manifest_failure_never_publishes_index_coverage() {
+        use std::{cell::Cell, rc::Rc};
+
+        let temp = tempfile::tempdir().expect("temporary output");
+        let graph_path = temp.path().join("graph.json");
+        let coverage_called = Rc::new(Cell::new(false));
+        let coverage_flag = Rc::clone(&coverage_called);
+        let error = commit_index_build(
+            &graph_path,
+            BuildArtifact::Graph(&graph_with_nodes(1)),
+            BuildProgress::complete(),
+            false,
+            &graphoxide_index_runtime::RuntimeCancellation::new(),
+            || anyhow::bail!("injected manifest failure"),
+            move || {
+                coverage_flag.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("manifest failure");
+        assert!(error.to_string().contains("injected manifest failure"));
+        assert!(graph_path.is_file(), "graph was accepted first");
+        assert!(!coverage_called.get());
+    }
+
+    #[test]
+    fn atomic_coverage_failure_preserves_older_coverage_bytes() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let graph_path = temp.path().join("graph.json");
+        let coverage_path = temp.path().join("coverage.json");
+        fs::write(&coverage_path, b"old coverage\n").expect("seed coverage");
+        let error = commit_index_build(
+            &graph_path,
+            BuildArtifact::Graph(&graph_with_nodes(1)),
+            BuildProgress::complete(),
+            false,
+            &graphoxide_index_runtime::RuntimeCancellation::new(),
+            || Ok(()),
+            || {
+                graphoxide_core::write_text_atomic_with_replacer(
+                    &coverage_path,
+                    "new coverage\n",
+                    |_, _| Err(io::Error::other("injected coverage replace failure")),
+                )
+            },
+        )
+        .expect_err("coverage replace failure");
+        assert!(error
+            .to_string()
+            .contains("injected coverage replace failure"));
+        assert_eq!(fs::read(&coverage_path).unwrap(), b"old coverage\n");
+        assert!(graph_path.is_file(), "graph and manifest phase completed");
+        assert!(
+            fs::read_dir(temp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "failed atomic coverage publication must clean its temporary file"
+        );
+    }
+
+    #[test]
+    fn cancellation_at_index_commit_boundary_preserves_every_published_artifact() {
+        use std::{cell::Cell, rc::Rc};
+
+        let temp = tempfile::tempdir().expect("temporary output");
+        let graph_path = temp.path().join("graph.json");
+        let manifest_path = temp.path().join("manifest.json");
+        let coverage_path = temp.path().join("coverage.json");
+        graphoxide_core::write_graph_atomic(&graph_path, &graph_with_nodes(2), true)
+            .expect("seed graph");
+        fs::write(&manifest_path, b"old manifest\n").expect("seed manifest");
+        fs::write(&coverage_path, b"old coverage\n").expect("seed coverage");
+        let graph_before = fs::read(&graph_path).unwrap();
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        let coverage_before = fs::read(&coverage_path).unwrap();
+        let manifest_called = Rc::new(Cell::new(false));
+        let coverage_called = Rc::new(Cell::new(false));
+        let manifest_flag = Rc::clone(&manifest_called);
+        let coverage_flag = Rc::clone(&coverage_called);
+        let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+        cancellation.cancel();
+
+        let error = commit_index_build(
+            &graph_path,
+            BuildArtifact::Graph(&graph_with_nodes(1)),
+            BuildProgress::complete(),
+            true,
+            &cancellation,
+            move || {
+                manifest_flag.set(true);
+                Ok(())
+            },
+            move || {
+                coverage_flag.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("pre-publication cancellation");
+        assert!(error.to_string().contains("cancelled before publication"));
+        assert!(!manifest_called.get());
+        assert!(!coverage_called.get());
+        assert_eq!(fs::read(&graph_path).unwrap(), graph_before);
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        assert_eq!(fs::read(&coverage_path).unwrap(), coverage_before);
+    }
+
+    #[test]
+    fn cancellation_after_commit_boundary_does_not_split_publication_sequence() {
+        use std::{cell::Cell, rc::Rc};
+
+        let temp = tempfile::tempdir().expect("temporary output");
+        let graph_path = temp.path().join("graph.json");
+        let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+        let manifest_called = Rc::new(Cell::new(false));
+        let coverage_called = Rc::new(Cell::new(false));
+        let manifest_flag = Rc::clone(&manifest_called);
+        let coverage_flag = Rc::clone(&coverage_called);
+        let cancel_during_manifest = cancellation.clone();
+        let graph_for_manifest = graph_path.clone();
+
+        let outcome = commit_index_build(
+            &graph_path,
+            BuildArtifact::Graph(&graph_with_nodes(1)),
+            BuildProgress::complete(),
+            false,
+            &cancellation,
+            move || {
+                assert!(graph_for_manifest.is_file(), "graph was accepted first");
+                manifest_flag.set(true);
+                cancel_during_manifest.cancel();
+                Ok(())
+            },
+            move || {
+                coverage_flag.set(true);
+                Ok(())
+            },
+        )
+        .expect("post-boundary cancellation cannot split publication");
+
+        assert_eq!(outcome, BuildCommitOutcome::Written);
+        assert!(manifest_called.get());
+        assert!(coverage_called.get());
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_index_graph_is_rejected_before_manifest_or_coverage() {
+        use std::{cell::Cell, os::unix::fs::symlink, rc::Rc};
+
+        let temp = tempfile::tempdir().expect("temporary output");
+        let external = temp.path().join("external-graph.json");
+        fs::write(&external, b"external accepted graph\n").expect("external graph");
+        let managed = temp.path().join("managed");
+        fs::create_dir(&managed).expect("managed output");
+        let graph_path = managed.join("graph.json");
+        symlink(&external, &graph_path).expect("graph symlink");
+        let manifest_called = Rc::new(Cell::new(false));
+        let coverage_called = Rc::new(Cell::new(false));
+        let manifest_flag = Rc::clone(&manifest_called);
+        let coverage_flag = Rc::clone(&coverage_called);
+
+        let error = commit_index_build(
+            &graph_path,
+            BuildArtifact::Graph(&graph_with_nodes(1)),
+            BuildProgress::complete(),
+            true,
+            &graphoxide_index_runtime::RuntimeCancellation::new(),
+            move || {
+                manifest_flag.set(true);
+                Ok(())
+            },
+            move || {
+                coverage_flag.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("symlinked graph must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("symlinked publication destination"));
+        assert!(!manifest_called.get());
+        assert!(!coverage_called.get());
+        assert_eq!(fs::read(&external).unwrap(), b"external accepted graph\n");
+        assert!(graph_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_dir(&managed).unwrap().count(), 1);
+    }
 
     #[test]
     fn successful_graph_stage_removes_its_unique_run_directory() {

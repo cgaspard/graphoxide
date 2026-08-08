@@ -1,5 +1,6 @@
 use graphoxide_extract::{
     coverage::{audit_coverage, CoverageBoundaryKind, CoverageOptions, CoverageStatus},
+    detect::{MAX_IGNORE_PATTERNS_PER_SOURCE, MAX_IGNORE_SOURCE_BYTES},
     format_registry::FormatCapability,
 };
 use std::{collections::BTreeSet, fs, path::Path};
@@ -97,6 +98,46 @@ fn reports_registry_capabilities_unknowns_sensitive_and_policy_outcomes() {
     assert_eq!(report.strict_failure_count(), 0);
 }
 
+#[test]
+fn code_only_matches_detector_buckets_without_losing_declared_metadata() {
+    let project = tempfile::tempdir().expect("temporary project");
+    write(project.path(), "src/main.rs", b"fn main() {}\n");
+    write(project.path(), "README.md", b"# documentation\n");
+    write(project.path(), "package.json", b"{}\n");
+    write(
+        project.path(),
+        "runner",
+        b"#!/usr/bin/env python3\nprint('ok')\n",
+    );
+    write(project.path(), "unknown.zzz", b"opaque\n");
+
+    let report = audit_coverage(
+        project.path(),
+        &CoverageOptions {
+            code_only: true,
+            ..CoverageOptions::default()
+        },
+    )
+    .expect("code-only coverage");
+    let file = |path: &str| {
+        report
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("missing {path}"))
+    };
+
+    assert_eq!(file("src/main.rs").status, CoverageStatus::Covered);
+    assert_eq!(file("runner").status, CoverageStatus::Covered);
+    assert_eq!(file("runner").format_id.as_deref(), Some("source-code"));
+    assert_eq!(file("package.json").status, CoverageStatus::InventoryOnly);
+    assert_eq!(file("README.md").status, CoverageStatus::ExcludedPolicy);
+    assert_eq!(file("README.md").reason.as_deref(), Some("code_only"));
+    assert!(file("README.md").format_id.is_some());
+    assert!(file("README.md").declared_capability.is_some());
+    assert_eq!(file("unknown.zzz").status, CoverageStatus::Unsupported);
+}
+
 fn populate_deterministic_tree(root: &Path) {
     write(root, ".gitignore", b"ignored.bin\n");
     write(root, "src/main.rs", b"fn main() {}\n");
@@ -146,6 +187,64 @@ fn reports_are_root_independent_and_boundaries_are_separate() {
         .files
         .iter()
         .all(|file| !file.path.contains(left.path().to_string_lossy().as_ref())));
+}
+
+#[test]
+fn oversized_root_and_nested_ignore_sources_are_strict_and_fail_closed() {
+    let root_project = tempfile::tempdir().expect("root ignore project");
+    write(
+        root_project.path(),
+        "sentinel.rs",
+        b"fn must_not_be_read() {}\n",
+    );
+    let mut root_ignore = b"sentinel.rs\n".to_vec();
+    root_ignore.resize(MAX_IGNORE_SOURCE_BYTES + 1, b'#');
+    write(root_project.path(), ".graphoxideignore", &root_ignore);
+
+    let root_report =
+        audit_coverage(root_project.path(), &CoverageOptions::default()).expect("root coverage");
+    assert!(root_report.files.is_empty());
+    assert!(root_report.boundaries.is_empty());
+    assert_eq!(root_report.ignore_sources_truncated, 1);
+    assert!(!root_report.complete);
+    assert_eq!(root_report.strict_failure_count(), 1);
+
+    let nested_project = tempfile::tempdir().expect("nested ignore project");
+    write(nested_project.path(), "root.rs", b"fn root() {}\n");
+    write(
+        nested_project.path(),
+        "nested/sentinel.rs",
+        b"fn must_not_be_read() {}\n",
+    );
+    let mut nested_ignore = String::from("sentinel.rs\n");
+    for index in 0..MAX_IGNORE_PATTERNS_PER_SOURCE {
+        nested_ignore.push_str(&format!("generated-{index}\n"));
+    }
+    assert!(nested_ignore.len() <= MAX_IGNORE_SOURCE_BYTES);
+    write(
+        nested_project.path(),
+        "nested/.gitignore",
+        nested_ignore.as_bytes(),
+    );
+
+    let nested_report = audit_coverage(nested_project.path(), &CoverageOptions::default())
+        .expect("nested coverage");
+    assert!(nested_report
+        .files
+        .iter()
+        .any(|file| file.path == "root.rs"));
+    assert!(!nested_report
+        .files
+        .iter()
+        .any(|file| file.path == "nested/sentinel.rs"));
+    assert!(nested_report.boundaries.iter().any(|boundary| {
+        boundary.path == "nested"
+            && boundary.kind == CoverageBoundaryKind::Ignored
+            && boundary.reason == "ignore_policy_incomplete"
+    }));
+    assert_eq!(nested_report.ignore_sources_truncated, 1);
+    assert!(!nested_report.complete);
+    assert_eq!(nested_report.strict_failure_count(), 1);
 }
 
 #[test]
@@ -348,4 +447,69 @@ fn unreadable_directory_is_a_root_relative_strict_walk_error() {
             report.summary.walk_errors
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn malformed_and_sensitive_directory_boundaries_do_not_open_nested_ignore_sources() {
+    use std::{
+        ffi::OsString,
+        os::unix::{ffi::OsStringExt as _, fs::symlink, fs::PermissionsExt as _},
+    };
+
+    let project = tempfile::tempdir().expect("temporary project");
+    write(project.path(), "root.rs", b"fn root() {}\n");
+
+    let malformed_name = OsString::from_vec(vec![b'b', b'a', b'd', 0xff]);
+    let malformed = project.path().join(&malformed_name);
+    let mut oversized = b"sentinel.rs\n".to_vec();
+    oversized.resize(MAX_IGNORE_SOURCE_BYTES + 1, b'#');
+    let malformed_ignore = fs::create_dir(&malformed).ok().map(|()| {
+        let malformed_ignore = malformed.join(".graphoxideignore");
+        fs::write(&malformed_ignore, &oversized).expect("write malformed-boundary ignore sentinel");
+        fs::set_permissions(&malformed_ignore, fs::Permissions::from_mode(0o000))
+            .expect("lock malformed-boundary ignore sentinel");
+        fs::write(malformed.join("sentinel.rs"), b"fn hidden() {}\n")
+            .expect("write malformed-boundary source sentinel");
+        malformed_ignore
+    });
+
+    write(project.path(), ".ssh/.graphoxideignore", &oversized);
+    write(project.path(), ".ssh/sentinel.rs", b"fn hidden() {}\n");
+    write(project.path(), ".aws/.graphoxideignore", &oversized);
+    write(project.path(), ".aws/sentinel.rs", b"fn hidden() {}\n");
+    symlink(".aws", project.path().join("cloud-alias")).expect("sensitive directory alias");
+
+    let report = audit_coverage(
+        project.path(),
+        &CoverageOptions {
+            follow_symlinks: true,
+            ..CoverageOptions::default()
+        },
+    )
+    .expect("coverage");
+    if let Some(malformed_ignore) = &malformed_ignore {
+        fs::set_permissions(malformed_ignore, fs::Permissions::from_mode(0o600))
+            .expect("restore malformed-boundary ignore sentinel");
+    }
+
+    assert_eq!(report.ignore_sources_truncated, 0);
+    assert!(report.complete);
+    assert!(report.files.iter().any(|file| file.path == "root.rs"));
+    assert!(!report
+        .files
+        .iter()
+        .any(|file| file.path.ends_with("sentinel.rs")));
+    if malformed_ignore.is_some() {
+        assert!(report.boundaries.iter().any(|boundary| {
+            boundary.reason == "non_unicode_path" && boundary.path.contains("%FF")
+        }));
+    }
+    assert!(report
+        .boundaries
+        .iter()
+        .any(|boundary| { boundary.path == ".ssh" && boundary.reason == "sensitive_directory" }));
+    assert!(report.boundaries.iter().any(|boundary| {
+        boundary.path == "cloud-alias" && boundary.reason == "sensitive_symlink_target"
+    }));
 }

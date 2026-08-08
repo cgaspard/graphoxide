@@ -18,6 +18,7 @@ pub const INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION: u8 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum BuildOperation {
     Extract,
+    Index,
     Update,
 }
 

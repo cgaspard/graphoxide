@@ -1,8 +1,10 @@
 //! Executable port of upstream `test_atomic_writes.py` (10 cases).
 
 use graphoxide_core::{
-    permission_fallback, write_graph_atomic, write_json_atomic, write_text_atomic,
-    write_text_atomic_with_replacer, KnowledgeGraph, Node,
+    permission_fallback, write_graph_atomic, write_graph_atomic_strict,
+    write_graph_atomic_strict_with_replacer, write_json_atomic, write_json_atomic_strict,
+    write_json_atomic_strict_with_replacer, write_text_atomic, write_text_atomic_with_replacer,
+    KnowledgeGraph, Node,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, fs};
@@ -185,6 +187,125 @@ fn write_json_atomic_ensure_ascii_false_preserves_utf8() {
         serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
         json!({"label": "Wörker 数据"})
     );
+}
+
+#[test]
+fn strict_json_replaces_an_existing_destination_without_a_copy_fallback() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("manifest.json");
+    write_json_atomic_strict(&path, &json!({"generation": 1}), false).unwrap();
+    write_json_atomic_strict(&path, &json!({"generation": 2}), false).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
+        json!({"generation": 2})
+    );
+    assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".tmp")));
+}
+
+#[test]
+fn strict_json_replace_failure_preserves_existing_bytes() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("manifest.json");
+    fs::write(&path, b"previous manifest\n").unwrap();
+
+    let error =
+        write_json_atomic_strict_with_replacer(&path, &json!({"generation": 2}), false, |_, _| {
+            Err(std::io::Error::other("injected strict replace failure"))
+        })
+        .expect_err("replace failure");
+    assert!(error
+        .to_string()
+        .contains("injected strict replace failure"));
+    assert_eq!(fs::read(&path).unwrap(), b"previous manifest\n");
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn strict_graph_replace_failure_preserves_existing_bytes() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("graph.json");
+    let previous = KnowledgeGraph {
+        nodes: vec![node("previous")],
+        ..KnowledgeGraph::default()
+    };
+    write_graph_atomic_strict(&path, &previous, true).unwrap();
+    let before = fs::read(&path).unwrap();
+    let replacement = KnowledgeGraph {
+        nodes: vec![node("replacement"), node("second")],
+        ..KnowledgeGraph::default()
+    };
+
+    let error = write_graph_atomic_strict_with_replacer(&path, &replacement, true, |_, _| {
+        Err(std::io::Error::other("injected graph replace failure"))
+    })
+    .expect_err("replace failure");
+    assert!(error.to_string().contains("injected graph replace failure"));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_graph_rejects_a_symlink_without_touching_its_external_target() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let managed = tmp.path().join("managed");
+    fs::create_dir(&managed).unwrap();
+    let external = tmp.path().join("external-graph.json");
+    fs::write(&external, b"external graph\n").unwrap();
+    let link = managed.join("graph.json");
+    symlink(&external, &link).unwrap();
+
+    let error = write_graph_atomic_strict(&link, &KnowledgeGraph::default(), true)
+        .expect_err("symlink must fail closed");
+    assert!(error
+        .to_string()
+        .contains("symlinked publication destination"));
+    assert_eq!(fs::read(&external).unwrap(), b"external graph\n");
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_dir(&managed).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_json_rejects_a_symlink_without_touching_its_external_target() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let managed = tmp.path().join("managed");
+    fs::create_dir(&managed).unwrap();
+    let external = tmp.path().join("external-manifest.json");
+    fs::write(&external, b"external manifest\n").unwrap();
+    let link = managed.join("manifest.json");
+    symlink(&external, &link).unwrap();
+
+    let error = write_json_atomic_strict(&link, &json!({"new": true}), false)
+        .expect_err("symlink must fail closed");
+    assert!(error
+        .to_string()
+        .contains("symlinked publication destination"));
+    assert_eq!(fs::read(&external).unwrap(), b"external manifest\n");
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_dir(&managed).unwrap().count(), 1);
+}
+
+#[test]
+fn strict_json_rejects_a_non_file_destination() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("manifest.json");
+    fs::create_dir(&path).unwrap();
+
+    let error = write_json_atomic_strict(&path, &json!({"new": true}), false)
+        .expect_err("directory must fail closed");
+    assert!(error
+        .to_string()
+        .contains("non-file publication destination"));
+    assert!(path.is_dir());
 }
 
 fn node(id: &str) -> Node {
