@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
   <title id="title">Graphoxide</title>
-  <desc id="desc">The Graphoxide graph-cube mark in oxide orange.</desc>
-  <rect width="128" height="128" rx="27" fill="#07090a"/>
+  <desc id="desc">The Graphoxide graph-cube mark in purple and blue.</desc>
+  <rect width="128" height="128" rx="27" fill="#1B1F2B"/>
   <rect x="1" y="1" width="126" height="126" rx="26" fill="none" stroke="#ffffff" stroke-opacity=".08"/>
-  <g fill="none" stroke="#ff7845" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+  <g fill="none" stroke="#8B5CF6" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
     <path d="M35 42.75 64 25l29 17.75v35.5L64 96 35 78.25z"/>
-    <circle cx="35" cy="42.75" r="7.5" fill="#07090a"/>
-    <circle cx="93" cy="42.75" r="7.5" fill="#07090a"/>
-    <circle cx="64" cy="96" r="7.5" fill="#07090a"/>
-    <circle cx="64" cy="60" r="10" fill="#ff7845"/>
-    <path d="m40.75 46.75 14.75 9M87.25 46.75l-14.75 9M64 70v18.5"/>
+    <circle cx="35" cy="42.75" r="7.5" fill="#1B1F2B"/>
+    <circle cx="93" cy="42.75" r="7.5" fill="#1B1F2B"/>
+    <circle cx="64" cy="96" r="7.5" fill="#1B1F2B"/>
+    <circle cx="64" cy="60" r="10" fill="#C9B8FF" stroke="#C9B8FF"/>
+    <path d="m40.75 46.75 14.75 9M87.25 46.75l-14.75 9M64 70v18.5" stroke="#7BC3E8"/>
   </g>
 </svg>
