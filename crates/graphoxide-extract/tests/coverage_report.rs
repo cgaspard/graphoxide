@@ -71,7 +71,11 @@ fn reports_registry_capabilities_unknowns_sensitive_and_policy_outcomes() {
         file("document.pdf").declared_capability,
         Some(FormatCapability::StructuralPartial)
     );
-    assert_eq!(file("report.docx").status, CoverageStatus::InventoryOnly);
+    assert_eq!(file("report.docx").status, CoverageStatus::Covered);
+    assert_eq!(
+        file("report.docx").declared_capability,
+        Some(FormatCapability::StructuralPartial)
+    );
     assert_eq!(file("Cargo.lock").status, CoverageStatus::ExcludedPolicy);
     assert_eq!(
         file("Cargo.lock").format_id.as_deref(),

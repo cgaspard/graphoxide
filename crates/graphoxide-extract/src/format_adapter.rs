@@ -248,6 +248,24 @@ fn extract_registered_format_at_depth(
     if extension == "dmi" {
         return None;
     }
+    // Known OOXML, ODF, and EPUB suffixes have a dedicated selective package
+    // parser. Claim them before the generic ZIP route so package XML is parsed
+    // under one format-specific allowance and never recursively dispatched as
+    // arbitrary archive payloads.
+    if let Some(kind) = crate::office::OfficeKind::from_extension(extension) {
+        return Some(extract_office_for_spec(
+            OfficeExtractionRequest {
+                path,
+                source_file,
+                source,
+                extension,
+                kind,
+                parser_allowance_bytes: semantic_parser_allowance,
+                recursion_depth,
+            },
+            dispatch_budget,
+        ));
+    }
     // Representation has precedence over a suffix family. A ZIP-backed
     // Draw.io, FMU, USDZ, IFCZIP, or Office document is a bounded container
     // inventory on the CPU plane; do not first hand compressed bytes to a
@@ -356,6 +374,16 @@ fn extract_registered_format_at_depth(
             source,
             semantic_parser_allowance,
             dispatch_budget.cancellation(),
+        )),
+        // Extension-owned package formats are consumed before generic ZIP
+        // inspection above. Keep a fail-closed branch for future magic-only
+        // registry entries instead of allowing compressed bytes to fall
+        // through to a text parser.
+        ByteAdapterKind::Office => Some(rejected_office_extraction(
+            path,
+            source_file,
+            extension,
+            "office_format_unrecognized",
         )),
         // A suffix can identify a container/media representation even when a
         // malformed buffer lacks a recognizable signature. Claim it with an
@@ -543,6 +571,98 @@ fn extract_pdf_for_spec(
         }
     });
     result.unwrap_or_else(|_| rejected_pdf_extraction(path, source_file, "parser_arena_budget"))
+}
+
+struct OfficeExtractionRequest<'a> {
+    path: &'a Path,
+    source_file: &'a str,
+    source: &'a [u8],
+    extension: &'a str,
+    kind: crate::office::OfficeKind,
+    parser_allowance_bytes: Option<usize>,
+    recursion_depth: u16,
+}
+
+fn extract_office_for_spec(
+    request: OfficeExtractionRequest<'_>,
+    dispatch_budget: &mut RecursiveDispatchBudget,
+) -> Extraction {
+    let OfficeExtractionRequest {
+        path,
+        source_file,
+        source,
+        extension,
+        kind,
+        parser_allowance_bytes,
+        recursion_depth,
+    } = request;
+    let mut limits = match parser_allowance_bytes {
+        Some(allowance_bytes) => {
+            let Some(limits) =
+                crate::office::OfficeLimits::for_parser_allowance(allowance_bytes, source.len())
+            else {
+                return rejected_office_extraction(
+                    path,
+                    source_file,
+                    extension,
+                    "parser_arena_budget",
+                );
+            };
+            limits
+        }
+        None => crate::office::OfficeLimits::default(),
+    };
+    let tree_fact_limit = if recursion_depth == 0 {
+        dispatch_budget.remaining_output_facts()
+    } else {
+        // A nested child node also receives one parent-member `contains`
+        // edge. Reserving at most half the remaining tree facts before parse
+        // ensures the post-parse attachment cannot exceed the shared budget.
+        dispatch_budget.remaining_output_facts() / 2
+    };
+    limits.max_facts = limits.max_facts.min(tree_fact_limit);
+    limits.max_units = limits.max_units.min(limits.max_facts.saturating_sub(1) / 2);
+    if limits.max_facts < 3 || limits.max_units == 0 {
+        return rejected_office_extraction(path, source_file, extension, "parser_arena_budget");
+    }
+    let Some(plan) = crate::parser_budget::ParserPlan::for_fact_limit(limits.max_facts) else {
+        return rejected_office_extraction(path, source_file, extension, "parser_arena_budget");
+    };
+    let shared_budget = RefCell::new(dispatch_budget);
+    let is_cancelled = || shared_budget.borrow().is_cancelled();
+    let (result, exhausted) = crate::parser_budget::with_plan(plan, || {
+        crate::office::extract_office_bytes_with_admission(
+            path,
+            source_file,
+            source,
+            kind,
+            limits,
+            Some(&is_cancelled),
+            |_| shared_budget.borrow_mut().admit_encounter(),
+            |member| {
+                let mut budget = shared_budget.borrow_mut();
+                if !budget.admit_dispatch(member) {
+                    return None;
+                }
+                let bytes = usize::try_from(member.declared_uncompressed_bytes).ok()?;
+                budget.try_reserve_scratch(bytes)
+            },
+        )
+    });
+    if exhausted {
+        return rejected_office_extraction(path, source_file, extension, "office_fact_limit");
+    }
+    match result {
+        Ok(extraction)
+            if !extraction.nodes.is_empty()
+                && extraction_fact_count(&extraction)
+                    .is_some_and(|fact_count| fact_count <= limits.max_facts) =>
+        {
+            extraction
+        }
+        Ok(_) => rejected_office_extraction(path, source_file, extension, "office_fact_limit"),
+        Err(error) => rejected_office_extraction(path, source_file, extension, error.code()),
+    }
 }
 
 /// Aggregate admission guard for one root archive tree.
@@ -1023,7 +1143,7 @@ fn remap_container_extraction_ids(
 /// without ever probing that logical path on disk. Extensionless names need a
 /// lexical fast path because the compatibility detector may inspect a shebang
 /// when classifying an ordinary extensionless source file.
-fn is_sensitive_container_member_path(member_path: &str) -> bool {
+pub(crate) fn is_sensitive_container_member_path(member_path: &str) -> bool {
     let path = Path::new(member_path);
     let components = path
         .components()
@@ -1927,6 +2047,29 @@ fn rejected_pdf_extraction(path: &Path, source_file: &str, diagnostic: &'static 
     node.file_type = "paper".into();
     node.extra.insert("format".into(), "pdf".into());
     node.extra.insert("_origin".into(), "pdf".into());
+    node.extra
+        .insert("format_capability".into(), "structural_partial".into());
+    node.extra.insert("parse_status".into(), "rejected".into());
+    node.extra.insert("diagnostic".into(), diagnostic.into());
+    Extraction {
+        nodes: vec![node],
+        edges: Vec::new(),
+        hyperedges: Vec::new(),
+    }
+}
+
+fn rejected_office_extraction(
+    path: &Path,
+    source_file: &str,
+    extension: &str,
+    diagnostic: &'static str,
+) -> Extraction {
+    let file_id = make_id(&[&source_stem(source_file)]);
+    let mut node = inventory_file_node(path, source_file, &file_id, "document_package");
+    node.extra
+        .insert("format".into(), extension.to_ascii_lowercase().into());
+    node.extra
+        .insert("_origin".into(), "document_package".into());
     node.extra
         .insert("format_capability".into(), "structural_partial".into());
     node.extra.insert("parse_status".into(), "rejected".into());
@@ -3198,6 +3341,7 @@ mod tests {
                 }
                 crate::format_registry::ByteAdapterKind::ContainerMedia => b"PK\x03\x04".as_slice(),
                 crate::format_registry::ByteAdapterKind::Pdf => b"%PDF-1.7\n".as_slice(),
+                crate::format_registry::ByteAdapterKind::Office => b"PK\x03\x04".as_slice(),
                 crate::format_registry::ByteAdapterKind::Inventory => b"fixture\n".as_slice(),
             },
         };
@@ -3263,6 +3407,7 @@ mod tests {
                         | ByteAdapterKind::Engineering
                         | ByteAdapterKind::Simulation
                         | ByteAdapterKind::Pdf
+                        | ByteAdapterKind::Office
                         | ByteAdapterKind::ContainerMedia
                 ),
                 "{} claims structural extraction outside a partial-structure adapter",

@@ -91,6 +91,7 @@ pub enum ByteAdapterKind {
     Simulation,
     ContainerMedia,
     Pdf,
+    Office,
     Inventory,
 }
 
@@ -105,6 +106,7 @@ impl ByteAdapterKind {
             Self::Simulation => "simulation",
             Self::ContainerMedia => "container_media",
             Self::Pdf => "pdf",
+            Self::Office => "office",
             Self::Inventory => "inventory",
         }
     }
@@ -208,6 +210,21 @@ pub const PDF_LIMITS: FormatLimits = FormatLimits {
     max_records: 1_025,
     max_container_members: 0,
     max_recursion_depth: 0,
+    max_expansion_ratio: 64,
+};
+
+/// Effective ceilings enforced by the bounded OOXML, ODF, and EPUB adapter.
+///
+/// The parser selectively inflates only structural XML parts and never
+/// recursively dispatches package payloads. Relationship and text ceilings
+/// are additionally enforced inside the adapter; these public values describe
+/// the outer package, XML nesting, retained fact, member, and expansion bounds.
+pub const OFFICE_LIMITS: FormatLimits = FormatLimits {
+    max_input_bytes: 16 * 1024 * 1024,
+    max_nesting: 128,
+    max_records: 4_096,
+    max_container_members: 1_024,
+    max_recursion_depth: 1,
     max_expansion_ratio: 64,
 };
 
@@ -395,9 +412,8 @@ impl FormatSpec {
             | "simulation-fmi-model-description"
             | "simulation-inventory" => ByteAdapterKind::Simulation,
             "pdf" => ByteAdapterKind::Pdf,
-            "office-open-xml"
-            | "office-container-documents"
-            | "office-documents"
+            "office-open-xml" | "office-container-documents" => ByteAdapterKind::Office,
+            "office-documents"
             | "raster-image"
             | "additional-raster-image"
             | "svg"
@@ -864,9 +880,9 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         LEGACY_OFFICE_EXTENSIONS,
         &[],
         &[],
-        FormatCapability::InventoryOnly,
+        FormatCapability::StructuralPartial,
         SchemaRequirement::NotRequired,
-        CONTAINER_LIMITS,
+        OFFICE_LIMITS,
         Some(FileType::Document),
         false,
         false,
@@ -878,10 +894,10 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         OFFICE_CONTAINER_DOCUMENT_EXTENSIONS,
         &[],
         MAGIC_ZIP,
-        FormatCapability::InventoryOnly,
+        FormatCapability::StructuralPartial,
         SchemaRequirement::NotRequired,
-        CONTAINER_LIMITS,
-        None,
+        OFFICE_LIMITS,
+        Some(FileType::Document),
         false,
         false,
         false,
@@ -2041,8 +2057,9 @@ pub const fn format_registry() -> &'static FormatRegistry {
 mod tests {
     use super::{
         format_registry, ByteAdapterKind, FormatCapability, MagicRule, SchemaRequirement,
-        COLUMNAR_PROTOCOL_LIMITS, CONTAINER_LIMITS, DIAGRAM_LIMITS, ENGINEERING_LIMITS, PDF_LIMITS,
-        PROTOCOL_LIMITS, SIMULATION_LIMITS, STRUCTURED_TEXT_LIMITS, WATCHED_EXTENSIONS,
+        COLUMNAR_PROTOCOL_LIMITS, CONTAINER_LIMITS, DIAGRAM_LIMITS, ENGINEERING_LIMITS,
+        OFFICE_LIMITS, PDF_LIMITS, PROTOCOL_LIMITS, SIMULATION_LIMITS, STRUCTURED_TEXT_LIMITS,
+        WATCHED_EXTENSIONS,
     };
     use std::path::Path;
 
@@ -2292,9 +2309,11 @@ mod tests {
         );
         assert_eq!(SIMULATION_LIMITS.max_input_bytes, 16 * 1024 * 1024);
         assert_eq!(SIMULATION_LIMITS.max_records, 150_000);
+        assert_eq!(OFFICE_LIMITS.max_input_bytes, 16 * 1024 * 1024);
+        assert_eq!(OFFICE_LIMITS.max_records, 4_096);
 
         let registry = format_registry();
-        let mut family_counts = [0usize; 4];
+        let mut family_counts = [0usize; 5];
         for spec in registry.specs() {
             let expected = match spec.adapter() {
                 ByteAdapterKind::Diagram => {
@@ -2316,6 +2335,10 @@ mod tests {
                 ByteAdapterKind::Simulation => {
                     family_counts[3] += 1;
                     Some(SIMULATION_LIMITS)
+                }
+                ByteAdapterKind::Office => {
+                    family_counts[4] += 1;
+                    Some(OFFICE_LIMITS)
                 }
                 _ => None,
             };
@@ -2484,9 +2507,14 @@ mod tests {
                 "{extension}"
             );
         }
-        for extension in [
-            "docx", "xlsx", "pptx", "odt", "epub", "vsdx", "ifczip", "bcfzip", "fmu", "usdz",
-        ] {
+        for extension in ["docx", "xlsx", "pptx", "odt", "ods", "odp", "epub"] {
+            assert_eq!(
+                registry.capability_for_extension(extension),
+                Some(FormatCapability::StructuralPartial),
+                "{extension}"
+            );
+        }
+        for extension in ["vsdx", "ifczip", "bcfzip", "fmu", "usdz"] {
             assert_eq!(
                 registry.capability_for_extension(extension),
                 Some(FormatCapability::InventoryOnly),

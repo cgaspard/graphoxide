@@ -1,6 +1,6 @@
 use graphoxide_core::Extraction;
 use graphoxide_extract::format_registry::{
-    format_registry, ByteAdapterKind, FormatCapability, PDF_LIMITS,
+    format_registry, ByteAdapterKind, FormatCapability, OFFICE_LIMITS, PDF_LIMITS,
 };
 use serde_json::Value;
 use std::{fs, path::Path};
@@ -292,4 +292,27 @@ fn pdf_registry_promises_only_bounded_structural_page_extraction() {
     assert_eq!(spec.limits.max_input_bytes, 16 * 1024 * 1024);
     assert_eq!(spec.limits.max_records, 1_025);
     assert_eq!(spec.limits.max_expansion_ratio, 64);
+}
+
+#[test]
+fn document_package_registry_publishes_the_bounded_structural_contract() {
+    for extension in ["docx", "xlsx", "pptx", "odt", "ods", "odp", "epub"] {
+        let name = format!("document.{extension}");
+        let spec = format_registry()
+            .find_by_path(Path::new(&name))
+            .expect("document package format is registered");
+        assert_eq!(
+            spec.capability,
+            FormatCapability::StructuralPartial,
+            "{name}"
+        );
+        assert_eq!(spec.adapter(), ByteAdapterKind::Office, "{name}");
+        assert_eq!(spec.limits, OFFICE_LIMITS, "{name}");
+    }
+    assert_eq!(OFFICE_LIMITS.max_input_bytes, 16 * 1024 * 1024);
+    assert_eq!(OFFICE_LIMITS.max_nesting, 128);
+    assert_eq!(OFFICE_LIMITS.max_records, 4_096);
+    assert_eq!(OFFICE_LIMITS.max_container_members, 1_024);
+    assert_eq!(OFFICE_LIMITS.max_recursion_depth, 1);
+    assert_eq!(OFFICE_LIMITS.max_expansion_ratio, 64);
 }

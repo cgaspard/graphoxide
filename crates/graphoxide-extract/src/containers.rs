@@ -18,6 +18,8 @@ use std::{
 use unicode_normalization::UnicodeNormalization as _;
 
 const READ_BUFFER_BYTES: usize = 64 * 1024;
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE: &[u8; 4] = b"PK\x03\x04";
+const ZIP_CENTRAL_FILE_HEADER_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
 const ZIP_EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
 const ZIP64_EOCD_SIGNATURE: &[u8; 4] = b"PK\x06\x06";
 const ZIP64_LOCATOR_SIGNATURE: &[u8; 4] = b"PK\x06\x07";
@@ -211,6 +213,24 @@ pub struct ContainerMember {
     pub kind: ContainerMemberKind,
     pub compressed_bytes: u64,
     pub declared_uncompressed_bytes: u64,
+    /// ZIP-only physical metadata validated against both the local header and
+    /// central-directory entry.
+    ///
+    /// The local-header offset lets format-specific callers enforce package
+    /// rules that depend on physical entry order. `None` denotes a non-ZIP
+    /// member; callers must not infer ZIP ordering from the path-sorted
+    /// inventory vector.
+    pub zip: Option<ZipMemberMetadata>,
+}
+
+/// Physical ZIP properties that remain stable when central-directory entries
+/// are reordered independently of their local file headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZipMemberMetadata {
+    pub local_header_offset: u64,
+    pub local_data_offset: u64,
+    pub local_extra_field_bytes: u16,
+    pub is_stored: bool,
 }
 
 /// Bounded inventory returned for an archive payload.
@@ -1043,6 +1063,7 @@ where
         path,
         compressed_bytes: bytes.len() as u64,
         declared_uncompressed_bytes: declared,
+        zip: None,
     };
     if !encounter(&member) {
         return ContainerInspection {
@@ -1318,6 +1339,7 @@ where
             // TAR member bytes are already stored in the source allocation.
             compressed_bytes: size,
             declared_uncompressed_bytes: size,
+            zip: None,
         };
         match type_flag {
             b'\0' | b'0' | b'7' => {
@@ -1498,6 +1520,7 @@ fn inspect_zstd(bytes: &[u8], limits: ContainerLimits) -> ContainerInspection {
             kind: ContainerMemberKind::File,
             compressed_bytes: bytes.len() as u64,
             declared_uncompressed_bytes: declared_size,
+            zip: None,
         }],
         decompressed_bytes: 0,
         diagnostics: vec![InspectionDiagnostic::DecoderUnavailable],
@@ -1520,6 +1543,7 @@ fn opaque_compressed_inventory(
             // A zero value is not used as a size claim: the accompanying
             // diagnostic states that the codec has no trustworthy declaration.
             declared_uncompressed_bytes: 0,
+            zip: None,
         }],
         decompressed_bytes: 0,
         diagnostics: vec![
@@ -1645,6 +1669,7 @@ fn detect_archive_kind(source_name: &str, bytes: &[u8]) -> Option<ArchiveKind> {
         || lower.ends_with(".odt")
         || lower.ends_with(".ods")
         || lower.ends_with(".odp")
+        || lower.ends_with(".epub")
     {
         Some(ArchiveKind::Zip)
     } else if lower.ends_with(".gz") || lower.ends_with(".tgz") {
@@ -1780,6 +1805,9 @@ fn has_bmff_brand(bytes: &[u8], brand: &[u8; 4]) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct ZipPreflight {
     entries: usize,
+    directory_offset: u64,
+    directory_size: u64,
+    metadata_boundary: u64,
 }
 
 struct ValidatedZip<'a> {
@@ -1793,6 +1821,138 @@ struct ValidatedZip<'a> {
 
 fn zip_compression_is_supported(method: zip::CompressionMethod) -> bool {
     method == zip::CompressionMethod::STORE || method == zip::CompressionMethod::DEFLATE
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValidatedZipPhysicalMetadata {
+    public: ZipMemberMetadata,
+    /// Exclusive end of the local header, name, extra field, and compressed
+    /// payload. Optional data-descriptor bytes are not decoded or exposed.
+    occupied_end: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZipPhysicalEvidence<'a> {
+    local_header_offset: u64,
+    central_header_offset: u64,
+    directory_start: u64,
+    directory_end: u64,
+    central_name_raw: &'a [u8],
+    central_crc32: u32,
+    compressed_bytes: u64,
+    uncompressed_bytes: u64,
+}
+
+/// Validate the local header fields used to locate and decode a member against
+/// the central-directory fields parsed by `zip`. The crate deliberately trusts
+/// central-directory compression/name metadata when opening a member, so this
+/// check prevents a package format from treating those claims as physical ZIP
+/// layout evidence when the corresponding local header disagrees.
+fn validated_zip_physical_metadata(
+    bytes: &[u8],
+    evidence: ZipPhysicalEvidence<'_>,
+) -> Option<ValidatedZipPhysicalMetadata> {
+    const LOCAL_FIXED_BYTES: usize = 30;
+    const CENTRAL_FIXED_BYTES: usize = 46;
+
+    let local = usize::try_from(evidence.local_header_offset).ok()?;
+    let central = usize::try_from(evidence.central_header_offset).ok()?;
+    if checked_slice(bytes, local, 4)? != ZIP_LOCAL_FILE_HEADER_SIGNATURE
+        || checked_slice(bytes, central, 4)? != ZIP_CENTRAL_FILE_HEADER_SIGNATURE
+    {
+        return None;
+    }
+
+    let local_flags = read_u16_le_at(bytes, local, 6)?;
+    let local_method = read_u16_le_at(bytes, local, 8)?;
+    let local_crc32 = read_u32_le_at(bytes, local, 14)?;
+    let local_compressed_bytes = read_u32_le_at(bytes, local, 18)?;
+    let local_uncompressed_bytes = read_u32_le_at(bytes, local, 22)?;
+    let local_name_bytes = usize::from(read_u16_le_at(bytes, local, 26)?);
+    let local_extra_field_bytes = read_u16_le_at(bytes, local, 28)?;
+    let central_flags = read_u16_le_at(bytes, central, 8)?;
+    let central_method = read_u16_le_at(bytes, central, 10)?;
+    let central_crc32_raw = read_u32_le_at(bytes, central, 16)?;
+    let central_compressed_bytes = read_u32_le_at(bytes, central, 20)?;
+    let central_uncompressed_bytes = read_u32_le_at(bytes, central, 24)?;
+    let central_name_bytes = usize::from(read_u16_le_at(bytes, central, 28)?);
+    let central_extra_bytes = usize::from(read_u16_le_at(bytes, central, 30)?);
+    let central_comment_bytes = usize::from(read_u16_le_at(bytes, central, 32)?);
+
+    if local_flags != central_flags
+        || local_method != central_method
+        || local_name_bytes != evidence.central_name_raw.len()
+        || central_name_bytes != evidence.central_name_raw.len()
+        || central_crc32_raw != evidence.central_crc32
+        || (central_compressed_bytes != u32::MAX
+            && u64::from(central_compressed_bytes) != evidence.compressed_bytes)
+        || (central_uncompressed_bytes != u32::MAX
+            && u64::from(central_uncompressed_bytes) != evidence.uncompressed_bytes)
+    {
+        return None;
+    }
+    const USING_DATA_DESCRIPTOR: u16 = 1 << 3;
+    if local_flags & USING_DATA_DESCRIPTOR == 0
+        && (local_crc32 != central_crc32_raw
+            || local_compressed_bytes != central_compressed_bytes
+            || local_uncompressed_bytes != central_uncompressed_bytes)
+    {
+        return None;
+    }
+
+    let local_name = checked_slice(
+        bytes,
+        local.checked_add(LOCAL_FIXED_BYTES)?,
+        local_name_bytes,
+    )?;
+    let central_name = checked_slice(
+        bytes,
+        central.checked_add(CENTRAL_FIXED_BYTES)?,
+        central_name_bytes,
+    )?;
+    if local_name != evidence.central_name_raw || central_name != evidence.central_name_raw {
+        return None;
+    }
+
+    // Validate the complete variable-size central record rather than accepting
+    // a name prefix that happens to fit before EOF.
+    let central_record_bytes = CENTRAL_FIXED_BYTES
+        .checked_add(central_name_bytes)?
+        .checked_add(central_extra_bytes)?
+        .checked_add(central_comment_bytes)?;
+    let central_record_end = evidence
+        .central_header_offset
+        .checked_add(u64::try_from(central_record_bytes).ok()?)?;
+    if evidence.central_header_offset < evidence.directory_start
+        || central_record_end > evidence.directory_end
+    {
+        return None;
+    }
+    checked_slice(bytes, central, central_record_bytes)?;
+
+    let local_data = local
+        .checked_add(LOCAL_FIXED_BYTES)?
+        .checked_add(local_name_bytes)?
+        .checked_add(usize::from(local_extra_field_bytes))?;
+    let occupied_end = u64::try_from(local_data)
+        .ok()?
+        .checked_add(evidence.compressed_bytes)?;
+    if evidence.local_header_offset >= evidence.directory_start
+        || occupied_end > evidence.directory_start
+        || occupied_end > u64::try_from(bytes.len()).ok()?
+    {
+        return None;
+    }
+
+    Some(ValidatedZipPhysicalMetadata {
+        public: ZipMemberMetadata {
+            local_header_offset: evidence.local_header_offset,
+            local_data_offset: u64::try_from(local_data).ok()?,
+            local_extra_field_bytes,
+            is_stored: local_method == 0,
+        },
+        occupied_end,
+    })
 }
 
 fn zip_nonregular_entry(
@@ -1852,10 +2012,40 @@ fn validated_zip<'a>(
             InspectionDiagnostic::InvalidArchive,
         ));
     }
+    let directory_start = match archive.offset().checked_add(preflight.directory_offset) {
+        Some(offset) => offset,
+        None => {
+            return Err(rejected_container(
+                ArchiveKind::Zip,
+                InspectionDiagnostic::InvalidArchive,
+            ))
+        }
+    };
+    let directory_end = match directory_start.checked_add(preflight.directory_size) {
+        Some(end)
+            if end <= preflight.metadata_boundary
+                && end <= u64::try_from(bytes.len()).unwrap_or(u64::MAX) =>
+        {
+            end
+        }
+        _ => {
+            return Err(rejected_container(
+                ArchiveKind::Zip,
+                InspectionDiagnostic::InvalidArchive,
+            ))
+        }
+    };
+    if !matches!(archive.has_overlapping_files(), Ok(false)) {
+        return Err(rejected_container(
+            ArchiveKind::Zip,
+            InspectionDiagnostic::InvalidArchive,
+        ));
+    }
 
     let mut members = Vec::with_capacity(archive.len());
     let mut seen_paths = BTreeSet::new();
     let mut unsafe_entries = Vec::new();
+    let mut occupied_local_ranges = Vec::with_capacity(archive.len());
     let mut declared_total = 0_u64;
     let mut compressed_total = 0_u64;
     for index in 0..archive.len() {
@@ -1888,6 +2078,34 @@ fn validated_zip<'a>(
         };
         let declared = member.size();
         let compressed = member.compressed_size();
+        let evidence = ZipPhysicalEvidence {
+            local_header_offset: member.header_start(),
+            central_header_offset: member.central_header_start(),
+            directory_start,
+            directory_end,
+            central_name_raw: member.name_raw(),
+            central_crc32: member.crc32(),
+            compressed_bytes: compressed,
+            uncompressed_bytes: declared,
+        };
+        let physical = match validated_zip_physical_metadata(bytes, evidence) {
+            Some(physical) => physical,
+            None => {
+                return Err(rejected_container(
+                    ArchiveKind::Zip,
+                    InspectionDiagnostic::InvalidArchive,
+                ))
+            }
+        };
+        if occupied_local_ranges.iter().any(|&(start, end)| {
+            start < physical.occupied_end && physical.public.local_header_offset < end
+        }) {
+            return Err(rejected_container(
+                ArchiveKind::Zip,
+                InspectionDiagnostic::InvalidArchive,
+            ));
+        }
+        occupied_local_ranges.push((physical.public.local_header_offset, physical.occupied_end));
         let unsafe_diagnostic = if member.encrypted() {
             Some(InspectionDiagnostic::EncryptedMember)
         } else if let Some(diagnostic) = zip_nonregular_entry(
@@ -1940,6 +2158,7 @@ fn validated_zip<'a>(
             kind: classify_member(&path, member.is_dir()),
             compressed_bytes: compressed,
             declared_uncompressed_bytes: declared,
+            zip: Some(physical.public),
         });
     }
     if !unsafe_entries.is_empty() {
@@ -2053,7 +2272,7 @@ fn preflight_zip(
         return Err(InspectionDiagnostic::MultiDiskZipUnsupported);
     }
 
-    let (entries, directory_size, directory_offset) =
+    let (entries, directory_size, directory_offset, metadata_boundary) =
         if entries == u16::MAX || directory_size == u32::MAX || directory_offset == u32::MAX {
             preflight_zip64(bytes, eocd)?
         } else {
@@ -2061,26 +2280,34 @@ fn preflight_zip(
                 u64::from(entries),
                 u64::from(directory_size),
                 u64::from(directory_offset),
+                u64::try_from(eocd).map_err(|_| InspectionDiagnostic::CentralDirectoryLimit)?,
             )
         };
     let entries = usize::try_from(entries).map_err(|_| InspectionDiagnostic::MemberLimit)?;
     if entries > limits.max_members {
         return Err(InspectionDiagnostic::MemberLimit);
     }
-    let directory_size =
+    let directory_size_usize =
         usize::try_from(directory_size).map_err(|_| InspectionDiagnostic::CentralDirectoryLimit)?;
-    if directory_size > limits.max_central_directory_bytes {
+    if directory_size_usize > limits.max_central_directory_bytes {
         return Err(InspectionDiagnostic::CentralDirectoryLimit);
     }
-    let directory_offset = usize::try_from(directory_offset)
+    let directory_offset_usize = usize::try_from(directory_offset)
         .map_err(|_| InspectionDiagnostic::CentralDirectoryLimit)?;
-    let directory_end = directory_offset
-        .checked_add(directory_size)
+    let directory_end = directory_offset_usize
+        .checked_add(directory_size_usize)
         .ok_or(InspectionDiagnostic::CentralDirectoryLimit)?;
-    if directory_end > eocd {
+    if u64::try_from(directory_end).map_err(|_| InspectionDiagnostic::CentralDirectoryLimit)?
+        > metadata_boundary
+    {
         return Err(InspectionDiagnostic::InvalidArchive);
     }
-    Ok(ZipPreflight { entries })
+    Ok(ZipPreflight {
+        entries,
+        directory_offset,
+        directory_size,
+        metadata_boundary,
+    })
 }
 
 /// Validate the bounded ZIP metadata needed before a general-purpose ZIP
@@ -2108,22 +2335,25 @@ pub(crate) fn preflight_zip_metadata_with_limits(
     .is_ok()
 }
 
-fn preflight_zip64(bytes: &[u8], eocd: usize) -> Result<(u64, u64, u64), InspectionDiagnostic> {
+fn preflight_zip64(
+    bytes: &[u8],
+    eocd: usize,
+) -> Result<(u64, u64, u64, u64), InspectionDiagnostic> {
     let locator = eocd
         .checked_sub(20)
         .filter(|offset| checked_slice(bytes, *offset, 4) == Some(ZIP64_LOCATOR_SIGNATURE))
         .ok_or(InspectionDiagnostic::Zip64MetadataInvalid)?;
     let locator_disk =
         read_u32_le_at(bytes, locator, 4).ok_or(InspectionDiagnostic::Zip64MetadataInvalid)?;
-    let record_offset =
+    let record_offset_u64 =
         read_u64_le_at(bytes, locator, 8).ok_or(InspectionDiagnostic::Zip64MetadataInvalid)?;
     let total_disks =
         read_u32_le_at(bytes, locator, 16).ok_or(InspectionDiagnostic::Zip64MetadataInvalid)?;
     if locator_disk != 0 || total_disks != 1 {
         return Err(InspectionDiagnostic::MultiDiskZipUnsupported);
     }
-    let record_offset =
-        usize::try_from(record_offset).map_err(|_| InspectionDiagnostic::Zip64MetadataInvalid)?;
+    let record_offset = usize::try_from(record_offset_u64)
+        .map_err(|_| InspectionDiagnostic::Zip64MetadataInvalid)?;
     if checked_slice(bytes, record_offset, 4) != Some(ZIP64_EOCD_SIGNATURE) {
         return Err(InspectionDiagnostic::Zip64MetadataInvalid);
     }
@@ -2151,7 +2381,7 @@ fn preflight_zip64(bytes: &[u8], eocd: usize) -> Result<(u64, u64, u64), Inspect
     if disk != 0 || directory_disk != 0 || entries_on_disk != entries {
         return Err(InspectionDiagnostic::MultiDiskZipUnsupported);
     }
-    Ok((entries, directory_size, directory_offset))
+    Ok((entries, directory_size, directory_offset, record_offset_u64))
 }
 
 fn find_zip_eocd(bytes: &[u8]) -> Option<usize> {
@@ -2312,6 +2542,7 @@ fn inspect_gzip(bytes: &[u8], limits: ContainerLimits) -> ContainerInspection {
             path,
             compressed_bytes: bytes.len() as u64,
             declared_uncompressed_bytes: decompressed,
+            zip: None,
         }],
         decompressed_bytes: decompressed,
         diagnostics: Vec::new(),
@@ -2523,6 +2754,7 @@ where
         kind: ContainerMemberKind::Svg,
         compressed_bytes: bytes.len() as u64,
         declared_uncompressed_bytes: declared,
+        zip: None,
     };
     let mut parsed = None;
     let outcome = visit_admitted_compressed_member(
@@ -3159,6 +3391,39 @@ mod tests {
     }
 
     #[test]
+    fn zip64_directory_cannot_overlap_its_metadata_records() {
+        const RECORD: usize = 64;
+        const LOCATOR: usize = 120;
+        const EOCD: usize = 140;
+        let mut bytes = vec![0_u8; EOCD + 22];
+
+        bytes[RECORD..RECORD + 4].copy_from_slice(ZIP64_EOCD_SIGNATURE);
+        bytes[RECORD + 4..RECORD + 12].copy_from_slice(&44_u64.to_le_bytes());
+        bytes[RECORD + 24..RECORD + 32].copy_from_slice(&1_u64.to_le_bytes());
+        bytes[RECORD + 32..RECORD + 40].copy_from_slice(&1_u64.to_le_bytes());
+        // A central directory starting at zero and ending at byte 80 would
+        // overlap the ZIP64 EOCD record beginning at byte 64.
+        bytes[RECORD + 40..RECORD + 48].copy_from_slice(&80_u64.to_le_bytes());
+        bytes[RECORD + 48..RECORD + 56].copy_from_slice(&0_u64.to_le_bytes());
+
+        bytes[LOCATOR..LOCATOR + 4].copy_from_slice(ZIP64_LOCATOR_SIGNATURE);
+        bytes[LOCATOR + 8..LOCATOR + 16]
+            .copy_from_slice(&u64::try_from(RECORD).unwrap().to_le_bytes());
+        bytes[LOCATOR + 16..LOCATOR + 20].copy_from_slice(&1_u32.to_le_bytes());
+
+        bytes[EOCD..EOCD + 4].copy_from_slice(ZIP_EOCD_SIGNATURE);
+        bytes[EOCD + 8..EOCD + 10].copy_from_slice(&u16::MAX.to_le_bytes());
+        bytes[EOCD + 10..EOCD + 12].copy_from_slice(&u16::MAX.to_le_bytes());
+        bytes[EOCD + 12..EOCD + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[EOCD + 16..EOCD + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(matches!(
+            preflight_zip(&bytes, ContainerLimits::default()),
+            Err(InspectionDiagnostic::InvalidArchive)
+        ));
+    }
+
+    #[test]
     fn zip_compression_ratio_limit_rejects_a_bomb_shape() {
         let payload = vec![b'a'; 64 * 1024];
         let bytes = zip_bytes(&[("large.txt", &payload)]);
@@ -3252,6 +3517,155 @@ mod tests {
             depth_limit.diagnostics,
             vec![InspectionDiagnostic::RecursionLimit]
         );
+    }
+
+    #[test]
+    fn zip_inventory_exposes_physical_header_order_and_storage_method() {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        writer
+            .start_file(
+                "mimetype",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(b"application/epub+zip").unwrap();
+        writer
+            .start_file(
+                "content.xml",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(b"<content/>").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let inspected = visit_zip_members(&bytes, 0, ContainerLimits::default(), |_| true);
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+        let mimetype = inspected
+            .members
+            .iter()
+            .find(|member| member.path == "mimetype")
+            .unwrap();
+        assert_eq!(
+            mimetype.zip,
+            Some(ZipMemberMetadata {
+                local_header_offset: 0,
+                local_data_offset: 38,
+                local_extra_field_bytes: 0,
+                is_stored: true,
+            })
+        );
+        let content = inspected
+            .members
+            .iter()
+            .find(|member| member.path == "content.xml")
+            .unwrap();
+        assert!(content
+            .zip
+            .is_some_and(|metadata| metadata.local_header_offset > 0 && !metadata.is_stored));
+    }
+
+    #[test]
+    fn zip_rejects_local_and_central_header_disagreement_or_aliasing() {
+        fn assert_invalid(bytes: &[u8]) {
+            let inspected = visit_zip_members(bytes, 0, ContainerLimits::default(), |_| true);
+            assert_eq!(inspected.status, InspectionStatus::Rejected);
+            assert_eq!(
+                inspected.diagnostics,
+                vec![InspectionDiagnostic::InvalidArchive]
+            );
+            assert!(inspected.members.is_empty());
+        }
+
+        let original = zip_bytes_with_method(&[("first.txt", b"first")], CompressionMethod::Stored);
+
+        let mut local_method = original.clone();
+        local_method[8..10].copy_from_slice(&8_u16.to_le_bytes());
+        assert_invalid(&local_method);
+
+        let mut local_flags = original.clone();
+        local_flags[6..8].copy_from_slice(&(1_u16 << 11).to_le_bytes());
+        assert_invalid(&local_flags);
+
+        for field in [14, 18, 22] {
+            let mut local_value = original.clone();
+            let changed = read_u32_le(&local_value, field).unwrap() ^ 1;
+            local_value[field..field + 4].copy_from_slice(&changed.to_le_bytes());
+            assert_invalid(&local_value);
+        }
+
+        let mut local_name = original.clone();
+        local_name[30] = b'x';
+        assert_invalid(&local_name);
+
+        let mut central_name = original.clone();
+        let central = single_zip_central_offset(&central_name);
+        central_name[central + 46] = b'x';
+        assert_invalid(&central_name);
+
+        let mut short_directory = original.clone();
+        let eocd = find_zip_eocd(&short_directory).unwrap();
+        short_directory[eocd + 12..eocd + 16].copy_from_slice(&45_u32.to_le_bytes());
+        assert_invalid(&short_directory);
+
+        let mut aliased = zip_bytes_with_method(
+            &[("first.txt", b"first"), ("second.txt", b"second")],
+            CompressionMethod::Stored,
+        );
+        let central_offsets = aliased
+            .windows(4)
+            .enumerate()
+            .filter_map(|(offset, signature)| {
+                (signature == ZIP_CENTRAL_FILE_HEADER_SIGNATURE).then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(central_offsets.len(), 2);
+        aliased[central_offsets[1] + 42..central_offsets[1] + 46]
+            .copy_from_slice(&0_u32.to_le_bytes());
+        assert_invalid(&aliased);
+    }
+
+    #[test]
+    fn zip_physical_records_must_stay_on_their_side_of_the_directory_boundary() {
+        let bytes = zip_bytes_with_method(&[("first.txt", b"first")], CompressionMethod::Stored);
+        let central = single_zip_central_offset(&bytes);
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
+        let member = archive.by_index_raw(0).unwrap();
+        let directory_start = u64::try_from(central).unwrap();
+        let directory_end = u64::try_from(bytes.len()).unwrap();
+        let local = member.header_start();
+        let central_header = member.central_header_start();
+        let name = member.name_raw();
+        let crc = member.crc32();
+        let compressed = member.compressed_size();
+        let uncompressed = member.size();
+        let evidence = ZipPhysicalEvidence {
+            local_header_offset: local,
+            central_header_offset: central_header,
+            directory_start,
+            directory_end,
+            central_name_raw: name,
+            central_crc32: crc,
+            compressed_bytes: compressed,
+            uncompressed_bytes: uncompressed,
+        };
+        assert!(validated_zip_physical_metadata(&bytes, evidence).is_some());
+        assert!(validated_zip_physical_metadata(
+            &bytes,
+            ZipPhysicalEvidence {
+                directory_start: 0,
+                ..evidence
+            },
+        )
+        .is_none());
+        assert!(validated_zip_physical_metadata(
+            &bytes,
+            ZipPhysicalEvidence {
+                directory_end: central_header + 45,
+                ..evidence
+            },
+        )
+        .is_none());
     }
 
     #[test]

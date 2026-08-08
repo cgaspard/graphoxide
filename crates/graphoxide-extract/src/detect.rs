@@ -394,7 +394,10 @@ struct BoundedWordCount {
 }
 
 pub fn count_words(path: &Path) -> usize {
-    if matches!(lower_extension(path).as_str(), "pdf" | "docx" | "xlsx") {
+    if matches!(
+        lower_extension(path).as_str(),
+        "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub"
+    ) {
         return 0;
     }
     count_words_with_cap(path, WORD_COUNT_MAX_BYTES).map_or(0, |count| count.words)
@@ -2657,7 +2660,10 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
             continue;
         }
         if kind != FileType::Video
-            && !matches!(lower_extension(&path).as_str(), "pdf" | "docx" | "xlsx")
+            && !matches!(
+                lower_extension(&path).as_str(),
+                "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub"
+            )
             && let Ok(count) = count_words_with_cap(&physical, WORD_COUNT_MAX_BYTES)
         {
             total_words = total_words.saturating_add(count.words);

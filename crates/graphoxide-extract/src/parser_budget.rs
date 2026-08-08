@@ -43,6 +43,21 @@ impl ParserPlan {
         (max_facts > 0).then_some(Self { max_facts })
     }
 
+    /// Install a format-specific fact ceiling after that adapter has already
+    /// derived and admitted its own scratch plan from the managed allowance.
+    ///
+    /// Container-backed formats cannot use the generic source expansion
+    /// estimate: their compressed source size does not describe peak decoded
+    /// scratch. Their adapter-specific planner owns that proof, while this
+    /// constructor keeps retained facts under the same thread-local budget.
+    pub(crate) const fn for_fact_limit(max_facts: usize) -> Option<Self> {
+        if max_facts == 0 {
+            None
+        } else {
+            Some(Self { max_facts })
+        }
+    }
+
     pub(crate) const fn max_facts(self) -> usize {
         self.max_facts
     }
@@ -111,5 +126,14 @@ mod tests {
         });
         assert!(exhausted);
         assert!(try_reserve_facts(usize::MAX));
+    }
+
+    #[test]
+    fn format_specific_plans_require_a_nonzero_fact_limit() {
+        assert_eq!(ParserPlan::for_fact_limit(0), None);
+        assert_eq!(
+            ParserPlan::for_fact_limit(7).map(ParserPlan::max_facts),
+            Some(7)
+        );
     }
 }

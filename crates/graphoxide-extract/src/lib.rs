@@ -40,6 +40,7 @@ pub mod languages;
 pub mod llm;
 pub mod manifest_ingest;
 mod native;
+mod office;
 mod parser_budget;
 mod pascal;
 mod pdf;

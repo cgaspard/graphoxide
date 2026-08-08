@@ -157,3 +157,54 @@ fn test_graphviz_file_roots_are_qualified_without_rewriting_declared_labels() {
     assert_eq!(labels["declared_a"], "architecture.dot");
     assert_eq!(labels["declared_b"], "architecture.dot");
 }
+
+#[test]
+fn test_document_package_roots_are_qualified_without_rewriting_declared_unit_labels() {
+    let mut root_a = node("root_a", "report.docx", "a/report.docx");
+    root_a.file_type = "document".into();
+    root_a
+        .extra
+        .insert("_origin".into(), json!("document_package"));
+    let mut root_b = node("root_b", "report.docx", "b/report.docx");
+    root_b.file_type = "document".into();
+    root_b
+        .extra
+        .insert("_origin".into(), json!("document_package"));
+    let mut unit_a = node("unit_a", "report.docx", "a/report.docx");
+    unit_a.file_type = "document".into();
+    unit_a.extra.extend([
+        ("_origin".into(), json!("document_package")),
+        ("unit_ordinal".into(), json!(1)),
+    ]);
+    let mut unit_b = node("unit_b", "report.docx", "b/report.docx");
+    unit_b.file_type = "document".into();
+    unit_b.extra.extend([
+        ("_origin".into(), json!("document_package")),
+        ("unit_ordinal".into(), json!(1)),
+    ]);
+    let mut part_a = node("part_a", "report.docx", "a/report.docx");
+    part_a.file_type = "document".into();
+    part_a.extra.extend([
+        ("_origin".into(), json!("document_package")),
+        ("internal_part".into(), json!("parts/report.docx")),
+    ]);
+    let mut part_b = node("part_b", "report.docx", "b/report.docx");
+    part_b.file_type = "document".into();
+    part_b.extra.extend([
+        ("_origin".into(), json!("document_package")),
+        ("internal_part".into(), json!("parts/report.docx")),
+    ]);
+    let mut nodes = vec![root_a, root_b, unit_a, unit_b, part_a, part_b];
+
+    disambiguate_file_labels_in_nodes(&mut nodes);
+    let labels = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.label.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(labels["root_a"], "a/report.docx");
+    assert_eq!(labels["root_b"], "b/report.docx");
+    assert_eq!(labels["unit_a"], "report.docx");
+    assert_eq!(labels["unit_b"], "report.docx");
+    assert_eq!(labels["part_a"], "report.docx");
+    assert_eq!(labels["part_b"], "report.docx");
+}
