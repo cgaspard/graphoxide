@@ -7,8 +7,10 @@
 
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node, CONTAINER_SOURCE_ATTRIBUTE};
 use std::{
-    collections::BTreeMap,
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 /// Immutable input handed from the I/O owner to one structured byte adapter.
@@ -143,12 +145,35 @@ pub(crate) fn extract_registered_format_with_allowance(
     extension: &str,
     parser_allowance_bytes: Option<usize>,
 ) -> Option<Extraction> {
+    extract_registered_format_with_allowance_and_cancellation(
+        path,
+        source_file,
+        source,
+        extension,
+        parser_allowance_bytes,
+        None,
+    )
+}
+
+/// Dispatch a registered format under an optional isolated parser allowance
+/// and cooperative cancellation handle.
+pub(crate) fn extract_registered_format_with_allowance_and_cancellation(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    extension: &str,
+    parser_allowance_bytes: Option<usize>,
+    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+) -> Option<Extraction> {
     let limits = parser_allowance_bytes.map_or_else(
         crate::containers::ContainerLimits::default,
         bounded_container_limits,
     );
-    let mut dispatch_budget =
-        RecursiveDispatchBudget::new_with_parser_allowance(limits, parser_allowance_bytes);
+    let mut dispatch_budget = RecursiveDispatchBudget::new_with_parser_allowance_and_cancellation(
+        limits,
+        parser_allowance_bytes,
+        cancellation.cloned(),
+    );
     extract_registered_format_at_depth(
         path,
         source_file,
@@ -496,17 +521,72 @@ fn extract_pdf_bytes(path: &Path, source_file: &str, source: &[u8]) -> Extractio
 /// Per-container validation protects decompression and metadata allocations.
 /// This additional guard bounds the number and declared bytes of members that
 /// may reach semantic adapters, plus every retained node, edge, hyperedge, and
-/// member-inventory fact across the complete nested tree. Isolated ZIP input is
-/// metadata-only because compressed members cannot borrow the source buffer;
-/// legacy ZIP dispatch and zero-copy TAR dispatch retain their fixed bounds.
+/// member-inventory fact across the complete nested tree. Compressed members
+/// additionally hold a tree-scoped scratch permit from before allocation until
+/// their child parser returns; TAR payloads remain zero-copy source slices.
 #[derive(Debug)]
 struct RecursiveDispatchBudget {
+    remaining_encountered_members: usize,
     remaining_dispatch_members: usize,
     remaining_declared_bytes: u64,
     remaining_output_facts: usize,
     output_fact_limit: usize,
     container_limits: crate::containers::ContainerLimits,
     parser_allowance_bytes: Option<usize>,
+    cancellation: Option<graphoxide_index_runtime::RuntimeCancellation>,
+    scratch: RecursiveScratchBudget,
+}
+
+#[derive(Debug, Clone)]
+struct RecursiveScratchBudget {
+    state: Rc<RecursiveScratchState>,
+}
+
+#[derive(Debug)]
+struct RecursiveScratchState {
+    used: Cell<usize>,
+    limit: usize,
+}
+
+#[derive(Debug)]
+struct RecursiveScratchPermit {
+    state: Rc<RecursiveScratchState>,
+    bytes: usize,
+}
+
+impl RecursiveScratchBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Rc::new(RecursiveScratchState {
+                used: Cell::new(0),
+                limit,
+            }),
+        }
+    }
+
+    fn try_reserve(&self, bytes: usize) -> Option<RecursiveScratchPermit> {
+        let next = self.state.used.get().checked_add(bytes)?;
+        if next > self.state.limit {
+            return None;
+        }
+        self.state.used.set(next);
+        Some(RecursiveScratchPermit {
+            state: Rc::clone(&self.state),
+            bytes,
+        })
+    }
+}
+
+impl Drop for RecursiveScratchPermit {
+    fn drop(&mut self) {
+        self.state.used.set(
+            self.state
+                .used
+                .get()
+                .checked_sub(self.bytes)
+                .expect("recursive scratch accounting must not underflow"),
+        );
+    }
 }
 
 impl RecursiveDispatchBudget {
@@ -517,14 +597,24 @@ impl RecursiveDispatchBudget {
         // construction uses `new_with_parser_allowance` directly.
         let mut budget =
             Self::new_with_parser_allowance(crate::containers::ContainerLimits::default(), None);
+        budget.remaining_encountered_members = limits.max_members;
         budget.remaining_dispatch_members = limits.max_members;
         budget.remaining_declared_bytes = limits.max_total_uncompressed_bytes;
         budget
     }
 
+    #[cfg(test)]
     fn new_with_parser_allowance(
         limits: crate::containers::ContainerLimits,
         parser_allowance_bytes: Option<usize>,
+    ) -> Self {
+        Self::new_with_parser_allowance_and_cancellation(limits, parser_allowance_bytes, None)
+    }
+
+    fn new_with_parser_allowance_and_cancellation(
+        limits: crate::containers::ContainerLimits,
+        parser_allowance_bytes: Option<usize>,
+        cancellation: Option<graphoxide_index_runtime::RuntimeCancellation>,
     ) -> Self {
         let output_fact_limit = parser_allowance_bytes.map_or(
             crate::format_registry::CONTAINER_LIMITS.max_records,
@@ -538,6 +628,7 @@ impl RecursiveDispatchBudget {
             limits,
             output_fact_limit,
             parser_allowance_bytes,
+            cancellation,
         )
     }
 
@@ -546,22 +637,36 @@ impl RecursiveDispatchBudget {
         limits: crate::containers::ContainerLimits,
         output_fact_limit: usize,
     ) -> Self {
-        Self::with_output_fact_limit_and_parser_allowance(limits, output_fact_limit, None)
+        Self::with_output_fact_limit_and_parser_allowance(limits, output_fact_limit, None, None)
     }
 
     fn with_output_fact_limit_and_parser_allowance(
         limits: crate::containers::ContainerLimits,
         output_fact_limit: usize,
         parser_allowance_bytes: Option<usize>,
+        cancellation: Option<graphoxide_index_runtime::RuntimeCancellation>,
     ) -> Self {
+        let scratch_limit =
+            usize::try_from(limits.max_total_uncompressed_bytes).unwrap_or(usize::MAX);
         Self {
+            remaining_encountered_members: limits.max_members,
             remaining_dispatch_members: limits.max_members,
             remaining_declared_bytes: limits.max_total_uncompressed_bytes,
             remaining_output_facts: output_fact_limit,
             output_fact_limit,
             container_limits: limits,
             parser_allowance_bytes,
+            cancellation,
+            scratch: RecursiveScratchBudget::new(scratch_limit),
         }
+    }
+
+    fn admit_encounter(&mut self) -> bool {
+        let Some(remaining) = self.remaining_encountered_members.checked_sub(1) else {
+            return false;
+        };
+        self.remaining_encountered_members = remaining;
+        true
     }
 
     fn admit_dispatch(&mut self, member: &crate::containers::ContainerMember) -> bool {
@@ -576,6 +681,25 @@ impl RecursiveDispatchBudget {
         };
         self.remaining_declared_bytes = remaining_bytes;
         self.remaining_dispatch_members = remaining_members;
+        true
+    }
+
+    fn admit_decoded_member(&mut self, decoded_bytes: usize) -> bool {
+        let Ok(decoded_bytes) = u64::try_from(decoded_bytes) else {
+            return false;
+        };
+        let Some(remaining_bytes) = self.remaining_declared_bytes.checked_sub(decoded_bytes) else {
+            return false;
+        };
+        let Some(remaining_dispatch) = self.remaining_dispatch_members.checked_sub(1) else {
+            return false;
+        };
+        let Some(remaining_encountered) = self.remaining_encountered_members.checked_sub(1) else {
+            return false;
+        };
+        self.remaining_declared_bytes = remaining_bytes;
+        self.remaining_dispatch_members = remaining_dispatch;
+        self.remaining_encountered_members = remaining_encountered;
         true
     }
 
@@ -609,6 +733,20 @@ impl RecursiveDispatchBudget {
                 .checked_shr(u32::from(recursion_depth).min(usize::BITS - 1))
                 .unwrap_or(0)
         })
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(graphoxide_index_runtime::RuntimeCancellation::is_cancelled)
+    }
+
+    fn cancellation(&self) -> Option<&graphoxide_index_runtime::RuntimeCancellation> {
+        self.cancellation.as_ref()
+    }
+
+    fn try_reserve_scratch(&self, bytes: usize) -> Option<RecursiveScratchPermit> {
+        self.scratch.try_reserve(bytes)
     }
 }
 
@@ -685,8 +823,12 @@ fn discard_extracted_members(
     }
 }
 
-fn mark_container_source(extraction: &mut Extraction, source_file: &str) {
-    let value = serde_json::Value::String(source_file.to_owned());
+fn mark_container_source(
+    extraction: &mut Extraction,
+    container_source: &str,
+    default_fact_source: &str,
+) {
+    let value = serde_json::Value::String(container_source.to_owned());
     for node in &mut extraction.nodes {
         node.extra
             .insert(CONTAINER_SOURCE_ATTRIBUTE.into(), value.clone());
@@ -697,6 +839,9 @@ fn mark_container_source(extraction: &mut Extraction, source_file: &str) {
     }
     for hyperedge in &mut extraction.hyperedges {
         if let Some(object) = hyperedge.as_object_mut() {
+            object
+                .entry("source_file")
+                .or_insert_with(|| default_fact_source.into());
             object.insert(CONTAINER_SOURCE_ATTRIBUTE.into(), value.clone());
         }
     }
@@ -713,6 +858,136 @@ fn virtual_member_path(container_path: &Path, member_path: &str) -> PathBuf {
 
 fn virtual_member_source_file(source_file: &str, member_path: &str) -> String {
     format!("{source_file}!/{member_path}")
+}
+
+fn generated_container_member_id(stem: &str, member_path: &str, attempt: u64) -> String {
+    let legacy = make_id(&[stem, "member", member_path]);
+    let mut owner = Vec::with_capacity(stem.len() + member_path.len() + 10);
+    owner.extend_from_slice(stem.as_bytes());
+    owner.push(0);
+    owner.extend_from_slice(member_path.as_bytes());
+    owner.push(0);
+    owner.extend_from_slice(&attempt.to_le_bytes());
+    format!("{}_{}", legacy, blake3::hash(&owner).to_hex())
+}
+
+fn generated_container_fact_id(
+    domain: &[u8],
+    member_source: &str,
+    id: &str,
+    attempt: u64,
+) -> String {
+    let mut owner = Vec::with_capacity(domain.len() + member_source.len() + id.len() + 11);
+    owner.extend_from_slice(domain);
+    owner.push(0);
+    owner.extend_from_slice(member_source.as_bytes());
+    owner.push(0);
+    owner.extend_from_slice(id.as_bytes());
+    owner.push(0);
+    owner.extend_from_slice(&attempt.to_le_bytes());
+    format!("{}_{}", id, blake3::hash(&owner).to_hex())
+}
+
+fn collision_safe_owned_id_plan(
+    domain: &[u8],
+    owners: &BTreeMap<String, BTreeSet<usize>>,
+    owner_names: &[String],
+    reserved: &BTreeSet<String>,
+) -> Vec<BTreeMap<String, String>> {
+    let mut all_reserved = reserved.clone();
+    all_reserved.extend(owners.keys().cloned());
+    let mut used = reserved.clone();
+    let mut plan = vec![BTreeMap::new(); owner_names.len()];
+    for (id, id_owners) in owners {
+        let preserve_legacy = id_owners.len() == 1 && !reserved.contains(id);
+        for owner in id_owners {
+            let owner_name = owner_names
+                .get(*owner)
+                .expect("container fact owner index must be valid");
+            let assigned = if preserve_legacy {
+                id.clone()
+            } else {
+                let mut attempt = 0_u64;
+                loop {
+                    let candidate = generated_container_fact_id(domain, owner_name, id, attempt);
+                    if !all_reserved.contains(&candidate) && !used.contains(&candidate) {
+                        break candidate;
+                    }
+                    attempt = attempt
+                        .checked_add(1)
+                        .expect("container fact ID attempts must not overflow");
+                }
+            };
+            used.insert(assigned.clone());
+            plan[*owner].insert(id.clone(), assigned);
+        }
+    }
+    plan
+}
+
+fn remap_container_extraction_ids(
+    extraction: &mut Extraction,
+    node_remap: &BTreeMap<String, String>,
+    hyperedge_remap: &BTreeMap<String, String>,
+) {
+    for node in &mut extraction.nodes {
+        if let Some(id) = node_remap.get(&node.id) {
+            node.id.clone_from(id);
+        }
+    }
+    for edge in &mut extraction.edges {
+        if let Some(id) = node_remap.get(&edge.source) {
+            edge.source.clone_from(id);
+        }
+        if let Some(id) = node_remap.get(&edge.target) {
+            edge.target.clone_from(id);
+        }
+        for field in ["_src", "_tgt"] {
+            if let Some(id) = edge
+                .extra
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| node_remap.get(id))
+            {
+                edge.extra.insert(field.into(), id.clone().into());
+            }
+        }
+    }
+    for hyperedge in &mut extraction.hyperedges {
+        let Some(object) = hyperedge.as_object_mut() else {
+            continue;
+        };
+        if let Some(id) = object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| hyperedge_remap.get(id))
+        {
+            object.insert("id".into(), id.clone().into());
+        }
+        for field in ["source", "target", "from", "to"] {
+            if let Some(id) = object
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| node_remap.get(id))
+            {
+                object.insert(field.into(), id.clone().into());
+            }
+        }
+        for field in ["nodes", "members", "node_ids"] {
+            let Some(members) = object
+                .get_mut(field)
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            for member in members {
+                let Some(id) = member.as_str().and_then(|id| node_remap.get(id)) else {
+                    continue;
+                };
+                *member = id.clone().into();
+            }
+        }
+    }
 }
 
 /// Apply the repository's sensitive-path policy to a normalized archive path
@@ -785,7 +1060,7 @@ fn is_sensitive_container_member_path(member_path: &str) -> bool {
     }
 
     if path.extension().is_some() {
-        return crate::detect::is_sensitive(path);
+        return crate::detect::is_sensitive_path_only(path);
     }
     let stem = name.trim_start_matches('.');
     if ["service_account", "service-account", "service.account"]
@@ -822,6 +1097,10 @@ fn extract_container_member(
 ) -> Extraction {
     let path = virtual_member_path(container_path, member_path);
     let member_source_file = virtual_member_source_file(source_file, member_path);
+    let parser_allowance = dispatch_budget.parser_allowance_at_depth(recursion_depth);
+    if dispatch_budget.is_cancelled() {
+        return rejected_inventory_extraction(&path, &member_source_file, "cancelled");
+    }
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -837,19 +1116,34 @@ fn extract_container_member(
     ) {
         return extraction;
     }
-    let result = dispatch_budget
-        .parser_allowance_at_depth(recursion_depth)
-        .map_or_else(
-            || crate::engine::extract_as_bytes(&path, &member_source_file, bytes),
-            |allowance| {
+    // Recursive generic AST and compatibility extractors do not pass through
+    // the registered adapter preflight. Apply it only after container and
+    // structured ownership has declined, so nested archives retain their
+    // independently bounded member policy.
+    if parser_plan_rejected(parser_allowance, bytes.len()) {
+        return rejected_inventory_extraction(&path, &member_source_file, "parser_arena_budget");
+    }
+    let result = parser_allowance.map_or_else(
+        || crate::engine::extract_as_bytes(&path, &member_source_file, bytes),
+        |allowance| {
+            if let Some(cancellation) = dispatch_budget.cancellation() {
+                crate::engine::extract_as_bytes_with_parser_allowance_and_cancellation(
+                    &path,
+                    &member_source_file,
+                    bytes,
+                    allowance,
+                    cancellation,
+                )
+            } else {
                 crate::engine::extract_as_bytes_with_parser_allowance(
                     &path,
                     &member_source_file,
                     bytes,
                     allowance,
                 )
-            },
-        );
+            }
+        },
+    );
     result.unwrap_or_else(|_| {
         rejected_inventory_extraction(&path, &member_source_file, "member_parse_failed")
     })
@@ -864,6 +1158,9 @@ fn dispatch_container_member(
     dispatch_budget: &mut RecursiveDispatchBudget,
     member_dispatch_statuses: &mut BTreeMap<String, &'static str>,
 ) -> Result<Option<ExtractedContainerMember>, &'static str> {
+    if dispatch_budget.is_cancelled() {
+        return Err("cancelled");
+    }
     if is_sensitive_container_member_path(&member.path) {
         member_dispatch_statuses.insert(member.path.clone(), "sensitive_path_skipped");
         return Ok(None);
@@ -877,6 +1174,28 @@ fn dispatch_container_member(
         return Err("aggregate_member_or_byte_limit");
     }
 
+    dispatch_admitted_container_member(
+        container_path,
+        source_file,
+        member,
+        bytes,
+        recursion_depth,
+        dispatch_budget,
+    )
+}
+
+fn dispatch_admitted_container_member(
+    container_path: &Path,
+    source_file: &str,
+    member: &crate::containers::ContainerMember,
+    bytes: &[u8],
+    recursion_depth: u16,
+    dispatch_budget: &mut RecursiveDispatchBudget,
+) -> Result<Option<ExtractedContainerMember>, &'static str> {
+    if dispatch_budget.is_cancelled() {
+        return Err("cancelled");
+    }
+
     let before = dispatch_budget.remaining_output_facts();
     let mut extraction = extract_container_member(
         container_path,
@@ -886,7 +1205,11 @@ fn dispatch_container_member(
         recursion_depth,
         dispatch_budget,
     );
-    mark_container_source(&mut extraction, source_file);
+    if dispatch_budget.is_cancelled() {
+        return Err("cancelled");
+    }
+    let member_source_file = virtual_member_source_file(source_file, &member.path);
+    mark_container_source(&mut extraction, source_file, &member_source_file);
     let already_accounted = before
         .checked_sub(dispatch_budget.remaining_output_facts())
         .expect("recursive child extraction cannot increase its fact budget");
@@ -917,27 +1240,21 @@ fn container_inventory_extraction(
     dispatch_budget: &mut RecursiveDispatchBudget,
 ) -> Option<Extraction> {
     use crate::containers::{
-        recursive_archive_kind, visit_tar_members, visit_zip_members, ArchiveKind, ByteInventory,
-        InspectionStatus, SvgReferenceRelation,
+        inspect_svgz_bounded, recursive_archive_kind, visit_gzip_member_bounded_with_encounter,
+        visit_tar_members_bounded_with_encounter, visit_zip_members_bounded_with_encounter,
+        ArchiveKind, ByteInventory, CompressedMemberAdmission, InspectionStatus,
+        SvgReferenceRelation,
     };
 
     let source_name = path.file_name()?.to_string_lossy();
     let limits = dispatch_budget.container_limits;
-    if dispatch_budget
-        .parser_allowance_bytes
-        .is_some_and(|allowance| allowance < 128 * 1024)
-        && source.starts_with(b"\x1f\x8b")
-    {
-        return Some(rejected_inventory_extraction(
-            path,
-            source_file,
-            "parser_arena_budget",
-        ));
-    }
     let mut extracted_members = Vec::new();
     let mut member_dispatch_statuses = BTreeMap::new();
     let mut dispatch_stop_reason = None;
+    let mut admitted_encountered_members = None;
     let recursive_kind = recursive_archive_kind(&source_name, source);
+    let svgz =
+        source_name.to_ascii_lowercase().ends_with(".svgz") && source.starts_with(b"\x1f\x8b");
     let recursive_output_accounting = recursive_kind.is_some();
     if recursive_output_accounting && !dispatch_budget.reserve_output_facts(1) {
         // A parent dispatcher reserves room for a child root before calling
@@ -950,66 +1267,202 @@ fn container_inventory_extraction(
         ));
     }
     let inventory = match recursive_kind {
-        Some(ArchiveKind::Tar) if recursion_depth < limits.max_recursion_depth => {
-            ByteInventory::Container(visit_tar_members(
-                source,
-                recursion_depth,
-                limits,
-                |child| {
-                    match dispatch_container_member(
-                        path,
-                        source_file,
-                        child.member,
-                        child.bytes,
-                        recursion_depth + 1,
-                        dispatch_budget,
-                        &mut member_dispatch_statuses,
-                    ) {
-                        Ok(Some(extracted)) => extracted_members.push(extracted),
-                        Ok(None) => {}
-                        Err(reason) => {
-                            dispatch_stop_reason.get_or_insert(reason);
-                            return false;
+        Some(ArchiveKind::Tar) => {
+            let branch_reason = Cell::new(None);
+            let encountered = Cell::new(0_usize);
+            let inspection = {
+                let budget = RefCell::new(&mut *dispatch_budget);
+                visit_tar_members_bounded_with_encounter(
+                    source,
+                    recursion_depth,
+                    limits,
+                    || budget.borrow().is_cancelled(),
+                    |_| {
+                        if budget.borrow_mut().admit_encounter() {
+                            encountered.set(encountered.get() + 1);
+                            true
+                        } else {
+                            branch_reason.set(Some("aggregate_encountered_member_limit"));
+                            false
                         }
-                    }
-                    true
-                },
-            ))
-        }
-        Some(ArchiveKind::Zip) if dispatch_budget.parser_allowance_bytes.is_some() => {
-            // ZIP payloads require an owned decompression buffer before a child
-            // parser can run. Isolated extraction keeps ZIP metadata only, so
-            // no member payload allocation can compete with the parser arena.
-            dispatch_stop_reason = Some("compressed_member_dispatch_disabled");
-            ByteInventory::Container(crate::containers::inspect_zip_inventory_bytes(
-                source,
-                recursion_depth,
-                limits,
-            ))
-        }
-        Some(ArchiveKind::Zip) if recursion_depth < limits.max_recursion_depth => {
-            ByteInventory::Container(visit_zip_members(
-                source,
-                recursion_depth,
-                limits,
-                |child| {
-                    match dispatch_container_member(
-                        path,
-                        source_file,
-                        child.member,
-                        child.bytes,
-                        recursion_depth + 1,
-                        dispatch_budget,
-                        &mut member_dispatch_statuses,
-                    ) {
-                        Ok(Some(extracted)) => extracted_members.push(extracted),
-                        Ok(None) => {}
-                        Err(reason) => {
-                            dispatch_stop_reason.get_or_insert(reason);
-                            return false;
+                    },
+                    |child| {
+                        match dispatch_container_member(
+                            path,
+                            source_file,
+                            child.member,
+                            child.bytes,
+                            recursion_depth + 1,
+                            &mut budget.borrow_mut(),
+                            &mut member_dispatch_statuses,
+                        ) {
+                            Ok(Some(extracted)) => extracted_members.push(extracted),
+                            Ok(None) => {}
+                            Err(reason) => {
+                                branch_reason.set(Some(reason));
+                                return false;
+                            }
                         }
-                    }
-                    true
+                        true
+                    },
+                )
+            };
+            admitted_encountered_members = Some(encountered.get());
+            dispatch_stop_reason = branch_reason.get();
+            ByteInventory::Container(inspection)
+        }
+        Some(ArchiveKind::Zip) => {
+            let branch_reason = Cell::new(None);
+            let encountered = Cell::new(0_usize);
+            let inspection = {
+                let budget = RefCell::new(&mut *dispatch_budget);
+                visit_zip_members_bounded_with_encounter(
+                    source,
+                    recursion_depth,
+                    limits,
+                    || budget.borrow().is_cancelled(),
+                    |_| {
+                        if budget.borrow_mut().admit_encounter() {
+                            encountered.set(encountered.get() + 1);
+                            true
+                        } else {
+                            branch_reason.set(Some("aggregate_encountered_member_limit"));
+                            false
+                        }
+                    },
+                    |member| {
+                        if is_sensitive_container_member_path(&member.path) {
+                            member_dispatch_statuses
+                                .insert(member.path.clone(), "sensitive_path_skipped");
+                            return CompressedMemberAdmission::Skip;
+                        }
+                        let mut budget = budget.borrow_mut();
+                        if !budget.can_reserve_output_facts(2) {
+                            branch_reason.set(Some("aggregate_fact_limit"));
+                            return CompressedMemberAdmission::Stop;
+                        }
+                        if !budget.admit_dispatch(member) {
+                            branch_reason.set(Some("aggregate_member_or_byte_limit"));
+                            return CompressedMemberAdmission::Stop;
+                        }
+                        let Ok(bytes) = usize::try_from(member.declared_uncompressed_bytes) else {
+                            branch_reason.set(Some("aggregate_member_or_byte_limit"));
+                            return CompressedMemberAdmission::Stop;
+                        };
+                        match budget.try_reserve_scratch(bytes) {
+                            Some(permit) => CompressedMemberAdmission::Dispatch(permit),
+                            None => {
+                                branch_reason.set(Some("aggregate_scratch_limit"));
+                                CompressedMemberAdmission::Stop
+                            }
+                        }
+                    },
+                    |child| {
+                        match dispatch_admitted_container_member(
+                            path,
+                            source_file,
+                            child.member,
+                            child.bytes,
+                            recursion_depth + 1,
+                            &mut budget.borrow_mut(),
+                        ) {
+                            Ok(Some(extracted)) => extracted_members.push(extracted),
+                            Ok(None) => {}
+                            Err(reason) => {
+                                branch_reason.set(Some(reason));
+                                return false;
+                            }
+                        }
+                        true
+                    },
+                )
+            };
+            admitted_encountered_members = Some(encountered.get());
+            dispatch_stop_reason = branch_reason.get();
+            ByteInventory::Container(inspection)
+        }
+        Some(ArchiveKind::Gzip) => {
+            let branch_reason = Cell::new(None);
+            let encountered = Cell::new(0_usize);
+            let inspection = {
+                let budget = RefCell::new(&mut *dispatch_budget);
+                visit_gzip_member_bounded_with_encounter(
+                    &source_name,
+                    source,
+                    recursion_depth,
+                    limits,
+                    || budget.borrow().is_cancelled(),
+                    |_| {
+                        if budget.borrow_mut().admit_encounter() {
+                            encountered.set(encountered.get() + 1);
+                            true
+                        } else {
+                            branch_reason.set(Some("aggregate_encountered_member_limit"));
+                            false
+                        }
+                    },
+                    |member| {
+                        if is_sensitive_container_member_path(&member.path) {
+                            member_dispatch_statuses
+                                .insert(member.path.clone(), "sensitive_path_skipped");
+                            return CompressedMemberAdmission::Skip;
+                        }
+                        let mut budget = budget.borrow_mut();
+                        if !budget.can_reserve_output_facts(2) {
+                            branch_reason.set(Some("aggregate_fact_limit"));
+                            return CompressedMemberAdmission::Stop;
+                        }
+                        if !budget.admit_dispatch(member) {
+                            branch_reason.set(Some("aggregate_member_or_byte_limit"));
+                            return CompressedMemberAdmission::Stop;
+                        }
+                        let Ok(bytes) = usize::try_from(member.declared_uncompressed_bytes) else {
+                            branch_reason.set(Some("aggregate_member_or_byte_limit"));
+                            return CompressedMemberAdmission::Stop;
+                        };
+                        match budget.try_reserve_scratch(bytes) {
+                            Some(permit) => CompressedMemberAdmission::Dispatch(permit),
+                            None => {
+                                branch_reason.set(Some("aggregate_scratch_limit"));
+                                CompressedMemberAdmission::Stop
+                            }
+                        }
+                    },
+                    |child| {
+                        match dispatch_admitted_container_member(
+                            path,
+                            source_file,
+                            child.member,
+                            child.bytes,
+                            recursion_depth + 1,
+                            &mut budget.borrow_mut(),
+                        ) {
+                            Ok(Some(extracted)) => extracted_members.push(extracted),
+                            Ok(None) => {}
+                            Err(reason) => {
+                                branch_reason.set(Some(reason));
+                                return false;
+                            }
+                        }
+                        true
+                    },
+                )
+            };
+            admitted_encountered_members = Some(encountered.get());
+            dispatch_stop_reason = branch_reason.get();
+            ByteInventory::Container(inspection)
+        }
+        _ if svgz => {
+            let budget = RefCell::new(&mut *dispatch_budget);
+            ByteInventory::Media(inspect_svgz_bounded(
+                source,
+                recursion_depth,
+                limits,
+                || budget.borrow().is_cancelled(),
+                |bytes| {
+                    let mut budget = budget.borrow_mut();
+                    let permit = budget.try_reserve_scratch(bytes)?;
+                    budget.admit_decoded_member(bytes).then_some(permit)
                 },
             ))
         }
@@ -1027,6 +1480,24 @@ fn container_inventory_extraction(
         ByteInventory::Container(mut container) => {
             let mut members = container.members;
             members.sort_by(|left, right| left.path.cmp(&right.path));
+            let requested_member_count = members.len();
+            let encountered_limit = if let Some(admitted) = admitted_encountered_members {
+                admitted
+            } else if recursive_output_accounting {
+                let mut admitted = 0_usize;
+                while admitted < members.len() && dispatch_budget.admit_encounter() {
+                    admitted += 1;
+                }
+                admitted
+            } else {
+                members.len()
+            };
+            if encountered_limit < members.len() {
+                members.truncate(encountered_limit);
+                container.status = InspectionStatus::InventoryOnly;
+                dispatch_stop_reason.get_or_insert("aggregate_encountered_member_limit");
+                discard_extracted_members(&mut extracted_members, dispatch_budget);
+            }
             for member in &members {
                 if is_sensitive_container_member_path(&member.path) {
                     member_dispatch_statuses
@@ -1034,7 +1505,6 @@ fn container_inventory_extraction(
                         .or_insert("sensitive_path_skipped");
                 }
             }
-            let requested_member_count = members.len();
             let mut semantic_output_allowed = container.status == InspectionStatus::Parsed;
             if !semantic_output_allowed {
                 discard_extracted_members(&mut extracted_members, dispatch_budget);
@@ -1124,12 +1594,98 @@ fn container_inventory_extraction(
                     (requested_member_count - members.len()).into(),
                 );
             }
+            let mut member_id_owners = BTreeMap::<String, BTreeSet<String>>::new();
+            for member in &members {
+                member_id_owners
+                    .entry(make_id(&[&stem, "member", &member.path]))
+                    .or_default()
+                    .insert(member.path.clone());
+            }
+            let reserved_legacy_member_ids =
+                member_id_owners.keys().cloned().collect::<BTreeSet<_>>();
+            let mut used_inventory_ids = BTreeSet::from([file_id.clone()]);
+            let mut member_ids = BTreeMap::new();
+            for member in &members {
+                let legacy = make_id(&[&stem, "member", &member.path]);
+                let unique_legacy = member_id_owners
+                    .get(&legacy)
+                    .is_some_and(|owners| owners.len() == 1)
+                    && !used_inventory_ids.contains(&legacy);
+                let id = if unique_legacy {
+                    legacy
+                } else {
+                    let mut attempt = 0_u64;
+                    loop {
+                        let candidate = generated_container_member_id(&stem, &member.path, attempt);
+                        if !reserved_legacy_member_ids.contains(&candidate)
+                            && !used_inventory_ids.contains(&candidate)
+                        {
+                            break candidate;
+                        }
+                        attempt = attempt
+                            .checked_add(1)
+                            .expect("container member ID attempts must not overflow");
+                    }
+                };
+                used_inventory_ids.insert(id.clone());
+                member_ids.insert(member.path.clone(), id);
+            }
+
+            let member_sources = extracted_members
+                .iter()
+                .map(|extracted| virtual_member_source_file(source_file, &extracted.path))
+                .collect::<Vec<_>>();
+            let mut fact_id_owners = BTreeMap::<String, BTreeSet<usize>>::new();
+            let mut hyperedge_id_owners = BTreeMap::<String, BTreeSet<usize>>::new();
+            for (owner, extracted) in extracted_members.iter().enumerate() {
+                for node in &extracted.extraction.nodes {
+                    fact_id_owners
+                        .entry(node.id.clone())
+                        .or_default()
+                        .insert(owner);
+                }
+                for id in extracted
+                    .extraction
+                    .hyperedges
+                    .iter()
+                    .filter_map(|hyperedge| hyperedge.get("id"))
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    hyperedge_id_owners
+                        .entry(id.to_owned())
+                        .or_default()
+                        .insert(owner);
+                }
+            }
+            let node_plan = collision_safe_owned_id_plan(
+                b"node",
+                &fact_id_owners,
+                &member_sources,
+                &used_inventory_ids,
+            );
+            let hyperedge_plan = collision_safe_owned_id_plan(
+                b"hyperedge",
+                &hyperedge_id_owners,
+                &member_sources,
+                &BTreeSet::new(),
+            );
+            let empty_remap = BTreeMap::new();
+            for (owner, extracted) in extracted_members.iter_mut().enumerate() {
+                remap_container_extraction_ids(
+                    &mut extracted.extraction,
+                    node_plan.get(owner).unwrap_or(&empty_remap),
+                    hyperedge_plan.get(owner).unwrap_or(&empty_remap),
+                );
+            }
+
             let mut nodes = vec![root];
             let mut edges = Vec::new();
-            let mut member_ids = BTreeMap::new();
+            let mut hyperedges = Vec::new();
             for member in members {
-                let member_id = make_id(&[&stem, "member", &member.path]);
-                member_ids.insert(member.path.clone(), member_id.clone());
+                let member_id = member_ids
+                    .get(&member.path)
+                    .cloned()
+                    .expect("every admitted member must have an ID");
                 let mut extra = BTreeMap::from([
                     ("type".into(), "container_member".into()),
                     (
@@ -1172,6 +1728,7 @@ fn container_inventory_extraction(
                         .collect::<Vec<_>>();
                     nodes.extend(extracted.extraction.nodes);
                     edges.extend(extracted.extraction.edges);
+                    hyperedges.extend(extracted.extraction.hyperedges);
                     for child_id in child_ids {
                         edges.push(contains_edge(member_id, &child_id, source_file));
                     }
@@ -1180,7 +1737,7 @@ fn container_inventory_extraction(
             Some(Extraction {
                 nodes,
                 edges,
-                hyperedges: Vec::new(),
+                hyperedges,
             })
         }
         ByteInventory::Media(media) => {
@@ -1591,7 +2148,11 @@ mod tests {
                 "_container_source": "nested-owner.tar"
             })],
         };
-        mark_container_source(&mut extraction, "archive.tar");
+        mark_container_source(
+            &mut extraction,
+            "archive.tar",
+            "archive.tar!/nested/config.toml",
+        );
 
         let round_trip: Extraction =
             serde_json::from_value(serde_json::to_value(extraction).expect("serialize extraction"))
@@ -1617,6 +2178,114 @@ mod tests {
     }
 
     #[test]
+    fn member_namespace_remaps_nodes_edges_and_hyperedges_together() {
+        let mut edge = contains_edge("a", "b", "archive.zip!/member.dot");
+        edge.extra.insert("_src".into(), "a".into());
+        edge.extra.insert("_tgt".into(), "b".into());
+        let mut extraction = Extraction {
+            nodes: vec![
+                inventory_file_node(Path::new("a"), "a", "a", "document"),
+                inventory_file_node(Path::new("b"), "b", "b", "document"),
+            ],
+            edges: vec![edge],
+            hyperedges: vec![serde_json::json!({
+                "id": "group",
+                "nodes": ["a", "b"],
+                "source": "a",
+                "target": "b"
+            })],
+        };
+        let first_owner = "archive.zip!/member.dot".to_owned();
+        let sibling_owner = "archive.zip!/sibling.dot".to_owned();
+        let owner_names = vec![first_owner, sibling_owner];
+        let duplicate_owners = BTreeSet::from([0_usize, 1_usize]);
+        let node_plan = collision_safe_owned_id_plan(
+            b"node",
+            &BTreeMap::from([
+                ("a".into(), duplicate_owners.clone()),
+                ("b".into(), duplicate_owners.clone()),
+            ]),
+            &owner_names,
+            &BTreeSet::new(),
+        );
+        let hyperedge_plan = collision_safe_owned_id_plan(
+            b"hyperedge",
+            &BTreeMap::from([("group".into(), duplicate_owners)]),
+            &owner_names,
+            &BTreeSet::new(),
+        );
+        remap_container_extraction_ids(
+            &mut extraction,
+            node_plan.first().expect("first node remap"),
+            hyperedge_plan.first().expect("first hyperedge remap"),
+        );
+        mark_container_source(&mut extraction, "archive.zip", "archive.zip!/member.dot");
+
+        let ids = extraction
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(extraction.edges[0].source.as_str()));
+        assert!(ids.contains(extraction.edges[0].target.as_str()));
+        assert!(ids.contains(extraction.edges[0].true_source()));
+        assert!(ids.contains(extraction.edges[0].true_target()));
+        assert!(extraction.hyperedges[0]["nodes"]
+            .as_array()
+            .is_some_and(|members| members
+                .iter()
+                .all(|member| member.as_str().is_some_and(|id| ids.contains(id)))));
+        assert_eq!(
+            extraction.hyperedges[0]["source_file"],
+            "archive.zip!/member.dot"
+        );
+        assert_eq!(
+            extraction.hyperedges[0][CONTAINER_SOURCE_ATTRIBUTE],
+            "archive.zip"
+        );
+        let first_group = extraction.hyperedges[0]["id"]
+            .as_str()
+            .expect("remapped hyperedge ID")
+            .to_owned();
+        let mut sibling = Extraction {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            hyperedges: vec![serde_json::json!({ "id": "group" })],
+        };
+        remap_container_extraction_ids(
+            &mut sibling,
+            &BTreeMap::new(),
+            hyperedge_plan.get(1).expect("sibling hyperedge remap"),
+        );
+        assert_ne!(sibling.hyperedges[0]["id"], first_group);
+    }
+
+    #[test]
+    fn owned_id_plan_avoids_generated_candidates_copied_by_a_third_member() {
+        let first = "archive.zip!/a.dot";
+        let second = "archive.zip!/b.dot";
+        let third = "archive.zip!/c.dot";
+        let owner_names = vec![first.into(), second.into(), third.into()];
+        let copied = generated_container_fact_id(b"node", first, "x", 0);
+        let owners = BTreeMap::from([
+            ("x".into(), BTreeSet::from([0_usize, 1_usize])),
+            (copied.clone(), BTreeSet::from([2_usize])),
+        ]);
+        let plan = collision_safe_owned_id_plan(b"node", &owners, &owner_names, &BTreeSet::new());
+        let assigned = [
+            plan[0]["x"].as_str(),
+            plan[1]["x"].as_str(),
+            plan[2][&copied].as_str(),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(assigned.len(), 3);
+        assert_eq!(plan[2][&copied], copied);
+        assert_ne!(plan[0]["x"], copied);
+    }
+
+    #[test]
     fn recursive_archives_dispatch_nested_semantics_without_path_io() {
         let nested = zip_bytes(&[(
             "design/architecture.dot",
@@ -1639,7 +2308,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_zip_is_metadata_only_and_never_dispatches_member_payloads() {
+    fn isolated_zip_dispatches_bounded_member_semantics() {
         let archive = zip_bytes(&[(
             "design/architecture.dot",
             b"digraph platform { gateway -> database; }",
@@ -1650,29 +2319,227 @@ mod tests {
             root.extra
                 .get("inspection_status")
                 .and_then(serde_json::Value::as_str),
-            Some("inventoryonly")
+            Some("parsed")
         );
         assert_eq!(
             root.extra
                 .get("decompressed_bytes")
                 .and_then(serde_json::Value::as_u64),
-            Some(0)
+            Some(b"digraph platform { gateway -> database; }".len() as u64)
         );
-        assert_eq!(
-            root.extra
-                .get("recursive_dispatch_status")
-                .and_then(serde_json::Value::as_str),
-            Some("compressed_member_dispatch_disabled")
-        );
+        assert_eq!(root.extra["format_capability"], "structural_partial");
+        assert_eq!(root.extra["parse_status"], "partial");
+        assert!(!root.extra.contains_key("recursive_dispatch_status"));
         assert!(extraction
             .nodes
             .iter()
             .any(|node| node.label == "design/architecture.dot"));
-        assert!(!extraction
+        assert!(extraction
             .nodes
             .iter()
             .any(|node| matches!(node.label.as_str(), "gateway" | "database")));
-        assert!(!has_relation(&extraction, "flows_to"));
+        assert!(has_relation(&extraction, "flows_to"));
+    }
+
+    #[test]
+    fn isolated_gzip_and_tgz_dispatch_one_bounded_child() {
+        let dot = b"digraph platform { gateway -> database; }";
+        let gzip = gzip_bytes(dot);
+        let gzip_extraction =
+            extract_with_allowance("design/architecture.dot.gz", &gzip, 2 * 1024 * 1024);
+        assert!(has_relation(&gzip_extraction, "flows_to"));
+        assert!(gzip_extraction.nodes.iter().any(|node| {
+            node.source_file == "design/architecture.dot.gz!/architecture.dot"
+                && node.label == "gateway"
+        }));
+
+        let tar = tar_bytes(&[("design/architecture.dot", dot)]);
+        let tgz = gzip_bytes(&tar);
+        let tgz_extraction = extract_with_allowance("bundle.tgz", &tgz, 4 * 1024 * 1024);
+        assert!(has_relation(&tgz_extraction, "flows_to"));
+        assert!(tgz_extraction.nodes.iter().any(|node| {
+            node.source_file == "bundle.tgz!/bundle.tar!/design/architecture.dot"
+                && node.label == "database"
+        }));
+    }
+
+    #[test]
+    fn nested_svgz_decode_shares_the_tree_compressed_scratch_limit() {
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path id=\"{}\" d=\"M0 0L1 1\"/></svg>",
+            (0..96)
+                .map(|index| char::from(b'a' + (index % 26) as u8))
+                .collect::<String>()
+        );
+        let svgz = gzip_bytes(svg.as_bytes());
+        let scratch_limit = svg.len().max(svgz.len());
+        assert!(svg.len() + svgz.len() > scratch_limit);
+        let archive = zip_bytes(&[("media/diagram.svgz", &svgz)]);
+        let limits = crate::containers::ContainerLimits {
+            max_member_uncompressed_bytes: scratch_limit as u64,
+            max_total_uncompressed_bytes: scratch_limit as u64,
+            max_svg_bytes: scratch_limit,
+            ..crate::containers::ContainerLimits::default()
+        };
+        let mut budget = RecursiveDispatchBudget::with_output_fact_limit(limits, 128);
+        let extraction = container_inventory_extraction(
+            Path::new("media.zip"),
+            "media.zip",
+            &archive,
+            0,
+            &mut budget,
+        )
+        .expect("bounded SVGZ archive inventory");
+
+        let svgz_root = extraction
+            .nodes
+            .iter()
+            .find(|node| node.source_file == "media.zip!/media/diagram.svgz")
+            .expect("SVGZ inventory root");
+        assert_eq!(svgz_root.extra["inspection_status"], "inventoryonly");
+        assert!(svgz_root.extra["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic == "nesteddispatchstopped")));
+        assert!(!extraction.nodes.iter().any(|node| {
+            node.source_file == "media.zip!/media/diagram.svgz"
+                && node
+                    .extra
+                    .get("type")
+                    .is_some_and(|kind| kind == "svg_element")
+        }));
+    }
+
+    #[test]
+    fn repeated_svgz_members_share_the_tree_decoded_byte_limit() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"item\"/></svg>";
+        let svgz = gzip_bytes(svg);
+        let archive = tar_bytes(&[("a.svgz", &svgz), ("b.svgz", &svgz)]);
+        let decoded_limit = svgz
+            .len()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(svg.len()))
+            .expect("fixture limit");
+        let limits = crate::containers::ContainerLimits {
+            max_member_uncompressed_bytes: decoded_limit as u64,
+            max_total_uncompressed_bytes: decoded_limit as u64,
+            max_svg_bytes: svg.len(),
+            ..crate::containers::ContainerLimits::default()
+        };
+        let mut budget = RecursiveDispatchBudget::with_output_fact_limit(limits, 128);
+        let extraction = container_inventory_extraction(
+            Path::new("many.tar"),
+            "many.tar",
+            &archive,
+            0,
+            &mut budget,
+        )
+        .expect("bounded repeated SVGZ inventory");
+
+        assert!(extraction.nodes.iter().any(|node| {
+            node.source_file == "many.tar!/a.svgz"
+                && node
+                    .extra
+                    .get("type")
+                    .is_some_and(|kind| kind == "svg_element")
+        }));
+        let second = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.source_file == "many.tar!/b.svgz" && node.extra.contains_key("diagnostics")
+            })
+            .expect("second SVGZ inventory root");
+        assert_eq!(second.extra["inspection_status"], "inventoryonly");
+        assert!(second.extra["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic == "nesteddispatchstopped")));
+        assert!(!extraction.nodes.iter().any(|node| {
+            node.source_file == "many.tar!/b.svgz"
+                && node
+                    .extra
+                    .get("type")
+                    .is_some_and(|kind| kind == "svg_element")
+        }));
+    }
+
+    #[test]
+    fn normalization_colliding_member_paths_keep_disjoint_semantic_ids() {
+        let archive = zip_bytes(&[
+            ("a-b.dot", b"digraph first { source_a -> target_a; }"),
+            ("a_b.dot", b"digraph second { source_b -> target_b; }"),
+        ]);
+        let extraction = extract_with_allowance("collisions.zip", &archive, 4 * 1024 * 1024);
+        let first = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.source_file == "collisions.zip!/a-b.dot")
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let second = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.source_file == "collisions.zip!/a_b.dot")
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+        assert!(first.is_disjoint(&second));
+        let member_ids = extraction
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.source_file == "collisions.zip"
+                    && matches!(node.label.as_str(), "a-b.dot" | "a_b.dot")
+            })
+            .map(|node| node.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(member_ids.len(), 2);
+        assert_eq!(
+            extraction
+                .edges
+                .iter()
+                .filter(|edge| edge.relation == "flows_to")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn collision_free_tar_members_preserve_legacy_fact_and_anchor_ids() {
+        let dot = b"digraph stable { gateway -> database; }";
+        let member_source = "single.tar!/design/stable.dot";
+        let raw = crate::engine::extract_as_bytes(Path::new(member_source), member_source, dot)
+            .expect("legacy child extraction");
+        let archive = extract("single.tar", &tar_bytes(&[("design/stable.dot", dot)]));
+
+        for label in ["gateway", "database"] {
+            let raw_id = &raw
+                .nodes
+                .iter()
+                .find(|node| node.label == label)
+                .expect("raw semantic node")
+                .id;
+            let archive_id = &archive
+                .nodes
+                .iter()
+                .find(|node| node.source_file == member_source && node.label == label)
+                .expect("archived semantic node")
+                .id;
+            assert_eq!(archive_id, raw_id, "{label}");
+        }
+        let member = archive
+            .nodes
+            .iter()
+            .find(|node| node.label == "design/stable.dot")
+            .expect("member inventory node");
+        assert_eq!(
+            member.id,
+            make_id(&["single", "member", "design/stable.dot"])
+        );
     }
 
     #[test]
@@ -1695,7 +2562,12 @@ mod tests {
             assert!(diagnostics.iter().any(|diagnostic| {
                 matches!(
                     diagnostic.as_str(),
-                    Some("totalsizelimit" | "inputtoolarge" | "compressionratiolimit")
+                    Some(
+                        "membersizelimit"
+                            | "totalsizelimit"
+                            | "inputtoolarge"
+                            | "compressionratiolimit"
+                    )
                 )
             }));
             if path.ends_with(".gz") {
@@ -1713,12 +2585,12 @@ mod tests {
             .nodes
             .first()
             .expect("tiny-arena inventory root");
-        assert_eq!(
-            root.extra
-                .get("diagnostic")
-                .and_then(serde_json::Value::as_str),
-            Some("parser_arena_budget")
-        );
+        assert!(root.extra["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| diagnostics.iter().any(|diagnostic| matches!(
+                diagnostic.as_str(),
+                Some("membersizelimit" | "totalsizelimit" | "compressionratiolimit")
+            ))));
     }
 
     #[test]
@@ -2032,6 +2904,52 @@ mod tests {
                 .any(|node| directories.contains(&node.label.as_str())),
             "an over-budget nested extraction must be discarded rather than attached partially"
         );
+    }
+
+    #[test]
+    fn nested_directories_share_one_tree_wide_encounter_limit() {
+        let directories = ["a/", "b/", "c/", "d/"];
+        let nested = zip_directory_bytes(&directories);
+        let outer = zip_bytes(&[("nested/archive.zip", &nested)]);
+        let mut budget = RecursiveDispatchBudget::new(crate::containers::ContainerLimits {
+            max_members: 4,
+            ..crate::containers::ContainerLimits::default()
+        });
+        let extraction = container_inventory_extraction(
+            Path::new("directories.zip"),
+            "directories.zip",
+            &outer,
+            0,
+            &mut budget,
+        )
+        .expect("bounded nested directory inventory");
+
+        let nested_root = extraction
+            .nodes
+            .iter()
+            .find(|node| node.source_file == "directories.zip!/nested/archive.zip")
+            .expect("nested archive root");
+        assert_eq!(
+            nested_root
+                .extra
+                .get("recursive_dispatch_status")
+                .and_then(serde_json::Value::as_str),
+            Some("aggregate_encountered_member_limit")
+        );
+        assert_eq!(
+            nested_root
+                .extra
+                .get("omitted_member_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let labels = extraction
+            .nodes
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"c"), "retained labels: {labels:?}");
+        assert!(!labels.contains(&"d"));
     }
 
     #[test]

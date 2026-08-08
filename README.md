@@ -297,6 +297,15 @@ deterministic fallback tier while their grammar-backed adapters are hardened.
 
 Deterministic structured/regex extraction covers the remaining offline matrix, including Kotlin, Scala, PHP, Swift, Lua, Groovy, Elixir, Zig, Julia, Fortran, Verilog/SystemVerilog, Objective-C, PowerShell, Terraform/HCL, SQL, Apex, Dart, Pascal, Blade/Razor, Visual Studio solutions/projects, XAML, Delphi/Lazarus forms, Vue/Svelte/Astro containers, and package manifests. Header routing distinguishes C++, C, and Objective-C markers.
 
+ZIP, TAR, and single-member GZIP inputs recursively index supported member
+formats in the default isolated runtime. Members stay in memory, receive stable
+`outer!/member` provenance, and are never extracted to the filesystem. Archive
+paths, nesting, member counts, decoded bytes, expansion ratios, retained facts,
+and compressed scratch are bounded; sensitive members remain visible as inert
+inventory without being decompressed. BZIP2, XZ, Zstandard, 7z, and RAR remain
+inventory-only. Encrypted members, links, special entries, and unsupported ZIP
+compression reject that archive before any child dispatch.
+
 The walker honors `.gitignore` and `.graphoxideignore`, skips dependency/build/cache directories and sensitive credential files, and never re-ingests `graphoxide-out/`. The `outer!/member` source spelling is reserved for logical archive members, so physical directory names ending in `!` are skipped with a discovery diagnostic.
 
 ## Deterministic graph-build benchmark profiles

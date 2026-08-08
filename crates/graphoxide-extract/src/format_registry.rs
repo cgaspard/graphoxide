@@ -393,6 +393,7 @@ impl FormatSpec {
             | "visio"
             | "building-container"
             | "zip-archive"
+            | "gzip-archive"
             | "tar-archive"
             | "archive"
             | "openusd-container"
@@ -459,9 +460,8 @@ const MAGIC_RASTER: &[MagicRule] = &[
     MagicRule::new(0, b"GIF8"),
 ];
 const MAGIC_ZIP: &[MagicRule] = &[MagicRule::new(0, b"PK\x03\x04")];
+const MAGIC_GZIP: &[MagicRule] = &[MagicRule::new(0, b"\x1f\x8b")];
 const MAGIC_ARCHIVE: &[MagicRule] = &[
-    MagicRule::new(0, b"PK\x03\x04"),
-    MagicRule::new(0, b"\x1f\x8b"),
     MagicRule::new(0, b"BZh"),
     MagicRule::new(0, b"\xfd7zXZ\x00"),
     MagicRule::new(0, b"\x28\xb5\x2f\xfd"),
@@ -605,9 +605,8 @@ const SCENARIO_EXTENSIONS: &[&str] = &["xodr", "xosc"];
 const SCENARIO_INVENTORY_EXTENSIONS: &[&str] = &["osc"];
 const ZIP_ARCHIVE_EXTENSIONS: &[&str] = &["zip"];
 const TAR_ARCHIVE_EXTENSIONS: &[&str] = &["tar"];
-const ARCHIVE_EXTENSIONS: &[&str] = &[
-    "tgz", "gz", "bz2", "xz", "zst", "7z", "rar", "cpio", "cab", "lz4", "lz",
-];
+const GZIP_ARCHIVE_EXTENSIONS: &[&str] = &["tgz", "gz"];
+const ARCHIVE_EXTENSIONS: &[&str] = &["bz2", "xz", "zst", "7z", "rar", "cpio", "cab", "lz4", "lz"];
 
 const PACKAGE_MANIFEST_NAMES: &[&str] = &[
     "package.json",
@@ -1691,7 +1690,7 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         ZIP_ARCHIVE_EXTENSIONS,
         &[],
         MAGIC_ZIP,
-        FormatCapability::InventoryOnly,
+        FormatCapability::StructuralPartial,
         SchemaRequirement::NotRequired,
         CONTAINER_LIMITS,
         None,
@@ -1705,6 +1704,20 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         TAR_ARCHIVE_EXTENSIONS,
         &[],
         &[],
+        FormatCapability::StructuralPartial,
+        SchemaRequirement::NotRequired,
+        CONTAINER_LIMITS,
+        None,
+        false,
+        false,
+        false,
+        false,
+    ),
+    format_spec!(
+        "gzip-archive",
+        GZIP_ARCHIVE_EXTENSIONS,
+        &[],
+        MAGIC_GZIP,
         FormatCapability::StructuralPartial,
         SchemaRequirement::NotRequired,
         CONTAINER_LIMITS,
@@ -2154,7 +2167,7 @@ mod tests {
         );
         assert!(registry
             .find_by_magic(b"PK\x03\x04rest")
-            .any(|spec| spec.id.as_str() == "archive"));
+            .any(|spec| spec.id.as_str() == "zip-archive"));
         assert!(!MagicRule::new(usize::MAX, b"x").matches(b"x"));
     }
 
@@ -2432,39 +2445,38 @@ mod tests {
     }
 
     #[test]
-    fn tar_dispatch_is_truthfully_partial() {
+    fn recursively_dispatched_archives_are_truthfully_partial() {
         let registry = format_registry();
-        assert_eq!(
-            registry.capability_for_extension("tar"),
-            Some(FormatCapability::StructuralPartial)
-        );
-        assert_eq!(
-            registry
-                .find_by_extension("tar")
-                .map(|spec| spec.id.as_str()),
-            Some("tar-archive")
-        );
-        for extension in [
-            "zip", "tar", "docx", "xlsx", "pptx", "odt", "epub", "vsdx", "ifczip", "bcfzip", "fmu",
-            "usdz",
+        for (extension, owner) in [
+            ("zip", "zip-archive"),
+            ("tar", "tar-archive"),
+            ("gz", "gzip-archive"),
+            ("tgz", "gzip-archive"),
         ] {
-            if extension == "tar" {
-                continue;
-            }
+            assert_eq!(
+                registry.capability_for_extension(extension),
+                Some(FormatCapability::StructuralPartial),
+                "{extension}"
+            );
+            assert_eq!(
+                registry
+                    .find_by_extension(extension)
+                    .map(|spec| spec.id.as_str()),
+                Some(owner),
+                "{extension}"
+            );
+        }
+        for extension in [
+            "docx", "xlsx", "pptx", "odt", "epub", "vsdx", "ifczip", "bcfzip", "fmu", "usdz",
+        ] {
             assert_eq!(
                 registry.capability_for_extension(extension),
                 Some(FormatCapability::InventoryOnly),
                 "{extension}"
             );
         }
-        assert_eq!(
-            registry
-                .find_by_extension("zip")
-                .map(|spec| spec.id.as_str()),
-            Some("zip-archive")
-        );
         assert_eq!(registry.classify_extension("usdz"), None);
-        for extension in ["gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "glb", "fmi"] {
+        for extension in ["bz2", "xz", "zst", "7z", "rar", "glb", "fmi"] {
             assert_eq!(
                 registry.capability_for_extension(extension),
                 Some(FormatCapability::InventoryOnly),
