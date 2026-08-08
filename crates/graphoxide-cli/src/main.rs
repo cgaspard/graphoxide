@@ -877,24 +877,32 @@ fn write_runtime_report_if_requested(
     report: &graphoxide_cli::build_telemetry::BuildTelemetry,
     runtime_report: Option<&std::path::Path>,
     runtime: Option<&graphoxide_cli::build_telemetry::IndexRuntimeConfiguration>,
-    cache: Option<graphoxide_extract::cache::RuntimeCacheTelemetry>,
+    io: Option<graphoxide_index_runtime::RuntimeIoTelemetry>,
+    work: Option<graphoxide_extract::RuntimeWorkTelemetry>,
+    cache: Option<graphoxide_cli::build_telemetry::RuntimeCacheTelemetryV2>,
 ) -> anyhow::Result<()> {
     let Some(path) = runtime_report else {
         return Ok(());
     };
     let mut sidecar = runtime.map_or_else(
-        || graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV1::legacy(report.clone()),
+        || graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV2::legacy(report.clone()),
         |runtime| {
-            graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV1::isolated(
+            graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV2::isolated(
                 report.clone(),
                 runtime.clone(),
             )
         },
     );
     if let Some(cache) = cache {
-        sidecar = sidecar.with_cache(cache.into());
+        sidecar = sidecar.with_cache(cache);
     }
-    graphoxide_cli::build_telemetry::write_runtime_report(path, &sidecar)
+    if let Some(io) = io {
+        sidecar = sidecar.with_io(io.into());
+    }
+    if let Some(work) = work {
+        sidecar = sidecar.with_work(work.into());
+    }
+    graphoxide_cli::build_telemetry::write_runtime_report_v2(path, &sidecar)
         .with_context(|| format!("write runtime telemetry sidecar {}", path.display()))
 }
 
@@ -1150,9 +1158,10 @@ fn run_project_build_with_cancellation(
     } else {
         None
     };
-    let scan = if let Some(runtime_config) = runtime_config {
-        if workflow.is_index() {
-            graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+    let (scan, runtime_extraction_telemetry) = if let Some(runtime_config) = runtime_config {
+        if runtime_report.is_some() {
+            let scan = if workflow.is_index() {
+                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry(
                         &path,
                         effective_force,
                         &output_directory,
@@ -1161,28 +1170,63 @@ fn run_project_build_with_cancellation(
                         runtime_config,
                         cancellation.clone(),
                     )?
+            } else {
+                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                    &path,
+                    effective_force,
+                    &output_directory,
+                    code_only,
+                    &detect_options,
+                    runtime_config,
+                )?
+            };
+            let runtime_telemetry = scan.telemetry;
+            (scan.result, Some(runtime_telemetry))
         } else {
-            graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+            let scan = if workflow.is_index() {
+                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+                    &path,
+                    effective_force,
+                    &output_directory,
+                    code_only,
+                    &detect_options,
+                    runtime_config,
+                    cancellation.clone(),
+                )?
+            } else {
+                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+                    &path,
+                    effective_force,
+                    &output_directory,
+                    code_only,
+                    &detect_options,
+                    runtime_config,
+                )?
+            };
+            (scan, None)
+        }
+    } else {
+        (
+            graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
                 &path,
                 effective_force,
                 &output_directory,
                 code_only,
                 &detect_options,
-                runtime_config,
-            )?
-        }
-    } else {
-        graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
-            &path,
-            effective_force,
-            &output_directory,
-            code_only,
-            &detect_options,
-        )?
+            )?,
+            None,
+        )
     };
     let runtime_telemetry = runtime_config
         .map(|config| isolated_runtime_configuration(config, scan.detection.total_files));
-    let runtime_cache_telemetry = scan.runtime_cache;
+    let runtime_cache_telemetry = runtime_extraction_telemetry.map(|runtime| {
+        graphoxide_cli::build_telemetry::RuntimeCacheTelemetryV2::from_runtime(
+            scan.runtime_cache,
+            runtime.cache_io,
+        )
+    });
+    let runtime_io_telemetry = runtime_extraction_telemetry.map(|runtime| runtime.io);
+    let runtime_work_telemetry = runtime_extraction_telemetry.map(|runtime| runtime.work);
     telemetry.stages_ms.scan_extract =
         graphoxide_cli::build_telemetry::elapsed_millis(scan_started);
     telemetry.files.detected = scan.detection.total_files;
@@ -1377,7 +1421,9 @@ fn run_project_build_with_cancellation(
             &telemetry,
             runtime_report.as_deref(),
             runtime_telemetry.as_ref(),
-            Some(runtime_cache_telemetry),
+            runtime_io_telemetry,
+            runtime_work_telemetry,
+            runtime_cache_telemetry,
         )?;
         return emit_project_build_report(
             &telemetry,
@@ -1494,7 +1540,9 @@ fn run_project_build_with_cancellation(
         &telemetry,
         runtime_report.as_deref(),
         runtime_telemetry.as_ref(),
-        Some(runtime_cache_telemetry),
+        runtime_io_telemetry,
+        runtime_work_telemetry,
+        runtime_cache_telemetry,
     )?;
     emit_project_build_report(
         &telemetry,
@@ -2695,6 +2743,7 @@ fn rebuild_watch_project(
                 scope: request.scope,
                 pass: request.pass,
                 runtime_config,
+                collect_runtime_telemetry: runtime_report.is_some(),
             })?;
             if runtime_report.is_some() {
                 hydrate_unchanged_graph_report(&mut outcome)?;
@@ -2703,6 +2752,8 @@ fn rebuild_watch_project(
                 &outcome.telemetry,
                 runtime_report,
                 Some(&outcome.runtime_telemetry),
+                Some(outcome.runtime_io),
+                Some(outcome.runtime_work),
                 Some(outcome.runtime_cache),
             )?;
             Ok(outcome.result)
@@ -2712,6 +2763,8 @@ fn rebuild_watch_project(
         write_runtime_report_if_requested(
             &legacy_rebuild_telemetry(&result),
             runtime_report,
+            None,
+            None,
             None,
             None,
         )?;
@@ -3482,7 +3535,7 @@ fn rebuild_legacy(
         }
         watch_service::RebuildStatus::RefusedShrink => String::new(),
     };
-    write_runtime_report_if_requested(&telemetry, runtime_report, None, None)?;
+    write_runtime_report_if_requested(&telemetry, runtime_report, None, None, None, None)?;
     if result.status == watch_service::RebuildStatus::RefusedShrink {
         if json {
             emit_build_report(&telemetry, true, false, "")?;
@@ -3573,6 +3626,7 @@ fn rebuild_isolated(
         scope: watch_service::RebuildScope::Incremental,
         pass: 1,
         runtime_config,
+        collect_runtime_telemetry: runtime_report.is_some(),
     })?;
     if json || runtime_report.is_some() {
         hydrate_unchanged_graph_report(&mut outcome)?;
@@ -3581,6 +3635,8 @@ fn rebuild_isolated(
         &outcome.telemetry,
         runtime_report,
         Some(&outcome.runtime_telemetry),
+        Some(outcome.runtime_io),
+        Some(outcome.runtime_work),
         Some(outcome.runtime_cache),
     )?;
     if outcome.result.status == watch_service::RebuildStatus::RefusedShrink {
@@ -3620,7 +3676,9 @@ struct IsolatedRebuildOutcome {
     result: watch_service::RebuildResult,
     telemetry: graphoxide_cli::build_telemetry::BuildTelemetry,
     runtime_telemetry: graphoxide_cli::build_telemetry::IndexRuntimeConfiguration,
-    runtime_cache: graphoxide_extract::cache::RuntimeCacheTelemetry,
+    runtime_cache: graphoxide_cli::build_telemetry::RuntimeCacheTelemetryV2,
+    runtime_io: graphoxide_index_runtime::RuntimeIoTelemetry,
+    runtime_work: graphoxide_extract::RuntimeWorkTelemetry,
 }
 
 #[derive(Debug, Default)]
@@ -3749,6 +3807,7 @@ struct IsolatedRebuildRequest<'a> {
     scope: watch_service::RebuildScope,
     pass: usize,
     runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
+    collect_runtime_telemetry: bool,
 }
 
 fn telemetry_status(
@@ -3798,25 +3857,42 @@ fn rebuild_isolated_pass(
         scope,
         pass,
         runtime_config,
+        collect_runtime_telemetry,
     } = request;
     let started = std::time::Instant::now();
     let output = output_directory.join("graph.json");
     let manifest_path = output_directory.join("manifest.json");
     let persisted = watch_service::read_build_config(output_directory);
     let scan_started = std::time::Instant::now();
-    let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
-        path,
-        force,
-        output_directory,
-        false,
-        &graphoxide_extract::detect::DetectOptions {
-            output_dir: Some(output_directory.to_path_buf()),
-            extra_excludes: persisted.excludes,
-            honor_gitignore: persisted.honor_gitignore,
-            ..Default::default()
-        },
-        runtime_config,
-    )?;
+    let detect_options = graphoxide_extract::detect::DetectOptions {
+        output_dir: Some(output_directory.to_path_buf()),
+        extra_excludes: persisted.excludes,
+        honor_gitignore: persisted.honor_gitignore,
+        ..Default::default()
+    };
+    let (scan, runtime_extraction_telemetry) = if collect_runtime_telemetry {
+        let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+            path,
+            force,
+            output_directory,
+            false,
+            &detect_options,
+            runtime_config,
+        )?;
+        (scan.result, scan.telemetry)
+    } else {
+        (
+            graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+                path,
+                force,
+                output_directory,
+                false,
+                &detect_options,
+                runtime_config,
+            )?,
+            graphoxide_extract::RuntimeExtractionTelemetry::default(),
+        )
+    };
     if !scan.detection.walk_errors.is_empty() {
         let preview = scan
             .detection
@@ -3836,7 +3912,12 @@ fn rebuild_isolated_pass(
     }
     let runtime_telemetry =
         isolated_runtime_configuration(runtime_config, scan.detection.total_files);
-    let runtime_cache = scan.runtime_cache;
+    let runtime_cache = graphoxide_cli::build_telemetry::RuntimeCacheTelemetryV2::from_runtime(
+        scan.runtime_cache,
+        runtime_extraction_telemetry.cache_io,
+    );
+    let runtime_io = runtime_extraction_telemetry.io;
+    let runtime_work = runtime_extraction_telemetry.work;
     let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
         graphoxide_cli::build_telemetry::BuildOperation::Update,
         match scope {
@@ -3909,6 +3990,8 @@ fn rebuild_isolated_pass(
             telemetry,
             runtime_telemetry,
             runtime_cache,
+            runtime_io,
+            runtime_work,
         }
     };
     if telemetry.files.changed == 0 && telemetry.files.deleted == 0 && output.is_file() {
@@ -5236,6 +5319,7 @@ mod tests {
             scope: graphoxide_cli::watch::RebuildScope::Incremental,
             pass: 1,
             runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+            collect_runtime_telemetry: false,
         })
         .expect("isolated watch pass");
         assert_eq!(
@@ -5263,6 +5347,7 @@ mod tests {
             scope: graphoxide_cli::watch::RebuildScope::Incremental,
             pass: 2,
             runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+            collect_runtime_telemetry: false,
         })
         .expect("unchanged isolated watch pass");
         assert_eq!(
@@ -5370,6 +5455,7 @@ mod tests {
             scope: graphoxide_cli::watch::RebuildScope::Incremental,
             pass: 1,
             runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+            collect_runtime_telemetry: false,
         })
         .expect("initial isolated pass");
 
@@ -5407,6 +5493,7 @@ mod tests {
                 io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
                 read_batch_bytes: 4 * 1024,
             },
+            collect_runtime_telemetry: false,
         }) {
             Ok(_) => panic!("oversized baseline must fail"),
             Err(error) => error,

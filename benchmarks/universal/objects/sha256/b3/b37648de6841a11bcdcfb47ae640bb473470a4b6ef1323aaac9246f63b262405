@@ -1,0 +1,2 @@
+def qualify(value: int) -> int:
+    return value + 1

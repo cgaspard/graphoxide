@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "name": "ci-mixed-v1",
+      "description": "Small content-addressed mixed-format corpus for correctness qualification.",
+      "manifest_sha256": "e9160a70af5454989d64c33dbf2fa4eca8d2ecd842568fce31830d69d67ced0d"
+    }
+  ]
+}

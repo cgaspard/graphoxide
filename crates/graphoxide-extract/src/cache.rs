@@ -2484,6 +2484,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_cache_telemetry_original_shape_remains_constructible() {
+        let telemetry = RuntimeCacheTelemetry {
+            enabled: true,
+            metadata_hits: 1,
+            runtime_hits: 2,
+            legacy_hits: 3,
+            misses: 4,
+            bypasses: 5,
+            stale_or_corrupt: 6,
+            probe_failures: 7,
+            payload_reads_avoided: 8,
+            parses_avoided: 9,
+            stores: 10,
+            already_present: 11,
+            store_failures: 12,
+        };
+        assert_eq!(telemetry.store_failures, 12);
+    }
+
+    #[test]
     fn legacy_manifest_entries_default_to_schema_zero_and_are_requeued() {
         let temp = tempfile::tempdir().expect("temporary manifest root");
         let source = temp.path().join("design.dot");
@@ -2892,6 +2912,46 @@ mod tests {
         .expect("cache evidence");
         let payload = encode_runtime_ast_cache_payload(&evidence, &extraction)
             .expect("owned reference provenance is cacheable");
+        let replay =
+            decode_runtime_ast_cache_payload(RuntimeCacheSource::RuntimeV1, &payload, &evidence)
+                .expect("validated replay");
+        assert_eq!(
+            serde_json::to_value(replay).expect("replay JSON"),
+            serde_json::to_value(extraction).expect("cold JSON")
+        );
+    }
+
+    #[test]
+    fn runtime_ast_envelope_accepts_owned_razor_reference_stubs() {
+        let relative = "dotnet/WorkerPage.razor";
+        let source = br#"@page "/worker"
+@inject Matrix.Runtime.IWorker Worker
+
+<WorkerPanel />
+
+@code {
+    private string Process() => Worker.Process("matrix");
+}
+"#;
+        let extraction = crate::engine::extract_as_bytes_with_parser_allowance(
+            Path::new(relative),
+            relative,
+            source,
+            1024 * 1024,
+        )
+        .expect("Razor extraction");
+        assert!(extraction.nodes.iter().any(|node| {
+            node.source_file.is_empty()
+                && node.extra.get("origin_file").and_then(Value::as_str) == Some(relative)
+        }));
+        let evidence = runtime_ast_cache_evidence(
+            relative,
+            source,
+            RuntimeAstCacheOptions::isolated(1024 * 1024),
+        )
+        .expect("cache evidence");
+        let payload = encode_runtime_ast_cache_payload(&evidence, &extraction)
+            .expect("owned Razor reference provenance is cacheable");
         let replay =
             decode_runtime_ast_cache_payload(RuntimeCacheSource::RuntimeV1, &payload, &evidence)
                 .expect("validated replay");

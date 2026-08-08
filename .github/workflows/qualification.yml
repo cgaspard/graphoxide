@@ -1,0 +1,157 @@
+name: Manual qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Qualification boundary to exercise
+        type: choice
+        required: true
+        options:
+          - synthetic-70gib
+          - controlled-os-cold
+          - controlled-70gib
+      report_directory:
+        description: Canonical preexisting report directory on the self-hosted runner
+        type: string
+        required: true
+      large_root:
+        description: Canonical preexisting parent for the exclusive 70 GiB child
+        type: string
+        required: false
+      controlled_helper:
+        description: Canonical root-owned cache-control helper (controlled mode only)
+        type: string
+        required: false
+      controlled_helper_sha256:
+        description: Pinned helper SHA-256 (controlled mode only)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: ${{ inputs.operation }}
+    if: github.repository == 'cgaspard/graphoxide' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, graphoxide-qualification]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --release --locked --bin graphoxide
+      - name: Stage single-link qualification binary
+        id: qualification_binary
+        shell: bash
+        run: |
+          source_binary="target/release/graphoxide"
+          staged_parent="${RUNNER_TEMP}/graphoxide-qualification-binary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 0700 -- "${staged_parent}"
+          staged_parent="$(realpath -- "${staged_parent}")"
+          test -d "${staged_parent}" && test ! -L "${staged_parent}"
+          test "$(stat -c '%u' "${staged_parent}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${staged_parent}")" = 700
+          staged_parent_identity="$(stat -c '%d:%i' "${staged_parent}")"
+          test "$(stat -c '%F' "${source_binary}")" = "regular file"
+          test "$(stat -c '%u' "${source_binary}")" -eq "$(id -u)"
+          test -x "${source_binary}"
+          source_identity="$(stat -c '%d:%i' "${source_binary}")"
+          staged_binary="${staged_parent}/graphoxide"
+          install -m 0700 "${source_binary}" "${staged_binary}"
+          staged_binary="$(realpath -- "${staged_binary}")"
+          test "${staged_binary}" = "${staged_parent}/graphoxide"
+          test "$(stat -c '%F' "${staged_binary}")" = "regular file"
+          test -x "${staged_binary}"
+          test "$(stat -c '%h' "${staged_binary}")" -eq 1
+          test "$(stat -c '%u' "${staged_binary}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${staged_binary}")" = 700
+          test "$(stat -c '%d:%i' "${staged_binary}")" != "${source_identity}"
+          cmp -s "${source_binary}" "${staged_binary}"
+          test "$(stat -c '%d:%i' "${source_binary}")" = "${source_identity}"
+          test "$(stat -c '%d:%i' "${staged_parent}")" = "${staged_parent_identity}"
+          test "$(stat -c '%u' "${staged_parent}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${staged_parent}")" = 700
+          STAGED_BINARY="${staged_binary}" node --input-type=module -e \
+            'if (/[\u0000-\u001f\u007f]/u.test(process.env.STAGED_BINARY ?? "")) throw new Error("staged binary path contains a control byte")'
+          printf '%s\n' "path=${staged_binary}" >> "${GITHUB_OUTPUT}"
+      - name: Resolve exclusive report path
+        id: report
+        shell: bash
+        env:
+          REPORT_DIRECTORY: ${{ inputs.report_directory }}
+        run: |
+          REPORT_RAW="${REPORT_DIRECTORY}" node --input-type=module -e \
+            'if (/[\u0000-\u001f\u007f]/u.test(process.env.REPORT_RAW ?? "")) throw new Error("report directory contains a control byte")'
+          report_parent="$(realpath -- "${REPORT_DIRECTORY}")"
+          REPORT_PARENT="${report_parent}" node --input-type=module -e \
+            'if (/[\u0000-\u001f\u007f]/u.test(process.env.REPORT_PARENT ?? "")) throw new Error("report directory contains a control byte")'
+          report_path="${report_parent}/qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          test ! -e "${report_path}"
+          printf '%s\n' "path=${report_path}" >> "${GITHUB_OUTPUT}"
+      - name: Run exact 70 GiB qualification
+        if: inputs.operation == 'synthetic-70gib'
+        shell: bash
+        env:
+          LARGE_ROOT: ${{ inputs.large_root }}
+          REPORT_PATH: ${{ steps.report.outputs.path }}
+          STAGED_BINARY: ${{ steps.qualification_binary.outputs.path }}
+        run: |
+          node scripts/qualify-universal-indexing.mjs \
+            --profile synthetic-70gib-v1 \
+            --large-root "${LARGE_ROOT}" \
+            --acknowledge-70-gib \
+            --acknowledge-large-disk-use \
+            --binary "${STAGED_BINARY}" \
+            --report "${REPORT_PATH}"
+      - name: Run controlled OS-cold qualification
+        if: inputs.operation == 'controlled-os-cold'
+        shell: bash
+        env:
+          CONTROLLED_HELPER: ${{ inputs.controlled_helper }}
+          CONTROLLED_HELPER_SHA256: ${{ inputs.controlled_helper_sha256 }}
+          REPORT_PATH: ${{ steps.report.outputs.path }}
+          STAGED_BINARY: ${{ steps.qualification_binary.outputs.path }}
+        run: |
+          node scripts/qualify-universal-indexing.mjs \
+            --profile ci-mixed-v1 \
+            --modes controlled_os_cold \
+            --controlled-os-cold-helper "${CONTROLLED_HELPER}" \
+            --controlled-os-cold-helper-sha256 "${CONTROLLED_HELPER_SHA256}" \
+            --acknowledge-controlled-os-cold \
+            --acknowledge-host-cache-drop \
+            --binary "${STAGED_BINARY}" \
+            --report "${REPORT_PATH}"
+      - name: Run controlled OS-cold 70 GiB qualification
+        if: inputs.operation == 'controlled-70gib'
+        shell: bash
+        env:
+          LARGE_ROOT: ${{ inputs.large_root }}
+          CONTROLLED_HELPER: ${{ inputs.controlled_helper }}
+          CONTROLLED_HELPER_SHA256: ${{ inputs.controlled_helper_sha256 }}
+          REPORT_PATH: ${{ steps.report.outputs.path }}
+          STAGED_BINARY: ${{ steps.qualification_binary.outputs.path }}
+        run: |
+          node scripts/qualify-universal-indexing.mjs \
+            --profile synthetic-70gib-v1 \
+            --large-root "${LARGE_ROOT}" \
+            --acknowledge-70-gib \
+            --acknowledge-large-disk-use \
+            --modes controlled_os_cold \
+            --controlled-os-cold-helper "${CONTROLLED_HELPER}" \
+            --controlled-os-cold-helper-sha256 "${CONTROLLED_HELPER_SHA256}" \
+            --acknowledge-controlled-os-cold \
+            --acknowledge-host-cache-drop \
+            --binary "${STAGED_BINARY}" \
+            --report "${REPORT_PATH}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: manual-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.report.outputs.path }}
+          if-no-files-found: error

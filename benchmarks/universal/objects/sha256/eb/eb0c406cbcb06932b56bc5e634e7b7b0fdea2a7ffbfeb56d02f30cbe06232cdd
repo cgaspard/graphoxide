@@ -1,0 +1,1 @@
+syntax = "proto3"; package qualification; message Ping { string id = 1; }

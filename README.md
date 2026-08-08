@@ -368,6 +368,43 @@ validated isolated-runtime telemetry, full/incremental graph artifact digests,
 and separate external-wall and CLI-reported elapsed timings. The timings remain
 environment-specific evidence rather than release gates.
 
+## Reproducible universal-indexing qualification
+
+The qualification runner exercises explicit cold, warm, and one-file
+same-size incremental modes against the strict content-addressed
+`ci-mixed-v1` corpus. It retains raw samples, failures, runtime telemetry v2,
+coverage outcomes, streaming artifact digests, and machine/storage environment
+evidence in one atomic report. Performance observations are never CI
+thresholds.
+
+```bash
+cargo build --release --locked --bin graphoxide
+stage_parent="$(mktemp -d "${TMPDIR:-/tmp}/graphoxide-qualification-binary.XXXXXX")"
+chmod 700 "$stage_parent"
+stage_parent="$(realpath "$stage_parent")"
+staged_binary="$stage_parent/graphoxide"
+install -m 0700 target/release/graphoxide "$staged_binary"
+staged_binary="$(realpath "$staged_binary")"
+STAGED_BINARY="$staged_binary" node --input-type=module -e \
+  'import { lstatSync } from "node:fs"; const value = lstatSync(process.env.STAGED_BINARY); if (!value.isFile() || value.isSymbolicLink() || value.nlink !== 1) throw new Error("staged binary must be a single-link regular file")'
+cmp -s target/release/graphoxide "$staged_binary"
+npm run qualification:ci -- \
+  --binary "$staged_binary" \
+  --report "$(pwd -P)/qualification-ci.json"
+```
+
+The runner never overwrites a report or corpus target and retains each
+exclusive qualification project for inspection. It deliberately requires a
+single-link binary so the reported content identity cannot alias another
+pathname; Cargo artifacts may be hard-linked, so operator and CI commands use
+`install` to make and verify a byte-copy in a new private directory. The
+optional exact 70 GiB
+profile and Linux controlled-OS-cold mode require separate acknowledgement and
+safety arguments. See
+[`benchmarks/universal/README.md`](benchmarks/universal/README.md) for the corpus
+layout, evidence ceilings, mode semantics, storage preflights, helper boundary,
+main-only manual workflow, and manual cleanup contract.
+
 ## VS Code extension
 
 The bundled extension turns Graphoxide into an IDE-native architecture browser.
@@ -660,7 +697,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Measured results and methodology are in [BENCHMARKS.md](BENCHMARKS.md). Porting decisions and the compatibility contract are documented in [HANDOFF.md](HANDOFF.md).
+Benchmark methodology and the raw observation schema are in [BENCHMARKS.md](BENCHMARKS.md). Porting decisions and the compatibility contract are documented in [HANDOFF.md](HANDOFF.md).
 
 ## License
 

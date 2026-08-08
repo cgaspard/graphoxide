@@ -54,10 +54,13 @@ fn assert_success(output: &Output) {
     });
 }
 
-fn runtime_cache(report: &Path) -> Value {
+fn runtime_report(report: &Path) -> Value {
     serde_json::from_slice::<Value>(&fs::read(report).expect("runtime report"))
-        .expect("runtime report JSON")["cache"]
-        .clone()
+        .expect("runtime report JSON")
+}
+
+fn runtime_cache(report: &Path) -> Value {
+    runtime_report(report)["cache"].clone()
 }
 
 fn managed(project: &Path, name: &str) -> PathBuf {
@@ -105,12 +108,28 @@ fn clean_rebuild_uses_persistent_cache_without_reading_source_payload() {
     let fixture = tempfile::tempdir().expect("temporary fixture");
     let project = fixture.path().join("project");
     fs::create_dir_all(&project).expect("project");
-    fs::write(project.join("lib.rs"), "pub fn answer() -> u32 { 42 }\n").expect("source");
+    let source = "pub fn answer() -> u32 { 42 }\n";
+    fs::write(project.join("lib.rs"), source).expect("source");
 
     let cold_report = fixture.path().join("cold-runtime.json");
     let cold = run_index(&project, &cold_report, &[]);
     assert_success(&cold);
-    let cold_cache = runtime_cache(&cold_report);
+    let cold_sidecar = runtime_report(&cold_report);
+    let cold_cache = cold_sidecar["cache"].clone();
+    let cold_stdout: Value = serde_json::from_slice(&cold.stdout).expect("cold stdout JSON");
+    assert_eq!(cold_stdout["schema_version"], 1);
+    assert_eq!(cold_sidecar["schema_version"], 2);
+    assert_eq!(cold_sidecar["build"]["schema_version"], 1);
+    assert_eq!(cold_sidecar["io"]["sources_selected"], 1);
+    assert_eq!(
+        cold_sidecar["io"]["source_bytes_selected"],
+        source.len() as u64
+    );
+    assert_eq!(cold_sidecar["io"]["sources_read"], 1);
+    assert_eq!(cold_sidecar["io"]["sources_delivered"], 1);
+    assert_eq!(cold_sidecar["io"]["source_bytes_avoided"], 0);
+    assert_eq!(cold_sidecar["work"]["parses"], 1);
+    assert!(cold_sidecar["process"]["peak_rss_source"].is_string());
     assert_eq!(cold_cache["enabled"], true);
     assert_eq!(cold_cache["metadata_hits"], 0);
     assert_eq!(cold_cache["parses_avoided"], 0);
@@ -126,12 +145,38 @@ fn clean_rebuild_uses_persistent_cache_without_reading_source_payload() {
     let warm_report = fixture.path().join("warm-runtime.json");
     let warm = run_index(&project, &warm_report, &[]);
     assert_success(&warm);
-    let warm_cache = runtime_cache(&warm_report);
+    let warm_sidecar = runtime_report(&warm_report);
+    let warm_cache = warm_sidecar["cache"].clone();
     assert_eq!(warm_cache["metadata_hits"], 1);
     assert_eq!(warm_cache["payload_reads_avoided"], 1);
     assert_eq!(warm_cache["parses_avoided"], 1);
     assert_eq!(warm_cache["runtime_hits"], 0);
     assert_eq!(warm_cache["legacy_hits"], 0);
+    assert_eq!(warm_sidecar["io"]["sources_selected"], 1);
+    assert_eq!(
+        warm_sidecar["io"]["source_bytes_selected"],
+        source.len() as u64
+    );
+    assert_eq!(warm_sidecar["io"]["sources_read"], 0);
+    assert_eq!(warm_sidecar["io"]["sources_delivered"], 0);
+    assert_eq!(warm_sidecar["io"]["source_bytes_read"], 0);
+    assert_eq!(warm_sidecar["io"]["source_bytes_delivered"], 0);
+    assert_eq!(
+        warm_sidecar["io"]["source_bytes_avoided"],
+        source.len() as u64
+    );
+    assert_eq!(warm_sidecar["io"]["read_failures"], 0);
+    assert_eq!(warm_sidecar["work"]["parses"], 0);
+    assert!(warm_cache["payload_bytes_read"]
+        .as_u64()
+        .is_some_and(|value| value > 0));
+    assert!(
+        warm_cache["artifact_bytes_read"].as_u64().unwrap()
+            > warm_cache["payload_bytes_read"].as_u64().unwrap()
+    );
+    assert!(warm_cache["peak_in_flight_transfer_bytes"]
+        .as_u64()
+        .is_some_and(|value| value > 0));
     assert_eq!(artifact_bytes(&project), accepted);
 }
 

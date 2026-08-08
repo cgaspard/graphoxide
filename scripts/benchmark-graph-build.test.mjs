@@ -305,7 +305,7 @@ test('validateCliReport rejects the wrong build path and no-op incremental updat
 test('runtime telemetry has an additive stable sidecar shape', () => {
   const telemetry = parseRuntimeTelemetry(
     JSON.stringify({
-      schema_version: 1,
+      schema_version: 2,
       build: {
         operation: 'extract',
         mode: 'full',
@@ -322,7 +322,7 @@ test('runtime telemetry has an additive stable sidecar shape', () => {
         io_workers: 2,
         compute_workers: 3,
         read_batch_bytes: 262144,
-        cache_partitions: null,
+        cache_partitions: 16,
         admission: {
           admitted_requests: 33,
           effective_io_workers: 2,
@@ -351,6 +351,30 @@ test('runtime telemetry has an additive stable sidecar shape', () => {
         stores: 33,
         already_present: 0,
         store_failures: 0,
+        payload_bytes_read: 0,
+        payload_bytes_written: 3300,
+        artifact_bytes_read: 0,
+        artifact_bytes_written: 3600,
+        peak_in_flight_transfer_bytes: 100,
+      },
+      io: {
+        sources_selected: 33,
+        source_bytes_selected: 3300,
+        sources_read: 33,
+        source_bytes_read: 3300,
+        sources_delivered: 33,
+        source_bytes_delivered: 3300,
+        source_bytes_avoided: 0,
+        read_failures: 0,
+        peak_ready_bytes: 100,
+        peak_ready_items: 2,
+      },
+      work: {
+        parses: 33,
+      },
+      process: {
+        peak_rss_bytes: 123456,
+        peak_rss_source: 'getrusage_maxrss_kib',
       },
       simd: {
         architecture: 'x86_64',

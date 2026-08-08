@@ -31,7 +31,7 @@ const MUTATION_TEXT =
 const MAX_COMMAND_OUTPUT_BYTES = 16 * 1024 * 1024;
 const FULL_BUILD_ARGS = ['extract', '.', '--force', '--json'];
 const INCREMENTAL_UPDATE_ARGS = ['update', '.', '--json'];
-const INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION = 1;
+const INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION = 2;
 
 const SCENARIO_DEFINITIONS = Object.freeze({
   'compat-language-matrix': Object.freeze({
@@ -925,6 +925,70 @@ export function validateRuntimeTelemetry(report, expected, commandName = 'grapho
     !Array.isArray(report.simd.enabled_kernels)
   ) {
     throw new Error(`${commandName} SIMD telemetry has an invalid shape`);
+  }
+  const io = report.io;
+  if (io === null || Array.isArray(io) || typeof io !== 'object') {
+    throw new Error(`${commandName} must contain source I/O telemetry`);
+  }
+  for (const field of [
+    'sources_selected',
+    'source_bytes_selected',
+    'sources_read',
+    'source_bytes_read',
+    'sources_delivered',
+    'source_bytes_delivered',
+    'source_bytes_avoided',
+    'read_failures',
+    'peak_ready_bytes',
+    'peak_ready_items',
+  ]) {
+    if (!Number.isSafeInteger(io[field]) || io[field] < 0) {
+      throw new Error(`${commandName} source I/O telemetry has invalid ${field}`);
+    }
+  }
+  if (
+    io.sources_delivered !== io.sources_read ||
+    io.sources_selected !== io.sources_read + io.read_failures + cache.metadata_hits ||
+    io.source_bytes_delivered > io.source_bytes_read ||
+    io.source_bytes_delivered + io.source_bytes_avoided > io.source_bytes_selected
+  ) {
+    throw new Error(`${commandName} source I/O telemetry is inconsistent`);
+  }
+  if (
+    report.work === null ||
+    Array.isArray(report.work) ||
+    typeof report.work !== 'object' ||
+    !Number.isSafeInteger(report.work.parses) ||
+    report.work.parses < 0 ||
+    report.work.parses > io.sources_delivered
+  ) {
+    throw new Error(`${commandName} parser work telemetry is invalid`);
+  }
+  for (const field of [
+    'payload_bytes_read',
+    'payload_bytes_written',
+    'artifact_bytes_read',
+    'artifact_bytes_written',
+    'peak_in_flight_transfer_bytes',
+  ]) {
+    if (!Number.isSafeInteger(cache[field]) || cache[field] < 0) {
+      throw new Error(`${commandName} cache telemetry has invalid ${field}`);
+    }
+  }
+  const processTelemetry = report.process;
+  if (
+    processTelemetry === null ||
+    Array.isArray(processTelemetry) ||
+    typeof processTelemetry !== 'object' ||
+    (!Number.isSafeInteger(processTelemetry.peak_rss_bytes) &&
+      processTelemetry.peak_rss_bytes !== null) ||
+    !['getrusage_maxrss_bytes', 'getrusage_maxrss_kib', 'unavailable'].includes(
+      processTelemetry.peak_rss_source,
+    ) ||
+    (processTelemetry.peak_rss_source === 'unavailable') !==
+      (processTelemetry.peak_rss_bytes === null)
+  ) {
+    throw new Error(`${commandName} process telemetry has an invalid shape`);
   }
   return report;
 }

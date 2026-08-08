@@ -1,0 +1,4 @@
+name: qualification
+steps:
+  - index
+  - verify

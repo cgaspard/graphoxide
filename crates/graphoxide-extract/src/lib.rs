@@ -89,6 +89,52 @@ pub struct RuntimeProjectExtraction {
     pub read_failures: Vec<graphoxide_index_runtime::FileReadFailure>,
 }
 
+/// Aggregate parser work for an isolated extraction run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeWorkTelemetry {
+    /// Parser invocations attempted after cache decisions.
+    pub parses: u64,
+}
+
+/// Additive measurements returned by telemetry-aware extraction entry points.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeExtractionTelemetry {
+    pub io: graphoxide_index_runtime::RuntimeIoTelemetry,
+    pub work: RuntimeWorkTelemetry,
+    pub cache_io: graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry,
+}
+
+fn collect_runtime_cache_io_telemetry<F>(
+    require_telemetry: bool,
+    snapshot: F,
+) -> anyhow::Result<graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry>
+where
+    F: FnOnce() -> Result<
+        graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry,
+        graphoxide_index_runtime::cache::RuntimeCacheIoServiceError,
+    >,
+{
+    if !require_telemetry {
+        return Ok(graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry::default());
+    }
+    snapshot().map_err(|error| anyhow::anyhow!("runtime cache telemetry barrier failed: {error}"))
+}
+
+/// Byte-only extraction plus additive runtime measurements.
+#[derive(Debug)]
+pub struct RuntimeProjectExtractionWithTelemetry {
+    pub result: RuntimeProjectExtraction,
+    pub telemetry: RuntimeExtractionTelemetry,
+}
+
+impl std::ops::Deref for RuntimeProjectExtractionWithTelemetry {
+    type Target = RuntimeProjectExtraction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
 const MAX_ISOLATED_PARSER_ALLOWANCE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Choose one per-file parser policy from the memory budget alone.
@@ -123,7 +169,18 @@ pub fn extract_project_with_runtime(
     root: &std::path::Path,
     config: graphoxide_index_runtime::IndexRuntimeConfig,
 ) -> anyhow::Result<RuntimeProjectExtraction> {
-    use graphoxide_index_runtime::{read_files_concurrently, FileReadRequest, InputIdentity};
+    extract_project_with_runtime_with_telemetry(root, config).map(|extraction| extraction.result)
+}
+
+/// Run the byte-only extraction substrate and return additive runtime
+/// measurements without changing [`RuntimeProjectExtraction`].
+pub fn extract_project_with_runtime_with_telemetry(
+    root: &std::path::Path,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+) -> anyhow::Result<RuntimeProjectExtractionWithTelemetry> {
+    use graphoxide_index_runtime::{
+        read_files_concurrently_with_telemetry, FileReadRequest, InputIdentity,
+    };
     use std::{collections::BTreeMap, sync::Arc};
 
     // Office containers must enter the same bounded byte-admission path as
@@ -182,7 +239,7 @@ pub fn extract_project_with_runtime(
     let parser_admission = Arc::new(RuntimeParserAdmission::new(parser_pool_bytes));
     let output_budget = config.memory_budget().cache_and_runs_bytes;
     let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
-    let completed = read_files_concurrently(config, requests, move |input| {
+    let completed = read_files_concurrently_with_telemetry(config, requests, move |input| {
         let relative = input.identity.normalized_path.as_ref();
         let (path, _) = contexts
             .get(relative)
@@ -206,14 +263,26 @@ pub fn extract_project_with_runtime(
     })
     .map_err(|error| anyhow::anyhow!("isolated extraction runtime failed: {error:?}"))?;
 
+    let runtime_io = completed.telemetry;
+    let completed = completed.result;
+    let runtime_work = RuntimeWorkTelemetry {
+        parses: u64::try_from(completed.completed.len()).unwrap_or(u64::MAX),
+    };
     let mut extractions = Vec::with_capacity(completed.completed.len());
     for completed in completed.completed {
         extractions.push(completed.value?);
     }
-    Ok(RuntimeProjectExtraction {
-        extractions,
-        detection,
-        read_failures: completed.failures,
+    Ok(RuntimeProjectExtractionWithTelemetry {
+        result: RuntimeProjectExtraction {
+            extractions,
+            detection,
+            read_failures: completed.failures,
+        },
+        telemetry: RuntimeExtractionTelemetry {
+            io: runtime_io,
+            work: runtime_work,
+            cache_io: graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry::default(),
+        },
     })
 }
 
@@ -368,6 +437,22 @@ pub struct DeferredProjectExtractionResult {
     pub pending_manifest: PendingProjectManifest,
 }
 
+/// Deferred extraction plus additive runtime measurements.
+#[derive(Debug)]
+#[must_use = "the pending manifest must be committed or deliberately discarded"]
+pub struct DeferredProjectExtractionWithTelemetry {
+    pub result: DeferredProjectExtractionResult,
+    pub telemetry: RuntimeExtractionTelemetry,
+}
+
+impl std::ops::Deref for DeferredProjectExtractionWithTelemetry {
+    type Target = DeferredProjectExtractionResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
 /// One file's contribution to a project scan: its extraction plus the manifest
 /// evidence that dates it.
 ///
@@ -432,6 +517,7 @@ struct RuntimeScanRow {
     runtime_manifest: Option<cache::RuntimeAstManifestEvidence>,
     runtime_cache: cache::RuntimeCacheTelemetry,
     runtime_cache_diagnostics: Vec<String>,
+    parses: u64,
 }
 
 #[derive(Debug)]
@@ -492,18 +578,23 @@ fn persist_runtime_cache_extraction(
     replace_existing: bool,
     cancellation: &graphoxide_index_runtime::RuntimeCancellation,
 ) -> Result<
-    graphoxide_index_runtime::cache::RuntimeCacheIoPersistOutcome,
+    (
+        graphoxide_index_runtime::cache::RuntimeCacheIoPersistOutcome,
+        usize,
+    ),
     graphoxide_index_runtime::cache::RuntimeCacheIoServiceError,
 > {
     let encoded_bytes = cache::runtime_ast_cache_payload_len(evidence, extraction)
         .map_err(graphoxide_index_runtime::cache::RuntimeCacheIoServiceError::Cache)?;
-    client.persist_encoded_with_cancellation(
-        evidence.key,
-        encoded_bytes,
-        replace_existing,
-        cancellation,
-        |output| cache::encode_runtime_ast_cache_payload_into(output, evidence, extraction),
-    )
+    client
+        .persist_encoded_with_cancellation(
+            evidence.key,
+            encoded_bytes,
+            replace_existing,
+            cancellation,
+            |output| cache::encode_runtime_ast_cache_payload_into(output, evidence, extraction),
+        )
+        .map(|outcome| (outcome, encoded_bytes))
 }
 
 fn runtime_manifest_byte_limit(cache_and_runs_bytes: usize, admitted_files: usize) -> usize {
@@ -1203,6 +1294,26 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest(
     )
 }
 
+/// Telemetry-aware production indexing entry point.
+pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+) -> anyhow::Result<DeferredProjectExtractionWithTelemetry> {
+    extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        graphoxide_index_runtime::RuntimeCancellation::new(),
+    )
+}
+
 /// Extract through the dedicated I/O/CPU runtime with cooperative
 /// cancellation, deferring manifest publication until the caller commits the
 /// matching graph.
@@ -1216,8 +1327,56 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
     config: graphoxide_index_runtime::IndexRuntimeConfig,
     cancellation: graphoxide_index_runtime::RuntimeCancellation,
 ) -> anyhow::Result<DeferredProjectExtractionResult> {
+    extract_project_with_runtime_scan_options_deferred_manifest_impl(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        cancellation,
+        false,
+    )
+    .map(|extraction| extraction.result)
+}
+
+/// Cancellation-aware production indexing entry point with additive runtime
+/// measurements.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+) -> anyhow::Result<DeferredProjectExtractionWithTelemetry> {
+    extract_project_with_runtime_scan_options_deferred_manifest_impl(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        cancellation,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+    require_telemetry: bool,
+) -> anyhow::Result<DeferredProjectExtractionWithTelemetry> {
     use graphoxide_index_runtime::{
-        read_files_concurrently_with_cancellation, FileReadRequest, InputIdentity,
+        read_files_concurrently_with_cancellation_and_telemetry, FileReadRequest, InputIdentity,
     };
     use md5::Digest as _;
     use std::{collections::BTreeMap, sync::Arc};
@@ -1375,6 +1534,11 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
             )
         })
         .collect::<std::io::Result<Vec<_>>>()?;
+    let selected_sources = u64::try_from(all_requests.len()).unwrap_or(u64::MAX);
+    let source_bytes_selected = all_requests.iter().fold(0_u64, |total, request| {
+        total.saturating_add(request.selected_source_bytes().unwrap_or(0))
+    });
+    let mut source_bytes_avoided = 0_u64;
     // Resolver source bytes remain live while sibling workers may still parse.
     // Give each phase a disjoint portion of the shared CPU-arena partition.
     let (parser_allowance_bytes, snapshot_budget) = isolated_parser_layout(config, true);
@@ -1439,6 +1603,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
             "isolated extraction cancelled"
         );
         let relative = request.identity.normalized_path.to_string();
+        let request_source_bytes = request.selected_source_bytes().unwrap_or(0);
         let Some(context) = contexts.get(relative.as_str()) else {
             requests.push(request);
             continue;
@@ -1502,6 +1667,8 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
                         };
                         match decoded {
                             Ok(extraction) => {
+                                source_bytes_avoided =
+                                    source_bytes_avoided.saturating_add(request_source_bytes);
                                 let mut row_cache = cache::RuntimeCacheTelemetry::enabled();
                                 row_cache.metadata_hits = 1;
                                 row_cache.payload_reads_avoided = 1;
@@ -1518,6 +1685,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
                                     runtime_manifest: Some(prior_cache),
                                     runtime_cache: row_cache,
                                     runtime_cache_diagnostics: Vec::new(),
+                                    parses: 0,
                                 });
                             }
                             Err(RuntimeCacheHitUseError::Rejected(rejection)) => {
@@ -1579,7 +1747,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
     let parser_admission_for_compute = Arc::clone(&parser_admission);
     let cache_client_for_compute = cache_client.clone();
     let compute_cancellation = cancellation.clone();
-    let completed = read_files_concurrently_with_cancellation(
+    let completed = read_files_concurrently_with_cancellation_and_telemetry(
         config,
         requests,
         cancellation.clone(),
@@ -1656,6 +1824,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         let mut row_cache_diagnostics = Vec::new();
         let mut extraction = None;
         let mut warning = None;
+        let mut parses = 0_u64;
         let mut should_persist = false;
         let mut replace_existing = false;
 
@@ -1766,6 +1935,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
                         "isolated parser allowance exceeds its {parser_pool_bytes}-byte pool"
                     );
                 };
+                parses = parses.saturating_add(1);
                 match engine::extract_as_bytes_with_parser_allowance_and_cancellation(
                     path,
                     &relative,
@@ -1815,7 +1985,9 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
                     replace_existing,
                     &compute_cancellation,
                 ) {
-                    Ok(outcome) => row_cache.record_persist(outcome),
+                    Ok((outcome, _payload_bytes)) => {
+                        row_cache.record_persist(outcome);
+                    }
                     Err(error) => {
                         row_cache.store_failures = row_cache.store_failures.saturating_add(1);
                         row_cache_diagnostics.push(format!(
@@ -1842,11 +2014,17 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
             runtime_manifest,
             runtime_cache: row_cache,
             runtime_cache_diagnostics: row_cache_diagnostics,
+            parses,
         })
     },
     )
     .map_err(|error| anyhow::anyhow!("isolated extraction runtime failed: {error:?}"))?;
 
+    let mut runtime_io = completed.telemetry;
+    let completed = completed.result;
+    runtime_io.sources_selected = selected_sources;
+    runtime_io.source_bytes_selected = source_bytes_selected;
+    runtime_io.source_bytes_avoided = source_bytes_avoided;
     anyhow::ensure!(
         !cancellation.is_cancelled(),
         "isolated extraction cancelled"
@@ -1865,6 +2043,18 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         runtime_cache.merge(row.runtime_cache);
         runtime_cache_diagnostics.extend(row.runtime_cache_diagnostics.iter().cloned());
     }
+    let runtime_cache_io = if let Some(client) = cache_client.as_ref() {
+        collect_runtime_cache_io_telemetry(require_telemetry, || {
+            client.telemetry_snapshot_with_cancellation(&cancellation)
+        })?
+    } else {
+        graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry::default()
+    };
+    let runtime_work = RuntimeWorkTelemetry {
+        parses: rows
+            .iter()
+            .fold(0_u64, |total, row| total.saturating_add(row.parses)),
+    };
     runtime_cache_diagnostics.sort();
     runtime_cache_diagnostics.dedup();
     drop(cache_client);
@@ -2098,25 +2288,32 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         "isolated resolver retains {retained_output_bytes} fresh bytes plus a {baseline_working_set_charge}-byte baseline working-set charge, exceeding its {output_budget}-byte cache/run budget"
     );
     debug_assert!(output_admission.retained_bytes() <= output_budget);
-    Ok(DeferredProjectExtractionResult {
-        extractions,
-        retained_output_bytes,
-        detection,
-        progress: ProjectExtractionProgress {
-            total: total_work,
-            succeeded,
+    Ok(DeferredProjectExtractionWithTelemetry {
+        result: DeferredProjectExtractionResult {
+            extractions,
+            retained_output_bytes,
+            detection,
+            progress: ProjectExtractionProgress {
+                total: total_work,
+                succeeded,
+            },
+            warnings,
+            rebuilt_sources,
+            changed_sources,
+            unchanged_sources,
+            deleted_sources,
+            runtime_cache,
+            runtime_cache_diagnostics,
+            resolution_snapshot_diagnostics,
+            pending_manifest: PendingProjectManifest {
+                output_directory: managed_output_dir,
+                entries: manifest,
+            },
         },
-        warnings,
-        rebuilt_sources,
-        changed_sources,
-        unchanged_sources,
-        deleted_sources,
-        runtime_cache,
-        runtime_cache_diagnostics,
-        resolution_snapshot_diagnostics,
-        pending_manifest: PendingProjectManifest {
-            output_directory: managed_output_dir,
-            entries: manifest,
+        telemetry: RuntimeExtractionTelemetry {
+            io: runtime_io,
+            work: runtime_work,
+            cache_io: runtime_cache_io,
         },
     })
 }
@@ -3669,15 +3866,16 @@ mod tests {
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
         };
-        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
-            &fixture.root,
-            true,
-            &fixture.root.join("graphoxide-out"),
-            false,
-            &super::detect::DetectOptions::default(),
-            runtime,
-        )
-        .expect("isolated runtime scan");
+        let result =
+            super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                &fixture.root,
+                true,
+                &fixture.root.join("graphoxide-out"),
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("isolated runtime scan");
         assert!(
             result.resolution_snapshot_diagnostics.is_empty(),
             "fixture has no unavailable resolver metadata: {:?}",
@@ -4256,55 +4454,102 @@ mod tests {
     #[test]
     fn isolated_runtime_cache_cold_warm_and_force_paths_are_truthful() {
         let fixture = Fixture::new();
-        fixture.write("lib.rs", "pub fn indexed() {}\n");
+        let source = "pub fn indexed() {}\n";
+        fixture.write("lib.rs", source);
         let output = fixture.root.join("graphoxide-out");
         let runtime = runtime_config(32 * 1024 * 1024);
-        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
-            &fixture.root,
-            true,
-            &output,
-            false,
-            &super::detect::DetectOptions::default(),
-            runtime,
-        )
-        .expect("isolated runtime scan");
+        let result =
+            super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                &fixture.root,
+                true,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("isolated runtime scan");
         assert!(result.runtime_cache_diagnostics.is_empty());
         assert_eq!(result.changed_sources, 1);
         assert!(result.runtime_cache.enabled);
         assert_eq!(result.runtime_cache.bypasses, 1);
         assert_eq!(result.runtime_cache.stores, 1);
+        assert_eq!(result.telemetry.io.sources_selected, 1);
+        assert_eq!(
+            result.telemetry.io.source_bytes_selected,
+            source.len() as u64
+        );
+        assert_eq!(result.telemetry.io.sources_read, 1);
+        assert_eq!(result.telemetry.io.sources_delivered, 1);
+        assert_eq!(result.telemetry.io.source_bytes_read, source.len() as u64);
+        assert_eq!(
+            result.telemetry.io.source_bytes_delivered,
+            source.len() as u64
+        );
+        assert_eq!(result.telemetry.io.source_bytes_avoided, 0);
+        assert_eq!(result.telemetry.work.parses, 1);
+        assert!(result.telemetry.cache_io.payload_bytes_written > 0);
+        assert_eq!(
+            result.telemetry.cache_io.artifact_bytes_written,
+            graphoxide_index_runtime::cache::runtime_cache_artifact_bytes(
+                usize::try_from(result.telemetry.cache_io.payload_bytes_written)
+                    .expect("test payload length fits usize"),
+            ),
+            "the extraction wrapper snapshots only after the completed publish command"
+        );
+        assert!(result.telemetry.cache_io.peak_in_flight_transfer_bytes > 0);
         assert!(
             output.join("cache/runtime-v1").exists(),
             "successful extraction must be available to the runtime read-through path"
         );
         let retained_output_bytes = result.retained_output_bytes;
-        commit_runtime_baseline(result, &fixture.root, &output);
+        commit_runtime_baseline(result.result, &fixture.root, &output);
 
-        let warm = super::extract_project_with_runtime_scan_options_deferred_manifest(
-            &fixture.root,
-            false,
-            &output,
-            false,
-            &super::detect::DetectOptions::default(),
-            runtime,
-        )
-        .expect("warm isolated runtime scan");
+        let warm =
+            super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                &fixture.root,
+                false,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("warm isolated runtime scan");
         assert_eq!(warm.changed_sources, 0);
         assert_eq!(warm.unchanged_sources, 1);
         assert!(warm.extractions.is_empty());
         assert_eq!(warm.runtime_cache.metadata_hits, 1);
         assert_eq!(warm.runtime_cache.payload_reads_avoided, 1);
         assert_eq!(warm.runtime_cache.parses_avoided, 1);
+        assert_eq!(warm.telemetry.io.sources_selected, 1);
+        assert_eq!(warm.telemetry.io.source_bytes_selected, source.len() as u64);
+        assert_eq!(warm.telemetry.io.sources_read, 0);
+        assert_eq!(warm.telemetry.io.sources_delivered, 0);
+        assert_eq!(warm.telemetry.io.source_bytes_read, 0);
+        assert_eq!(warm.telemetry.io.source_bytes_delivered, 0);
+        assert_eq!(warm.telemetry.io.source_bytes_avoided, source.len() as u64);
+        assert_eq!(warm.telemetry.io.read_failures, 0);
+        assert_eq!(warm.telemetry.work.parses, 0);
+        assert!(warm.telemetry.cache_io.payload_bytes_read > 0);
+        assert_eq!(
+            warm.telemetry.cache_io.artifact_bytes_read,
+            graphoxide_index_runtime::cache::runtime_cache_artifact_bytes(
+                usize::try_from(warm.telemetry.cache_io.payload_bytes_read)
+                    .expect("test payload length fits usize"),
+            ),
+            "the warm wrapper snapshots only after its completed owner read"
+        );
+        assert!(warm.telemetry.cache_io.peak_in_flight_transfer_bytes > 0);
 
-        let forced = super::extract_project_with_runtime_scan_options_deferred_manifest(
-            &fixture.root,
-            true,
-            &output,
-            false,
-            &super::detect::DetectOptions::default(),
-            runtime,
-        )
-        .expect("forced isolated runtime rescan");
+        let forced =
+            super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                &fixture.root,
+                true,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("forced isolated runtime rescan");
         assert_eq!(
             forced.retained_output_bytes, retained_output_bytes,
             "force bypass must not perturb deterministic output admission"
@@ -4314,6 +4559,30 @@ mod tests {
         assert_eq!(forced.runtime_cache.runtime_hits, 0);
         assert_eq!(forced.runtime_cache.stores, 1);
         assert_eq!(forced.runtime_cache.already_present, 0);
+        assert_eq!(forced.telemetry.io.sources_read, 1);
+        assert_eq!(forced.telemetry.io.sources_delivered, 1);
+        assert_eq!(forced.telemetry.work.parses, 1);
+    }
+
+    #[test]
+    fn cache_telemetry_barrier_is_strict_only_for_opt_in_callers() {
+        let barrier_called = std::cell::Cell::new(false);
+        let fallback = super::collect_runtime_cache_io_telemetry(false, || {
+            barrier_called.set(true);
+            Err(graphoxide_index_runtime::cache::RuntimeCacheIoServiceError::WorkerUnavailable)
+        })
+        .expect("default extraction does not require cache telemetry");
+        assert_eq!(
+            fallback,
+            graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry::default()
+        );
+        assert!(!barrier_called.get(), "default execution skips the barrier");
+
+        let error = super::collect_runtime_cache_io_telemetry(true, || {
+            Err(graphoxide_index_runtime::cache::RuntimeCacheIoServiceError::WorkerUnavailable)
+        })
+        .expect_err("opt-in telemetry cannot publish fabricated zero evidence");
+        assert!(error.to_string().contains("telemetry barrier failed"));
     }
 
     #[test]
