@@ -78,14 +78,26 @@ operating system makes it available.
 ## Run the CI profile
 
 Build the exact binary outside the measured region, then choose a new canonical
-report path (existing reports are never overwritten):
+report path (existing reports are never overwritten). Qualification requires a
+single-link executable so its pinned content identity cannot alias another
+pathname. Cargo may hard-link its release artifact, so stage a verified
+byte-copy with `install` in a new runner-owned `0700` directory:
 
 ```bash
 cargo build --release --locked --bin graphoxide
+stage_parent="$(mktemp -d "${TMPDIR:-/tmp}/graphoxide-qualification-binary.XXXXXX")"
+chmod 700 "$stage_parent"
+stage_parent="$(realpath "$stage_parent")"
+staged_binary="$stage_parent/graphoxide"
+install -m 0700 target/release/graphoxide "$staged_binary"
+staged_binary="$(realpath "$staged_binary")"
+STAGED_BINARY="$staged_binary" node --input-type=module -e \
+  'import { lstatSync } from "node:fs"; const value = lstatSync(process.env.STAGED_BINARY); if (!value.isFile() || value.isSymbolicLink() || value.nlink !== 1) throw new Error("staged binary must be a single-link regular file")'
+cmp -s target/release/graphoxide "$staged_binary"
 node scripts/qualify-universal-indexing.mjs \
   --profile ci-mixed-v1 \
-  --binary target/release/graphoxide \
-  --report "$PWD/qualification-ci.json"
+  --binary "$staged_binary" \
+  --report "$(pwd -P)/qualification-ci.json"
 ```
 
 ## Optional 70 GiB profile
@@ -109,7 +121,7 @@ node scripts/qualify-universal-indexing.mjs \
   --large-root /canonical/preexisting/qualification-volume \
   --acknowledge-70-gib \
   --acknowledge-large-disk-use \
-  --binary /absolute/path/to/graphoxide \
+  --binary "$staged_binary" \
   --report /canonical/preexisting/reports/qualification-70gib.json
 ```
 
@@ -122,4 +134,6 @@ branch on the dedicated self-hosted runner and has an explicit 12-hour job
 timeout. It exposes both the small controlled run and a combined
 controlled-OS-cold 70 GiB operation; the combined operation requires all four
 acknowledgements plus the large root and pinned helper inputs. Its canonical
-report directory must be owned by the runner and not group/world writable.
+report directory must be owned by the runner and not group/world writable. Both
+hosted and manual workflows stage and verify the release binary before passing
+its canonical private path to the qualification runner.

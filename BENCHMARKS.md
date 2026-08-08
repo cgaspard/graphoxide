@@ -32,6 +32,12 @@ node scripts/benchmark-graph-build.mjs \
 Run `node scripts/benchmark-graph-build.mjs --help` for the supported options.
 The default maximum of 100 samples keeps accidental runs bounded.
 
+The ordinary benchmark runner may read a Cargo release artifact directly. The
+universal qualification runner has a stricter single-link content-identity
+contract, so its operator and CI commands byte-copy the Cargo artifact with
+`install` into a new private directory before measurement; see
+[`benchmarks/universal/README.md`](benchmarks/universal/README.md).
+
 ## Baseline fixture
 
 The default fixture is [`parity/corpora/language-matrix`](parity/corpora/language-matrix).

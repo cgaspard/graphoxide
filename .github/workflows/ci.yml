@@ -24,15 +24,50 @@ jobs:
         with:
           node-version: 22
       - run: cargo build --release --locked --bin graphoxide
+      - name: Stage single-link qualification binary
+        id: qualification_binary
+        shell: bash
+        run: |
+          source_binary="target/release/graphoxide"
+          staged_parent="${RUNNER_TEMP}/graphoxide-qualification-binary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 0700 -- "${staged_parent}"
+          staged_parent="$(realpath -- "${staged_parent}")"
+          test -d "${staged_parent}" && test ! -L "${staged_parent}"
+          test "$(stat -c '%u' "${staged_parent}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${staged_parent}")" = 700
+          staged_parent_identity="$(stat -c '%d:%i' "${staged_parent}")"
+          test "$(stat -c '%F' "${source_binary}")" = "regular file"
+          test "$(stat -c '%u' "${source_binary}")" -eq "$(id -u)"
+          test -x "${source_binary}"
+          source_identity="$(stat -c '%d:%i' "${source_binary}")"
+          staged_binary="${staged_parent}/graphoxide"
+          install -m 0700 "${source_binary}" "${staged_binary}"
+          staged_binary="$(realpath -- "${staged_binary}")"
+          test "${staged_binary}" = "${staged_parent}/graphoxide"
+          test "$(stat -c '%F' "${staged_binary}")" = "regular file"
+          test -x "${staged_binary}"
+          test "$(stat -c '%h' "${staged_binary}")" -eq 1
+          test "$(stat -c '%u' "${staged_binary}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${staged_binary}")" = 700
+          test "$(stat -c '%d:%i' "${staged_binary}")" != "${source_identity}"
+          cmp -s "${source_binary}" "${staged_binary}"
+          test "$(stat -c '%d:%i' "${source_binary}")" = "${source_identity}"
+          test "$(stat -c '%d:%i' "${staged_parent}")" = "${staged_parent_identity}"
+          test "$(stat -c '%u' "${staged_parent}")" -eq "$(id -u)"
+          test "$(stat -c '%a' "${staged_parent}")" = 700
+          STAGED_BINARY="${staged_binary}" node --input-type=module -e \
+            'if (/[\u0000-\u001f\u007f]/u.test(process.env.STAGED_BINARY ?? "")) throw new Error("staged binary path contains a control byte")'
+          printf '%s\n' "path=${staged_binary}" >> "${GITHUB_OUTPUT}"
       - name: Run small deterministic qualification
+        env:
+          STAGED_BINARY: ${{ steps.qualification_binary.outputs.path }}
         run: |
           report_parent="${RUNNER_TEMP}/graphoxide-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          test ! -e "${report_parent}"
-          install -d -m 0700 "${report_parent}"
-          report_parent="$(realpath "${report_parent}")"
+          mkdir -m 0700 -- "${report_parent}"
+          report_parent="$(realpath -- "${report_parent}")"
           node scripts/qualify-universal-indexing.mjs \
             --profile ci-mixed-v1 \
-            --binary target/release/graphoxide \
+            --binary "${STAGED_BINARY}" \
             --report "${report_parent}/universal-qualification.json"
       - uses: actions/upload-artifact@v4
         if: always()

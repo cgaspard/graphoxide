@@ -599,7 +599,7 @@ test('manual qualification workflow is main-only and validates output command da
   );
   assert.match(workflow, /timeout-minutes: 720/);
   const rawControlCheck = workflow.indexOf('process.env.REPORT_RAW');
-  const realpath = workflow.indexOf('realpath --');
+  const realpath = workflow.indexOf('realpath -- "${REPORT_DIRECTORY}"');
   const canonicalControlCheck = workflow.indexOf('process.env.REPORT_PARENT');
   const outputWrite = workflow.indexOf(`printf '%s\\n' "path=\${report_path}"`);
   assert.ok(rawControlCheck >= 0, 'workflow must reject raw report-directory control bytes');
@@ -607,6 +607,87 @@ test('manual qualification workflow is main-only and validates output command da
   assert.ok(canonicalControlCheck > realpath, 'workflow must validate the canonical path');
   assert.ok(outputWrite > canonicalControlCheck, 'workflow must validate before writing GITHUB_OUTPUT');
   assert.doesNotMatch(workflow, /echo "path=.*GITHUB_OUTPUT/);
+});
+
+test('qualification workflows byte-copy and exclusively pass a staged single-link binary', () => {
+  const workflows = [
+    ['hosted CI', readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8'), 1],
+    [
+      'manual qualification',
+      readFileSync(path.join(root, '.github', 'workflows', 'qualification.yml'), 'utf8'),
+      3,
+    ],
+  ];
+  for (const [label, workflow, expectedInvocations] of workflows) {
+    assert.equal(
+      [...workflow.matchAll(/target\/release\/graphoxide/g)].length,
+      1,
+      `${label} must name the Cargo artifact only as the staging source`,
+    );
+    assert.match(workflow, /source_binary="target\/release\/graphoxide"/);
+    assert.match(workflow, /mkdir -m 0700 -- "\$\{staged_parent\}"/);
+    assert.doesNotMatch(workflow, /test ! -e "\$\{staged_parent\}"|install -d/);
+    assert.match(workflow, /staged_parent_identity="\$\(stat -c '%d:%i'/);
+    assert.match(workflow, /stat -c '%F'.*source_binary.*regular file/);
+    assert.match(workflow, /stat -c '%u'.*source_binary.*id -u/);
+    assert.match(
+      workflow,
+      /install -m 0700 "\$\{source_binary\}" "\$\{staged_binary\}"/,
+    );
+    assert.match(workflow, /staged_binary="\$\(realpath -- "\$\{staged_binary\}"\)"/);
+    assert.match(workflow, /stat -c '%h'.*staged_binary/);
+    assert.match(workflow, /stat -c '%d:%i'.*staged_binary.*!=.*source_identity/);
+    assert.match(workflow, /cmp -s "\$\{source_binary\}" "\$\{staged_binary\}"/);
+    assert.match(workflow, /stat -c '%d:%i'.*staged_parent.*=.*staged_parent_identity/);
+    assert.doesNotMatch(workflow, /--binary\s+target\/release\/graphoxide/);
+    const invocations = [...workflow.matchAll(/--binary "\$\{STAGED_BINARY\}"/g)];
+    assert.equal(invocations.length, expectedInvocations, `${label} must use only the staged path`);
+  }
+  const rootGuide = readFileSync(path.join(root, 'README.md'), 'utf8');
+  const qualificationGuide = readFileSync(
+    path.join(root, 'benchmarks', 'universal', 'README.md'),
+    'utf8',
+  );
+  for (const guide of [rootGuide, qualificationGuide]) {
+    assert.match(guide, /install -m 0700 target\/release\/graphoxide "\$staged_binary"/);
+    assert.match(guide, /value\.nlink !== 1/);
+    assert.match(guide, /--binary "\$staged_binary"/);
+  }
+});
+
+test('staging primitives refuse an existing parent and de-alias a hardlinked binary', {
+  skip: process.platform === 'win32' && 'POSIX install and inode semantics are required',
+}, () => {
+  const fixture = temporary('binary-stage');
+  const cargoObject = path.join(fixture, 'cargo-object');
+  const cargoBinary = path.join(fixture, 'cargo-graphoxide');
+  const stagedParent = path.join(fixture, 'stage');
+  const stagedBinary = path.join(stagedParent, 'graphoxide');
+  try {
+    writeFileSync(cargoObject, Buffer.from('deterministic executable bytes\n'), { mode: 0o700 });
+    linkSync(cargoObject, cargoBinary);
+    const firstMkdir = spawnSync('mkdir', ['-m', '0700', '--', stagedParent], {
+      encoding: 'utf8',
+    });
+    assert.equal(firstMkdir.status, 0, firstMkdir.stderr);
+    const repeatedMkdir = spawnSync('mkdir', ['-m', '0700', '--', stagedParent], {
+      encoding: 'utf8',
+    });
+    assert.notEqual(repeatedMkdir.status, 0, 'atomic staging mkdir must refuse an existing parent');
+    const installed = spawnSync('install', ['-m', '0700', cargoBinary, stagedBinary], {
+      encoding: 'utf8',
+    });
+    assert.equal(installed.status, 0, installed.stderr);
+    const source = lstatSync(cargoBinary);
+    const destination = lstatSync(stagedBinary);
+    assert.equal(source.nlink, 2, 'fixture source must simulate Cargo hard links');
+    assert.equal(destination.nlink, 1);
+    assert.notDeepEqual([destination.dev, destination.ino], [source.dev, source.ino]);
+    assert.equal(destination.mode & 0o777, 0o700);
+    assert.deepEqual(readFileSync(stagedBinary), readFileSync(cargoBinary));
+  } finally {
+    rmSync(fixture, { recursive: true, force: false });
+  }
 });
 
 test('aggregate evidence exhaustion retains a bounded digest record', () => {
