@@ -25,6 +25,7 @@ mod csharp;
 mod dart;
 pub mod detect;
 mod diagrams;
+mod dot;
 mod dotnet;
 pub mod engine;
 mod engineering;
@@ -1010,7 +1011,10 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
             && (force
                 || previous_for_compute
                     .get(relative.as_str())
-                    .is_none_or(|entry| entry.ast_hash != hash.as_deref().unwrap_or_default()));
+                    .is_none_or(|entry| {
+                        entry.ast_version != cache::AST_CACHE_VERSION
+                            || entry.ast_hash != hash.as_deref().unwrap_or_default()
+                    }));
         let (extraction, warning) = if changed {
             match engine::extract_as_bytes_with_parser_allowance(
                 path,
@@ -1137,13 +1141,16 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         .map(|row| {
             let semantic_hash = previous
                 .get(&row.relative)
-                .filter(|entry| entry.ast_hash == row.hash)
+                .filter(|entry| {
+                    entry.ast_version == cache::AST_CACHE_VERSION && entry.ast_hash == row.hash
+                })
                 .map(|entry| entry.semantic_hash.clone())
                 .unwrap_or_default();
             (
                 row.relative.clone(),
                 cache::ManifestEntry {
                     mtime: row.mtime,
+                    ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: row.hash.clone(),
                     semantic_hash,
                 },
@@ -1416,13 +1423,16 @@ pub fn extract_project_with_scan_options_deferred_manifest(
         .map(|(relative, _, mtime, hash)| {
             let semantic_hash = previous
                 .get(relative)
-                .filter(|entry| entry.ast_hash == *hash)
+                .filter(|entry| {
+                    entry.ast_version == cache::AST_CACHE_VERSION && entry.ast_hash == *hash
+                })
                 .map(|entry| entry.semantic_hash.clone())
                 .unwrap_or_default();
             (
                 relative.clone(),
                 cache::ManifestEntry {
                     mtime: *mtime,
+                    ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: hash.clone(),
                     semantic_hash,
                 },
@@ -1709,13 +1719,18 @@ where
         .map(|(relative, _, mtime, hash)| {
             let semantic_hash = previous
                 .get(relative)
-                .filter(|entry| entry.ast_hash == *hash && !hash.is_empty())
+                .filter(|entry| {
+                    entry.ast_version == cache::AST_CACHE_VERSION
+                        && entry.ast_hash == *hash
+                        && !hash.is_empty()
+                })
                 .map(|entry| entry.semantic_hash.clone())
                 .unwrap_or_default();
             (
                 relative.clone(),
                 cache::ManifestEntry {
                     mtime: *mtime,
+                    ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: hash.clone(),
                     semantic_hash,
                 },
@@ -2179,6 +2194,102 @@ mod tests {
                 expected = Some(bytes);
             }
         }
+    }
+
+    #[test]
+    fn isolated_incremental_reextracts_legacy_dot_manifest_once() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "design.dot",
+            "digraph architecture { api -> database [label=queries]; }\n",
+        );
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial DOT scan");
+        assert_eq!(initial.changed_sources, 1);
+        let expected_extraction =
+            serde_json::to_vec(&initial.extractions).expect("serialize initial DOT facts");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+
+        let manifest_path = output.join("manifest.json");
+        let mut legacy_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read current manifest"))
+                .expect("decode current manifest");
+        let legacy_entry = legacy_manifest["design.dot"]
+            .as_object_mut()
+            .expect("DOT manifest entry");
+        legacy_entry.remove("ast_version");
+        legacy_entry.insert(
+            "semantic_hash".into(),
+            serde_json::Value::String("stale-semantic".into()),
+        );
+        graphoxide_core::write_json_atomic(&manifest_path, &legacy_manifest, true)
+            .expect("write legacy manifest fixture");
+
+        let rebuilt = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("schema-invalidated DOT scan");
+        assert_eq!(rebuilt.changed_sources, 1);
+        assert_eq!(rebuilt.unchanged_sources, 0);
+        assert_eq!(
+            serde_json::to_vec(&rebuilt.extractions).expect("serialize rebuilt DOT facts"),
+            expected_extraction,
+            "schema invalidation must reproduce deterministic DOT facts"
+        );
+        let next_entry = rebuilt
+            .pending_manifest
+            .entries
+            .get("design.dot")
+            .expect("rebuilt DOT manifest entry");
+        assert_eq!(next_entry.ast_version, super::cache::AST_CACHE_VERSION);
+        assert!(
+            next_entry.semantic_hash.is_empty(),
+            "semantic hashes from an older AST schema must not carry forward"
+        );
+        commit_runtime_baseline(rebuilt, &fixture.root, &output);
+
+        let graph_before = fs::read(output.join("graph.json")).expect("read rebuilt graph");
+        let manifest_before = fs::read(&manifest_path).expect("read rebuilt manifest");
+        let unchanged = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("current-schema unchanged DOT scan");
+        assert_eq!(unchanged.changed_sources, 0);
+        assert_eq!(unchanged.unchanged_sources, 1);
+        assert!(unchanged.extractions.is_empty());
+        unchanged
+            .pending_manifest
+            .commit()
+            .expect("commit unchanged current manifest");
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread current manifest"),
+            manifest_before,
+            "a current-version rerun must preserve manifest bytes"
+        );
+        assert_eq!(
+            fs::read(output.join("graph.json")).expect("reread rebuilt graph"),
+            graph_before,
+            "an unchanged rerun must leave graph bytes untouched"
+        );
     }
 
     #[test]

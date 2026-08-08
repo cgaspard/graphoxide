@@ -1,0 +1,9 @@
+digraph ServiceFlow {
+  graph [label="Service flow", rankdir=LR]
+  node [shape=box, color=purple]
+  edge [color=blue]
+
+  api [label="API"]
+  database [label="Database"]
+  api -> database [label="queries"]
+}

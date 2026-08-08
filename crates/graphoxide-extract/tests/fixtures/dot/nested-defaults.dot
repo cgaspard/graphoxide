@@ -1,0 +1,17 @@
+digraph NestedDefaults {
+  graph [fontname="Inter"]
+  node [shape=box, color=purple]
+  edge [color=blue]
+
+  outside_before
+  subgraph cluster_services {
+    label="Services"
+    node [color=green]
+    api
+    subgraph persistence {
+      database [shape=cylinder]
+    }
+    api -> database
+  }
+  outside_after
+}

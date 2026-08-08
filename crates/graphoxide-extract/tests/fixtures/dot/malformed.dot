@@ -1,0 +1,6 @@
+digraph Recoverable {
+  good -> retained
+  broken [label]
+  @
+  after -> recovery
+}

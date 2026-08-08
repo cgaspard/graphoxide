@@ -1,0 +1,5 @@
+digraph Labels {
+  "service" + "-api" [label=<<TABLE><TR><TD><B>API</B></TD></TR></TABLE>>]
+  2.34 [label="Numeric ID"]
+  "service-api" -> 2.34 [label=<request <I>flow</I>>]
+}

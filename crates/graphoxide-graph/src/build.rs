@@ -273,7 +273,8 @@ pub fn shortest_unique_suffix(source_file: &str, all_source_files: &BTreeSet<Str
 pub fn disambiguate_file_labels_in_nodes(nodes: &mut [Node]) {
     let mut groups: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
     for (index, node) in nodes.iter().enumerate() {
-        if !is_file_node_label(&node.label, &node.source_file) {
+        if is_declared_graphviz_entity(node) || !is_file_node_label(&node.label, &node.source_file)
+        {
             continue;
         }
         let normalized = node.source_file.replace('\\', "/");
@@ -976,6 +977,21 @@ fn is_structural_node(node: &Node) -> bool {
         == Some(true)
 }
 
+/// Graphviz IDs and labels are grammar-defined entity data, even when a node's
+/// display label happens to equal the source filename. File-node heuristics
+/// must not rewrite or merge those declared identities.
+fn is_declared_graphviz_entity(node: &Node) -> bool {
+    node.extra
+        .get("diagram_format")
+        .and_then(|value| value.as_str())
+        == Some("graphviz")
+        && node
+            .extra
+            .get("dot_id")
+            .and_then(|value| value.as_str())
+            .is_some()
+}
+
 fn document_twin_remap(nodes: &BTreeMap<String, Node>) -> BTreeMap<String, String> {
     let mut remap = BTreeMap::new();
     for (id, canonical) in nodes {
@@ -985,7 +1001,9 @@ fn document_twin_remap(nodes: &BTreeMap<String, Node>) -> BTreeMap<String, Strin
         let Some(bare) = nodes.get(bare_id) else {
             continue;
         };
-        if canonical.file_type == "document"
+        if !is_declared_graphviz_entity(canonical)
+            && !is_declared_graphviz_entity(bare)
+            && canonical.file_type == "document"
             && bare.file_type == "document"
             && !canonical.source_file.is_empty()
             && canonical.source_file == bare.source_file

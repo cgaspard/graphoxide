@@ -399,7 +399,7 @@ fn deduplicate_engine(
     let mut union_find = UnionFind::new(unique_nodes.len());
     let mut norm_groups = BTreeMap::<String, Vec<usize>>::new();
     for (index, node) in unique_nodes.iter().enumerate() {
-        if node.file_type == "code" {
+        if preserves_declared_identity(node) {
             continue;
         }
         let normalized = normalized_label(&node.label);
@@ -452,7 +452,7 @@ fn deduplicate_engine(
     let mut candidate_norms = BTreeMap::new();
     let mut seen_norms = BTreeSet::new();
     for (index, node) in unique_nodes.iter().enumerate() {
-        if node.file_type == "code" {
+        if preserves_declared_identity(node) {
             continue;
         }
         let normalized = normalized_label(&node.label);
@@ -573,7 +573,13 @@ fn deduplicate_engine(
         if edge.extra.contains_key("_tgt") {
             edge.extra.insert("_tgt".into(), target.into());
         }
-        if edge.source == edge.target {
+        let declared_graphviz_self_loop = original.true_source() == original.true_target()
+            && original
+                .extra
+                .get("diagram_format")
+                .and_then(serde_json::Value::as_str)
+                == Some("graphviz");
+        if edge.source == edge.target && !declared_graphviz_self_loop {
             report.self_loops_dropped += 1;
         } else {
             deduped_edges.push(edge);
@@ -611,6 +617,19 @@ fn crossfile_file_anchored(left: &Node, right: &Node) -> bool {
     }
     matches!(left.file_type.as_str(), "rationale" | "document")
         || matches!(right.file_type.as_str(), "rationale" | "document")
+}
+
+/// Code symbols and grammar-defined DOT entities carry identity that is
+/// stronger than their display label. Two DOT nodes may intentionally share a
+/// label, including within the same source graph, without denoting one entity.
+fn preserves_declared_identity(node: &Node) -> bool {
+    node.file_type == "code"
+        || (node
+            .extra
+            .get("diagram_format")
+            .and_then(serde_json::Value::as_str)
+            == Some("graphviz")
+            && node.extra.contains_key("dot_id"))
 }
 
 fn resolve_endpoint(value: &str, remap: &BTreeMap<String, String>) -> String {
@@ -696,6 +715,8 @@ pub(crate) fn deduplicate_with_report(graph: &mut KnowledgeGraph) -> Deduplicati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graphoxide_core::Confidence;
+    use serde_json::json;
 
     #[test]
     fn entropy_distinguishes_repetition() {
@@ -712,5 +733,51 @@ mod tests {
     fn normalization_uses_unicode_casefolding() {
         assert_eq!(normalized_label("Straße"), "strasse");
         assert_eq!(normalized_label("Ｇｒａｐｈ＿Ｏｘｉｄｅ"), "graph oxide");
+    }
+
+    #[test]
+    fn dot_identity_and_declared_self_loops_survive_semantic_deduplication() {
+        let node = |id: &str| Node {
+            id: id.into(),
+            label: "Same display label".into(),
+            file_type: "document".into(),
+            source_file: "architecture.dot".into(),
+            source_location: Some("L1".into()),
+            community: None,
+            extra: BTreeMap::from([
+                ("diagram_format".into(), json!("graphviz")),
+                ("dot_id".into(), json!(id)),
+            ]),
+        };
+        let mut graph = KnowledgeGraph {
+            nodes: vec![node("dot_a"), node("dot_b")],
+            links: vec![
+                Edge {
+                    source: "dot_a".into(),
+                    target: "dot_a".into(),
+                    relation: "flows_to".into(),
+                    confidence: Confidence::Extracted,
+                    source_file: "architecture.dot".into(),
+                    extra: BTreeMap::from([("diagram_format".into(), json!("graphviz"))]),
+                },
+                Edge {
+                    source: "dot_b".into(),
+                    target: "dot_b".into(),
+                    relation: "generic_self_loop".into(),
+                    confidence: Confidence::Extracted,
+                    source_file: "architecture.dot".into(),
+                    extra: BTreeMap::new(),
+                },
+            ],
+            ..KnowledgeGraph::default()
+        };
+
+        let report = deduplicate_with_report(&mut graph);
+        assert_eq!(report.same_label_nodes_merged, 0);
+        assert_eq!(report.self_loops_dropped, 1);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.links.len(), 1);
+        assert_eq!(graph.links[0].source, graph.links[0].target);
+        assert_eq!(graph.links[0].relation, "flows_to");
     }
 }

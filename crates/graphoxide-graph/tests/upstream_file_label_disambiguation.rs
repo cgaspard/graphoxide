@@ -3,6 +3,7 @@ use graphoxide_graph::{
     disambiguate_file_labels_in_extractions, disambiguate_file_labels_in_nodes, is_file_node_label,
     shortest_unique_suffix,
 };
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 fn node(id: &str, label: &str, source_file: &str) -> Node {
@@ -118,4 +119,41 @@ fn test_three_way_collision_grows_suffix_until_unique() {
     disambiguate_file_labels_in_nodes(&mut nodes);
     assert_eq!(nodes[0].label, "a/x/index.ts");
     assert_eq!(nodes[1].label, "b/x/index.ts");
+}
+
+#[test]
+fn test_graphviz_file_roots_are_qualified_without_rewriting_declared_labels() {
+    let mut root_a = node("root_a", "architecture.dot", "a/architecture.dot");
+    root_a.file_type = "document".into();
+    root_a
+        .extra
+        .insert("diagram_format".into(), json!("graphviz"));
+    let mut root_b = node("root_b", "architecture.dot", "b/architecture.dot");
+    root_b.file_type = "document".into();
+    root_b
+        .extra
+        .insert("diagram_format".into(), json!("graphviz"));
+    let mut declared_a = node("declared_a", "architecture.dot", "a/architecture.dot");
+    declared_a.file_type = "document".into();
+    declared_a.extra.extend([
+        ("diagram_format".into(), json!("graphviz")),
+        ("dot_id".into(), json!("architecture.dot")),
+    ]);
+    let mut declared_b = node("declared_b", "architecture.dot", "b/architecture.dot");
+    declared_b.file_type = "document".into();
+    declared_b.extra.extend([
+        ("diagram_format".into(), json!("graphviz")),
+        ("dot_id".into(), json!("architecture.dot")),
+    ]);
+    let mut nodes = vec![root_a, root_b, declared_a, declared_b];
+
+    disambiguate_file_labels_in_nodes(&mut nodes);
+    let labels = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.label.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(labels["root_a"], "a/architecture.dot");
+    assert_eq!(labels["root_b"], "b/architecture.dot");
+    assert_eq!(labels["declared_a"], "architecture.dot");
+    assert_eq!(labels["declared_b"], "architecture.dot");
 }

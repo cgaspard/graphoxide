@@ -3,10 +3,11 @@
 //! The module deliberately accepts bytes and a logical source name rather than
 //! a filesystem path.  It is intended to run on the compute pool after the
 //! I/O plane has admitted a bounded source allocation.  Textual diagram
-//! languages do not share one complete grammar, so this module only emits
-//! facts that are explicit in the input and labels all recovered facts with
-//! their source format.  Invalid XML/JSON is an error (and therefore a caller
-//! diagnostic), never a partly-successful semantic extraction.
+//! languages do not share one grammar. Graphviz DOT is delegated to its
+//! complete bounded parser; the remaining adapters conservatively emit only
+//! structure explicit in their source format. Invalid XML/JSON is an error
+//! (and therefore a caller diagnostic), never a partly-successful semantic
+//! extraction.
 
 use anyhow::{bail, ensure, Context as _};
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
@@ -29,18 +30,6 @@ const MAX_NODES: usize = 100_000;
 const MAX_EDGES: usize = 250_000;
 const MAX_LABEL_BYTES: usize = 512;
 
-static DOT_EDGE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)(?:\"(?P<a_q>(?:\\.|[^\"])*)\"|(?P<a>[A-Za-z_][A-Za-z0-9_:.-]*))\s*(?P<op>->|--)\s*(?:\"(?P<b_q>(?:\\.|[^\"])*)\"|(?P<b>[A-Za-z_][A-Za-z0-9_:.-]*))(?:\s*\[(?P<attrs>[^\]]*)\])?"#)
-        .expect("valid DOT edge expression")
-});
-static DOT_NODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)(?:\"(?P<id_q>(?:\\.|[^\"])*)\"|(?P<id>[A-Za-z_][A-Za-z0-9_:.-]*))\s*\[(?P<attrs>[^\]]*)\]"#)
-        .expect("valid DOT node expression")
-});
-static DOT_SUBGRAPH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)\bsubgraph\s+(?:\"(?P<id_q>(?:\\.|[^\"])*)\"|(?P<id>[A-Za-z_][A-Za-z0-9_:.-]*)?)\s*\{"#)
-        .expect("valid DOT subgraph expression")
-});
 static DECLARATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?mi)^\s*(?:abstract\s+)?(?P<kind>class|interface|enum|entity|actor|participant|boundary|control|database|component|node|cloud|queue|usecase|state|package|namespace|rectangle|folder|frame)\s*(?:\"(?P<quoted>[^\"]+)\"|(?P<name>[A-Za-z_][A-Za-z0-9_.:-]*))"#)
         .expect("valid declaration expression")
@@ -92,11 +81,14 @@ pub(crate) fn extract_diagram_bytes(
         "diagram source exceeds {MAX_BYTES} byte limit"
     );
     let format = format_for(path, bytes);
+    if format == DiagramFormat::Dot {
+        return crate::dot::extract_dot_bytes(source_file, bytes);
+    }
     let text = std::str::from_utf8(bytes)
         .with_context(|| format!("diagram source is not UTF-8: {source_file}"))?;
     let mut state = DiagramState::new(source_file, format, bytes);
     match format {
-        DiagramFormat::Dot => parse_dot(text, &mut state),
+        DiagramFormat::Dot => unreachable!("DOT uses its dedicated grammar-aware parser"),
         DiagramFormat::Mermaid => parse_mermaid(text, &mut state),
         DiagramFormat::PlantUml => parse_plantuml(text, &mut state),
         DiagramFormat::D2 => parse_d2(text, &mut state),
@@ -421,101 +413,6 @@ fn clean_identifier(value: &str) -> String {
         .trim_matches(['\"', '\'', '`', '[', ']', '(', ')', '{', '}', '<', '>'])
         .trim()
         .to_owned()
-}
-
-fn attr_value(attrs: &str, name: &str) -> Option<String> {
-    let needle = format!("{name}=");
-    let at = attrs.find(&needle)? + needle.len();
-    let value = attrs[at..].trim_start();
-    if let Some(rest) = value.strip_prefix('\"') {
-        return rest.split('\"').next().map(str::to_owned);
-    }
-    value
-        .split(|c: char| c == ',' || c == ']' || c.is_whitespace())
-        .next()
-        .map(str::to_owned)
-}
-
-fn strip_comments_dot(source: &str) -> String {
-    let mut result = String::with_capacity(source.len());
-    let mut quote = false;
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\"' {
-            quote = !quote;
-            result.push(ch);
-            continue;
-        }
-        if !quote && ch == '/' && chars.peek() == Some(&'/') {
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    result.push('\n');
-                    break;
-                }
-            }
-            continue;
-        }
-        if !quote && ch == '#' {
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    result.push('\n');
-                    break;
-                }
-            }
-            continue;
-        }
-        result.push(ch);
-    }
-    result
-}
-
-fn parse_dot(source: &str, state: &mut DiagramState<'_>) {
-    let clean = strip_comments_dot(source);
-    for captures in DOT_SUBGRAPH.captures_iter(&clean) {
-        let whole = captures.get(0).expect("match");
-        let local = captures
-            .name("id_q")
-            .or_else(|| captures.name("id"))
-            .map_or("subgraph", |value| value.as_str());
-        let id = state.node(
-            local,
-            local.trim_start_matches("cluster_"),
-            "cluster",
-            whole.start(),
-        );
-        state.contain(&state.root.clone(), &id, whole.start());
-    }
-    for captures in DOT_NODE.captures_iter(&clean) {
-        let whole = captures.get(0).expect("match");
-        let local = captures
-            .name("id_q")
-            .or_else(|| captures.name("id"))
-            .map_or("", |value| value.as_str());
-        let attrs = captures.name("attrs").map_or("", |value| value.as_str());
-        let label = attr_value(attrs, "label").unwrap_or_else(|| local.into());
-        state.node(local, &label, "node", whole.start());
-    }
-    for captures in DOT_EDGE.captures_iter(&clean) {
-        let whole = captures.get(0).expect("match");
-        let a = captures
-            .name("a_q")
-            .or_else(|| captures.name("a"))
-            .map_or("", |value| value.as_str());
-        let b = captures
-            .name("b_q")
-            .or_else(|| captures.name("b"))
-            .map_or("", |value| value.as_str());
-        let a_id = state.node(a, a, "node", whole.start());
-        let b_id = state.node(b, b, "node", whole.start());
-        let attrs = captures.name("attrs").map_or("", |value| value.as_str());
-        let label = attr_value(attrs, "label");
-        let relation = if captures.name("op").is_some_and(|op| op.as_str() == "--") {
-            "connected_to"
-        } else {
-            "flows_to"
-        };
-        state.edge(&a_id, &b_id, relation, label.as_deref(), whole.start());
-    }
 }
 
 fn parse_mermaid(source: &str, state: &mut DiagramState<'_>) {

@@ -4,8 +4,8 @@
 //! that disappears here can never appear in the graph, so unsupported,
 //! sensitive, ignored, and unreadable paths are all reported explicitly.
 
-use crate::format_registry::format_registry;
 pub use crate::format_registry::FileType;
+use crate::{cache::AST_CACHE_VERSION, format_registry::format_registry};
 use md5::{Digest as _, Md5};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -2842,6 +2842,7 @@ fn normalize_manifest_entry(value: &Value) -> Option<Map<String, Value>> {
     if let Some(number) = value.as_f64() {
         return Some(Map::from_iter([
             ("mtime".into(), Value::from(number)),
+            ("ast_version".into(), Value::from(0)),
             ("ast_hash".into(), Value::String(String::new())),
             ("semantic_hash".into(), Value::String(String::new())),
         ]));
@@ -2852,7 +2853,16 @@ fn normalize_manifest_entry(value: &Value) -> Option<Map<String, Value>> {
         entry.insert("ast_hash".into(), hash);
         entry.insert("semantic_hash".into(), Value::String(String::new()));
     }
+    entry.entry("ast_version").or_insert_with(|| Value::from(0));
     Some(entry)
+}
+
+fn manifest_ast_version(entry: &Map<String, Value>) -> u32 {
+    entry
+        .get("ast_version")
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or_default()
 }
 
 fn lexical_absolute(path: &Path) -> PathBuf {
@@ -3012,18 +3022,30 @@ pub fn save_manifest(
             .get("ast_hash")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let previous_ast_version = manifest_ast_version(&previous);
         let previous_semantic = previous
             .get("semantic_hash")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let ast = if matches!(options.kind, ManifestKind::Ast | ManifestKind::Both) {
+        let writes_ast = matches!(options.kind, ManifestKind::Ast | ManifestKind::Both);
+        let ast = if writes_ast {
             hash.clone()
         } else {
             previous_ast.to_owned()
         };
+        let ast_version = if writes_ast {
+            AST_CACHE_VERSION
+        } else if hash == previous_ast {
+            previous_ast_version
+        } else {
+            // A semantic-only pass has observed bytes that do not match the
+            // retained AST hash. Keep the old hash for compatibility, but
+            // invalidate its schema marker so an AST pass cannot skip it.
+            0
+        };
         let semantic = if matches!(options.kind, ManifestKind::Semantic | ManifestKind::Both) {
             hash.clone()
-        } else if hash == previous_ast {
+        } else if hash == previous_ast && previous_ast_version == AST_CACHE_VERSION {
             previous_semantic.to_owned()
         } else {
             String::new()
@@ -3032,6 +3054,7 @@ pub fn save_manifest(
             nfc(path),
             serde_json::json!({
                 "mtime": mtime,
+                "ast_version": ast_version,
                 "ast_hash": ast,
                 "semantic_hash": semantic,
             }),
@@ -3086,7 +3109,7 @@ pub fn detect_incremental(
             let current_mtime = modified_time(&physical).unwrap_or_default();
             let stored = manifest.get(&nfc(path));
             let changed = if let Some(number) = stored.and_then(Value::as_f64) {
-                current_mtime != number
+                kind != ManifestKind::Semantic || current_mtime != number
             } else if let Some(entry) = stored.and_then(Value::as_object) {
                 let normalized =
                     normalize_manifest_entry(&Value::Object(entry.clone())).unwrap_or_default();
@@ -3099,7 +3122,10 @@ pub fn detect_incremental(
                     .get(hash_key)
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                hash.is_empty()
+                let stale_ast_schema = kind != ManifestKind::Semantic
+                    && manifest_ast_version(&normalized) != AST_CACHE_VERSION;
+                stale_ast_schema
+                    || hash.is_empty()
                     || stored_mtime(&normalized).is_none_or(|mtime| {
                         current_mtime != mtime && content_md5(&physical) != hash
                     })
