@@ -66,7 +66,11 @@ fn reports_registry_capabilities_unknowns_sensitive_and_policy_outcomes() {
         Some(FormatCapability::SemanticFull)
     );
     assert_eq!(file("service.yaml").status, CoverageStatus::Covered);
-    assert_eq!(file("document.pdf").status, CoverageStatus::InventoryOnly);
+    assert_eq!(file("document.pdf").status, CoverageStatus::Covered);
+    assert_eq!(
+        file("document.pdf").declared_capability,
+        Some(FormatCapability::StructuralPartial)
+    );
     assert_eq!(file("report.docx").status, CoverageStatus::InventoryOnly);
     assert_eq!(file("Cargo.lock").status, CoverageStatus::ExcludedPolicy);
     assert_eq!(

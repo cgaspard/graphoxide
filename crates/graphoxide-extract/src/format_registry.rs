@@ -197,6 +197,20 @@ pub const BINARY_LIMITS: FormatLimits = FormatLimits {
     max_expansion_ratio: 1,
 };
 
+/// Effective ceilings enforced by the bounded PDF text/page adapter.
+///
+/// A successful extraction retains one document node plus one node and one
+/// containment edge per page. The expansion ratio bounds decoded stream and
+/// retained text growth relative to the admitted source bytes.
+pub const PDF_LIMITS: FormatLimits = FormatLimits {
+    max_input_bytes: 16 * 1024 * 1024,
+    max_nesting: 32,
+    max_records: 1_025,
+    max_container_members: 0,
+    max_recursion_depth: 0,
+    max_expansion_ratio: 64,
+};
+
 pub const CONTAINER_LIMITS: FormatLimits = FormatLimits {
     max_input_bytes: 512 * 1024 * 1024,
     max_nesting: 64,
@@ -836,9 +850,9 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         &["pdf"],
         &[],
         MAGIC_PDF,
-        FormatCapability::InventoryOnly,
+        FormatCapability::StructuralPartial,
         SchemaRequirement::NotRequired,
-        BINARY_LIMITS,
+        PDF_LIMITS,
         Some(FileType::Paper),
         true,
         false,
@@ -2027,7 +2041,7 @@ pub const fn format_registry() -> &'static FormatRegistry {
 mod tests {
     use super::{
         format_registry, ByteAdapterKind, FormatCapability, MagicRule, SchemaRequirement,
-        COLUMNAR_PROTOCOL_LIMITS, CONTAINER_LIMITS, DIAGRAM_LIMITS, ENGINEERING_LIMITS,
+        COLUMNAR_PROTOCOL_LIMITS, CONTAINER_LIMITS, DIAGRAM_LIMITS, ENGINEERING_LIMITS, PDF_LIMITS,
         PROTOCOL_LIMITS, SIMULATION_LIMITS, STRUCTURED_TEXT_LIMITS, WATCHED_EXTENSIONS,
     };
     use std::path::Path;
@@ -2053,7 +2067,11 @@ mod tests {
         );
         assert_eq!(
             registry.capability_for_extension("pdf"),
-            Some(FormatCapability::InventoryOnly)
+            Some(FormatCapability::StructuralPartial)
+        );
+        assert_eq!(
+            registry.find_by_extension("pdf").unwrap().limits,
+            PDF_LIMITS
         );
         assert_eq!(
             registry.classify_extension("png").unwrap().as_str(),

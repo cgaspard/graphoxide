@@ -625,20 +625,25 @@ fn validated_office_zip_from_checked_file(
     Some(archive)
 }
 
-/// Safely extract PDF text after enforcing the same raw-file ceiling used for
-/// untrusted Office inputs.
+/// Safely extract bounded PDF page text from one no-follow source generation.
 pub fn extract_pdf_text(path: &Path) -> String {
     extract_pdf_text_with_cap(path, OFFICE_MAX_RAW_BYTES)
 }
 
 pub fn extract_pdf_text_with_cap(path: &Path, cap: u64) -> String {
-    let Some(file) = open_source_with_size_cap(path, cap) else {
+    let limits = crate::pdf::PdfLimits::default();
+    let parser_cap = u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX);
+    let effective_cap = cap.min(parser_cap);
+    let Some(file) = open_source_with_size_cap(path, effective_cap) else {
         return String::new();
     };
-    let Some(bytes) = read_checked_source_with_cap(file, cap) else {
+    let Some(bytes) = read_checked_source_with_cap(file, effective_cap) else {
         return String::new();
     };
-    pdf_extract::extract_text_from_mem(&bytes).unwrap_or_default()
+    let source_file = path.to_string_lossy();
+    crate::pdf::extract_pdf_bytes(path, &source_file, &bytes, limits, None)
+        .map(|extraction| crate::pdf::extraction_text(&extraction))
+        .unwrap_or_default()
 }
 
 fn read_checked_source_with_cap(file: fs::File, cap: u64) -> Option<Vec<u8>> {

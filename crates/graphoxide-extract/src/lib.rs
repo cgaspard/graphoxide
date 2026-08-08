@@ -42,6 +42,7 @@ pub mod manifest_ingest;
 mod native;
 mod parser_budget;
 mod pascal;
+mod pdf;
 pub mod pg_introspect;
 mod php;
 mod project_path;

@@ -63,7 +63,7 @@ fn bedrock_response(blocks: Vec<Value>) -> Value {
 }
 
 #[test]
-fn test_pdf_routed_through_pypdf_not_readtext() {
+fn test_pdf_routed_through_bounded_pdf_reader_not_readtext() {
     let directory = TempDir::new().unwrap();
     let pdf = directory.path().join("paper.pdf");
     fs::write(&pdf, b"%PDF-1.4 RAWBINARYGARBAGE\0\xff").unwrap();
