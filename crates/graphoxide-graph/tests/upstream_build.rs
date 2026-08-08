@@ -1923,6 +1923,86 @@ fn test_doc_twin_merge_does_not_touch_code_symbols() {
 }
 
 #[test]
+fn test_doc_twin_merge_preserves_declared_graphviz_ids() {
+    let graph = build_value(json!({
+        "nodes": [
+            {
+                "id": "architecture_diagram_graphviz_service",
+                "label": "service",
+                "file_type": "document",
+                "source_file": "architecture.dot",
+                "source_location": "L1",
+                "diagram_format": "graphviz",
+                "dot_id": "service"
+            },
+            {
+                "id": "architecture_diagram_graphviz_service_doc",
+                "label": "service_doc",
+                "file_type": "document",
+                "source_file": "architecture.dot",
+                "source_location": "L2",
+                "diagram_format": "graphviz",
+                "dot_id": "service_doc"
+            }
+        ],
+        "edges": [{
+            "source": "architecture_diagram_graphviz_service",
+            "target": "architecture_diagram_graphviz_service_doc",
+            "relation": "flows_to",
+            "source_file": "architecture.dot",
+            "confidence": "EXTRACTED",
+            "diagram_format": "graphviz"
+        }]
+    }));
+    assert!(has_node(&graph, "architecture_diagram_graphviz_service"));
+    assert!(has_node(
+        &graph,
+        "architecture_diagram_graphviz_service_doc"
+    ));
+    assert!(has_edge(
+        &graph,
+        "architecture_diagram_graphviz_service",
+        "architecture_diagram_graphviz_service_doc"
+    ));
+}
+
+#[test]
+fn test_diagram_origin_remains_authoritative_during_semantic_enrichment() {
+    let graph = build_value(json!({
+        "nodes": [
+            {
+                "id": "architecture_diagram_graphviz_api",
+                "label": "Declared API",
+                "file_type": "document",
+                "source_file": "architecture.dot",
+                "source_location": "L2",
+                "_origin": "diagram",
+                "diagram_format": "graphviz",
+                "dot_id": "api",
+                "type": "node"
+            },
+            {
+                "id": "architecture_diagram_graphviz_api",
+                "label": "Model rewrite",
+                "file_type": "concept",
+                "source_file": "architecture.dot",
+                "_origin": "semantic",
+                "type": "concept",
+                "summary": "Optional enrichment"
+            }
+        ],
+        "edges": []
+    }));
+    let api = node(&graph, "architecture_diagram_graphviz_api");
+    assert_eq!(api.label, "Declared API");
+    assert_eq!(api.file_type, "document");
+    assert_eq!(api.extra["_origin"], "diagram");
+    assert_eq!(api.extra["type"], "node");
+    assert_eq!(api.extra["dot_id"], "api");
+    assert_eq!(api.extra["summary"], "Optional enrichment");
+}
+
+#[test]
 fn test_build_from_json_prunes_dangling_hyperedge_members() {
     let graph = build_value(json!({
         "nodes":[

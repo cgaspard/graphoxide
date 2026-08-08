@@ -86,6 +86,172 @@ fn coverage(output_root: &Path) -> CoverageReport {
 }
 
 #[test]
+fn semantic_dot_is_identical_after_index_update_and_clean_rebuild() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let clean_project = fixture.path().join("clean-project");
+    fs::create_dir_all(&project).expect("project directory");
+    let diagram = project.join("architecture.dot");
+    fs::write(
+        &diagram,
+        "digraph Platform { node [shape=box]; api -> database [label=queries]; }\n",
+    )
+    .expect("initial DOT");
+
+    let indexed = graphoxide(&project)
+        .arg("index")
+        .arg(&project)
+        .arg("--force")
+        .arg("--no-cluster")
+        .arg("--json")
+        .output()
+        .expect("index DOT project");
+    assert!(indexed.status.success(), "{}", output_text(&indexed));
+    let graph_path = project.join("graphoxide-out/graph.json");
+    let initial_graph: Value =
+        serde_json::from_slice(&fs::read(&graph_path).expect("indexed graph")).expect("graph JSON");
+    let nodes = initial_graph["nodes"].as_array().expect("raw graph nodes");
+    assert!(nodes.iter().any(|node| {
+        node["diagram_format"] == "graphviz"
+            && node["parse_status"] == "complete"
+            && node["format_capability"] == "semantic_full"
+    }));
+    assert!(nodes.iter().any(|node| node["label"] == "api"));
+    assert!(nodes.iter().any(|node| node["label"] == "database"));
+    assert!(initial_graph["edges"].as_array().is_some_and(|edges| {
+        edges
+            .iter()
+            .any(|edge| edge["relation"] == "flows_to" && edge["dot_occurrence_count"] == 1)
+    }));
+
+    let changed_source =
+        "digraph Platform { node [shape=box]; api -> cache -> database [label=queries]; }\n";
+    fs::write(&diagram, changed_source).expect("changed DOT");
+    let updated = graphoxide(&project)
+        .arg("update")
+        .arg(&project)
+        .arg("--no-cluster")
+        .arg("--json")
+        .output()
+        .expect("incremental DOT update");
+    assert!(updated.status.success(), "{}", output_text(&updated));
+
+    fs::create_dir_all(&clean_project).expect("clean project directory");
+    fs::write(clean_project.join("architecture.dot"), changed_source).expect("clean DOT source");
+    let clean = graphoxide(&clean_project)
+        .arg("update")
+        .arg(&clean_project)
+        .arg("--force")
+        .arg("--no-cluster")
+        .arg("--json")
+        .output()
+        .expect("clean DOT rebuild");
+    assert!(clean.status.success(), "{}", output_text(&clean));
+    assert_eq!(
+        fs::read(&graph_path).expect("updated graph"),
+        fs::read(clean_project.join("graphoxide-out/graph.json")).expect("clean graph"),
+        "incremental DOT updates must match a clean rebuild byte-for-byte"
+    );
+}
+
+#[test]
+fn graph_audit_surfaces_incomplete_semantic_dot_parses() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let diagram = project.join("architecture.dot");
+    fs::write(&diagram, "digraph Broken { good -> ; retained -> node; }\n").expect("malformed DOT");
+
+    let report = graphoxide(&project)
+        .arg("audit")
+        .arg(&project)
+        .arg("--json")
+        .arg("--force")
+        .output()
+        .expect("audit malformed DOT");
+    assert!(report.status.success(), "{}", output_text(&report));
+    let report_json: Value = serde_json::from_slice(&report.stdout).expect("audit JSON");
+    assert!(report_json["strict_violations"]
+        .as_u64()
+        .is_some_and(|value| value > 0));
+    assert!(report_json["findings"].as_array().is_some_and(|findings| {
+        findings.iter().any(|finding| {
+            finding["severity"] == "error"
+                && finding["code"] == "semantic_parse_incomplete"
+                && finding["source_file"] == "architecture.dot"
+        })
+    }));
+
+    let strict = graphoxide(&project)
+        .arg("audit")
+        .arg(&project)
+        .arg("--json")
+        .arg("--strict")
+        .arg("--force")
+        .output()
+        .expect("strict audit malformed DOT");
+    assert!(
+        !strict.status.success(),
+        "strict audit must reject recovered DOT"
+    );
+    let _: Value = serde_json::from_slice(&strict.stdout).expect("strict audit JSON");
+
+    fs::write(&diagram, "digraph Valid { good -> retained; }\n").expect("valid DOT");
+    let valid = graphoxide(&project)
+        .arg("audit")
+        .arg(&project)
+        .arg("--json")
+        .arg("--strict")
+        .arg("--force")
+        .output()
+        .expect("strict audit valid DOT");
+    assert!(valid.status.success(), "{}", output_text(&valid));
+    let valid_json: Value = serde_json::from_slice(&valid.stdout).expect("valid audit JSON");
+    assert_eq!(valid_json["strict_violations"], 0);
+}
+
+#[test]
+fn clustered_index_accepts_bounded_repeated_dot_edges() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    fs::create_dir_all(&project).expect("project directory");
+    let mut source = String::from("digraph Repeated {\n");
+    for _ in 0..10_000 {
+        source.push_str("  source -> target;\n");
+    }
+    source.push_str("}\n");
+    fs::write(project.join("repeated.dot"), source).expect("repeated DOT fixture");
+
+    let indexed = graphoxide(&project)
+        .arg("index")
+        .arg(&project)
+        .arg("--force")
+        .arg("--json")
+        .output()
+        .expect("cluster and index bounded DOT project");
+    assert!(indexed.status.success(), "{}", output_text(&indexed));
+
+    let graph: Value = serde_json::from_slice(
+        &fs::read(project.join("graphoxide-out/graph.json")).expect("clustered graph"),
+    )
+    .expect("clustered graph JSON");
+    let nodes = graph["nodes"].as_array().expect("graph nodes");
+    let root = nodes
+        .iter()
+        .find(|node| node["diagram_format"] == "graphviz" && node["type"] == "diagram")
+        .expect("DOT root");
+    assert_eq!(root["parse_status"], "partial");
+    assert!(root["dot_diagnostics"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["code"] == "dot_edge_metadata_limit")
+    }));
+    assert!(graph["links"]
+        .as_array()
+        .is_some_and(|edges| { edges.iter().any(|edge| edge["relation"] == "flows_to") }));
+}
+
+#[test]
 fn index_and_extract_reject_nonexistent_source_roots_without_creating_paths() {
     let fixture = tempfile::tempdir().expect("temporary fixture");
     for command in ["index", "extract"] {

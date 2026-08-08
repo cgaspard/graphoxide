@@ -15,7 +15,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
-pub const AST_CACHE_VERSION: u32 = 25;
+// Bump whenever a built-in extractor's persisted fact schema changes. Stage 3
+// replaces the partial DOT scanner with semantic Graphviz facts, so v25 entries
+// must not be replayed into an incremental build.
+pub const AST_CACHE_VERSION: u32 = 26;
 
 /// Binary framing for future cache artifacts.
 ///
@@ -173,6 +176,12 @@ fn decode_cache_json(bytes: &[u8]) -> Option<Value> {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub mtime: f64,
+    /// Persisted extractor fact-schema version.
+    ///
+    /// Legacy manifests omit this field and deserialize as version zero so
+    /// they are treated as cache misses after schema-aware manifests ship.
+    #[serde(default)]
+    pub ast_version: u32,
     #[serde(default)]
     pub ast_hash: String,
     #[serde(default)]
@@ -1524,6 +1533,7 @@ pub fn changed_files(
             .unwrap_or_default()
             .as_secs_f64();
         if let Some(old) = manifest.get(relative)
+            && old.ast_version == AST_CACHE_VERSION
             && old.mtime == mtime
             && !old.ast_hash.is_empty()
         {
@@ -1533,7 +1543,7 @@ pub fn changed_files(
         let hash = format!("{:x}", Md5::digest(&bytes));
         if manifest
             .get(relative)
-            .is_some_and(|old| old.ast_hash == hash)
+            .is_some_and(|old| old.ast_version == AST_CACHE_VERSION && old.ast_hash == hash)
         {
             continue;
         }
@@ -1682,6 +1692,48 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_manifest_entries_default_to_schema_zero_and_are_requeued() {
+        let temp = tempfile::tempdir().expect("temporary manifest root");
+        let source = temp.path().join("design.dot");
+        let source_bytes = b"digraph { api -> database; }\n";
+        fs::write(&source, source_bytes).expect("write DOT source");
+        let mtime = fs::metadata(&source)
+            .expect("DOT metadata")
+            .modified()
+            .expect("DOT mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let hash = format!("{:x}", Md5::digest(source_bytes));
+        let mut entry: ManifestEntry = serde_json::from_value(serde_json::json!({
+            "mtime": mtime,
+            "ast_hash": hash,
+            "semantic_hash": "legacy-semantic"
+        }))
+        .expect("deserialize legacy manifest entry");
+        assert_eq!(entry.ast_version, 0);
+
+        let files = vec![("design.dot".to_owned(), source)];
+        let mut manifest = Manifest::from([("design.dot".to_owned(), entry.clone())]);
+        assert_eq!(
+            changed_files(temp.path(), &files, &manifest)
+                .expect("compare legacy manifest")
+                .len(),
+            1,
+            "a content-identical legacy entry must be re-extracted"
+        );
+
+        entry.ast_version = AST_CACHE_VERSION;
+        manifest.insert("design.dot".to_owned(), entry);
+        assert!(
+            changed_files(temp.path(), &files, &manifest)
+                .expect("compare current manifest")
+                .is_empty(),
+            "a current content-identical entry remains unchanged"
+        );
+    }
 
     #[test]
     fn cache_frame_round_trips_without_copying_payload() {

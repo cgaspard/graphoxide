@@ -1,0 +1,4 @@
+strict graph Connections {
+  a -- b [color=red]
+  b -- a [label="merged"]
+}

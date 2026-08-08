@@ -807,7 +807,7 @@ fn reconcile_graph(
             }
             let rebuilt = identity_in(&node.source_file, &evidence.rebuilt_sources, paths);
             if rebuilt {
-                return evidence.full_rebuild && !is_ast_node(node);
+                return !is_ast_node(node);
             }
             !(is_ast_node(node)
                 && (evidence.full_rebuild || evidence.current_sources.is_empty())
@@ -1515,7 +1515,7 @@ where
     Ok(result.result)
 }
 
-fn ast_document(path: &Path) -> bool {
+fn markdown_ast_document(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|value| value.to_str())
@@ -1524,6 +1524,18 @@ fn ast_document(path: &Path) -> bool {
             .as_str(),
         "md" | "markdown" | "mdx" | "qmd"
     )
+}
+
+fn ast_document(path: &Path) -> bool {
+    markdown_ast_document(path)
+        || matches!(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
+            "dot" | "gv" | "graphviz"
+        )
 }
 
 fn detected_ast_files_in(files_by_type: &detect::DetectedFiles) -> Vec<PathBuf> {
@@ -1554,7 +1566,13 @@ fn usable_incremental_manifest(path: &Path) -> bool {
     fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, Value>>(&bytes).ok())
-        .is_some()
+        .is_some_and(|manifest| {
+            !manifest.is_empty()
+                && manifest.values().all(|entry| {
+                    entry.get("ast_version").and_then(Value::as_u64)
+                        == Some(u64::from(graphoxide_extract::cache::AST_CACHE_VERSION))
+                })
+        })
 }
 
 #[derive(Debug, Default)]
@@ -1601,7 +1619,10 @@ fn semantic_doc_sources(
 ) -> BTreeSet<PathBuf> {
     let ast_docs = ast_files
         .iter()
-        .filter(|path| ast_document(path))
+        // Markdown semantic documents are intentionally owned by their
+        // enrichment records. DOT remains a deterministic parser-owned source
+        // even when optional semantic overlay nodes share its source path.
+        .filter(|path| markdown_ast_document(path))
         .filter_map(|path| absolute_identity(path, &paths.project_root))
         .collect::<BTreeSet<_>>();
     existing
@@ -1877,11 +1898,12 @@ fn rebuild_once(
     let graph_path = context.output.join("graph.json");
     let manifest_path = context.output.join("manifest.json");
     let existing = load_existing(&graph_path, options.max_graph_bytes)?;
+    let incremental_manifest_eligible =
+        existing.is_some() && usable_incremental_manifest(&manifest_path);
     let derive_incremental_paths = changed_paths.is_none()
         && options.scope == RebuildScope::Incremental
-        && existing.is_some()
-        && usable_incremental_manifest(&manifest_path);
-    let use_explicit_changed_paths = changed_paths.is_some() && existing.is_some();
+        && incremental_manifest_eligible;
+    let use_explicit_changed_paths = changed_paths.is_some() && incremental_manifest_eligible;
     let scope = if use_explicit_changed_paths || derive_incremental_paths {
         RebuildScope::Incremental
     } else {

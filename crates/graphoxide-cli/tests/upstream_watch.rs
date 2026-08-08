@@ -944,6 +944,15 @@ fn test_manual_incremental_no_change_reports_unchanged_with_telemetry() {
     write(temp.path().join("a.py"), "def alpha():\n    return 1\n");
     write(temp.path().join("b.py"), "def beta():\n    return 2\n");
     assert_eq!(build(temp.path(), true).status, RebuildStatus::Rebuilt);
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(temp.path().join(OUTPUT_DIRECTORY).join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(manifest
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|entry| { entry["ast_version"] == graphoxide_extract::cache::AST_CACHE_VERSION }));
 
     let mut opts = options(temp.path(), true);
     opts.scope = RebuildScope::Incremental;
@@ -1053,6 +1062,98 @@ fn test_explicit_watch_change_without_a_baseline_builds_the_full_corpus() {
     let source = sources(&graph(temp.path()));
     assert!(source.contains("a.py"));
     assert!(source.contains("b.py"));
+}
+
+#[test]
+fn test_explicit_watch_change_rebuilds_legacy_manifest_corpus_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let dot = temp.path().join("architecture.gv");
+    let app = temp.path().join("app.py");
+    write(&dot, "digraph architecture { old_service -> database; }\n");
+    write(&app, "def app():\n    return 1\n");
+    assert_eq!(build(temp.path(), true).status, RebuildStatus::Rebuilt);
+
+    rewrite_with_new_mtime(
+        &dot,
+        "digraph architecture { fresh_service -> database; }\n",
+    );
+    rewrite_with_new_mtime(&app, "def app():\n    return 2\n");
+    let manifest_path = temp.path().join(OUTPUT_DIRECTORY).join("manifest.json");
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    for entry in legacy.as_object_mut().unwrap().values_mut() {
+        entry.as_object_mut().unwrap().remove("ast_version");
+    }
+    graphoxide_core::write_json_atomic(&manifest_path, &legacy, true).unwrap();
+
+    let mut opts = options(temp.path(), true);
+    opts.changed_paths = Some(vec![PathBuf::from("app.py")]);
+    let upgraded = rebuild_project(temp.path(), &opts).unwrap();
+    assert_eq!(upgraded.scope, RebuildScope::Full);
+    assert_eq!(upgraded.stats.processed_files, 2);
+    let dot_ids = graph(temp.path())
+        .nodes
+        .into_iter()
+        .filter(|node| node.source_file == "architecture.gv")
+        .filter_map(|node| {
+            node.extra
+                .get("dot_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(dot_ids.contains("fresh_service"), "{dot_ids:?}");
+    assert!(!dot_ids.contains("old_service"), "{dot_ids:?}");
+    let current: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    assert!(current
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|entry| { entry["ast_version"] == graphoxide_extract::cache::AST_CACHE_VERSION }));
+
+    rewrite_with_new_mtime(&app, "def app():\n    return 3\n");
+    let incremental = rebuild_project(temp.path(), &opts).unwrap();
+    assert_eq!(incremental.scope, RebuildScope::Incremental);
+    assert_eq!(incremental.stats.processed_files, 1);
+    assert_eq!(incremental.stats.unchanged_files, 1);
+}
+
+#[test]
+fn test_dot_change_rebuilds_structural_facts_and_preserves_semantic_overlay() {
+    let temp = tempfile::tempdir().unwrap();
+    let dot = temp.path().join("architecture.dot");
+    write(&dot, "digraph architecture { old_service -> database; }\n");
+    assert_eq!(build(temp.path(), true).status, RebuildStatus::Rebuilt);
+
+    let mut seeded = graph(temp.path());
+    let mut overlay = node("architecture_summary", "architecture.dot", false);
+    overlay.label = "Architecture summary".into();
+    overlay.extra.insert("_origin".into(), json!("semantic"));
+    seeded.nodes.push(overlay);
+    write_graph(temp.path(), &seeded);
+
+    rewrite_with_new_mtime(
+        &dot,
+        "digraph architecture { fresh_service -> database; }\n",
+    );
+    let mut opts = options(temp.path(), true);
+    opts.changed_paths = Some(vec![PathBuf::from("architecture.dot")]);
+    let rebuilt = rebuild_project(temp.path(), &opts).unwrap();
+    assert_eq!(rebuilt.scope, RebuildScope::Incremental);
+    assert_eq!(rebuilt.stats.processed_files, 1);
+
+    let after = graph(temp.path());
+    let dot_ids = after
+        .nodes
+        .iter()
+        .filter(|node| node.source_file == "architecture.dot")
+        .filter_map(|node| node.extra.get("dot_id").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    assert!(dot_ids.contains("fresh_service"), "{dot_ids:?}");
+    assert!(!dot_ids.contains("old_service"), "{dot_ids:?}");
+    assert!(after.nodes.iter().any(|node| {
+        node.id == "architecture_summary"
+            && node.extra.get("_origin").and_then(Value::as_str) == Some("semantic")
+    }));
 }
 
 #[test]

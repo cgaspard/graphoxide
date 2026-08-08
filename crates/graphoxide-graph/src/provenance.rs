@@ -9,7 +9,7 @@ pub fn origin_is_structural(origin: &str) -> Option<bool> {
         // Some deterministic extractors are tree-sitter based; others are
         // specialized parsers or conservative fallback scanners. They retain
         // distinct origins for diagnostics but share build/replacement policy.
-        "ast" | "fallback" | "terraform" | "sql" | "dotnet" | "scip" => Some(true),
+        "ast" | "fallback" | "terraform" | "sql" | "dotnet" | "scip" | "diagram" => Some(true),
         _ => None,
     }
 }

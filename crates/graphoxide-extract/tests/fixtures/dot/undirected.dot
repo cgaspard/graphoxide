@@ -1,0 +1,4 @@
+graph Network {
+  router -- switch [label="uplink"]
+  switch -- workstation
+}
