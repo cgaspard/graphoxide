@@ -1,0 +1,12 @@
+version: 0.8.2
+date: 2026-08-08
+highlights:
+  - Build an associated graph, incremental manifest, and deterministic in-scope file coverage report with one bounded graphoxide index command.
+added:
+  - Add graphoxide index with human-readable and single-document JSON reports that include the coverage path, completion state, and SHA-256 association to the exact accepted graph bytes.
+changed:
+  - Keep graphoxide extract graph and JSON contracts compatible while sharing effective scan policy, runtime controls, and managed-output coordination with index.
+fixed:
+  - Harden managed publication with cooperative cancellation, strict per-artifact replacement, and graph-digest detection of stale coverage.
+  - Reject unsafe output, lock, build-configuration, and runtime-report paths, and bound ignore-policy processing for untrusted repositories.
+removed: []

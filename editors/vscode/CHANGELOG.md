@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2 — 2026-08-08
+
+- Bundled `graphoxide index`, which publishes a graph, incremental manifest, and
+  deterministic coverage report associated with the exact accepted graph bytes.
+- Hardened managed graph writes, cancellation, and untrusted ignore and output
+  paths while preserving existing `extract` behavior.
+- Recolored the Marketplace graph-cube icon with the shared purple and cyan
+  palette while preserving its geometry and activity-bar icon.
+
 ## 0.8.1 — 2026-08-07
 
 - Added deterministic file-coverage auditing through

@@ -1,0 +1,11 @@
+version: 0.8.2
+date: 2026-08-08
+highlights:
+  - Bundle the first-class Index workflow and align the Marketplace icon with the Graphoxide purple and cyan palette.
+added:
+  - Include graphoxide index in every platform-specific bundled CLI, publishing graph, manifest, and associated coverage artifacts in one bounded workflow.
+changed:
+  - Recolor the Marketplace graph-cube icon with midnight, violet, cyan, and lavender while preserving its geometry and activity-bar icon.
+fixed:
+  - Bundle coordinated graph writes, cooperative cancellation, and fail-closed handling for unsafe managed paths and ignore policies.
+removed: []
