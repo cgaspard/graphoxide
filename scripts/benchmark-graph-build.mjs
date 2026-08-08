@@ -879,6 +879,43 @@ export function validateRuntimeTelemetry(report, expected, commandName = 'grapho
   ) {
     throw new Error(`${commandName} admission evidence exceeds its configured bounds`);
   }
+  const cache = report.cache;
+  if (cache === null || Array.isArray(cache) || typeof cache !== 'object') {
+    throw new Error(`${commandName} must contain runtime cache telemetry`);
+  }
+  if (typeof cache.enabled !== 'boolean') {
+    throw new Error(`${commandName} cache telemetry has invalid enabled`);
+  }
+  for (const field of [
+    'metadata_hits',
+    'runtime_hits',
+    'legacy_hits',
+    'misses',
+    'bypasses',
+    'stale_or_corrupt',
+    'probe_failures',
+    'payload_reads_avoided',
+    'parses_avoided',
+    'stores',
+    'already_present',
+    'store_failures',
+  ]) {
+    if (!Number.isSafeInteger(cache[field]) || cache[field] < 0) {
+      throw new Error(`${commandName} cache telemetry has invalid ${field}`);
+    }
+  }
+  const expectedParsesAvoided =
+    cache.metadata_hits + cache.runtime_hits + cache.legacy_hits;
+  if (cache.parses_avoided !== expectedParsesAvoided) {
+    throw new Error(
+      `${commandName} cache telemetry parses_avoided does not match its hit counters`,
+    );
+  }
+  if (cache.payload_reads_avoided !== cache.metadata_hits) {
+    throw new Error(
+      `${commandName} cache telemetry payload_reads_avoided does not match metadata_hits`,
+    );
+  }
   if (report.simd === null || Array.isArray(report.simd) || typeof report.simd !== 'object') {
     throw new Error(`${commandName} must contain SIMD telemetry`);
   }
