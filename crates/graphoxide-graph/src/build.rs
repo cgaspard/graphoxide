@@ -275,6 +275,7 @@ pub fn disambiguate_file_labels_in_nodes(nodes: &mut [Node]) {
     for (index, node) in nodes.iter().enumerate() {
         if is_declared_graphviz_entity(node)
             || is_document_package_child(node)
+            || is_enrichment_entity(node)
             || !is_file_node_label(&node.label, &node.source_file)
         {
             continue;
@@ -545,6 +546,19 @@ fn build_graph_with_report_normalized(
                 node.id = canonical.clone();
             }
             if let Some(existing) = nodes.get_mut(&node.id) {
+                // Enrichment facts are source/profile-owned identities, not
+                // alternate producers for a structural entity. A later source
+                // file can deliberately choose the public enrichment ID, so
+                // merging here would silently retarget `has_enrichment` to that
+                // structural node. Fail closed on every duplicate involving an
+                // enrichment fact; the enrichment applier already rejects
+                // duplicate records before they reach the builder.
+                if is_enrichment_entity(existing) || is_enrichment_entity(&node) {
+                    anyhow::bail!(
+                        "refusing to merge duplicate node ID involving enrichment: {}",
+                        node.id
+                    );
+                }
                 merge_node(existing, &node);
                 report.merge_node(NodeMergeReason::DuplicateId);
             } else {
@@ -577,6 +591,7 @@ fn build_graph_with_report_normalized(
             && candidates.len() == 1
             && candidates[0] != node.id
             && !is_structural_node(node)
+            && !is_enrichment_entity(node)
         {
             remap.insert(node.id.clone(), candidates[0].clone());
         }
@@ -608,7 +623,7 @@ fn build_graph_with_report_normalized(
     for node in nodes.values() {
         let path = std::path::Path::new(&node.source_file);
         let stem = path.file_stem().and_then(|v| v.to_str()).unwrap_or("");
-        if !is_document_package_child(node) {
+        if !is_document_package_child(node) && !is_enrichment_entity(node) {
             add_legacy_alias(
                 &mut legacy,
                 normalize_id(&format!(
@@ -623,6 +638,7 @@ fn build_graph_with_report_normalized(
             .and_then(|value| value.to_str())
             .unwrap_or("");
         if !is_document_package_child(node)
+            && !is_enrichment_entity(node)
             && !stem.is_empty()
             && (node.label == basename
                 || node
@@ -1001,6 +1017,10 @@ fn is_document_package_entity(node: &Node) -> bool {
     node.extra.get("_origin").and_then(|value| value.as_str()) == Some("document_package")
 }
 
+fn is_enrichment_entity(node: &Node) -> bool {
+    node.extra.get("_origin").and_then(|value| value.as_str()) == Some("enrichment")
+}
+
 fn is_document_package_child(node: &Node) -> bool {
     is_document_package_entity(node)
         && (node.extra.contains_key("unit_ordinal") || node.extra.contains_key("internal_part"))
@@ -1019,6 +1039,8 @@ fn document_twin_remap(nodes: &BTreeMap<String, Node>) -> BTreeMap<String, Strin
             && !is_declared_graphviz_entity(bare)
             && !is_document_package_entity(canonical)
             && !is_document_package_entity(bare)
+            && !is_enrichment_entity(canonical)
+            && !is_enrichment_entity(bare)
             && canonical.file_type == "document"
             && bare.file_type == "document"
             && !canonical.source_file.is_empty()
@@ -1043,7 +1065,11 @@ fn add_legacy_alias(aliases: &mut BTreeMap<String, Vec<String>>, alias: String, 
 pub fn semantic_id_remap(extractions: &[Extraction]) -> BTreeMap<String, String> {
     let mut remap = BTreeMap::new();
     for node in extractions.iter().flat_map(|extraction| &extraction.nodes) {
-        if is_structural_node(node) || node.id.is_empty() || node.source_file.is_empty() {
+        if is_structural_node(node)
+            || is_enrichment_entity(node)
+            || node.id.is_empty()
+            || node.source_file.is_empty()
+        {
             continue;
         }
         let path = std::path::Path::new(&node.source_file);

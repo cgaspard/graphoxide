@@ -1,0 +1,9 @@
+{
+  "choices": [
+    {
+      "message": {
+        "content": "{\"summary\":42,\"topics\":\"not-an-array\"}"
+      }
+    }
+  ]
+}
