@@ -3,7 +3,7 @@
 use graphoxide_core::Extraction;
 use graphoxide_index_runtime::cache::{
     RuntimeCache, RuntimeCacheHit, RuntimeCacheIoPersistOutcome, RuntimeCacheIoService,
-    RuntimeCacheIoServiceError, RuntimeCacheKey,
+    RuntimeCacheIoServiceError, RuntimeCacheKey, RuntimeCacheSource,
 };
 use md5::{Digest as _, Md5};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,221 @@ use std::{
 // replaces the partial DOT scanner with semantic Graphviz facts, so v25 entries
 // must not be replayed into an incremental build.
 pub const AST_CACHE_VERSION: u32 = 26;
+
+/// Wire version for the extraction-owned payload stored inside runtime-v1.
+///
+/// Runtime-v1 validates its outer append-only frame. This independent version
+/// validates the meaning of the decoded payload so a future envelope change
+/// cannot accidentally replay bytes under a compatible outer frame.
+pub const RUNTIME_AST_CACHE_ENVELOPE_VERSION: u32 = 2;
+
+/// Stable version for the isolated byte-extraction policy encoded in runtime
+/// AST cache keys. Bump this independently of [`AST_CACHE_VERSION`] when a
+/// fact-affecting execution option changes without changing the fact schema.
+pub const RUNTIME_AST_CACHE_OPTIONS_VERSION: u32 = 1;
+
+const RUNTIME_AST_CACHE_KEY_DOMAIN: &[u8] = b"graphoxide-runtime-ast-cache-key-v1\0";
+const RUNTIME_AST_CACHE_EXTRACTOR_PREFIX: &str = "graphoxide-extract/";
+const RUNTIME_AST_CACHE_PREAMBLE_MAGIC: [u8; 8] = *b"GOXAST02";
+const RUNTIME_AST_CACHE_PREAMBLE_LEN: usize = 16;
+
+/// Canonical fact-affecting options for one runtime AST extraction.
+///
+/// The production isolated executor currently has one fact-affecting switch:
+/// parser code may not probe sibling paths. Keeping that choice explicit in
+/// the key and envelope prevents a legacy path-aware extraction from becoming
+/// an isolated hit merely because its source bytes happen to match. New
+/// fact-affecting switches must be appended to `update_key` in field order and
+/// require an options-version bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAstCacheOptions {
+    pub version: u32,
+    pub allow_path_probes: bool,
+    /// Per-worker parser arena allowance. A hit under a different allowance is
+    /// deliberately a miss: a result admitted under a larger parser policy
+    /// must not silently bypass a tighter run's extraction boundary.
+    pub parser_allowance_bytes: u64,
+}
+
+impl RuntimeAstCacheOptions {
+    /// Options used by the dedicated I/O/CPU runtime.
+    #[must_use]
+    pub const fn isolated(parser_allowance_bytes: u64) -> Self {
+        Self {
+            version: RUNTIME_AST_CACHE_OPTIONS_VERSION,
+            allow_path_probes: false,
+            parser_allowance_bytes,
+        }
+    }
+
+    fn update_key(self, hasher: &mut blake3::Hasher) {
+        hasher.update(&self.version.to_le_bytes());
+        hasher.update(&[u8::from(self.allow_path_probes)]);
+        hasher.update(&self.parser_allowance_bytes.to_le_bytes());
+    }
+}
+
+impl Default for RuntimeAstCacheOptions {
+    fn default() -> Self {
+        Self::isolated(0)
+    }
+}
+
+/// Immutable evidence used to derive and validate one runtime AST artifact.
+///
+/// The source digest is computed from bytes already admitted by an I/O owner.
+/// It is retained in the envelope as independent evidence rather than relying
+/// on the opaque outer cache key alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAstCacheEvidence {
+    pub normalized_path: String,
+    pub content_digest: [u8; 32],
+    pub extractor_id: String,
+    pub extractor_version: u32,
+    pub options: RuntimeAstCacheOptions,
+    pub key: RuntimeCacheKey,
+}
+
+/// Deterministic runtime-cache counters exposed to CLI telemetry.
+///
+/// Counters describe cache decisions, not incidental worker scheduling. The
+/// project scan aggregates them only after rows have been restored to stable
+/// normalized-path order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeCacheTelemetry {
+    pub enabled: bool,
+    pub metadata_hits: u64,
+    pub runtime_hits: u64,
+    pub legacy_hits: u64,
+    pub misses: u64,
+    pub bypasses: u64,
+    pub stale_or_corrupt: u64,
+    pub probe_failures: u64,
+    pub payload_reads_avoided: u64,
+    pub parses_avoided: u64,
+    pub stores: u64,
+    pub already_present: u64,
+    pub store_failures: u64,
+}
+
+impl RuntimeCacheTelemetry {
+    pub const fn enabled() -> Self {
+        Self {
+            enabled: true,
+            metadata_hits: 0,
+            runtime_hits: 0,
+            legacy_hits: 0,
+            misses: 0,
+            bypasses: 0,
+            stale_or_corrupt: 0,
+            probe_failures: 0,
+            payload_reads_avoided: 0,
+            parses_avoided: 0,
+            stores: 0,
+            already_present: 0,
+            store_failures: 0,
+        }
+    }
+
+    /// Record one valid parser-bypassing artifact hit.
+    pub fn record_hit(&mut self, source: RuntimeCacheSource) {
+        match source {
+            RuntimeCacheSource::RuntimeV1 => {
+                self.runtime_hits = self.runtime_hits.saturating_add(1)
+            }
+            RuntimeCacheSource::Legacy => self.legacy_hits = self.legacy_hits.saturating_add(1),
+        }
+        self.parses_avoided = self.parses_avoided.saturating_add(1);
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.enabled |= other.enabled;
+        macro_rules! merge_counter {
+            ($field:ident) => {
+                self.$field = self.$field.saturating_add(other.$field);
+            };
+        }
+        merge_counter!(metadata_hits);
+        merge_counter!(runtime_hits);
+        merge_counter!(legacy_hits);
+        merge_counter!(misses);
+        merge_counter!(bypasses);
+        merge_counter!(stale_or_corrupt);
+        merge_counter!(probe_failures);
+        merge_counter!(payload_reads_avoided);
+        merge_counter!(parses_avoided);
+        merge_counter!(stores);
+        merge_counter!(already_present);
+        merge_counter!(store_failures);
+    }
+
+    pub fn record_persist(&mut self, outcome: RuntimeCacheIoPersistOutcome) {
+        match outcome {
+            RuntimeCacheIoPersistOutcome::AlreadyPresent { .. } => {
+                self.already_present = self.already_present.saturating_add(1);
+            }
+            RuntimeCacheIoPersistOutcome::Stored { .. }
+            | RuntimeCacheIoPersistOutcome::RepairedRejected { .. }
+            | RuntimeCacheIoPersistOutcome::ReplacedExisting { .. } => {
+                self.stores = self.stores.saturating_add(1);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeAstCacheEnvelope {
+    envelope_version: u32,
+    extractor_id: String,
+    extractor_version: u32,
+    normalized_path: String,
+    content_digest: [u8; 32],
+    options: RuntimeAstCacheOptions,
+    complete: bool,
+    extraction: Extraction,
+}
+
+#[derive(Serialize)]
+struct RuntimeAstCacheEnvelopeRef<'a> {
+    envelope_version: u32,
+    extractor_id: &'a str,
+    extractor_version: u32,
+    normalized_path: &'a str,
+    content_digest: [u8; 32],
+    options: RuntimeAstCacheOptions,
+    complete: bool,
+    extraction: &'a Extraction,
+}
+
+#[derive(Deserialize)]
+struct RuntimeAstCacheEnvelopeHeader {
+    envelope_version: u32,
+    extractor_id: String,
+    extractor_version: u32,
+    normalized_path: String,
+    content_digest: [u8; 32],
+    options: RuntimeAstCacheOptions,
+    complete: bool,
+    #[serde(rename = "extraction")]
+    _extraction: serde::de::IgnoredAny,
+}
+
+/// A cache payload reached the extraction validation boundary but could not be
+/// trusted. Every variant is a safe cache miss; none is a scan failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeAstCacheRejection {
+    Preamble,
+    Decode,
+    EnvelopeVersion,
+    Extractor,
+    ExtractorVersion,
+    Path,
+    ContentDigest,
+    Options,
+    Incomplete,
+    Empty,
+    Provenance,
+}
 
 /// Binary framing for future cache artifacts.
 ///
@@ -186,8 +401,23 @@ pub struct ManifestEntry {
     pub ast_hash: String,
     #[serde(default)]
     pub semantic_hash: String,
+    /// Strong generation evidence plus the raw BLAKE3 digest observed during
+    /// the committed scan. This authorizes a metadata-only runtime-cache probe
+    /// only while a no-follow runtime guard proves the same source generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_cache: Option<RuntimeAstManifestEvidence>,
 }
 pub type Manifest = BTreeMap<String, ManifestEntry>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAstManifestEvidence {
+    pub content_digest: [u8; 32],
+    pub source_identity_digest: [u8; 32],
+    /// Exact extraction key, including extractor/schema/options/path/content.
+    /// A changed parser allowance therefore invalidates baseline reuse even
+    /// when the source bytes are unchanged.
+    pub artifact_key: [u8; 32],
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StatIndexEntry {
@@ -1519,6 +1749,167 @@ pub fn load_manifest_from_output(output_dir: &Path) -> Manifest {
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default()
 }
+
+/// Result of the bounded, no-follow manifest reader used by the isolated
+/// runtime. Every non-loaded state is a safe full-rebuild miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeManifestLoadStatus {
+    Loaded,
+    Missing,
+    UnsafeOrUnreadable,
+    Oversize,
+    Corrupt,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeManifestLoad {
+    pub manifest: Manifest,
+    pub status: RuntimeManifestLoadStatus,
+}
+
+/// Load the committed manifest without following a final-component link and
+/// without allocating from an attacker-controlled advertised file length.
+#[must_use]
+pub fn load_manifest_from_output_bounded(
+    output_dir: &Path,
+    max_bytes: usize,
+) -> RuntimeManifestLoad {
+    use std::io::Read as _;
+
+    let reject = |status| RuntimeManifestLoad {
+        manifest: Manifest::new(),
+        status,
+    };
+    if max_bytes == 0 {
+        return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable);
+    }
+    let lexical_root = absolute_lexical(output_dir);
+    let canonical_root = match fs::canonicalize(&lexical_root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return reject(RuntimeManifestLoadStatus::Missing);
+        }
+        Err(_) => return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable),
+    };
+    let path = lexical_root.join("manifest.json");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return reject(RuntimeManifestLoadStatus::Missing);
+        }
+        Err(_) => return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable),
+    };
+    if !runtime_manifest_metadata_is_safe(&metadata) {
+        return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable);
+    }
+    if metadata.len() > max_bytes as u64 {
+        return reject(RuntimeManifestLoadStatus::Oversize);
+    }
+    let expected_path = canonical_root.join("manifest.json");
+    if fs::canonicalize(&path).ok().as_deref() != Some(expected_path.as_path()) {
+        return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable);
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(_) => return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable),
+    };
+    let opened_identity = match graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+    {
+        Ok(Some(identity)) if identity.length_bytes() <= max_bytes as u64 => identity,
+        Ok(Some(identity)) if identity.length_bytes() > max_bytes as u64 => {
+            return reject(RuntimeManifestLoadStatus::Oversize);
+        }
+        Ok(Some(_)) => unreachable!("opened manifest length branches are exhaustive"),
+        Ok(None) | Err(_) => return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable),
+    };
+    let capacity = usize::try_from(opened_identity.length_bytes())
+        .unwrap_or(max_bytes)
+        .min(max_bytes);
+    let mut bytes = Vec::with_capacity(capacity);
+    if file
+        .by_ref()
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable);
+    }
+    if bytes.len() > max_bytes {
+        return reject(RuntimeManifestLoadStatus::Oversize);
+    }
+    let after_identity = match graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+    {
+        Ok(Some(identity)) => identity,
+        Ok(None) | Err(_) => return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable),
+    };
+    // Reopen the current path with the same no-follow policy. A held handle
+    // stays perfectly stable when an attacker renames it aside and installs a
+    // different single-link file at `manifest.json`; canonical path strings
+    // alone cannot distinguish those generations.
+    let current = match options.open(&path) {
+        Ok(file) => file,
+        Err(_) => return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable),
+    };
+    let current_identity =
+        match graphoxide_index_runtime::validate_opened_regular_single_link(&current) {
+            Ok(Some(identity)) => identity,
+            Ok(None) | Err(_) => return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable),
+        };
+    if after_identity != opened_identity
+        || current_identity != opened_identity
+        || after_identity.length_bytes() != bytes.len() as u64
+        || fs::canonicalize(&lexical_root).ok().as_deref() != Some(canonical_root.as_path())
+        || fs::canonicalize(&path).ok().as_deref() != Some(expected_path.as_path())
+    {
+        return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable);
+    }
+    match serde_json::from_slice(&bytes) {
+        Ok(manifest) => RuntimeManifestLoad {
+            manifest,
+            status: RuntimeManifestLoadStatus::Loaded,
+        },
+        Err(_) => RuntimeManifestLoad {
+            manifest: Manifest::new(),
+            status: RuntimeManifestLoadStatus::Corrupt,
+        },
+    }
+}
+
+fn runtime_manifest_metadata_is_safe(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            return false;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn changed_files(
     _root: &Path,
     files: &[(String, std::path::PathBuf)],
@@ -1593,12 +1984,411 @@ pub fn ast_cache_put_to_output(
     atomic_json(&cache_path(output_dir, relative, bytes), value)
 }
 
-/// Derive the runtime-v1 AST artifact key from bytes already materialized by
-/// an I/O owner. This is a pure operation and can be performed before a CPU
-/// extractor consumes the source lease.
+/// Build complete runtime-cache evidence from source bytes already admitted by
+/// an I/O owner.
 #[must_use]
-pub fn runtime_ast_cache_key(relative: &str, bytes: &[u8]) -> RuntimeCacheKey {
-    RuntimeCacheKey::for_versioned_bytes("ast", AST_CACHE_VERSION, relative, bytes)
+pub fn runtime_ast_cache_evidence(
+    relative: &str,
+    bytes: &[u8],
+    options: RuntimeAstCacheOptions,
+) -> Option<RuntimeAstCacheEvidence> {
+    runtime_ast_cache_evidence_from_digest(relative, *blake3::hash(bytes).as_bytes(), options)
+}
+
+/// Build runtime-cache evidence from a previously validated source digest.
+///
+/// The metadata-only fast path uses this only while a runtime-owned strong
+/// identity guard is holding and revalidating the same source generation.
+#[must_use]
+pub fn runtime_ast_cache_evidence_from_digest(
+    relative: &str,
+    content_digest: [u8; 32],
+    options: RuntimeAstCacheOptions,
+) -> Option<RuntimeAstCacheEvidence> {
+    let normalized_path = normalize_runtime_ast_path(relative)?;
+    let extractor_id = runtime_ast_extractor_id(&normalized_path);
+    let extractor_version = AST_CACHE_VERSION;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RUNTIME_AST_CACHE_KEY_DOMAIN);
+    update_len_prefixed(&mut hasher, extractor_id.as_bytes());
+    hasher.update(&extractor_version.to_le_bytes());
+    update_len_prefixed(&mut hasher, normalized_path.as_bytes());
+    hasher.update(&content_digest);
+    options.update_key(&mut hasher);
+    let key = RuntimeCacheKey::new(*hasher.finalize().as_bytes());
+    Some(RuntimeAstCacheEvidence {
+        normalized_path,
+        content_digest,
+        extractor_id,
+        extractor_version,
+        options,
+        key,
+    })
+}
+
+fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn normalize_runtime_ast_path(relative: &str) -> Option<String> {
+    use unicode_normalization::UnicodeNormalization as _;
+
+    if relative.is_empty() || relative.contains('\0') {
+        return None;
+    }
+    let path = relative.replace('\\', "/").nfc().collect::<String>();
+    if path.starts_with('/')
+        || path.starts_with("//")
+        || path.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+    {
+        return None;
+    }
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return None,
+            component => components.push(component),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
+}
+
+fn runtime_ast_extractor_id(normalized_path: &str) -> String {
+    crate::format_registry::format_registry()
+        .find_by_path(Path::new(normalized_path))
+        .map_or_else(
+            || format!("{RUNTIME_AST_CACHE_EXTRACTOR_PREFIX}unregistered/engine"),
+            |spec| {
+                format!(
+                    "{RUNTIME_AST_CACHE_EXTRACTOR_PREFIX}{}/{}",
+                    spec.id.as_str(),
+                    spec.adapter().as_str()
+                )
+            },
+        )
+}
+
+/// Whether this source is eligible for parser-result caching.
+///
+/// JavaScript-family raw extraction remains dependent on project context and
+/// intentionally bypasses both legacy and runtime-v1 AST artifacts.
+#[must_use]
+pub fn runtime_ast_cache_is_eligible(relative: &str) -> bool {
+    normalize_runtime_ast_path(relative).is_some() && !bypass(relative)
+}
+
+/// Encode a complete, self-validating runtime AST envelope.
+pub fn encode_runtime_ast_cache_payload(
+    evidence: &RuntimeAstCacheEvidence,
+    extraction: &Extraction,
+) -> Result<Vec<u8>, graphoxide_index_runtime::cache::RuntimeCacheError> {
+    let encoded_bytes = runtime_ast_cache_payload_len(evidence, extraction)?;
+    let mut output = Vec::with_capacity(encoded_bytes);
+    encode_runtime_ast_cache_payload_into(&mut output, evidence, extraction)?;
+    debug_assert_eq!(output.len(), encoded_bytes);
+    Ok(output)
+}
+
+/// Serialize into caller-reserved storage. The runtime cache client invokes
+/// this only after acquiring exact shared transfer credit from the pre-count
+/// returned by [`runtime_ast_cache_payload_len`].
+pub fn encode_runtime_ast_cache_payload_into(
+    output: &mut impl std::io::Write,
+    evidence: &RuntimeAstCacheEvidence,
+    extraction: &Extraction,
+) -> Result<(), graphoxide_index_runtime::cache::RuntimeCacheError> {
+    validate_runtime_ast_cache_value(evidence, extraction)?;
+    output
+        .write_all(&RUNTIME_AST_CACHE_PREAMBLE_MAGIC)
+        .and_then(|()| output.write_all(&[0; 8]))
+        .map_err(|error| {
+            graphoxide_index_runtime::cache::RuntimeCacheError::Encode(error.to_string())
+        })?;
+    serde_json::to_writer(
+        output,
+        &runtime_ast_cache_envelope_ref(evidence, extraction),
+    )
+    .map_err(|error| graphoxide_index_runtime::cache::RuntimeCacheError::Encode(error.to_string()))
+}
+
+/// Count the exact encoded envelope length without allocating the payload.
+/// Cache I/O clients use this to reserve shared in-flight byte credit before
+/// the serializer is allowed to create its `Vec`.
+pub fn runtime_ast_cache_payload_len(
+    evidence: &RuntimeAstCacheEvidence,
+    extraction: &Extraction,
+) -> Result<usize, graphoxide_index_runtime::cache::RuntimeCacheError> {
+    validate_runtime_ast_cache_value(evidence, extraction)?;
+    #[derive(Default)]
+    struct CountingWriter(usize);
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(
+        &mut writer,
+        &runtime_ast_cache_envelope_ref(evidence, extraction),
+    )
+    .map_err(|error| {
+        graphoxide_index_runtime::cache::RuntimeCacheError::Encode(error.to_string())
+    })?;
+    Ok(RUNTIME_AST_CACHE_PREAMBLE_LEN.saturating_add(writer.0))
+}
+
+fn validate_runtime_ast_cache_value(
+    evidence: &RuntimeAstCacheEvidence,
+    extraction: &Extraction,
+) -> Result<(), graphoxide_index_runtime::cache::RuntimeCacheError> {
+    if extraction.nodes.is_empty() {
+        return Err(graphoxide_index_runtime::cache::RuntimeCacheError::Encode(
+            "runtime AST cache refuses an empty extraction".into(),
+        ));
+    }
+    if !runtime_extraction_provenance_matches(extraction, &evidence.normalized_path) {
+        return Err(graphoxide_index_runtime::cache::RuntimeCacheError::Encode(
+            "runtime AST cache extraction provenance does not match its source".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn runtime_ast_cache_envelope_ref<'a>(
+    evidence: &'a RuntimeAstCacheEvidence,
+    extraction: &'a Extraction,
+) -> RuntimeAstCacheEnvelopeRef<'a> {
+    RuntimeAstCacheEnvelopeRef {
+        envelope_version: RUNTIME_AST_CACHE_ENVELOPE_VERSION,
+        extractor_id: &evidence.extractor_id,
+        extractor_version: evidence.extractor_version,
+        normalized_path: &evidence.normalized_path,
+        content_digest: evidence.content_digest,
+        options: evidence.options,
+        // This marks completion of the extractor/serialization transaction,
+        // not semantic parse status. A bounded partial extraction is valid
+        // under the exact parser allowance carried in `options`.
+        complete: true,
+        extraction,
+    }
+}
+
+/// Decode and validate one cache hit before any facts are replayed.
+pub fn decode_runtime_ast_cache_hit(
+    hit: RuntimeCacheHit,
+    evidence: &RuntimeAstCacheEvidence,
+) -> Result<Extraction, RuntimeAstCacheRejection> {
+    decode_runtime_ast_cache_payload(hit.source, &hit.payload, evidence)
+}
+
+/// Validate the fixed versioned preamble and every fact-affecting
+/// envelope field without allocating or replaying the extraction itself.
+///
+/// `IgnoredAny` scans the complete extraction JSON, so malformed or truncated
+/// syntax is rejected. This header-only path is used only when a committed
+/// graph is authoritative and strong identity proves the same source
+/// generation.
+pub fn validate_runtime_ast_cache_payload_header(
+    source: RuntimeCacheSource,
+    payload_bytes: &[u8],
+    evidence: &RuntimeAstCacheEvidence,
+) -> Result<(), RuntimeAstCacheRejection> {
+    if source != RuntimeCacheSource::RuntimeV1 {
+        return Err(RuntimeAstCacheRejection::Preamble);
+    }
+    let json = runtime_ast_cache_payload_parts(payload_bytes)?;
+    let header: RuntimeAstCacheEnvelopeHeader =
+        serde_json::from_slice(json).map_err(|_| RuntimeAstCacheRejection::Decode)?;
+    validate_runtime_ast_cache_envelope_fields(
+        header.envelope_version,
+        &header.extractor_id,
+        header.extractor_version,
+        &header.normalized_path,
+        header.content_digest,
+        header.options,
+        header.complete,
+        evidence,
+    )?;
+    Ok(())
+}
+
+fn runtime_ast_cache_payload_parts(
+    payload_bytes: &[u8],
+) -> Result<&[u8], RuntimeAstCacheRejection> {
+    if payload_bytes.len() <= RUNTIME_AST_CACHE_PREAMBLE_LEN
+        || payload_bytes[..8] != RUNTIME_AST_CACHE_PREAMBLE_MAGIC
+    {
+        return Err(RuntimeAstCacheRejection::Preamble);
+    }
+    if payload_bytes[8..RUNTIME_AST_CACHE_PREAMBLE_LEN] != [0; 8] {
+        return Err(RuntimeAstCacheRejection::Preamble);
+    }
+    Ok(&payload_bytes[RUNTIME_AST_CACHE_PREAMBLE_LEN..])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_ast_cache_envelope_fields(
+    envelope_version: u32,
+    extractor_id: &str,
+    extractor_version: u32,
+    normalized_path: &str,
+    content_digest: [u8; 32],
+    options: RuntimeAstCacheOptions,
+    complete: bool,
+    evidence: &RuntimeAstCacheEvidence,
+) -> Result<(), RuntimeAstCacheRejection> {
+    if envelope_version != RUNTIME_AST_CACHE_ENVELOPE_VERSION {
+        return Err(RuntimeAstCacheRejection::EnvelopeVersion);
+    }
+    if extractor_id != evidence.extractor_id {
+        return Err(RuntimeAstCacheRejection::Extractor);
+    }
+    if extractor_version != evidence.extractor_version {
+        return Err(RuntimeAstCacheRejection::ExtractorVersion);
+    }
+    if normalized_path != evidence.normalized_path {
+        return Err(RuntimeAstCacheRejection::Path);
+    }
+    if content_digest != evidence.content_digest {
+        return Err(RuntimeAstCacheRejection::ContentDigest);
+    }
+    if options != evidence.options {
+        return Err(RuntimeAstCacheRejection::Options);
+    }
+    if !complete {
+        return Err(RuntimeAstCacheRejection::Incomplete);
+    }
+    Ok(())
+}
+
+/// Validate borrowed payload bytes while the caller keeps any runtime transfer
+/// credit alive around deserialization.
+pub fn decode_runtime_ast_cache_payload(
+    source: RuntimeCacheSource,
+    payload_bytes: &[u8],
+    evidence: &RuntimeAstCacheEvidence,
+) -> Result<Extraction, RuntimeAstCacheRejection> {
+    let extraction = match source {
+        RuntimeCacheSource::RuntimeV1 => {
+            let json = runtime_ast_cache_payload_parts(payload_bytes)?;
+            let envelope: RuntimeAstCacheEnvelope =
+                serde_json::from_slice(json).map_err(|_| RuntimeAstCacheRejection::Decode)?;
+            validate_runtime_ast_cache_envelope_fields(
+                envelope.envelope_version,
+                &envelope.extractor_id,
+                envelope.extractor_version,
+                &envelope.normalized_path,
+                envelope.content_digest,
+                envelope.options,
+                envelope.complete,
+                evidence,
+            )?;
+            envelope.extraction
+        }
+        RuntimeCacheSource::Legacy => {
+            let payload = cache_payload(payload_bytes).ok_or(RuntimeAstCacheRejection::Decode)?;
+            serde_json::from_slice(payload).map_err(|_| RuntimeAstCacheRejection::Decode)?
+        }
+    };
+    if extraction.nodes.is_empty() {
+        return Err(RuntimeAstCacheRejection::Empty);
+    }
+    if !runtime_extraction_provenance_matches(&extraction, &evidence.normalized_path) {
+        return Err(RuntimeAstCacheRejection::Provenance);
+    }
+    Ok(extraction)
+}
+
+fn runtime_extraction_provenance_matches(extraction: &Extraction, expected: &str) -> bool {
+    fn source_matches(source_file: &str, extra: &BTreeMap<String, Value>, expected: &str) -> bool {
+        if source_file == expected {
+            return extra
+                .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+                .and_then(Value::as_str)
+                .is_none_or(|container| container == expected);
+        }
+        let Some(member) = source_file.strip_prefix(expected) else {
+            return false;
+        };
+        member.starts_with("!/")
+            && member.len() > 2
+            && extra
+                .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+                .and_then(Value::as_str)
+                == Some(expected)
+    }
+
+    fn node_source_matches(node: &graphoxide_core::Node, expected: &str) -> bool {
+        if !node.source_file.is_empty() {
+            return source_matches(&node.source_file, &node.extra, expected);
+        }
+        // Language extractors use source-less nodes only for independently
+        // owned unresolved references. Most retain their owner explicitly;
+        // C#'s resolver-managed stub predates `origin_file` but carries both
+        // an AST origin and its dedicated lifecycle marker.
+        node.extra.get("origin_file").and_then(Value::as_str) == Some(expected)
+            || (node.extra.get("_origin").and_then(Value::as_str) == Some("ast")
+                && node
+                    .extra
+                    .get("_csharp_resolution_managed")
+                    .and_then(Value::as_bool)
+                    == Some(true))
+    }
+
+    extraction
+        .nodes
+        .iter()
+        .all(|node| node_source_matches(node, expected))
+        && extraction
+            .edges
+            .iter()
+            .all(|edge| source_matches(&edge.source_file, &edge.extra, expected))
+        && extraction.hyperedges.iter().all(|hyperedge| {
+            let Some(object) = hyperedge.as_object() else {
+                return false;
+            };
+            let Some(source_file) = object.get("source_file").and_then(Value::as_str) else {
+                return false;
+            };
+            if source_file == expected {
+                return object
+                    .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+                    .and_then(Value::as_str)
+                    .is_none_or(|container| container == expected);
+            }
+            source_file
+                .strip_prefix(expected)
+                .is_some_and(|member| member.starts_with("!/") && member.len() > 2)
+                && object
+                    .get(graphoxide_core::CONTAINER_SOURCE_ATTRIBUTE)
+                    .and_then(Value::as_str)
+                    == Some(expected)
+        })
+}
+
+/// Return the cache-owner-relative legacy AST artifact path after source bytes
+/// have been read and hashed. The dedicated cache I/O owner validates this
+/// normal-component path again before opening it.
+#[must_use]
+pub fn runtime_ast_legacy_relative_path(relative: &str, bytes: &[u8]) -> Option<PathBuf> {
+    if !runtime_ast_cache_is_eligible(relative) {
+        return None;
+    }
+    Some(cache_relative_path(relative, bytes))
+}
+
+/// Compatibility key helper for tests and direct cache callers.
+#[must_use]
+pub fn runtime_ast_cache_key(relative: &str, bytes: &[u8]) -> Option<RuntimeCacheKey> {
+    runtime_ast_cache_evidence(relative, bytes, RuntimeAstCacheOptions::default())
+        .map(|evidence| evidence.key)
 }
 
 /// Read an AST payload from runtime-v1, falling back to the legacy AST cache
@@ -1615,10 +2405,7 @@ pub fn runtime_ast_cache_payload_from_output(
     relative: &str,
     source_bytes: &[u8],
 ) -> Option<RuntimeCacheHit> {
-    if bypass(relative) {
-        return None;
-    }
-    let key = runtime_ast_cache_key(relative, source_bytes);
+    let key = runtime_ast_cache_key(relative, source_bytes)?;
     runtime_cache.get_or_legacy(key, || {
         let bytes = fs::read(cache_path(output_dir, relative, source_bytes)).ok()?;
         cache_payload(&bytes).map(ToOwned::to_owned)
@@ -1630,17 +2417,14 @@ pub fn runtime_ast_cache_payload_from_output(
 /// read and does not touch legacy cache files.
 pub fn runtime_ast_cache_put(
     runtime_cache: &mut RuntimeCache,
-    key: RuntimeCacheKey,
-    relative: &str,
+    evidence: &RuntimeAstCacheEvidence,
     extraction: &Extraction,
 ) -> Result<(), graphoxide_index_runtime::cache::RuntimeCacheError> {
-    if bypass(relative) || extraction.nodes.is_empty() {
+    if !runtime_ast_cache_is_eligible(&evidence.normalized_path) || extraction.nodes.is_empty() {
         return Ok(());
     }
-    let payload = serde_json::to_vec(extraction).map_err(|error| {
-        graphoxide_index_runtime::cache::RuntimeCacheError::Encode(error.to_string())
-    })?;
-    runtime_cache.put(key, &payload)
+    let payload = encode_runtime_ast_cache_payload(evidence, extraction)?;
+    runtime_cache.put(evidence.key, &payload)
 }
 
 /// Serialize an AST extraction and submit it to the dedicated runtime-cache
@@ -1653,27 +2437,32 @@ pub fn runtime_ast_cache_put(
 /// callback.
 pub fn runtime_ast_cache_persist_on_io_owner(
     service: &RuntimeCacheIoService,
-    key: RuntimeCacheKey,
-    relative: &str,
+    evidence: &RuntimeAstCacheEvidence,
     extraction: &Extraction,
 ) -> Result<Option<RuntimeCacheIoPersistOutcome>, RuntimeCacheIoServiceError> {
-    if bypass(relative) || extraction.nodes.is_empty() {
+    if !runtime_ast_cache_is_eligible(&evidence.normalized_path) || extraction.nodes.is_empty() {
         return Ok(None);
     }
-    let payload = serde_json::to_vec(extraction).map_err(|error| {
-        RuntimeCacheIoServiceError::Cache(
-            graphoxide_index_runtime::cache::RuntimeCacheError::Encode(error.to_string()),
-        )
-    })?;
-    service.persist_if_absent(key, payload).map(Some)
+    let encoded_bytes = runtime_ast_cache_payload_len(evidence, extraction)
+        .map_err(RuntimeCacheIoServiceError::Cache)?;
+    service
+        .client()
+        .persist_encoded(evidence.key, encoded_bytes, false, |output| {
+            encode_runtime_ast_cache_payload_into(output, evidence, extraction)
+        })
+        .map(Some)
 }
 
 fn cache_path(output_dir: &Path, relative: &str, bytes: &[u8]) -> std::path::PathBuf {
+    output_dir.join(cache_relative_path(relative, bytes))
+}
+
+fn cache_relative_path(relative: &str, bytes: &[u8]) -> PathBuf {
     let mut hash = Sha256::new();
     hash.update(bytes);
     hash.update(b"\0");
     hash.update(relative.to_lowercase().as_bytes());
-    output_dir.join(format!(
+    PathBuf::from(format!(
         "cache/ast/v{AST_CACHE_VERSION}/{}.json",
         hex::encode(hash.finalize())
     ))
@@ -1879,16 +2668,21 @@ mod tests {
             graphoxide_index_runtime::cache::RuntimeCacheSource::Legacy
         );
         assert_eq!(
-            serde_json::from_slice::<Extraction>(&legacy.payload)
-                .expect("legacy payload")
-                .nodes[0]
+            decode_runtime_ast_cache_hit(
+                legacy,
+                &runtime_ast_cache_evidence(relative, source, RuntimeAstCacheOptions::default())
+                    .expect("cache evidence")
+            )
+            .expect("validated legacy payload")
+            .nodes[0]
                 .id,
             "example"
         );
 
-        let key = runtime_ast_cache_key(relative, source);
-        runtime_ast_cache_put(&mut runtime, key, relative, &extraction)
-            .expect("runtime cache write");
+        let evidence =
+            runtime_ast_cache_evidence(relative, source, RuntimeAstCacheOptions::default())
+                .expect("cache evidence");
+        runtime_ast_cache_put(&mut runtime, &evidence, &extraction).expect("runtime cache write");
         let runtime_hit =
             runtime_ast_cache_payload_from_output(&runtime, &output, relative, source)
                 .expect("runtime hit");
@@ -1897,11 +2691,352 @@ mod tests {
             graphoxide_index_runtime::cache::RuntimeCacheSource::RuntimeV1
         );
         assert_eq!(
-            serde_json::from_slice::<Extraction>(&runtime_hit.payload)
-                .expect("runtime payload")
+            decode_runtime_ast_cache_hit(runtime_hit, &evidence)
+                .expect("validated runtime payload")
                 .nodes[0]
                 .id,
             "example"
+        );
+    }
+
+    fn runtime_fixture(relative: &str) -> Extraction {
+        Extraction {
+            nodes: vec![graphoxide_core::Node {
+                id: "fixture".into(),
+                label: "fixture()".into(),
+                file_type: "code".into(),
+                source_file: relative.into(),
+                source_location: Some("L1".into()),
+                community: None,
+                extra: BTreeMap::new(),
+            }],
+            ..Extraction::default()
+        }
+    }
+
+    fn runtime_payload_with_json(original: &[u8], value: &Value) -> Vec<u8> {
+        let mut payload = original[..RUNTIME_AST_CACHE_PREAMBLE_LEN].to_vec();
+        payload.extend(serde_json::to_vec(value).expect("runtime envelope JSON"));
+        payload
+    }
+
+    #[test]
+    fn runtime_ast_key_invalidates_content_path_and_parser_policy() {
+        let source = b"def fixture(): pass\n";
+        let first = runtime_ast_cache_evidence(
+            "src/cafe\u{301}.py",
+            source,
+            RuntimeAstCacheOptions::isolated(4096),
+        )
+        .expect("first evidence");
+        let normalized = runtime_ast_cache_evidence(
+            "src/caf\u{e9}.py",
+            source,
+            RuntimeAstCacheOptions::isolated(4096),
+        )
+        .expect("normalized evidence");
+        assert_eq!(first.key, normalized.key, "paths are keyed in NFC");
+        assert_ne!(
+            first.key,
+            runtime_ast_cache_evidence(
+                "moved/caf\u{e9}.py",
+                source,
+                RuntimeAstCacheOptions::isolated(4096)
+            )
+            .expect("moved evidence")
+            .key
+        );
+        assert_ne!(
+            first.key,
+            runtime_ast_cache_evidence(
+                "src/caf\u{e9}.py",
+                b"def fixture(): return 1\n",
+                RuntimeAstCacheOptions::isolated(4096)
+            )
+            .expect("changed evidence")
+            .key
+        );
+        assert_ne!(
+            first.key,
+            runtime_ast_cache_evidence(
+                "src/caf\u{e9}.py",
+                source,
+                RuntimeAstCacheOptions::isolated(8192)
+            )
+            .expect("different parser allowance")
+            .key
+        );
+        assert_eq!(
+            first.key,
+            runtime_ast_cache_evidence(
+                "src/caf\u{e9}.py",
+                source,
+                RuntimeAstCacheOptions::isolated(4096)
+            )
+            .expect("same bytes after metadata-only touch")
+            .key,
+            "strong source identity is manifest-only and cannot poison a content hit"
+        );
+    }
+
+    #[test]
+    fn runtime_ast_envelope_rejects_incomplete_wrong_path_and_corrupt_payloads() {
+        let relative = "src/fixture.py";
+        let source = b"def fixture(): pass\n";
+        let evidence =
+            runtime_ast_cache_evidence(relative, source, RuntimeAstCacheOptions::isolated(4096))
+                .expect("cache evidence");
+        let extraction = runtime_fixture(relative);
+        let payload = encode_runtime_ast_cache_payload(&evidence, &extraction).expect("envelope");
+        assert_eq!(
+            runtime_ast_cache_payload_len(&evidence, &extraction).expect("payload length"),
+            payload.len()
+        );
+
+        let mut incomplete: Value =
+            serde_json::from_slice(&payload[RUNTIME_AST_CACHE_PREAMBLE_LEN..])
+                .expect("envelope JSON");
+        incomplete["complete"] = false.into();
+        let incomplete = runtime_payload_with_json(&payload, &incomplete);
+        assert_eq!(
+            decode_runtime_ast_cache_payload(
+                RuntimeCacheSource::RuntimeV1,
+                &incomplete,
+                &evidence,
+            )
+            .expect_err("incomplete envelope must miss"),
+            RuntimeAstCacheRejection::Incomplete
+        );
+
+        let mut wrong_path: Value =
+            serde_json::from_slice(&payload[RUNTIME_AST_CACHE_PREAMBLE_LEN..])
+                .expect("envelope JSON");
+        wrong_path["normalized_path"] = "src/other.py".into();
+        let wrong_path = runtime_payload_with_json(&payload, &wrong_path);
+        assert_eq!(
+            decode_runtime_ast_cache_payload(
+                RuntimeCacheSource::RuntimeV1,
+                &wrong_path,
+                &evidence,
+            )
+            .expect_err("wrong-path envelope must miss"),
+            RuntimeAstCacheRejection::Path
+        );
+        let mut corrupt = payload[..RUNTIME_AST_CACHE_PREAMBLE_LEN].to_vec();
+        corrupt.extend_from_slice(b"{not-json");
+        assert_eq!(
+            decode_runtime_ast_cache_payload(RuntimeCacheSource::RuntimeV1, &corrupt, &evidence,)
+                .expect_err("corrupt envelope must miss"),
+            RuntimeAstCacheRejection::Decode
+        );
+    }
+
+    #[test]
+    fn runtime_ast_envelope_rejects_cross_source_provenance() {
+        let relative = "src/fixture.py";
+        let evidence = runtime_ast_cache_evidence(
+            relative,
+            b"def fixture(): pass\n",
+            RuntimeAstCacheOptions::isolated(4096),
+        )
+        .expect("cache evidence");
+        let wrong = runtime_fixture("src/other.py");
+        assert!(encode_runtime_ast_cache_payload(&evidence, &wrong).is_err());
+
+        let mut value = serde_json::to_value(runtime_ast_cache_envelope_ref(
+            &evidence,
+            &runtime_fixture(relative),
+        ))
+        .expect("envelope JSON");
+        value["extraction"]["nodes"][0]["source_file"] = "src/other.py".into();
+        let valid = encode_runtime_ast_cache_payload(&evidence, &runtime_fixture(relative))
+            .expect("valid runtime envelope");
+        let poisoned = runtime_payload_with_json(&valid, &value);
+        assert!(
+            validate_runtime_ast_cache_payload_header(
+                RuntimeCacheSource::RuntimeV1,
+                &poisoned,
+                &evidence,
+            )
+            .is_ok(),
+            "baseline validation must scan but not allocate or replay extraction facts"
+        );
+        assert_eq!(
+            decode_runtime_ast_cache_payload(RuntimeCacheSource::RuntimeV1, &poisoned, &evidence,)
+                .expect_err("cross-source envelope must miss"),
+            RuntimeAstCacheRejection::Provenance
+        );
+    }
+
+    #[test]
+    fn runtime_ast_envelope_accepts_owned_python_reference_stubs() {
+        let relative = "src/fixture.py";
+        let source = b"def fixture(value: MissingType):\n    return value\n";
+        let extraction = crate::engine::extract_as_bytes_with_parser_allowance(
+            Path::new(relative),
+            relative,
+            source,
+            1024 * 1024,
+        )
+        .expect("Python extraction");
+        assert!(extraction.nodes.iter().any(|node| {
+            node.source_file.is_empty()
+                && node.extra.get("origin_file").and_then(Value::as_str) == Some(relative)
+        }));
+        let evidence = runtime_ast_cache_evidence(
+            relative,
+            source,
+            RuntimeAstCacheOptions::isolated(1024 * 1024),
+        )
+        .expect("cache evidence");
+        let payload = encode_runtime_ast_cache_payload(&evidence, &extraction)
+            .expect("owned reference provenance is cacheable");
+        let replay =
+            decode_runtime_ast_cache_payload(RuntimeCacheSource::RuntimeV1, &payload, &evidence)
+                .expect("validated replay");
+        assert_eq!(
+            serde_json::to_value(replay).expect("replay JSON"),
+            serde_json::to_value(extraction).expect("cold JSON")
+        );
+    }
+
+    #[test]
+    fn bounded_runtime_manifest_loads_valid_and_rejects_oversize_or_corrupt_input() {
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let output = temp.path().join("graphoxide-out");
+        let manifest = Manifest::from([(
+            "src/main.py".to_owned(),
+            ManifestEntry {
+                mtime: 1.0,
+                ast_version: AST_CACHE_VERSION,
+                ast_hash: "content".into(),
+                semantic_hash: String::new(),
+                runtime_cache: None,
+            },
+        )]);
+        save_manifest_to_output(&output, &manifest).expect("write valid manifest");
+        let loaded = load_manifest_from_output_bounded(&output, 16 * 1024);
+        assert_eq!(loaded.status, RuntimeManifestLoadStatus::Loaded);
+        assert_eq!(
+            serde_json::to_value(loaded.manifest).expect("loaded manifest JSON"),
+            serde_json::to_value(manifest).expect("expected manifest JSON")
+        );
+
+        fs::write(output.join("manifest.json"), b"{not-json").expect("write corrupt manifest");
+        let corrupt = load_manifest_from_output_bounded(&output, 16 * 1024);
+        assert_eq!(corrupt.status, RuntimeManifestLoadStatus::Corrupt);
+        assert!(corrupt.manifest.is_empty());
+
+        let sparse = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(output.join("manifest.json"))
+            .expect("open sparse manifest");
+        sparse.set_len(1024 * 1024).expect("size sparse manifest");
+        let oversize = load_manifest_from_output_bounded(&output, 4096);
+        assert_eq!(oversize.status, RuntimeManifestLoadStatus::Oversize);
+        assert!(oversize.manifest.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_runtime_manifest_rejects_final_symlinks_and_hardlinks() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let output = temp.path().join("graphoxide-out");
+        fs::create_dir_all(&output).expect("create output root");
+        let target = temp.path().join("manifest-target.json");
+        fs::write(&target, b"{}").expect("write manifest target");
+        symlink(&target, output.join("manifest.json")).expect("link manifest target");
+        assert_eq!(
+            load_manifest_from_output_bounded(&output, 4096).status,
+            RuntimeManifestLoadStatus::UnsafeOrUnreadable
+        );
+
+        fs::remove_file(output.join("manifest.json")).expect("remove symlink");
+        fs::hard_link(&target, output.join("manifest.json")).expect("hardlink manifest target");
+        assert_eq!(
+            load_manifest_from_output_bounded(&output, 4096).status,
+            RuntimeManifestLoadStatus::UnsafeOrUnreadable
+        );
+
+        fs::remove_file(output.join("manifest.json")).expect("remove hardlink");
+        let fifo_path = output.join("manifest.json");
+        let fifo = std::ffi::CString::new(fifo_path.as_os_str().as_bytes()).expect("FIFO path");
+        // SAFETY: `fifo` is a live NUL-terminated path and mkfifo does not
+        // retain the pointer after returning.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            load_manifest_from_output_bounded(&output, 4096).status,
+            RuntimeManifestLoadStatus::UnsafeOrUnreadable,
+            "a FIFO manifest must be rejected without a blocking open"
+        );
+    }
+
+    #[test]
+    fn opened_manifest_identity_detects_same_size_restored_mtime_rewrite() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let path = temp.path().join("manifest.json");
+        fs::write(&path, b"{\"a\":1}").expect("write first manifest generation");
+        let original_mtime = filetime::FileTime::from_last_modification_time(
+            &fs::metadata(&path).expect("first manifest metadata"),
+        );
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open held manifest handle");
+        let before = graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+            .expect("validate first generation")
+            .expect("strong filesystem identity");
+        file.seek(SeekFrom::Start(0)).expect("rewind manifest");
+        file.write_all(b"{\"b\":2}")
+            .expect("rewrite equal-length manifest");
+        file.sync_all().expect("sync rewritten manifest");
+        filetime::set_file_mtime(&path, original_mtime).expect("restore manifest mtime");
+        let after = graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+            .expect("validate rewritten generation")
+            .expect("strong filesystem identity");
+        assert_ne!(
+            before, after,
+            "strong handle identity must include generation evidence beyond length and mtime"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reopened_manifest_identity_detects_rename_substitution() {
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let path = temp.path().join("manifest.json");
+        let backup = temp.path().join("manifest.previous.json");
+        fs::write(&path, b"{\"a\":1}").expect("write first manifest generation");
+        let held = fs::File::open(&path).expect("open held manifest generation");
+        let held_before = graphoxide_index_runtime::validate_opened_regular_single_link(&held)
+            .expect("validate held manifest")
+            .expect("strong filesystem identity");
+
+        fs::rename(&path, &backup).expect("rename held generation aside");
+        fs::write(&path, b"{\"b\":2}").expect("install equal-length replacement");
+        let held_after = graphoxide_index_runtime::validate_opened_regular_single_link(&held)
+            .expect("revalidate held manifest")
+            .expect("strong filesystem identity");
+        let current = fs::File::open(&path).expect("reopen current manifest path");
+        let current_identity =
+            graphoxide_index_runtime::validate_opened_regular_single_link(&current)
+                .expect("validate current manifest")
+                .expect("strong filesystem identity");
+
+        assert_ne!(
+            held_after, current_identity,
+            "the production reopen check must reject the replacement generation"
+        );
+        assert!(
+            held_before != held_after || held_before != current_identity,
+            "at least one strong generation check must observe rename substitution"
         );
     }
 }

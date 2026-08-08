@@ -337,6 +337,21 @@ test('runtime telemetry has an additive stable sidecar shape', () => {
           emergency_reserve_bytes: 26843547,
         },
       },
+      cache: {
+        enabled: true,
+        metadata_hits: 0,
+        runtime_hits: 0,
+        legacy_hits: 0,
+        misses: 33,
+        bypasses: 0,
+        stale_or_corrupt: 0,
+        probe_failures: 0,
+        payload_reads_avoided: 0,
+        parses_avoided: 0,
+        stores: 33,
+        already_present: 0,
+        store_failures: 0,
+      },
       simd: {
         architecture: 'x86_64',
         detected_features: ['avx2'],
@@ -389,6 +404,22 @@ test('runtime telemetry has an additive stable sidecar shape', () => {
         { operation: 'extract', mode: 'full', status: 'rebuilt' },
       ),
     /exceeds its configured bounds/,
+  );
+  assert.throws(
+    () =>
+      validateRuntimeTelemetry(
+        { ...telemetry, cache: { ...telemetry.cache, parses_avoided: 1 } },
+        { operation: 'extract', mode: 'full', status: 'rebuilt' },
+      ),
+    /parses_avoided does not match/,
+  );
+  assert.throws(
+    () =>
+      validateRuntimeTelemetry(
+        { ...telemetry, cache: { ...telemetry.cache, payload_reads_avoided: 1 } },
+        { operation: 'extract', mode: 'full', status: 'rebuilt' },
+      ),
+    /payload_reads_avoided does not match/,
   );
 });
 

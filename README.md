@@ -124,13 +124,24 @@ bounded queues and a resolved managed-memory budget. `--memory-budget-bytes`,
 `--io-workers`, `--compute-workers`, `--read-batch-bytes`, and `--io-backend`
 provide explicit overrides; unsupported `io-uring` requests fall back to the
 portable threaded backend and record that decision in the optional runtime
-report. `graphoxide formats --json` reports each registered family's actual
-semantic, schema, structural, container, or inventory-only support and its
-parser limits. The managed budget governs Graphoxide's queues and registered
-format-parser allowances, admits completed extraction facts before they enter
-the aggregate result, and bounds caches and graph staging. It is not a hard
-process RSS limit; discovery and language parsers retain their own fixed safety
-caps.
+report. It persists validated parser results under `cache/runtime-v1`; exact
+path, content, extractor-version, and runtime-option evidence can avoid parsing
+on a later build, while strong source-generation evidence can also avoid a
+payload read. Unsafe, stale, incomplete, or corrupt entries are treated as
+cache misses, and `--force` bypasses cache reads. The optional runtime report
+records cache hits, misses, bypasses, rejected entries, and writes without
+changing graph bytes. Cache frames are integrity-checked for accidental damage;
+like other user-writable build outputs, they are not an authentication boundary
+against a process running as the same user. Treat `graphoxide-out` as local
+managed state: remove any copy received from an untrusted source before reusing
+it. `--force` bypasses cache reads for the current build, but fail-open cache
+write errors can leave older entries in place. `graphoxide formats --json`
+reports each registered family's actual semantic, schema, structural,
+container, or inventory-only support and its parser limits. The managed budget
+governs Graphoxide's queues and registered format-parser allowances, admits
+completed extraction facts before they enter the aggregate result, and bounds
+caches and graph staging. It is not a hard process RSS limit; discovery and
+language parsers retain their own fixed safety caps.
 
 ### 2. Query the graph
 
