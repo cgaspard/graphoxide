@@ -904,6 +904,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "filetime",
+ "flate2",
  "fs2",
  "graphoxide-core",
  "graphoxide-export",
@@ -924,6 +925,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
