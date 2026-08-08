@@ -5,7 +5,8 @@ use graphoxide_extract::detect::{
     classify_file, collect_files, convert_office_text, count_words, detect, detect_incremental,
     is_ignored, is_ignored_with_cache, is_noise_dir, is_sensitive, load_ignore_patterns,
     load_manifest, save_manifest, shebang_interpreter, DetectOptions, DetectResult, DetectedFiles,
-    FileType, IgnorePattern, ManifestKind, SaveManifestOptions, WORD_COUNT_MAX_BYTES,
+    FileType, IgnorePattern, ManifestKind, SaveManifestOptions, MAX_IGNORE_PATTERNS_PER_SOURCE,
+    MAX_IGNORE_PATTERN_BYTES, MAX_IGNORE_SOURCE_BYTES, WORD_COUNT_MAX_BYTES,
 };
 use serde_json::{json, Value};
 use std::{
@@ -792,6 +793,57 @@ fn test_detect_follows_symlinked_directory() {
 
 #[test]
 #[cfg(unix)]
+fn test_detect_managed_memory_never_crosses_symlink_boundaries() {
+    let fixture = fixture();
+    let outside = fixture.path().join("outside");
+    write(
+        &outside,
+        "must_not_be_opened.py",
+        "raise RuntimeError('outside')\n",
+    );
+
+    let linked_memory_project = fixture.path().join("linked-memory-project");
+    write(&linked_memory_project, "app.py", "x=1\n");
+    fs::create_dir_all(linked_memory_project.join("graphoxide-out")).unwrap();
+    make_symlink(
+        &outside,
+        &linked_memory_project.join("graphoxide-out/memory"),
+    );
+    let linked = scan_with(&linked_memory_project, |options| {
+        options.follow_symlinks = true;
+    });
+    assert!(has(&linked, "app.py"));
+    assert!(!has(&linked, "must_not_be_opened.py"));
+    assert!(linked
+        .files
+        .values()
+        .flatten()
+        .all(|path| !path.starts_with(outside.to_string_lossy().as_ref())));
+
+    let nested_link_project = fixture.path().join("nested-link-project");
+    write(&nested_link_project, "app.py", "x=1\n");
+    write(
+        &nested_link_project,
+        "graphoxide-out/memory/note.md",
+        "# Safe managed memory\n",
+    );
+    make_symlink(
+        &outside,
+        &nested_link_project.join("graphoxide-out/memory/escape"),
+    );
+    let nested = scan_with(&nested_link_project, |options| {
+        options.follow_symlinks = true;
+    });
+    assert!(has(&nested, "graphoxide-out/memory/note.md"));
+    assert!(!has(&nested, "must_not_be_opened.py"));
+    assert!(nested
+        .skipped_sensitive
+        .iter()
+        .any(|item| item.contains("managed memory symlink or reparse point")));
+}
+
+#[test]
+#[cfg(unix)]
 fn test_detect_follows_symlinked_file() {
     let fixture = fixture();
     let real = write(fixture.path(), "real.py", "x=1");
@@ -1095,6 +1147,87 @@ fn test_negation_cannot_rescue_file_under_excluded_dir() {
     write(fixture.path(), ".graphifyignore", "android/\n!src/\n");
     let patterns = load_ignore_patterns(fixture.path(), true);
     assert!(is_ignored(&victim, fixture.path(), &patterns));
+}
+
+#[test]
+fn oversized_root_ignore_source_fails_closed_with_a_diagnostic() {
+    let fixture = fixture();
+    let _sentinel = write(fixture.path(), "sentinel.rs", "fn must_not_be_read() {}\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&_sentinel, fs::Permissions::from_mode(0o000))
+            .expect("make no-read sentinel");
+    }
+    let mut oversized = b"sentinel.rs\n".to_vec();
+    oversized.resize(MAX_IGNORE_SOURCE_BYTES + 1, b'#');
+    write_bytes(fixture.path(), ".graphoxideignore", &oversized);
+
+    let error = detect(fixture.path(), &DetectOptions::default())
+        .expect_err("oversized root ignore must abort discovery");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&_sentinel, fs::Permissions::from_mode(0o600))
+            .expect("restore no-read sentinel");
+    }
+
+    let error = error.to_string();
+    assert!(error.contains(".graphoxideignore"));
+    assert!(error.contains("byte limit"));
+    assert!(error.contains("no rules from this source were applied"));
+
+    let legacy_patterns = load_ignore_patterns(fixture.path(), true);
+    assert_eq!(legacy_patterns.len(), 1);
+    assert_eq!(legacy_patterns[0].pattern, "**");
+    assert!(is_ignored(
+        &fixture.path().join("sentinel.rs"),
+        fixture.path(),
+        &legacy_patterns
+    ));
+}
+
+#[test]
+fn oversized_nested_ignore_source_skips_that_subtree_without_reading_it() {
+    let fixture = fixture();
+    write(fixture.path(), "root.rs", "fn root() {}\n");
+    write(
+        fixture.path(),
+        "nested/sentinel.rs",
+        "fn must_not_be_read() {}\n",
+    );
+    let mut oversized = String::from("sentinel.rs\n");
+    for index in 0..MAX_IGNORE_PATTERNS_PER_SOURCE {
+        oversized.push_str(&format!("generated-{index}\n"));
+    }
+    assert!(oversized.len() <= MAX_IGNORE_SOURCE_BYTES);
+    write(fixture.path(), "nested/.gitignore", &oversized);
+
+    let error = detect(fixture.path(), &DetectOptions::default())
+        .expect_err("oversized nested ignore must abort discovery")
+        .to_string();
+
+    assert!(error.contains("nested/.gitignore"));
+    assert!(error.contains("pattern source limit"));
+}
+
+#[test]
+fn overlong_ignore_rule_fails_closed_before_project_traversal() {
+    let fixture = fixture();
+    write(fixture.path(), "sentinel.rs", "fn must_not_be_read() {}\n");
+    write(
+        fixture.path(),
+        ".graphoxideignore",
+        &format!("{}\n", "x".repeat(MAX_IGNORE_PATTERN_BYTES + 1)),
+    );
+
+    let error = detect(fixture.path(), &DetectOptions::default())
+        .expect_err("overlong ignore rule must abort discovery")
+        .to_string();
+
+    assert!(error.contains("rule exceeding"));
+    assert!(error.contains("no rules from this source were applied"));
 }
 
 #[test]

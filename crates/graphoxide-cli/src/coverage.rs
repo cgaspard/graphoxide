@@ -93,6 +93,90 @@ pub fn render_coverage_report(report: &CoverageReport, json: bool) -> anyhow::Re
             )?;
         }
     }
+    if report.files_truncated > 0
+        || report.boundaries_truncated > 0
+        || report.directory_walks_truncated > 0
+        || report.ignore_sources_truncated > 0
+    {
+        writeln!(output, "Omissions:")?;
+        if report.files_truncated > 0 {
+            writeln!(
+                output,
+                "- {} file outcome(s) omitted",
+                report.files_truncated
+            )?;
+        }
+        if report.boundaries_truncated > 0 {
+            writeln!(
+                output,
+                "- {} boundary outcome(s) omitted",
+                report.boundaries_truncated
+            )?;
+        }
+        if report.directory_walks_truncated > 0 {
+            writeln!(
+                output,
+                "- {} directory walk(s) omitted after exceeding the traversal budget",
+                report.directory_walks_truncated
+            )?;
+        }
+        if report.ignore_sources_truncated > 0 {
+            writeln!(
+                output,
+                "- {} oversized ignore-policy source(s) rejected",
+                report.ignore_sources_truncated
+            )?;
+        }
+    }
 
     Ok(output.trim_end().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graphoxide_extract::coverage::{audit_coverage, CoverageOptions};
+
+    #[test]
+    fn incomplete_human_report_names_every_truncation_category() {
+        let root = tempfile::tempdir().expect("coverage root");
+        let mut report = audit_coverage(root.path(), &CoverageOptions::default())
+            .expect("baseline coverage report");
+        report.complete = false;
+        report.files_truncated = 2;
+        report.boundaries_truncated = 3;
+        report.directory_walks_truncated = 4;
+        report.walk_errors_truncated = 5;
+        report.ignore_sources_truncated = 6;
+
+        let rendered = render_coverage_report(&report, false).expect("human report");
+        assert!(rendered.contains("Status: incomplete"), "{rendered}");
+        assert!(rendered.contains("2 file outcome(s) omitted"), "{rendered}");
+        assert!(
+            rendered.contains("3 boundary outcome(s) omitted"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("4 directory walk(s) omitted"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("5 additional walk error(s) omitted"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("6 oversized ignore-policy source(s) rejected"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn complete_human_report_does_not_claim_any_omissions() {
+        let root = tempfile::tempdir().expect("coverage root");
+        let report =
+            audit_coverage(root.path(), &CoverageOptions::default()).expect("coverage report");
+        let rendered = render_coverage_report(&report, false).expect("human report");
+        assert!(!rendered.contains("Omissions:"), "{rendered}");
+        assert!(!rendered.contains("omitted"), "{rendered}");
+    }
 }

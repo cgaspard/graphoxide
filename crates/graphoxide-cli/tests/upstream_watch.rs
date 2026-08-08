@@ -242,6 +242,79 @@ fn test_rebuild_lock_writes_pid_with_newline() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_rebuild_lock_rejects_symlink_without_touching_external_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("output");
+    fs::create_dir(&output).unwrap();
+    let external = temp.path().join("external.txt");
+    fs::write(&external, b"external lock target\n").unwrap();
+    let lock = output.join(REBUILD_LOCK);
+    symlink(&external, &lock).unwrap();
+
+    let error = RebuildLockGuard::acquire(&output, false).unwrap_err();
+    assert!(error.to_string().contains("unsafe rebuild lock"));
+    assert_eq!(fs::read(&external).unwrap(), b"external lock target\n");
+    assert!(lock.symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_rebuild_lock_rejects_symlinked_output_directory() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let external = temp.path().join("external-output");
+    fs::create_dir(&external).unwrap();
+    let output = temp.path().join("output");
+    symlink(&external, &output).unwrap();
+
+    let error = RebuildLockGuard::acquire(&output, false).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unsafe rebuild output directory"));
+    assert!(!external.join(REBUILD_LOCK).exists());
+    assert!(output.symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+#[test]
+fn test_rebuild_lock_rejects_non_file_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let lock = temp.path().join(REBUILD_LOCK);
+    fs::create_dir(&lock).unwrap();
+
+    let error = RebuildLockGuard::acquire(temp.path(), false).unwrap_err();
+    assert!(error.to_string().contains("unsafe rebuild lock"));
+    assert!(lock.is_dir());
+}
+
+#[test]
+fn test_rebuild_lock_rejects_hardlink_without_touching_external_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("output");
+    fs::create_dir(&output).unwrap();
+    let external = temp.path().join("external.txt");
+    fs::write(&external, b"external hardlink target\n").unwrap();
+    let lock = output.join(REBUILD_LOCK);
+    if let Err(error) = fs::hard_link(&external, &lock) {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+        ) {
+            return;
+        }
+        panic!("create hardlink fixture: {error}");
+    }
+
+    let error = RebuildLockGuard::acquire(&output, false).unwrap_err();
+    assert!(error.to_string().contains("multiply linked rebuild lock"));
+    assert_eq!(fs::read(&external).unwrap(), b"external hardlink target\n");
+    assert_eq!(fs::read(&lock).unwrap(), b"external hardlink target\n");
+}
+
 #[test]
 fn test_rebuild_lock_inode_persists_after_release() {
     let temp = tempfile::tempdir().unwrap();

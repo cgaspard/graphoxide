@@ -172,6 +172,48 @@ pub fn write_graph_atomic(
     force: bool,
 ) -> anyhow::Result<bool> {
     let path = path.as_ref();
+    write_graph_atomic_with(path, graph, force, atomic_value)
+}
+
+/// Atomically write a graph without following a destination link or falling
+/// back to an in-place copy when replacement is unavailable.
+pub fn write_graph_atomic_strict(
+    path: impl AsRef<Path>,
+    graph: &KnowledgeGraph,
+    force: bool,
+) -> anyhow::Result<bool> {
+    let path = path.as_ref();
+    validate_strict_destination(path)?;
+    write_graph_atomic_with(path, graph, force, atomic_value_strict)
+}
+
+/// Test/embedding hook for strict graph publication with an injected replace.
+#[doc(hidden)]
+pub fn write_graph_atomic_strict_with_replacer<R>(
+    path: impl AsRef<Path>,
+    graph: &KnowledgeGraph,
+    force: bool,
+    replace: R,
+) -> anyhow::Result<bool>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let path = path.as_ref();
+    validate_strict_destination(path)?;
+    write_graph_atomic_with(path, graph, force, |path, value| {
+        write_json_atomic_strict_with_replacer(path, value, true, replace)
+    })
+}
+
+fn write_graph_atomic_with<W>(
+    path: &Path,
+    graph: &KnowledgeGraph,
+    force: bool,
+    write: W,
+) -> anyhow::Result<bool>
+where
+    W: FnOnce(&Path, &serde_json::Value) -> anyhow::Result<()>,
+{
     if !force && path.exists() {
         let existing = read_graph(path).map_err(|error| {
             anyhow::anyhow!(
@@ -186,7 +228,7 @@ pub fn write_graph_atomic(
 
     let mut value = serde_json::to_value(graph)?;
     prepare_for_export(&mut value);
-    atomic_value(path, &value)?;
+    write(path, &value)?;
     Ok(true)
 }
 
@@ -197,6 +239,48 @@ pub fn write_raw_extractions_atomic(
     force: bool,
 ) -> anyhow::Result<bool> {
     let path = path.as_ref();
+    write_raw_extractions_atomic_with(path, extractions, force, atomic_value)
+}
+
+/// Strict raw-graph writer for transactional publication workflows.
+pub fn write_raw_extractions_atomic_strict(
+    path: impl AsRef<Path>,
+    extractions: &[Extraction],
+    force: bool,
+) -> anyhow::Result<bool> {
+    let path = path.as_ref();
+    validate_strict_destination(path)?;
+    write_raw_extractions_atomic_with(path, extractions, force, atomic_value_strict)
+}
+
+/// Test/embedding hook for strict raw-graph publication with an injected
+/// replace operation.
+#[doc(hidden)]
+pub fn write_raw_extractions_atomic_strict_with_replacer<R>(
+    path: impl AsRef<Path>,
+    extractions: &[Extraction],
+    force: bool,
+    replace: R,
+) -> anyhow::Result<bool>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let path = path.as_ref();
+    validate_strict_destination(path)?;
+    write_raw_extractions_atomic_with(path, extractions, force, |path, value| {
+        write_json_atomic_strict_with_replacer(path, value, true, replace)
+    })
+}
+
+fn write_raw_extractions_atomic_with<W>(
+    path: &Path,
+    extractions: &[Extraction],
+    force: bool,
+    write: W,
+) -> anyhow::Result<bool>
+where
+    W: FnOnce(&Path, &serde_json::Value) -> anyhow::Result<()>,
+{
     let node_count: usize = extractions.iter().map(|e| e.nodes.len()).sum();
     if !force && path.exists() {
         let existing = read_graph(path).map_err(|error| {
@@ -232,12 +316,16 @@ pub fn write_raw_extractions_atomic(
             }
         }
     }
-    atomic_value(path, &value)?;
+    write(path, &value)?;
     Ok(true)
 }
 
 fn atomic_value(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
     write_json_atomic(path, value, true)
+}
+
+fn atomic_value_strict(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
+    write_json_atomic_strict(path, value, true)
 }
 
 /// Atomically write UTF-8 text, preserving an existing destination's mode and
@@ -288,12 +376,63 @@ pub fn write_json_atomic(
     )
 }
 
+/// Atomically serialize JSON without link following or an in-place copy
+/// fallback when the final filesystem replacement cannot be performed.
+pub fn write_json_atomic_strict(
+    path: impl AsRef<Path>,
+    value: &impl Serialize,
+    pretty: bool,
+) -> anyhow::Result<()> {
+    write_json_atomic_strict_with_replacer(path, value, pretty, replace_file_strict)
+}
+
+/// Test/embedding hook for strict JSON publication with an injected replace.
+#[doc(hidden)]
+pub fn write_json_atomic_strict_with_replacer<R>(
+    path: impl AsRef<Path>,
+    value: &impl Serialize,
+    pretty: bool,
+    replace: R,
+) -> anyhow::Result<()>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    atomic_write_strict(
+        path.as_ref(),
+        |file| {
+            if pretty {
+                serde_json::to_writer_pretty(file, value).map_err(std::io::Error::other)
+            } else {
+                serde_json::to_writer(file, value).map_err(std::io::Error::other)
+            }
+        },
+        replace,
+    )
+}
+
 fn atomic_write<W, R>(path: &Path, write: W, replace: R) -> anyhow::Result<()>
 where
     W: FnOnce(&mut fs::File) -> std::io::Result<()>,
     R: FnOnce(&Path, &Path) -> std::io::Result<()>,
 {
     let destination = resolve_destination(path)?;
+    atomic_write_destination(&destination, write, replace)
+}
+
+fn atomic_write_strict<W, R>(path: &Path, write: W, replace: R) -> anyhow::Result<()>
+where
+    W: FnOnce(&mut fs::File) -> std::io::Result<()>,
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    validate_strict_destination(path)?;
+    atomic_write_destination(path, write, replace)
+}
+
+fn atomic_write_destination<W, R>(destination: &Path, write: W, replace: R) -> anyhow::Result<()>
+where
+    W: FnOnce(&mut fs::File) -> std::io::Result<()>,
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let name = destination
@@ -327,13 +466,13 @@ where
     })?;
     let mut file = file.expect("temporary path and file are created together");
     let result = (|| -> anyhow::Result<()> {
-        if let Ok(metadata) = fs::metadata(&destination) {
+        if let Ok(metadata) = fs::metadata(destination) {
             fs::set_permissions(&temporary, metadata.permissions())?;
         }
         write(&mut file)?;
         file.sync_all()?;
         drop(file);
-        replace(&temporary, &destination)?;
+        replace(&temporary, destination)?;
         Ok(())
     })();
     if result.is_err() {
@@ -350,6 +489,28 @@ fn resolve_destination(path: &Path) -> std::io::Result<PathBuf> {
         return fs::canonicalize(path);
     }
     Ok(path.to_path_buf())
+}
+
+fn validate_strict_destination(path: &Path) -> std::io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing symlinked publication destination {}",
+                path.display()
+            ),
+        )),
+        Ok(metadata) if !metadata.file_type().is_file() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing non-file publication destination {}",
+                path.display()
+            ),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Replace `destination` with a fully-written temporary file.
@@ -376,6 +537,49 @@ pub fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()>
                 Err(rename_error)
             }
         }
+    }
+}
+
+/// Replace a destination in one filesystem operation, with no copy fallback.
+///
+/// Both paths must name entries in the same directory. On Windows,
+/// MOVEFILE_WRITE_THROUGH ensures the move reaches storage before the
+/// publication sequence proceeds.
+#[cfg(not(windows))]
+pub fn replace_file_strict(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+/// Windows strict replacement using the platform's replace-existing move.
+#[cfg(windows)]
+pub fn replace_file_strict(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temporary = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers remain live and are NUL-terminated UTF-16 paths.
+    let replaced = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 

@@ -103,16 +103,118 @@ pub struct RebuildLockGuard {
     acquired: bool,
 }
 
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn validate_rebuild_output_directory(out: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(out) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_dir() && !metadata_is_reparse_point(&metadata),
+                "refusing unsafe rebuild output directory {}",
+                out.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(out)?;
+            let metadata = fs::symlink_metadata(out)?;
+            anyhow::ensure!(
+                metadata.file_type().is_dir() && !metadata_is_reparse_point(&metadata),
+                "refusing unsafe rebuild output directory {}",
+                out.display()
+            );
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn rebuild_lock_link_count(file: &File) -> std::io::Result<u64> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(file.metadata()?.nlink())
+}
+
+#[cfg(windows)]
+fn rebuild_lock_link_count(file: &File) -> std::io::Result<u64> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the borrowed handle remains valid for the duration of the call,
+    // and the output structure points to initialized writable storage.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(u64::from(information.nNumberOfLinks))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn rebuild_lock_link_count(_file: &File) -> std::io::Result<u64> {
+    Ok(1)
+}
+
+fn validate_open_rebuild_lock(file: &File, path: &Path) -> anyhow::Result<()> {
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.file_type().is_file() && !metadata_is_reparse_point(&metadata),
+        "refusing unsafe rebuild lock {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        rebuild_lock_link_count(file)? == 1,
+        "refusing multiply linked rebuild lock {}",
+        path.display()
+    );
+    Ok(())
+}
+
 impl RebuildLockGuard {
     pub fn acquire(out: &Path, blocking: bool) -> anyhow::Result<Option<Self>> {
-        fs::create_dir_all(out)?;
+        validate_rebuild_output_directory(out)?;
         let path = out.join(REBUILD_LOCK);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_file() && !metadata_is_reparse_point(&metadata),
+                    "refusing unsafe rebuild lock {}",
+                    path.display()
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let mut file = options.open(&path)?;
+        validate_open_rebuild_lock(&file, &path)?;
         let locked = if blocking {
             file.lock_exclusive().map(|_| true)
         } else {
@@ -125,6 +227,7 @@ impl RebuildLockGuard {
         if !locked {
             return Ok(None);
         }
+        validate_open_rebuild_lock(&file, &path)?;
         file.seek(SeekFrom::Start(0))?;
         file.set_len(0)?;
         writeln!(file, "{}", std::process::id())?;

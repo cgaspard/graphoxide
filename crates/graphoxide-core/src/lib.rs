@@ -26,8 +26,11 @@ pub use ids::{make_id, node_id, normalize_id};
 pub use io::{
     check_graph_file_size_cap, check_graph_file_size_cap_with, max_graph_bytes,
     parse_max_graph_bytes, permission_fallback, read_graph, read_graph_capped, read_graph_with_cap,
-    read_json_object, read_json_object_with_cap, replace_file, write_graph_atomic,
-    write_json_atomic, write_raw_extractions_atomic, write_text_atomic,
+    read_json_object, read_json_object_with_cap, replace_file, replace_file_strict,
+    write_graph_atomic, write_graph_atomic_strict, write_graph_atomic_strict_with_replacer,
+    write_json_atomic, write_json_atomic_strict, write_json_atomic_strict_with_replacer,
+    write_raw_extractions_atomic, write_raw_extractions_atomic_strict,
+    write_raw_extractions_atomic_strict_with_replacer, write_text_atomic,
     write_text_atomic_with_replacer, CappedGraphRead, DEFAULT_MAX_GRAPH_BYTES,
 };
 pub use jsonc::{parse_jsonc, parse_jsonc_slice};

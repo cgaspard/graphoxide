@@ -52,22 +52,24 @@ All examples below assume `graphoxide` is on `PATH`. You can replace the command
 
 ```bash
 cd /path/to/project
-graphoxide extract . --code-only
+graphoxide index . --code-only
 graphoxide query "where are calls resolved?"
 graphoxide report
 ```
 
-The first command creates `graphoxide-out/graph.json`; subsequent commands read that graph by default.
+The first command creates an associated graph, incremental manifest, and file
+coverage report beneath `graphoxide-out/`; subsequent commands read the graph by
+default.
 
 ## Typical workflow
 
-### 1. Build a project graph
+### 1. Index a project
 
-Run extraction against the repository you want to inspect:
+Run the bounded indexing workflow against the repository you want to inspect:
 
 ```bash
 cd /path/to/project
-graphoxide extract . --code-only
+graphoxide index . --code-only
 ```
 
 This walks the repository, extracts code relationships in parallel, builds and deduplicates the graph, runs Leiden clustering, and creates:
@@ -76,22 +78,27 @@ This walks the repository, extracts code relationships in parallel, builds and d
 graphoxide-out/
 ├── graph.json       # queryable knowledge graph
 ├── manifest.json    # incremental file state
+├── coverage.json    # deterministic file outcomes associated with graph.json
 └── cache/           # reusable extraction cache
 ```
 
 The walker honors `.gitignore` and `.graphoxideignore`. It skips dependencies, build artifacts, credential files, and its own `graphoxide-out/` directory.
 
-Useful extraction variants:
+`graphoxide extract` remains compatible for scripts that only want the graph
+build. `graphoxide index` uses the same graph path and adds the associated
+coverage artifact.
+
+Useful indexing variants:
 
 ```bash
 # Discard cached extraction results and scan every supported file again
-graphoxide extract . --code-only --force
+graphoxide index . --code-only --force
 
 # Write the upstream-compatible raw extraction without build/clustering
-graphoxide extract . --code-only --no-cluster
+graphoxide index . --code-only --no-cluster
 
-# Emit one JSON build report for automation
-graphoxide extract . --code-only --json
+# Emit one JSON report with build and coverage-association evidence
+graphoxide index . --code-only --json
 
 # Inspect the deterministic structured-format capability contract
 graphoxide formats --json
@@ -100,18 +107,17 @@ graphoxide formats --json
 graphoxide audit coverage . --json
 
 # Bound an isolated build explicitly and write additive runtime telemetry
-graphoxide extract . --memory-budget-bytes 1073741824 \
+graphoxide index . --memory-budget-bytes 1073741824 \
   --compute-workers 4 --runtime-report graphoxide-out/runtime.json
 ```
 
 `--force` also permits replacing an existing graph with a smaller one. Use it intentionally if files were removed or ignore rules changed.
 
-Successful builds report elapsed time. Add `--timing` to `extract` for
-human-readable stage durations on stderr, or `--json` to either `extract` or
-`update` for a single stdout object containing the operation mode and status,
-stage durations, file counts, graph totals, output path, and warnings. Timing is
-never written into `graph.json`, so telemetry does not affect deterministic
-graph output.
+Successful builds report elapsed time. Add `--timing` for human-readable stage
+durations on stderr. `extract --json` and `update --json` retain their existing
+single build-report object; `index --json` adds an outer object containing that
+build report and the coverage path and graph digest. Timing is never written
+into `graph.json`, so telemetry does not affect deterministic graph output.
 
 The default executor separates filesystem I/O from CPU extraction behind
 bounded queues and a resolved managed-memory budget. `--memory-budget-bytes`,
@@ -234,6 +240,7 @@ HTML outputs open directly in a browser. GraphML can be imported by graph tools,
 
 | Command | Purpose |
 |---|---|
+| `index <path>` | Build a graph and publish its associated deterministic file coverage |
 | `extract <path>` | Extract, build, deduplicate, cluster, and write a graph |
 | `audit [path]` | Report unresolved, malformed, merged, repaired, or dropped graph facts |
 | `update [path]` | Incrementally refresh an existing project graph |
@@ -267,7 +274,9 @@ coverage report. It includes unknown and extensionless files without adding them
 to `graph.json`, records sensitive and policy-excluded paths without reading
 their contents, and reports ignored or pruned boundaries separately. Coverage
 `--strict` fails only when the scan is incomplete or an in-scope file is
-unreadable; unsupported formats remain valid, visible outcomes.
+unreadable; unsupported formats remain valid, visible outcomes. The report
+published by `graphoxide index` additionally records the relative graph path and
+SHA-256 of the exact accepted graph bytes.
 
 ## Supported source formats
 

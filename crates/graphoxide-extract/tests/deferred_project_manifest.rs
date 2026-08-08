@@ -1,5 +1,6 @@
 use graphoxide_extract::{
-    detect::DetectOptions, extract_project_with_scan_options_deferred_manifest,
+    detect::{DetectOptions, MAX_IGNORE_SOURCE_BYTES},
+    extract_project_with_scan_options_deferred_manifest,
 };
 use serde_json::Value;
 use std::fs;
@@ -46,6 +47,44 @@ fn deferred_manifest_stays_unchanged_until_graph_commit_point() {
 }
 
 #[test]
+fn rejected_nested_ignore_policy_aborts_compensating_work_and_preserves_seeded_manifest() {
+    let fixture = tempfile::tempdir().unwrap();
+    let project = fixture.path().join("project");
+    let output = fixture.path().join("managed/graphoxide-out");
+    write(
+        &project.join("new.py"),
+        "def compensating_node():\n    pass\n",
+    );
+    write(
+        &project.join("nested/sentinel.py"),
+        "raise RuntimeError('must not read')\n",
+    );
+    let mut ignore = b"sentinel.py\n".to_vec();
+    ignore.resize(MAX_IGNORE_SOURCE_BYTES + 1, b'#');
+    fs::write(project.join("nested/.graphoxideignore"), ignore).unwrap();
+    let manifest_path = output.join("manifest.json");
+    let previous = br#"{"old.py":{"mtime":1.0,"ast_hash":"old","semantic_hash":""}}"#;
+    write(&manifest_path, std::str::from_utf8(previous).unwrap());
+
+    let error = extract_project_with_scan_options_deferred_manifest(
+        &project,
+        false,
+        &output,
+        true,
+        &DetectOptions {
+            output_dir: Some(output.clone()),
+            ..DetectOptions::default()
+        },
+    )
+    .expect_err("rejected nested ignore policy must abort extraction")
+    .to_string();
+
+    assert!(error.contains("ignore policy could not be loaded safely"));
+    assert!(error.contains("nested/.graphoxideignore"));
+    assert_eq!(fs::read(&manifest_path).unwrap(), previous);
+}
+
+#[test]
 fn dropping_deferred_manifest_does_not_publish_it() {
     let fixture = tempfile::tempdir().unwrap();
     let project = fixture.path().join("project");
@@ -66,6 +105,40 @@ fn dropping_deferred_manifest_does_not_publish_it() {
     drop(prepared);
 
     assert!(!output.join("manifest.json").exists());
+}
+
+#[test]
+fn strict_manifest_commit_is_byte_identical_to_legacy_commit() {
+    let fixture = tempfile::tempdir().unwrap();
+    let project = fixture.path().join("project");
+    let legacy_output = fixture.path().join("legacy/graphoxide-out");
+    let strict_output = fixture.path().join("strict/graphoxide-out");
+    write(&project.join("app.py"), "def app():\n    return 1\n");
+
+    let legacy = extract_project_with_scan_options_deferred_manifest(
+        &project,
+        false,
+        &legacy_output,
+        true,
+        &DetectOptions::default(),
+    )
+    .unwrap();
+    legacy.pending_manifest.commit().unwrap();
+
+    let strict = extract_project_with_scan_options_deferred_manifest(
+        &project,
+        false,
+        &strict_output,
+        true,
+        &DetectOptions::default(),
+    )
+    .unwrap();
+    strict.pending_manifest.commit_strict().unwrap();
+
+    assert_eq!(
+        fs::read(legacy_output.join("manifest.json")).unwrap(),
+        fs::read(strict_output.join("manifest.json")).unwrap()
+    );
 }
 
 #[test]
@@ -188,6 +261,45 @@ fn managed_output_ownership_overrides_a_mismatched_detect_option() {
         prepared.pending_manifest.path(),
         output.join("manifest.json")
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn extraction_never_admits_an_outside_managed_memory_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let project = fixture.path().join("project");
+    let outside = fixture.path().join("outside");
+    let output = project.join("graphoxide-out");
+    write(&project.join("app.py"), "def app():\n    return 1\n");
+    write(
+        &outside.join("must_not_be_opened.py"),
+        "raise RuntimeError('outside')\n",
+    );
+    fs::create_dir_all(&output).unwrap();
+    symlink(&outside, output.join("memory")).unwrap();
+
+    let prepared = extract_project_with_scan_options_deferred_manifest(
+        &project,
+        false,
+        &output,
+        true,
+        &DetectOptions {
+            follow_symlinks: true,
+            output_dir: Some(output.clone()),
+            ..DetectOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(prepared.progress.is_complete());
+    assert_eq!(prepared.progress.total, 1);
+    assert!(prepared
+        .extractions
+        .iter()
+        .flat_map(|extraction| &extraction.nodes)
+        .all(|node| !node.source_file.contains("must_not_be_opened")));
 }
 
 #[test]

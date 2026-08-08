@@ -8,7 +8,7 @@ mod site;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use graphoxide_cli::watch as watch_service;
-use std::{fs, io::Write, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf, thread, time::Duration};
 
 #[derive(Parser)]
 #[command(
@@ -113,50 +113,17 @@ impl RuntimeOptions {
 enum Command {
     /// Headless deterministic extraction into graphoxide-out/
     Extract {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Restrict extraction to code and configuration inputs
-        #[arg(long)]
-        code_only: bool,
-        /// Skip clustering, write raw extraction only
-        #[arg(long)]
-        no_cluster: bool,
-        /// Full re-scan: skip the incremental manifest gate
-        #[arg(long)]
-        force: bool,
-        /// Include a read-only PostgreSQL catalog, optionally using this DSN.
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        postgres: Option<String>,
-        /// Permit a known-incomplete extraction to bypass shrink protection.
-        #[arg(long)]
-        allow_partial: bool,
-        /// Emit extraction stage durations to stderr.
-        #[arg(long)]
-        timing: bool,
-        /// Emit one machine-readable build report to stdout.
-        #[arg(long)]
-        json: bool,
-        /// Atomically write additive runtime telemetry to this JSON sidecar.
-        ///
-        /// This never changes stdout, including the stable `--json` build
-        /// report. The sidecar is intended for benchmark and runtime analysis.
-        #[arg(long)]
-        runtime_report: Option<PathBuf>,
+        #[command(flatten)]
+        build: ProjectBuildOptions,
         /// Use the retired path-based/Rayon extractor instead of the default
         /// dedicated I/O and CPU execution runtime.
         #[arg(long)]
         legacy_executor: bool,
+    },
+    /// Build a deterministic graph and its associated universal coverage report
+    Index {
         #[command(flatten)]
-        runtime: RuntimeOptions,
-        /// Place the managed graphoxide-out directory beneath this root.
-        #[arg(long, visible_alias = "output")]
-        out: Option<PathBuf>,
-        /// Exclude a path or ignore-style pattern; repeated flags replace the persisted set.
-        #[arg(long)]
-        exclude: Vec<String>,
-        /// Ignore VCS ignore files while continuing to honor .graphoxideignore/.graphifyignore.
-        #[arg(long)]
-        no_gitignore: bool,
+        build: ProjectBuildOptions,
     },
     /// Audit graph integrity or report bounded file-indexing coverage
     #[command(
@@ -565,6 +532,50 @@ enum Command {
     },
 }
 
+#[derive(Args, Debug)]
+struct ProjectBuildOptions {
+    #[arg(default_value = ".")]
+    path: PathBuf,
+    /// Restrict extraction to code and configuration inputs
+    #[arg(long)]
+    code_only: bool,
+    /// Skip clustering, write raw extraction only
+    #[arg(long)]
+    no_cluster: bool,
+    /// Full re-scan: skip the incremental manifest gate
+    #[arg(long)]
+    force: bool,
+    /// Include a read-only PostgreSQL catalog, optionally using this DSN.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    postgres: Option<String>,
+    /// Permit a known-incomplete extraction to bypass shrink protection.
+    #[arg(long)]
+    allow_partial: bool,
+    /// Emit extraction stage durations to stderr.
+    #[arg(long)]
+    timing: bool,
+    /// Emit one machine-readable workflow report to stdout.
+    #[arg(long)]
+    json: bool,
+    /// Atomically write additive runtime telemetry to this JSON sidecar.
+    ///
+    /// This never changes stdout, including the stable `--json` report. The
+    /// sidecar is intended for benchmark and runtime analysis.
+    #[arg(long)]
+    runtime_report: Option<PathBuf>,
+    #[command(flatten)]
+    runtime: RuntimeOptions,
+    /// Place the managed graphoxide-out directory beneath this root.
+    #[arg(long, visible_alias = "output")]
+    out: Option<PathBuf>,
+    /// Exclude a path or ignore-style pattern; repeated flags replace the persisted set.
+    #[arg(long)]
+    exclude: Vec<String>,
+    /// Ignore VCS ignore files while continuing to honor .graphoxideignore/.graphifyignore.
+    #[arg(long)]
+    no_gitignore: bool,
+}
+
 #[derive(Subcommand)]
 enum HookCommand {
     Install {
@@ -777,19 +788,20 @@ fn stale_local_sources(
     stale.into_iter().collect()
 }
 
-fn emit_build_report(
+fn emit_build_timing(
     report: &graphoxide_cli::build_telemetry::BuildTelemetry,
-    json: bool,
     timing: bool,
-    human: &str,
 ) -> anyhow::Result<()> {
     if timing {
         let stages = &report.stages_ms;
         let mut stage_values = match report.operation {
-            graphoxide_cli::build_telemetry::BuildOperation::Extract => vec![
-                ("detect/extract", stages.scan_extract),
-                ("build", stages.build),
-            ],
+            graphoxide_cli::build_telemetry::BuildOperation::Extract
+            | graphoxide_cli::build_telemetry::BuildOperation::Index => {
+                vec![
+                    ("detect/extract", stages.scan_extract),
+                    ("build", stages.build),
+                ]
+            }
             graphoxide_cli::build_telemetry::BuildOperation::Update => vec![
                 ("detect", stages.detect),
                 ("extract", stages.extract),
@@ -811,10 +823,48 @@ fn emit_build_report(
             graphoxide_cli::build_telemetry::format_elapsed(report.elapsed_ms)
         );
     }
+    Ok(())
+}
+
+fn emit_build_report(
+    report: &graphoxide_cli::build_telemetry::BuildTelemetry,
+    json: bool,
+    timing: bool,
+    human: &str,
+) -> anyhow::Result<()> {
+    emit_build_timing(report, timing)?;
     if json {
         write_output(&serde_json::to_string(report)?)
     } else {
         write_output(human)
+    }
+}
+
+fn emit_project_build_report(
+    report: &graphoxide_cli::build_telemetry::BuildTelemetry,
+    json: bool,
+    timing: bool,
+    human: &str,
+    coverage: Option<&graphoxide_cli::index::PublishedCoverage>,
+) -> anyhow::Result<()> {
+    let Some(coverage) = coverage else {
+        return emit_build_report(report, json, timing, human);
+    };
+    emit_build_timing(report, timing)?;
+    if json {
+        write_output(&serde_json::to_string(
+            &graphoxide_cli::index::IndexBuildReport::new(report, coverage),
+        )?)
+    } else {
+        let completeness = if coverage.complete {
+            ""
+        } else {
+            " (incomplete)"
+        };
+        write_output(&format!(
+            "{human}\nWrote associated coverage{completeness} to {}",
+            coverage.path,
+        ))
     }
 }
 
@@ -892,212 +942,345 @@ fn cluster_with_resource_gate(graph: &mut graphoxide_core::KnowledgeGraph) -> an
     graphoxide_graph::cluster(graph)
 }
 
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Formats { json } => write_output(&format_capability_output(json)?),
-        Command::Extract {
-            path,
-            code_only,
-            no_cluster,
-            force,
-            postgres,
-            allow_partial,
-            timing,
-            json,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectBuildWorkflow {
+    Extract { legacy_executor: bool },
+    Index,
+}
+
+impl ProjectBuildWorkflow {
+    const fn legacy_executor(self) -> bool {
+        match self {
+            Self::Extract { legacy_executor } => legacy_executor,
+            Self::Index => false,
+        }
+    }
+
+    const fn operation(self) -> graphoxide_cli::build_telemetry::BuildOperation {
+        match self {
+            Self::Extract { .. } => graphoxide_cli::build_telemetry::BuildOperation::Extract,
+            Self::Index => graphoxide_cli::build_telemetry::BuildOperation::Index,
+        }
+    }
+
+    const fn is_index(self) -> bool {
+        matches!(self, Self::Index)
+    }
+}
+
+fn run_project_build(
+    options: ProjectBuildOptions,
+    workflow: ProjectBuildWorkflow,
+) -> anyhow::Result<()> {
+    let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+    if workflow.is_index() {
+        let interrupt = cancellation.clone();
+        ctrlc::set_handler(move || interrupt.cancel())
+            .context("install index Ctrl-C cancellation handler")?;
+    }
+    run_project_build_with_cancellation(options, workflow, cancellation)
+}
+
+fn acquire_project_build_lock(
+    output_directory: &std::path::Path,
+    cancellation: &graphoxide_index_runtime::RuntimeCancellation,
+) -> anyhow::Result<watch_service::RebuildLockGuard> {
+    const RETRY_INTERVAL: Duration = Duration::from_millis(25);
+    let mut announced_wait = false;
+    loop {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "project build cancelled while waiting for the rebuild lock"
+        );
+        if let Some(lock) = watch_service::RebuildLockGuard::acquire(output_directory, false)? {
+            return Ok(lock);
+        }
+        if !announced_wait {
+            eprintln!(
+                "[graphoxide] waiting for the rebuild lock at {}",
+                output_directory.display()
+            );
+            announced_wait = true;
+        }
+        thread::sleep(RETRY_INTERVAL);
+    }
+}
+
+fn run_project_build_with_cancellation(
+    options: ProjectBuildOptions,
+    workflow: ProjectBuildWorkflow,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+) -> anyhow::Result<()> {
+    let ProjectBuildOptions {
+        path,
+        code_only,
+        no_cluster,
+        force,
+        postgres,
+        allow_partial,
+        timing,
+        json,
+        runtime_report,
+        runtime,
+        out,
+        exclude,
+        no_gitignore,
+    } = options;
+    let source_metadata = fs::metadata(&path).with_context(|| {
+        format!(
+            "project source root {} must already exist and be a directory",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        source_metadata.is_dir(),
+        "project source root {} must be a directory",
+        path.display()
+    );
+    let legacy_executor = workflow.legacy_executor();
+    let total_started = std::time::Instant::now();
+    let effective_force = graphoxide_cli::extract_cli::force_enabled(
+        force,
+        std::env::var("GRAPHOXIDE_FORCE").ok().as_deref(),
+        std::env::var("GRAPHIFY_FORCE").ok().as_deref(),
+    );
+    let output_directory = managed_output_directory(&path, out.as_deref());
+    let output = output_directory.join("graph.json");
+    let manifest_path = output_directory.join("manifest.json");
+    if let Some(runtime_report) = runtime_report.as_deref() {
+        graphoxide_cli::index::validate_runtime_report_destination(
             runtime_report,
-            legacy_executor,
-            runtime,
-            out,
-            exclude,
-            no_gitignore,
-        } => {
-            let total_started = std::time::Instant::now();
-            let effective_force = graphoxide_cli::extract_cli::force_enabled(
-                force,
-                std::env::var("GRAPHOXIDE_FORCE").ok().as_deref(),
-                std::env::var("GRAPHIFY_FORCE").ok().as_deref(),
-            );
-            let output_directory = managed_output_directory(&path, out.as_deref());
-            let output = output_directory.join("graph.json");
-            let manifest_path = output_directory.join("manifest.json");
-            // A committed graph is a sufficient carry-forward baseline for an
-            // explicitly code-only rebuild. This preserves live semantic
-            // records when a fresh clone does not contain the manifest.
-            let incremental_mode =
-                !effective_force && output.is_file() && (manifest_path.is_file() || code_only);
-            if incremental_mode && !json {
-                write_output(if legacy_executor {
-                    "Incremental scan: reusing unchanged extraction cache entries."
-                } else {
-                    "Incremental scan: isolating I/O and extracting only content-hash changes."
-                })?;
-            }
-            let mode = if incremental_mode {
-                graphoxide_cli::build_telemetry::BuildMode::Incremental
-            } else {
-                graphoxide_cli::build_telemetry::BuildMode::Full
-            };
-            let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
-                graphoxide_cli::build_telemetry::BuildOperation::Extract,
-                mode,
-                graphoxide_cli::build_telemetry::BuildStatus::Rebuilt,
-                output.clone(),
-            );
-            let persisted = watch_service::read_build_config(&output_directory);
-            let effective_excludes = if exclude.is_empty() {
-                persisted.excludes.clone()
-            } else {
-                exclude.clone()
-            };
-            let honor_gitignore = !no_gitignore && persisted.honor_gitignore;
-            let runtime_config = runtime.resolve_for_executor(legacy_executor)?;
-            let graph_memory_budget = runtime_config.map_or(
-                graphoxide_graph::DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
-                |config| config.memory_budget().cache_and_runs_bytes,
-            );
-            let scan_started = std::time::Instant::now();
-            let detect_options = graphoxide_extract::detect::DetectOptions {
-                extra_excludes: effective_excludes,
-                output_dir: Some(output_directory.clone()),
-                honor_gitignore,
-                ..Default::default()
-            };
-            let scan = if let Some(runtime_config) = runtime_config {
-                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
-                    &path,
-                    effective_force,
-                    &output_directory,
-                    code_only,
-                    &detect_options,
-                    runtime_config,
-                )?
-            } else {
-                graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
-                    &path,
-                    effective_force,
-                    &output_directory,
-                    code_only,
-                    &detect_options,
-                )?
-            };
-            let runtime_telemetry = runtime_config
-                .map(|config| isolated_runtime_configuration(config, scan.detection.total_files));
-            telemetry.stages_ms.scan_extract =
-                graphoxide_cli::build_telemetry::elapsed_millis(scan_started);
-            telemetry.files.detected = scan.detection.total_files;
-            telemetry.files.processed = scan.changed_sources;
-            telemetry.files.changed = scan.changed_sources;
-            telemetry.files.unchanged = scan.unchanged_sources;
-            telemetry.files.deleted = scan.deleted_sources;
-            telemetry.files.unclassified = scan.detection.unclassified.len();
-            telemetry.files.sensitive = scan.detection.skipped_sensitive.len();
-            telemetry.warnings.extend(scan.detection.warning.clone());
-            telemetry
-                .warnings
-                .extend(scan.detection.walk_errors.iter().cloned());
-            telemetry.warnings.extend(scan.warnings.iter().cloned());
-            for warning in &scan.warnings {
-                eprintln!("{warning}");
-            }
-            let build_progress = graphoxide_cli::build_guard::BuildProgress::new(
-                scan.progress.total,
-                scan.progress.succeeded,
+            &output_directory,
+        )?;
+    }
+    if workflow.is_index() {
+        graphoxide_cli::index::validate_index_prior_artifacts(&output_directory)?;
+        graphoxide_cli::index::validate_index_build_config_destinations(&output_directory)?;
+    }
+    // Both writers share one coherent view of prior state through graph,
+    // manifest, coverage, and build-policy publication. A non-index extract
+    // must not replace graph.json while index hashes it for association.
+    let _build_lock = acquire_project_build_lock(&output_directory, &cancellation)?;
+    if workflow.is_index() {
+        // Recheck after any lock wait so a cooperating publisher cannot leave
+        // a newly unsafe prior-state path for the baseline readers below.
+        graphoxide_cli::index::validate_index_prior_artifacts(&output_directory)?;
+        graphoxide_cli::index::validate_index_build_config_destinations(&output_directory)?;
+    }
+    // A committed graph is a sufficient carry-forward baseline for an
+    // explicitly code-only rebuild. This preserves live semantic
+    // records when a fresh clone does not contain the manifest.
+    let incremental_mode =
+        !effective_force && output.is_file() && (manifest_path.is_file() || code_only);
+    if incremental_mode && !json {
+        write_output(if legacy_executor {
+            "Incremental scan: reusing unchanged extraction cache entries."
+        } else {
+            "Incremental scan: isolating I/O and extracting only content-hash changes."
+        })?;
+    }
+    let mode = if incremental_mode {
+        graphoxide_cli::build_telemetry::BuildMode::Incremental
+    } else {
+        graphoxide_cli::build_telemetry::BuildMode::Full
+    };
+    let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
+        workflow.operation(),
+        mode,
+        graphoxide_cli::build_telemetry::BuildStatus::Rebuilt,
+        output.clone(),
+    );
+    let persisted = if workflow.is_index() {
+        graphoxide_cli::index::read_index_build_config(&output_directory)?
+    } else {
+        watch_service::read_build_config(&output_directory)
+    };
+    let prepared_index_build_config = if workflow.is_index() {
+        Some(graphoxide_cli::index::prepare_index_build_config(
+            persisted.clone(),
+            (!exclude.is_empty()).then_some(exclude.as_slice()),
+            no_gitignore.then_some(false),
+            !no_cluster,
+        )?)
+    } else {
+        None
+    };
+    let effective_excludes = if exclude.is_empty() {
+        persisted.excludes.clone()
+    } else {
+        exclude.clone()
+    };
+    let honor_gitignore = !no_gitignore && persisted.honor_gitignore;
+    let runtime_config = if workflow.is_index() {
+        Some(runtime.resolve()?)
+    } else {
+        runtime.resolve_for_executor(legacy_executor)?
+    };
+    let graph_memory_budget = runtime_config.map_or(
+        graphoxide_graph::DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
+        |config| config.memory_budget().cache_and_runs_bytes,
+    );
+    let scan_started = std::time::Instant::now();
+    let detect_options = graphoxide_extract::detect::DetectOptions {
+        extra_excludes: effective_excludes,
+        output_dir: Some(output_directory.clone()),
+        honor_gitignore,
+        ..Default::default()
+    };
+    let mut coverage_report = if workflow.is_index() {
+        let mut coverage_options =
+            graphoxide_extract::coverage::CoverageOptions::from(&detect_options);
+        coverage_options.code_only = code_only;
+        let report = graphoxide_extract::coverage::audit_coverage_with_cancellation(
+            &path,
+            &coverage_options,
+            &cancellation,
+        )?;
+        graphoxide_cli::index::validate_coverage_for_index(&report, allow_partial)?;
+        Some(report)
+    } else {
+        None
+    };
+    let scan = if let Some(runtime_config) = runtime_config {
+        if workflow.is_index() {
+            graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+                        &path,
+                        effective_force,
+                        &output_directory,
+                        code_only,
+                        &detect_options,
+                        runtime_config,
+                        cancellation.clone(),
+                    )?
+        } else {
+            graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+                &path,
+                effective_force,
+                &output_directory,
+                code_only,
+                &detect_options,
+                runtime_config,
             )?
-            .ensure_any_success("local extraction")?;
-            if code_only {
-                let skipped = scan
-                    .detection
-                    .files
-                    .iter()
-                    .filter(|(kind, _)| kind.as_str() != "code")
-                    .map(|(_, files)| files.len())
-                    .sum::<usize>();
-                telemetry.files.skipped = telemetry.files.skipped.saturating_add(skipped);
-                if !json {
-                    write_output(&format!(
-                        "--code-only: skipping {skipped} non-code input(s)"
-                    ))?;
-                }
-            }
-            for skipped in &scan.detection.skipped_sensitive {
-                eprintln!("skipped as potentially sensitive: {skipped}");
-            }
-            let mut extractions = scan.extractions;
-            let rebuilt_sources = scan.rebuilt_sources;
-            let pending_manifest = scan.pending_manifest;
-            let mut rebuilt_provider_sources = Vec::new();
-            if let Some(dsn) = postgres.as_deref() {
-                let extraction = graphoxide_extract::pg_introspect::introspect_postgres(
-                    (!dsn.is_empty()).then_some(dsn),
-                )?;
-                if let Some(source) = extraction
-                    .nodes
-                    .first()
-                    .map(|node| node.source_file.clone())
-                {
-                    rebuilt_provider_sources.push(source);
-                }
-                extractions.push(extraction);
-            }
-            rebuilt_provider_sources.sort();
-            rebuilt_provider_sources.dedup();
-            let retained_output_bytes =
-                graphoxide_extract::extractions_retained_bytes(&extractions)?;
-            debug_assert!(retained_output_bytes >= scan.retained_output_bytes);
-            let (previous, graph_materialization_budget) = if incremental_mode {
-                let budget = incremental_graph_budget_after_retained_output(
-                    graph_memory_budget,
+        }
+    } else {
+        graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
+            &path,
+            effective_force,
+            &output_directory,
+            code_only,
+            &detect_options,
+        )?
+    };
+    let runtime_telemetry = runtime_config
+        .map(|config| isolated_runtime_configuration(config, scan.detection.total_files));
+    telemetry.stages_ms.scan_extract =
+        graphoxide_cli::build_telemetry::elapsed_millis(scan_started);
+    telemetry.files.detected = scan.detection.total_files;
+    telemetry.files.processed = scan.changed_sources;
+    telemetry.files.changed = scan.changed_sources;
+    telemetry.files.unchanged = scan.unchanged_sources;
+    telemetry.files.deleted = scan.deleted_sources;
+    telemetry.files.unclassified = scan.detection.unclassified.len();
+    telemetry.files.sensitive = scan.detection.skipped_sensitive.len();
+    telemetry.warnings.extend(scan.detection.warning.clone());
+    telemetry
+        .warnings
+        .extend(scan.detection.walk_errors.iter().cloned());
+    telemetry.warnings.extend(scan.warnings.iter().cloned());
+    for warning in &scan.warnings {
+        eprintln!("{warning}");
+    }
+    let build_progress = graphoxide_cli::build_guard::BuildProgress::new(
+        scan.progress.total,
+        scan.progress.succeeded,
+    )?
+    .ensure_any_success("local extraction")?;
+    if code_only {
+        let skipped = scan
+            .detection
+            .files
+            .iter()
+            .filter(|(kind, _)| kind.as_str() != "code")
+            .map(|(_, files)| files.len())
+            .sum::<usize>();
+        telemetry.files.skipped = telemetry.files.skipped.saturating_add(skipped);
+        if !json {
+            write_output(&format!(
+                "--code-only: skipping {skipped} non-code input(s)"
+            ))?;
+        }
+    }
+    for skipped in &scan.detection.skipped_sensitive {
+        eprintln!("skipped as potentially sensitive: {skipped}");
+    }
+    let mut extractions = scan.extractions;
+    let rebuilt_sources = scan.rebuilt_sources;
+    let pending_manifest = scan.pending_manifest;
+    let mut rebuilt_provider_sources = Vec::new();
+    if let Some(dsn) = postgres.as_deref() {
+        let extraction = graphoxide_extract::pg_introspect::introspect_postgres(
+            (!dsn.is_empty()).then_some(dsn),
+        )?;
+        if let Some(source) = extraction
+            .nodes
+            .first()
+            .map(|node| node.source_file.clone())
+        {
+            rebuilt_provider_sources.push(source);
+        }
+        extractions.push(extraction);
+    }
+    rebuilt_provider_sources.sort();
+    rebuilt_provider_sources.dedup();
+    let retained_output_bytes = graphoxide_extract::extractions_retained_bytes(&extractions)?;
+    debug_assert!(retained_output_bytes >= scan.retained_output_bytes);
+    let (previous, graph_materialization_budget) = if incremental_mode {
+        let budget = incremental_graph_budget_after_retained_output(
+            graph_memory_budget,
+            retained_output_bytes,
+        )?;
+        let (previous, materialization_budget) =
+            read_incremental_baseline(&output, graph_memory_budget, budget)?;
+        (Some(previous), materialization_budget)
+    } else if !no_cluster && output.is_file() {
+        // A forced/full rebuild may recover from an unreadable or
+        // over-budget baseline; community remapping is best-effort in
+        // that mode and never weakens the new build's own bound.
+        incremental_graph_budget_after_retained_output(graph_memory_budget, retained_output_bytes)
+            .ok()
+            .and_then(|budget| read_incremental_baseline(&output, graph_memory_budget, budget).ok())
+            .filter(|(_, materialization_budget)| {
+                optional_baseline_leaves_full_graph_headroom(
                     retained_output_bytes,
-                )?;
-                let (previous, materialization_budget) =
-                    read_incremental_baseline(&output, graph_memory_budget, budget)?;
-                (Some(previous), materialization_budget)
-            } else if !no_cluster && output.is_file() {
-                // A forced/full rebuild may recover from an unreadable or
-                // over-budget baseline; community remapping is best-effort in
-                // that mode and never weakens the new build's own bound.
-                incremental_graph_budget_after_retained_output(
-                    graph_memory_budget,
-                    retained_output_bytes,
+                    *materialization_budget,
                 )
-                .ok()
-                .and_then(|budget| {
-                    read_incremental_baseline(&output, graph_memory_budget, budget).ok()
-                })
-                .filter(|(_, materialization_budget)| {
-                    optional_baseline_leaves_full_graph_headroom(
-                        retained_output_bytes,
-                        *materialization_budget,
-                    )
-                })
-                .map_or((None, graph_memory_budget), |(previous, budget)| {
-                    (Some(previous), budget)
-                })
-            } else {
-                (None, graph_memory_budget)
-            };
-            let live_sources = scan
-                .detection
-                .files
-                .values()
-                .flatten()
-                .map(PathBuf::from)
-                .collect::<Vec<_>>();
-            let prune_sources = previous
+            })
+            .map_or((None, graph_memory_budget), |(previous, budget)| {
+                (Some(previous), budget)
+            })
+    } else {
+        (None, graph_memory_budget)
+    };
+    let live_sources = scan
+        .detection
+        .files
+        .values()
+        .flatten()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let prune_sources = previous
+        .as_ref()
+        .map(|graph| stale_local_sources(graph, &path, &live_sources))
+        .unwrap_or_default();
+    let build_started = std::time::Instant::now();
+    if no_cluster {
+        graphoxide_graph::disambiguate_file_labels_in_extractions(&mut extractions);
+        if incremental_mode {
+            let fresh = flatten_extractions(extractions);
+            let baseline = previous
                 .as_ref()
-                .map(|graph| stale_local_sources(graph, &path, &live_sources))
-                .unwrap_or_default();
-            let build_started = std::time::Instant::now();
-            if no_cluster {
-                graphoxide_graph::disambiguate_file_labels_in_extractions(&mut extractions);
-                if incremental_mode {
-                    let fresh = flatten_extractions(extractions);
-                    let baseline = previous
-                        .as_ref()
-                        .expect("incremental mode loads a required baseline");
-                    extractions = vec![graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+                .expect("incremental mode loads a required baseline");
+            extractions = vec![graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
                         fresh,
                         baseline,
                         &rebuilt_sources,
@@ -1106,58 +1289,93 @@ fn main() -> anyhow::Result<()> {
                         Some(&path),
                         graph_materialization_budget,
                     )?];
-                }
-                extractions = vec![graphoxide_graph::dedupe_raw_extractions(&extractions)];
-                telemetry.stages_ms.build =
-                    graphoxide_cli::build_telemetry::elapsed_millis(build_started);
-                // An incomplete-build shrink check may read the committed
-                // graph again. Release the inspected baseline first so that
-                // check cannot create a second retained whole-graph copy.
-                drop(previous);
-                let write_started = std::time::Instant::now();
-                let outcome = graphoxide_cli::build_guard::commit_build(
-                    &output,
-                    graphoxide_cli::build_guard::BuildArtifact::Raw(&extractions),
-                    build_progress,
-                    allow_partial,
-                    || pending_manifest.commit(),
-                )?;
-                if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
-                    anyhow::bail!("{outcome}");
-                }
-                let nodes: usize = extractions.iter().map(|e| e.nodes.len()).sum();
-                let edges: usize = extractions.iter().map(|e| e.edges.len()).sum();
-                save_build_config_in(
-                    &output_directory,
-                    true,
-                    (!exclude.is_empty()).then_some(exclude.as_slice()),
-                    no_gitignore.then_some(false),
-                )?;
-                telemetry.stages_ms.write =
-                    graphoxide_cli::build_telemetry::elapsed_millis(write_started);
-                telemetry.elapsed_ms =
-                    graphoxide_cli::build_telemetry::elapsed_millis(total_started);
-                telemetry.graph.nodes = nodes;
-                telemetry.graph.edges = edges;
-                telemetry.graph.clustered = false;
-                let human = format!(
-                    "Wrote {nodes} nodes and {edges} edges to {} in {}",
-                    output.display(),
-                    graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
-                );
-                write_runtime_report_if_requested(
-                    &telemetry,
-                    runtime_report.as_deref(),
-                    runtime_telemetry.as_ref(),
-                )?;
-                return emit_build_report(&telemetry, json, timing, &human);
-            }
-            let (staged_extractions, build_options, normalization_root) = if incremental_mode {
-                let fresh = flatten_extractions(extractions);
-                let baseline = previous
+        }
+        extractions = vec![graphoxide_graph::dedupe_raw_extractions(&extractions)];
+        telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+        // An incomplete-build shrink check may read the committed
+        // graph again. Release the inspected baseline first so that
+        // check cannot create a second retained whole-graph copy.
+        drop(previous);
+        let write_started = std::time::Instant::now();
+        let mut published_coverage = None;
+        let outcome = if workflow.is_index() {
+            let report = coverage_report
+                .take()
+                .expect("index prepares coverage before graph construction");
+            graphoxide_cli::build_guard::commit_index_build(
+                &output,
+                graphoxide_cli::build_guard::BuildArtifact::Raw(&extractions),
+                build_progress,
+                allow_partial,
+                &cancellation,
+                || pending_manifest.commit_strict(),
+                || {
+                    published_coverage = Some(graphoxide_cli::index::publish_associated_coverage(
+                        &output_directory,
+                        &output,
+                        report,
+                    )?);
+                    Ok(())
+                },
+            )?
+        } else {
+            graphoxide_cli::build_guard::commit_build(
+                &output,
+                graphoxide_cli::build_guard::BuildArtifact::Raw(&extractions),
+                build_progress,
+                allow_partial,
+                || pending_manifest.commit(),
+            )?
+        };
+        if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+            anyhow::bail!("{outcome}");
+        }
+        let nodes: usize = extractions.iter().map(|e| e.nodes.len()).sum();
+        let edges: usize = extractions.iter().map(|e| e.edges.len()).sum();
+        if workflow.is_index() {
+            graphoxide_cli::index::write_prepared_index_build_config(
+                &output_directory,
+                prepared_index_build_config
                     .as_ref()
-                    .expect("incremental mode loads a required baseline");
-                let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+                    .expect("index validates its build config before extraction"),
+            )?;
+        } else {
+            save_build_config_in(
+                &output_directory,
+                true,
+                (!exclude.is_empty()).then_some(exclude.as_slice()),
+                no_gitignore.then_some(false),
+            )?;
+        }
+        telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+        telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(total_started);
+        telemetry.graph.nodes = nodes;
+        telemetry.graph.edges = edges;
+        telemetry.graph.clustered = false;
+        let human = format!(
+            "Wrote {nodes} nodes and {edges} edges to {} in {}",
+            output.display(),
+            graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
+        );
+        write_runtime_report_if_requested(
+            &telemetry,
+            runtime_report.as_deref(),
+            runtime_telemetry.as_ref(),
+        )?;
+        return emit_project_build_report(
+            &telemetry,
+            json,
+            timing,
+            &human,
+            published_coverage.as_ref(),
+        );
+    }
+    let (staged_extractions, build_options, normalization_root) = if incremental_mode {
+        let fresh = flatten_extractions(extractions);
+        let baseline = previous
+            .as_ref()
+            .expect("incremental mode loads a required baseline");
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
                     fresh,
                     baseline,
                     &rebuilt_sources,
@@ -1166,18 +1384,18 @@ fn main() -> anyhow::Result<()> {
                     Some(&path),
                     graph_materialization_budget,
                 )?;
-                (
-                    vec![merged],
-                    graphoxide_graph::BuildOptions {
-                        directed: previous.as_ref().is_some_and(|graph| graph.directed),
-                        ..graphoxide_graph::BuildOptions::default()
-                    },
-                    Some(path.as_path()),
-                )
-            } else {
-                (extractions, graphoxide_graph::BuildOptions::default(), None)
-            };
-            let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root(
+        (
+            vec![merged],
+            graphoxide_graph::BuildOptions {
+                directed: previous.as_ref().is_some_and(|graph| graph.directed),
+                ..graphoxide_graph::BuildOptions::default()
+            },
+            Some(path.as_path()),
+        )
+    } else {
+        (extractions, graphoxide_graph::BuildOptions::default(), None)
+    };
+    let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root(
                 staged_extractions,
                 &output_directory,
                 build_options,
@@ -1186,53 +1404,101 @@ fn main() -> anyhow::Result<()> {
             )?
             .into_parts()
             .0;
-            telemetry.stages_ms.build =
-                graphoxide_cli::build_telemetry::elapsed_millis(build_started);
-            let cluster_started = std::time::Instant::now();
-            cluster_with_resource_gate(&mut graph)?;
-            if let Some(previous) = &previous {
-                graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
-            }
-            drop(previous);
-            telemetry.stages_ms.cluster =
-                graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
-            let write_started = std::time::Instant::now();
-            let outcome = graphoxide_cli::build_guard::commit_build(
-                &output,
-                graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
-                build_progress,
-                allow_partial,
-                || pending_manifest.commit(),
-            )?;
-            if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
-                anyhow::bail!("{outcome}");
-            }
-            save_build_config_in(
-                &output_directory,
-                false,
-                (!exclude.is_empty()).then_some(exclude.as_slice()),
-                no_gitignore.then_some(false),
-            )?;
-            telemetry.stages_ms.write =
-                graphoxide_cli::build_telemetry::elapsed_millis(write_started);
-            telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(total_started);
-            telemetry.graph.nodes = graph.nodes.len();
-            telemetry.graph.edges = graph.links.len();
-            telemetry.graph.clustered = true;
-            let human = format!(
-                "Wrote {} nodes and {} edges to {} in {}",
-                graph.nodes.len(),
-                graph.links.len(),
-                output.display(),
-                graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
-            );
-            write_runtime_report_if_requested(
-                &telemetry,
-                runtime_report.as_deref(),
-                runtime_telemetry.as_ref(),
-            )?;
-            emit_build_report(&telemetry, json, timing, &human)
-        }
+    telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+    let cluster_started = std::time::Instant::now();
+    cluster_with_resource_gate(&mut graph)?;
+    if let Some(previous) = &previous {
+        graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
+    }
+    drop(previous);
+    telemetry.stages_ms.cluster = graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
+    let write_started = std::time::Instant::now();
+    let mut published_coverage = None;
+    let outcome = if workflow.is_index() {
+        let report = coverage_report
+            .take()
+            .expect("index prepares coverage before graph construction");
+        graphoxide_cli::build_guard::commit_index_build(
+            &output,
+            graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
+            build_progress,
+            allow_partial,
+            &cancellation,
+            || pending_manifest.commit_strict(),
+            || {
+                published_coverage = Some(graphoxide_cli::index::publish_associated_coverage(
+                    &output_directory,
+                    &output,
+                    report,
+                )?);
+                Ok(())
+            },
+        )?
+    } else {
+        graphoxide_cli::build_guard::commit_build(
+            &output,
+            graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
+            build_progress,
+            allow_partial,
+            || pending_manifest.commit(),
+        )?
+    };
+    if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+        anyhow::bail!("{outcome}");
+    }
+    if workflow.is_index() {
+        graphoxide_cli::index::write_prepared_index_build_config(
+            &output_directory,
+            prepared_index_build_config
+                .as_ref()
+                .expect("index validates its build config before extraction"),
+        )?;
+    } else {
+        save_build_config_in(
+            &output_directory,
+            false,
+            (!exclude.is_empty()).then_some(exclude.as_slice()),
+            no_gitignore.then_some(false),
+        )?;
+    }
+    telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+    telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(total_started);
+    telemetry.graph.nodes = graph.nodes.len();
+    telemetry.graph.edges = graph.links.len();
+    telemetry.graph.clustered = true;
+    let human = format!(
+        "Wrote {} nodes and {} edges to {} in {}",
+        graph.nodes.len(),
+        graph.links.len(),
+        output.display(),
+        graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms)
+    );
+    write_runtime_report_if_requested(
+        &telemetry,
+        runtime_report.as_deref(),
+        runtime_telemetry.as_ref(),
+    )?;
+    emit_project_build_report(
+        &telemetry,
+        json,
+        timing,
+        &human,
+        published_coverage.as_ref(),
+    )
+}
+
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Formats { json } => write_output(&format_capability_output(json)?),
+        Command::Extract {
+            build,
+            legacy_executor,
+        } => run_project_build(build, ProjectBuildWorkflow::Extract { legacy_executor }),
+        Command::Index { build } => run_project_build(build, ProjectBuildWorkflow::Index),
         Command::Audit {
             path,
             coverage_path,
@@ -1452,6 +1718,11 @@ fn main() -> anyhow::Result<()> {
             no_viz: _,
             no_label,
         } => {
+            let known_managed_directory = graph_override
+                .is_none()
+                .then(|| path.is_dir())
+                .filter(|is_directory| *is_directory)
+                .map(|_| managed_output_directory(&path, None));
             let sidecar_directory = graph_override.as_ref().map_or_else(
                 || {
                     if path.is_dir() {
@@ -1481,6 +1752,8 @@ fn main() -> anyhow::Result<()> {
             } else {
                 path
             };
+            let _managed_graph_lock =
+                acquire_managed_graph_lock(&graph_path, known_managed_directory.as_deref())?;
             let mut graph = graphoxide_core::read_graph(&graph_path)?;
             let mut previous = graph.clone();
             let labels = load_community_labels(
@@ -1567,6 +1840,7 @@ fn main() -> anyhow::Result<()> {
             output,
             force,
         } => {
+            let _managed_graph_lock = acquire_managed_graph_lock(&output, None)?;
             let mut graphs = Vec::new();
             for input in inputs {
                 let graph = graphoxide_core::read_graph(&input)?;
@@ -2426,11 +2700,16 @@ fn label_communities(
     batch_size: usize,
     timeout_seconds: Option<f64>,
 ) -> anyhow::Result<()> {
-    let graph_path = if path.is_dir() {
-        managed_output_directory(path, None).join("graph.json")
+    let known_managed_directory = if path.is_dir() {
+        Some(managed_output_directory(path, None))
     } else {
-        path.to_path_buf()
+        None
     };
+    let graph_path = known_managed_directory
+        .as_ref()
+        .map_or_else(|| path.to_path_buf(), |output| output.join("graph.json"));
+    let _managed_graph_lock =
+        acquire_managed_graph_lock(&graph_path, known_managed_directory.as_deref())?;
     let mut graph = graphoxide_core::read_graph(&graph_path)?;
     let output = graph_path
         .parent()
@@ -3230,6 +3509,8 @@ fn rebuild_isolated(
     runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
 ) -> anyhow::Result<()> {
     let output_directory = managed_output_directory(path, None);
+    let _build_lock = watch_service::RebuildLockGuard::acquire(&output_directory, true)?
+        .ok_or_else(|| anyhow::anyhow!("failed to acquire the blocking rebuild lock"))?;
     let outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
         path,
         output_directory: &output_directory,
@@ -3631,6 +3912,7 @@ fn save_build_config_in(
 }
 
 fn global_graph(roots: &[PathBuf], output: &std::path::Path, force: bool) -> anyhow::Result<()> {
+    let _managed_graph_lock = acquire_managed_graph_lock(output, None)?;
     let mut paths = Vec::new();
     for root in roots {
         for entry in ignore::WalkBuilder::new(root).hidden(false).build() {
@@ -3919,6 +4201,8 @@ fn merge_driver(
     theirs: &std::path::Path,
     output: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    let destination = output.unwrap_or(ours);
+    let _managed_graph_lock = acquire_managed_graph_lock(destination, None)?;
     let mut chunks = Vec::new();
     for path in [base, ours, theirs] {
         if path.exists() {
@@ -3931,7 +4215,6 @@ fn merge_driver(
         }
     }
     let graph = graphoxide_graph::build_graph(&chunks)?;
-    let destination = output.unwrap_or(ours);
     graphoxide_core::write_graph_atomic(destination, &graph, true)?;
     write_output(&format!(
         "Merged graph conflict into {}",
@@ -3994,6 +4277,23 @@ fn managed_output_directory(
         Some(path) => root.join(path),
         None => root.join("graphoxide-out"),
     }
+}
+
+fn acquire_managed_graph_lock(
+    graph_path: &std::path::Path,
+    known_managed_directory: Option<&std::path::Path>,
+) -> anyhow::Result<Option<watch_service::RebuildLockGuard>> {
+    let inferred = graph_path.parent().filter(|parent| {
+        graph_path.file_name().and_then(|value| value.to_str()) == Some("graph.json")
+            && matches!(
+                parent.file_name().and_then(|value| value.to_str()),
+                Some("graphoxide-out" | "graphify-out")
+            )
+    });
+    let Some(output_directory) = known_managed_directory.or(inferred) else {
+        return Ok(None);
+    };
+    watch_service::RebuildLockGuard::acquire(output_directory, true)
 }
 
 fn resolve_managed_graph_path(graph: PathBuf) -> PathBuf {
@@ -4310,7 +4610,8 @@ mod tests {
         annotate_query_context, audit_report, format_capability_output, format_god_nodes,
         incremental_graph_budget_after_retained_output, load_learning_overlay,
         optional_baseline_leaves_full_graph_headroom, read_incremental_baseline,
-        relevant_watch_paths, stale_local_sources, Cli, Command, IncrementalGraphBudget,
+        relevant_watch_paths, run_project_build_with_cancellation, stale_local_sources, Cli,
+        Command, IncrementalGraphBudget, ProjectBuildOptions, ProjectBuildWorkflow,
         RuntimeIoBackendArg, RuntimeOptions,
     };
     use clap::Parser;
@@ -4408,7 +4709,10 @@ mod tests {
         assert!(matches!(
             extract.command,
             Command::Extract {
-                runtime_report: Some(path),
+                build: ProjectBuildOptions {
+                    runtime_report: Some(path),
+                    ..
+                },
                 ..
             } if path.as_path() == Path::new("runtime/extract.json")
         ));
@@ -4461,7 +4765,11 @@ mod tests {
             "--read-batch-bytes=4096",
         ])
         .expect("parse extract runtime controls");
-        let Command::Extract { runtime, .. } = extract.command else {
+        let Command::Extract {
+            build: ProjectBuildOptions { runtime, .. },
+            ..
+        } = extract.command
+        else {
             panic!("expected extract command");
         };
         assert_eq!(runtime.memory_budget_bytes, Some(1_048_576));
@@ -4528,6 +4836,118 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn index_accepts_the_shared_build_controls_but_not_the_legacy_executor() {
+        let index = Cli::try_parse_from([
+            "graphoxide",
+            "index",
+            "workspace",
+            "--code-only",
+            "--no-cluster",
+            "--force",
+            "--allow-partial",
+            "--timing",
+            "--json",
+            "--runtime-report",
+            "runtime/index.json",
+            "--memory-budget-bytes",
+            "1048576",
+            "--io-workers",
+            "2",
+            "--compute-workers",
+            "3",
+            "--read-batch-bytes",
+            "4096",
+            "--out",
+            "artifacts",
+            "--exclude",
+            "vendor/**",
+            "--no-gitignore",
+        ])
+        .expect("parse index controls");
+        let Command::Index {
+            build:
+                ProjectBuildOptions {
+                    path,
+                    code_only: true,
+                    no_cluster: true,
+                    force: true,
+                    allow_partial: true,
+                    timing: true,
+                    json: true,
+                    runtime_report: Some(runtime_report),
+                    runtime,
+                    out: Some(out),
+                    exclude,
+                    no_gitignore: true,
+                    ..
+                },
+        } = index.command
+        else {
+            panic!("expected index command");
+        };
+        assert_eq!(path, Path::new("workspace"));
+        assert_eq!(runtime_report, Path::new("runtime/index.json"));
+        assert_eq!(out, Path::new("artifacts"));
+        assert_eq!(exclude, ["vendor/**"]);
+        assert_eq!(runtime.io_workers, Some(2));
+        assert_eq!(runtime.compute_workers, Some(3));
+
+        let error = match Cli::try_parse_from(["graphoxide", "index", ".", "--legacy-executor"]) {
+            Ok(_) => panic!("index must not expose the unbounded legacy executor"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("--legacy-executor"));
+    }
+
+    #[test]
+    fn cancelled_index_cli_path_preserves_seeded_artifacts() {
+        use std::fs;
+
+        let temp = tempfile::tempdir().expect("temporary fixture");
+        let project = temp.path().join("project");
+        let output_root = temp.path().join("output-root");
+        let output = output_root.join("graphoxide-out");
+        fs::create_dir_all(&project).expect("project");
+        fs::create_dir_all(&output).expect("output");
+        fs::write(project.join("main.rs"), "fn main() {}\n").expect("source");
+        fs::write(output.join("graph.json"), b"old graph\n").expect("graph");
+        fs::write(output.join("manifest.json"), b"old manifest\n").expect("manifest");
+        fs::write(output.join("coverage.json"), b"old coverage\n").expect("coverage");
+        let before = ["graph.json", "manifest.json", "coverage.json"]
+            .map(|name| fs::read(output.join(name)).unwrap());
+        let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+        cancellation.cancel();
+
+        let error = run_project_build_with_cancellation(
+            ProjectBuildOptions {
+                path: project,
+                code_only: false,
+                no_cluster: false,
+                force: false,
+                postgres: None,
+                allow_partial: false,
+                timing: false,
+                json: false,
+                runtime_report: None,
+                runtime: RuntimeOptions::default(),
+                out: Some(output_root),
+                exclude: Vec::new(),
+                no_gitignore: false,
+            },
+            ProjectBuildWorkflow::Index,
+            cancellation,
+        )
+        .expect_err("cancelled index");
+        assert!(error.to_string().contains("project build cancelled"));
+        for (name, expected) in ["graph.json", "manifest.json", "coverage.json"]
+            .into_iter()
+            .zip(before)
+        {
+            assert_eq!(fs::read(output.join(name)).unwrap(), expected, "{name}");
+        }
     }
 
     #[test]
@@ -5043,9 +5463,13 @@ mod tests {
         let cli = Cli::try_parse_from(arguments).expect("parse pathless PostgreSQL extract");
         match cli.command {
             Command::Extract {
-                path,
-                postgres,
-                no_cluster,
+                build:
+                    ProjectBuildOptions {
+                        path,
+                        postgres,
+                        no_cluster,
+                        ..
+                    },
                 ..
             } => {
                 assert_eq!(path, PathBuf::from("."));

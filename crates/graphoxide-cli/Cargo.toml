@@ -19,6 +19,7 @@ graphoxide-export.workspace = true
 graphoxide-mcp.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+ctrlc.workspace = true
 rayon.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -29,6 +30,12 @@ ignore.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 fs2 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -33,6 +33,35 @@ const OFFICE_MAX_MARKDOWN_BYTES: usize = 16 * 1024 * 1024;
 pub const WORD_COUNT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const PAPER_HEURISTIC_MAX_BYTES: u64 = 12_000;
 
+/// Maximum bytes read from any one ignore-policy source.
+///
+/// Sources over this limit are rejected as a whole so a missing suffix (for
+/// example, a later negation rule) can never be mistaken for complete policy.
+pub const MAX_IGNORE_SOURCE_BYTES: usize = 1024 * 1024;
+
+/// Maximum parsed rules accepted from any one ignore-policy source.
+pub const MAX_IGNORE_PATTERNS_PER_SOURCE: usize = 10_000;
+
+/// Maximum bytes accepted in one parsed ignore rule.
+pub const MAX_IGNORE_PATTERN_BYTES: usize = 4 * 1024;
+
+/// Maximum slash-delimited components accepted in one parsed ignore rule.
+pub const MAX_IGNORE_PATTERN_SEGMENTS: usize = 128;
+
+/// Maximum bytes in an ignore rule's absolute anchor. Admission charges this
+/// fixed ceiling for every retained rule so clone-root length cannot change
+/// which otherwise-identical policy is accepted.
+pub const MAX_IGNORE_ANCHOR_BYTES: usize = 4 * 1024;
+
+/// Maximum ignore rules retained across one discovery or coverage scan.
+pub const MAX_IGNORE_PATTERNS: usize = 20_000;
+
+/// Maximum aggregate bytes retained by ignore rule strings and their anchors.
+pub const MAX_IGNORE_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+const MAX_RETAINED_IGNORE_DIAGNOSTICS: usize = 128;
+const MAX_GIT_CONTROL_BYTES: usize = 64 * 1024;
+
 /// Resource ceilings applied before any Office XML parser sees attacker-owned
 /// `.docx` or `.xlsx` content. Central-directory materialization is separately
 /// capped by [`OFFICE_MAX_CENTRAL_DIRECTORY_BYTES`].
@@ -187,6 +216,34 @@ impl DetectResult {
 pub struct IgnorePattern {
     pub anchor: PathBuf,
     pub pattern: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct IgnoreLoadResult {
+    pub patterns: Vec<IgnorePattern>,
+    pub diagnostics: Vec<String>,
+    pub truncated_sources: usize,
+    pub retained_bytes: usize,
+}
+
+impl IgnoreLoadResult {
+    fn record_truncation(&mut self, diagnostic: String) {
+        self.truncated_sources = self.truncated_sources.saturating_add(1);
+        if self.diagnostics.len() < MAX_RETAINED_IGNORE_DIAGNOSTICS {
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
+    pub(crate) fn merge(&mut self, mut other: Self) {
+        self.patterns.append(&mut other.patterns);
+        self.retained_bytes = self.retained_bytes.saturating_add(other.retained_bytes);
+        self.truncated_sources = self
+            .truncated_sources
+            .saturating_add(other.truncated_sources);
+        let remaining = MAX_RETAINED_IGNORE_DIAGNOSTICS.saturating_sub(self.diagnostics.len());
+        self.diagnostics
+            .extend(other.diagnostics.into_iter().take(remaining));
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -363,6 +420,31 @@ pub(crate) fn open_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "source is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn open_ignore_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // `O_NONBLOCK` ensures a regular-file-to-FIFO race cannot stall the
+        // control plane between metadata validation and the no-follow open.
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ignore source is not a regular file",
         ));
     }
     Ok(file)
@@ -1153,6 +1235,21 @@ pub(crate) fn is_sensitive_path_only(path: &Path) -> bool {
     is_sensitive_with_path_policy(path, false)
 }
 
+/// Whether entering a directory would cross a credential-store boundary.
+pub(crate) fn is_sensitive_directory(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(value)
+                if value
+                    .to_str()
+                    .is_some_and(|value| [".ssh", ".gnupg", ".aws", ".gcloud"]
+                        .iter()
+                        .any(|sensitive| value.eq_ignore_ascii_case(sensitive)))
+        )
+    })
+}
+
 fn is_graphable_path_without_content(path: &Path) -> bool {
     let code = is_package_manifest(path)
         || path
@@ -1351,22 +1448,145 @@ pub(crate) fn parse_ignore_line(raw: &str) -> Option<String> {
     (!line.is_empty()).then_some(line)
 }
 
-fn read_ignore_file(path: &Path, anchor: &Path) -> Vec<IgnorePattern> {
-    let Ok(bytes) = fs::read(path) else {
-        return Vec::new();
-    };
-    let mut content = String::from_utf8_lossy(&bytes).into_owned();
-    if content.starts_with('\u{feff}') {
-        content.remove(0);
+fn ignore_pattern_within_limits(pattern: &str) -> bool {
+    if pattern.len() > MAX_IGNORE_PATTERN_BYTES {
+        return false;
     }
-    content
-        .lines()
-        .filter_map(parse_ignore_line)
-        .map(|pattern| IgnorePattern {
+    let raw = pattern.strip_prefix('!').unwrap_or(pattern);
+    raw.trim_matches('/').split('/').count() <= MAX_IGNORE_PATTERN_SEGMENTS
+}
+
+fn retained_ignore_pattern_bytes(anchor: &Path, pattern: &str) -> Option<usize> {
+    (anchor.as_os_str().len() <= MAX_IGNORE_ANCHOR_BYTES).then(|| {
+        MAX_IGNORE_ANCHOR_BYTES
+            .saturating_add(std::mem::size_of::<IgnorePattern>())
+            .saturating_add(pattern.len())
+    })
+}
+
+fn read_ignore_file(
+    path: &Path,
+    anchor: &Path,
+    remaining_patterns: usize,
+    remaining_bytes: usize,
+) -> IgnoreLoadResult {
+    if anchor.as_os_str().len() > MAX_IGNORE_ANCHOR_BYTES {
+        let mut result = IgnoreLoadResult::default();
+        result.record_truncation(format!(
+            "{}: ignore source anchor exceeds the {}-byte portable limit; no rules from this source were applied",
+            path.display(),
+            MAX_IGNORE_ANCHOR_BYTES
+        ));
+        return result;
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return IgnoreLoadResult::default();
+        }
+        Err(_) => {
+            let mut result = IgnoreLoadResult::default();
+            result.record_truncation(format!(
+                "{}: ignore source metadata could not be read safely; no rules from this source were applied",
+                path.display()
+            ));
+            return result;
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        let mut result = IgnoreLoadResult::default();
+        result.record_truncation(format!(
+            "{}: ignore source is not a regular non-symlink file; no rules from this source were applied",
+            path.display()
+        ));
+        return result;
+    }
+    let Ok(file) = open_ignore_source_nofollow(path) else {
+        let mut result = IgnoreLoadResult::default();
+        result.record_truncation(format!(
+            "{}: ignore source could not be opened safely; no rules from this source were applied",
+            path.display()
+        ));
+        return result;
+    };
+    let mut bytes = Vec::new();
+    let byte_limit = u64::try_from(MAX_IGNORE_SOURCE_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    if file.take(byte_limit).read_to_end(&mut bytes).is_err() {
+        let mut result = IgnoreLoadResult::default();
+        result.record_truncation(format!(
+            "{}: ignore source could not be read safely; no rules from this source were applied",
+            path.display()
+        ));
+        return result;
+    }
+    if bytes.len() > MAX_IGNORE_SOURCE_BYTES {
+        let mut result = IgnoreLoadResult::default();
+        result.record_truncation(format!(
+            "{}: ignore source exceeds the {}-byte limit; no rules from this source were applied",
+            path.display(),
+            MAX_IGNORE_SOURCE_BYTES
+        ));
+        return result;
+    }
+
+    let content = String::from_utf8_lossy(&bytes);
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let mut patterns = Vec::new();
+    let mut retained_bytes = 0usize;
+    for pattern in content.lines().filter_map(parse_ignore_line) {
+        if !ignore_pattern_within_limits(&pattern) {
+            let mut result = IgnoreLoadResult::default();
+            result.record_truncation(format!(
+                "{}: ignore source contains a rule exceeding the {}-byte or {}-segment limit; no rules from this source were applied",
+                path.display(),
+                MAX_IGNORE_PATTERN_BYTES,
+                MAX_IGNORE_PATTERN_SEGMENTS
+            ));
+            return result;
+        }
+        if patterns.len() >= MAX_IGNORE_PATTERNS_PER_SOURCE {
+            let mut result = IgnoreLoadResult::default();
+            result.record_truncation(format!(
+                "{}: ignore source exceeds the {}-pattern source limit; no rules from this source were applied",
+                path.display(),
+                MAX_IGNORE_PATTERNS_PER_SOURCE
+            ));
+            return result;
+        }
+        retained_bytes = retained_bytes.saturating_add(
+            retained_ignore_pattern_bytes(anchor, &pattern)
+                .expect("validated ignore anchor must have a deterministic charge"),
+        );
+        if retained_bytes > remaining_bytes {
+            let mut result = IgnoreLoadResult::default();
+            result.record_truncation(format!(
+                "{}: ignore source exceeds the remaining scan-wide retained-byte budget of {}; no rules from this source were applied",
+                path.display(),
+                remaining_bytes
+            ));
+            return result;
+        }
+        patterns.push(IgnorePattern {
             anchor: anchor.to_path_buf(),
             pattern,
-        })
-        .collect()
+        });
+    }
+    if patterns.len() > remaining_patterns {
+        let mut result = IgnoreLoadResult::default();
+        result.record_truncation(format!(
+            "{}: ignore source exceeds the remaining scan-wide pattern budget of {}; no rules from this source were applied",
+            path.display(),
+            remaining_patterns
+        ));
+        return result;
+    }
+    IgnoreLoadResult {
+        patterns,
+        retained_bytes,
+        ..IgnoreLoadResult::default()
+    }
 }
 
 fn find_vcs_root(start: &Path) -> Option<PathBuf> {
@@ -1390,43 +1610,73 @@ fn find_vcs_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn is_vcs_root(directory: &Path) -> bool {
-    let dot_git = directory.join(".git");
-    let git_valid = if dot_git.is_dir() {
-        dot_git.join("HEAD").is_file()
-    } else if dot_git.is_file() {
-        fs::read_to_string(&dot_git)
-            .ok()
-            .and_then(|value| {
-                value
-                    .trim()
-                    .strip_prefix("gitdir:")
-                    .map(str::trim)
-                    .map(PathBuf::from)
-            })
-            .map(|git_dir| {
-                if git_dir.is_absolute() {
-                    git_dir
-                } else {
-                    directory.join(git_dir)
-                }
-            })
-            .is_some_and(|git_dir| git_dir.join("HEAD").is_file())
-    } else {
-        false
-    };
-    git_valid
+    fs::symlink_metadata(directory.join(".git")).is_ok()
         || [".hg", ".svn", "_darcs", ".fossil"]
             .iter()
             .any(|marker| directory.join(marker).exists())
 }
 
-fn git_info_exclude(vcs_root: &Path) -> Option<PathBuf> {
+fn read_git_control_file(path: &Path) -> std::io::Result<Option<String>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Git control path is not a regular non-symlink file",
+        ));
+    }
+    let mut file = open_ignore_source_nofollow(path)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(
+            u64::try_from(MAX_GIT_CONTROL_BYTES)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_GIT_CONTROL_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Git control file exceeds its byte limit",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid UTF-8"))
+}
+
+fn git_info_exclude(vcs_root: &Path) -> Result<Option<PathBuf>, String> {
     let dot_git = vcs_root.join(".git");
-    let mut git_dir = if dot_git.is_dir() {
-        dot_git
-    } else if dot_git.is_file() {
-        let value = fs::read_to_string(&dot_git).ok()?;
-        let value = value.trim().strip_prefix("gitdir:")?.trim();
+    let metadata = match fs::symlink_metadata(&dot_git) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(format!(
+                "{}: Git control metadata could not be read safely",
+                dot_git.display()
+            ));
+        }
+    };
+    let mut git_dir = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        dot_git.clone()
+    } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+        let value = read_git_control_file(&dot_git)
+            .map_err(|_| {
+                format!(
+                    "{}: Git pointer could not be read safely",
+                    dot_git.display()
+                )
+            })?
+            .ok_or_else(|| format!("{}: Git pointer disappeared", dot_git.display()))?;
+        let value = value
+            .trim()
+            .strip_prefix("gitdir:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{}: Git pointer is malformed", dot_git.display()))?;
         let value = PathBuf::from(value);
         if value.is_absolute() {
             value
@@ -1434,38 +1684,82 @@ fn git_info_exclude(vcs_root: &Path) -> Option<PathBuf> {
             vcs_root.join(value)
         }
     } else {
-        return None;
+        return Err(format!(
+            "{}: Git control path is not a regular file or directory",
+            dot_git.display()
+        ));
     };
-    if let Ok(common) = fs::read_to_string(git_dir.join("commondir")) {
-        let common = PathBuf::from(common.trim());
-        git_dir = if common.is_absolute() {
-            common
-        } else {
-            git_dir.join(common)
-        };
+    let commondir_path = git_dir.join("commondir");
+    match read_git_control_file(&commondir_path) {
+        Ok(Some(common)) => {
+            let common = common.trim();
+            if common.is_empty() {
+                return Err(format!(
+                    "{}: Git commondir pointer is empty",
+                    commondir_path.display()
+                ));
+            }
+            let common = PathBuf::from(common);
+            git_dir = if common.is_absolute() {
+                common
+            } else {
+                git_dir.join(common)
+            };
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return Err(format!(
+                "{}: Git commondir pointer could not be read safely",
+                commondir_path.display()
+            ));
+        }
     }
     let path = git_dir.join("info/exclude");
-    path.is_file().then_some(path)
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(format!(
+            "{}: Git info/exclude metadata could not be read safely",
+            path.display()
+        )),
+    }
 }
 
-pub(crate) fn load_dir_ignore(directory: &Path, honor_gitignore: bool) -> Vec<IgnorePattern> {
-    let mut patterns = Vec::new();
+pub(crate) fn load_dir_ignore(
+    directory: &Path,
+    honor_gitignore: bool,
+    max_patterns: usize,
+    max_bytes: usize,
+) -> IgnoreLoadResult {
+    let mut result = IgnoreLoadResult::default();
     if honor_gitignore {
-        patterns.extend(read_ignore_file(&directory.join(".gitignore"), directory));
+        let remaining = max_patterns.saturating_sub(result.patterns.len());
+        result.merge(read_ignore_file(
+            &directory.join(".gitignore"),
+            directory,
+            remaining,
+            max_bytes.saturating_sub(result.retained_bytes),
+        ));
     }
-    patterns.extend(read_ignore_file(
+    let remaining = max_patterns.saturating_sub(result.patterns.len());
+    result.merge(read_ignore_file(
         &directory.join(".graphifyignore"),
         directory,
+        remaining,
+        max_bytes.saturating_sub(result.retained_bytes),
     ));
-    patterns.extend(read_ignore_file(
+    let remaining = max_patterns.saturating_sub(result.patterns.len());
+    result.merge(read_ignore_file(
         &directory.join(".graphoxideignore"),
         directory,
+        remaining,
+        max_bytes.saturating_sub(result.retained_bytes),
     ));
-    patterns
+    result
 }
 
-/// Load ignore rules from the VCS ceiling down to the scan root.
-pub fn load_ignore_patterns(root: &Path, honor_gitignore: bool) -> Vec<IgnorePattern> {
+/// Load bounded ignore rules from the VCS ceiling down to the scan root.
+pub(crate) fn load_ignore_patterns_bounded(root: &Path, honor_gitignore: bool) -> IgnoreLoadResult {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let ceiling = find_vcs_root(&root).unwrap_or_else(|| root.clone());
     let mut directories = vec![root.clone()];
@@ -1479,68 +1773,262 @@ pub fn load_ignore_patterns(root: &Path, honor_gitignore: bool) -> Vec<IgnorePat
         directories.push(parent.to_path_buf());
     }
     directories.reverse();
-    let mut patterns = Vec::new();
-    if honor_gitignore && let Some(exclude) = git_info_exclude(&ceiling) {
-        patterns.extend(read_ignore_file(&exclude, &ceiling));
+    let mut result = IgnoreLoadResult::default();
+    if honor_gitignore {
+        match git_info_exclude(&ceiling) {
+            Ok(Some(exclude)) => result.merge(read_ignore_file(
+                &exclude,
+                &ceiling,
+                MAX_IGNORE_PATTERNS,
+                MAX_IGNORE_RETAINED_BYTES,
+            )),
+            Ok(None) => {}
+            Err(diagnostic) => result.record_truncation(format!(
+                "{diagnostic}; ignore policy is incomplete and no project files were scanned"
+            )),
+        }
     }
     for directory in directories {
-        patterns.extend(load_dir_ignore(&directory, honor_gitignore));
+        let remaining = MAX_IGNORE_PATTERNS.saturating_sub(result.patterns.len());
+        let remaining_bytes = MAX_IGNORE_RETAINED_BYTES.saturating_sub(result.retained_bytes);
+        result.merge(load_dir_ignore(
+            &directory,
+            honor_gitignore,
+            remaining,
+            remaining_bytes,
+        ));
     }
-    patterns
+    result
+}
+
+pub(crate) fn load_extra_ignore_patterns(
+    root: &Path,
+    raw_patterns: &[String],
+    max_patterns: usize,
+    max_bytes: usize,
+) -> IgnoreLoadResult {
+    let mut result = IgnoreLoadResult::default();
+    for (index, raw) in raw_patterns.iter().enumerate() {
+        if raw.len() > MAX_IGNORE_SOURCE_BYTES {
+            result.record_truncation(format!(
+                "extra exclude #{} exceeds the {}-byte ignore-source limit; the rule was not applied",
+                index + 1,
+                MAX_IGNORE_SOURCE_BYTES
+            ));
+            continue;
+        }
+        let Some(pattern) = parse_ignore_line(raw) else {
+            continue;
+        };
+        if !ignore_pattern_within_limits(&pattern) {
+            result.record_truncation(format!(
+                "extra exclude #{} exceeds the {}-byte or {}-segment ignore-rule limit; the rule was not applied",
+                index + 1,
+                MAX_IGNORE_PATTERN_BYTES,
+                MAX_IGNORE_PATTERN_SEGMENTS
+            ));
+            continue;
+        }
+        if result.patterns.len() >= max_patterns {
+            result.record_truncation(format!(
+                "extra exclude #{} exceeds the remaining scan-wide ignore-pattern budget; the rule was not applied",
+                index + 1
+            ));
+            continue;
+        }
+        let Some(retained_bytes) = retained_ignore_pattern_bytes(root, &pattern) else {
+            result.record_truncation(format!(
+                "extra excludes use an anchor exceeding the {}-byte portable limit; the rule was not applied",
+                MAX_IGNORE_ANCHOR_BYTES
+            ));
+            continue;
+        };
+        if retained_bytes > max_bytes.saturating_sub(result.retained_bytes) {
+            result.record_truncation(format!(
+                "extra exclude #{} exceeds the remaining scan-wide retained ignore-pattern byte budget; the rule was not applied",
+                index + 1
+            ));
+            continue;
+        }
+        result.retained_bytes = result.retained_bytes.saturating_add(retained_bytes);
+        result.patterns.push(IgnorePattern {
+            anchor: root.to_path_buf(),
+            pattern,
+        });
+    }
+    result
+}
+
+/// Load ignore rules from the VCS ceiling down to the scan root.
+///
+/// Rules are bounded by the documented per-source and scan-wide ceilings.
+/// Discovery and coverage use the diagnostic-bearing internal form so a
+/// rejected source cannot be mistaken for a complete policy load. Legacy
+/// callers receive a match-all rule when a source is rejected, which safely
+/// suppresses their secondary traversal instead of applying a partial prefix.
+pub fn load_ignore_patterns(root: &Path, honor_gitignore: bool) -> Vec<IgnorePattern> {
+    let loaded = load_ignore_patterns_bounded(root, honor_gitignore);
+    if loaded.truncated_sources == 0 {
+        return loaded.patterns;
+    }
+    vec![IgnorePattern {
+        anchor: fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+        pattern: "**".to_owned(),
+    }]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComponentGlobToken {
+    Star,
+    Any,
+    Literal(char),
+    Class {
+        negated: bool,
+        ranges: Vec<(char, char)>,
+    },
+}
+
+fn component_glob_tokens(pattern: &str) -> Option<Vec<ComponentGlobToken>> {
+    if pattern.len() > MAX_IGNORE_PATTERN_BYTES {
+        return None;
+    }
+    let characters = pattern.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::with_capacity(characters.len());
+    let mut index = 0usize;
+    while index < characters.len() {
+        match characters[index] {
+            '*' => {
+                if !matches!(tokens.last(), Some(ComponentGlobToken::Star)) {
+                    tokens.push(ComponentGlobToken::Star);
+                }
+                index += 1;
+            }
+            '?' => {
+                tokens.push(ComponentGlobToken::Any);
+                index += 1;
+            }
+            '[' => {
+                let mut cursor = index + 1;
+                let negated = characters.get(cursor) == Some(&'!');
+                if negated {
+                    cursor += 1;
+                }
+                let class_start = cursor;
+                while cursor < characters.len() && characters[cursor] != ']' {
+                    cursor += 1;
+                }
+                if cursor == characters.len() || cursor == class_start {
+                    return None;
+                }
+                let class = &characters[class_start..cursor];
+                let mut ranges = Vec::new();
+                let mut class_index = 0usize;
+                while class_index < class.len() {
+                    if class_index + 2 < class.len() && class[class_index + 1] == '-' {
+                        let start = class[class_index];
+                        let end = class[class_index + 2];
+                        if start > end {
+                            return None;
+                        }
+                        ranges.push((start, end));
+                        class_index += 3;
+                    } else {
+                        let value = class[class_index];
+                        ranges.push((value, value));
+                        class_index += 1;
+                    }
+                }
+                tokens.push(ComponentGlobToken::Class { negated, ranges });
+                index = cursor + 1;
+            }
+            literal => {
+                tokens.push(ComponentGlobToken::Literal(literal));
+                index += 1;
+            }
+        }
+    }
+    Some(tokens)
+}
+
+fn component_token_matches(token: &ComponentGlobToken, value: char) -> bool {
+    match token {
+        ComponentGlobToken::Any => true,
+        ComponentGlobToken::Literal(expected) => *expected == value,
+        ComponentGlobToken::Class { negated, ranges } => {
+            let contained = ranges
+                .iter()
+                .any(|(start, end)| *start <= value && value <= *end);
+            contained != *negated
+        }
+        ComponentGlobToken::Star => false,
+    }
 }
 
 fn component_glob(pattern: &str, value: &str) -> bool {
-    let mut regex = String::from("^");
-    let mut chars = pattern.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '*' => regex.push_str(".*"),
-            '?' => regex.push('.'),
-            '[' => {
-                regex.push('[');
-                if chars.peek() == Some(&'!') {
-                    chars.next();
-                    regex.push('^');
-                }
-                for class in chars.by_ref() {
-                    regex.push(class);
-                    if class == ']' {
-                        break;
-                    }
-                }
-            }
-            other => regex.push_str(&regex::escape(&other.to_string())),
+    let Some(tokens) = component_glob_tokens(pattern) else {
+        return false;
+    };
+    let mut previous = vec![false; tokens.len() + 1];
+    previous[0] = true;
+    for (index, token) in tokens.iter().enumerate() {
+        if matches!(token, ComponentGlobToken::Star) {
+            previous[index + 1] = previous[index];
+        } else {
+            break;
         }
     }
-    regex.push('$');
-    Regex::new(&regex).is_ok_and(|regex| regex.is_match(value))
+    for character in value.chars() {
+        let mut current = vec![false; tokens.len() + 1];
+        for (index, token) in tokens.iter().enumerate() {
+            current[index + 1] = match token {
+                ComponentGlobToken::Star => current[index] || previous[index + 1],
+                _ => previous[index] && component_token_matches(token, character),
+            };
+        }
+        previous = current;
+    }
+    previous[tokens.len()]
 }
 
 fn anchored_glob(path: &str, pattern: &str) -> bool {
-    fn matches(path: &[&str], pattern: &[&str]) -> bool {
-        if pattern.is_empty() {
-            return path.is_empty();
-        }
-        if pattern[0] == "**" {
-            if pattern.len() == 1 {
-                return !path.is_empty();
-            }
-            return matches(path, &pattern[1..])
-                || (!path.is_empty() && matches(&path[1..], pattern));
-        }
-        !path.is_empty()
-            && component_glob(pattern[0], path[0])
-            && matches(&path[1..], &pattern[1..])
+    if !ignore_pattern_within_limits(pattern) {
+        return false;
     }
-    matches(
-        &path.split('/').collect::<Vec<_>>(),
-        &pattern.split('/').collect::<Vec<_>>(),
-    )
+    let path = path.split('/').collect::<Vec<_>>();
+    let pattern = pattern.split('/').collect::<Vec<_>>();
+    let mut previous = vec![false; pattern.len() + 1];
+    previous[0] = true;
+    for index in 0..pattern.len() {
+        if pattern[index] == "**" && index + 1 < pattern.len() {
+            previous[index + 1] = previous[index];
+        } else {
+            break;
+        }
+    }
+    for component in path {
+        let mut current = vec![false; pattern.len() + 1];
+        for index in 0..pattern.len() {
+            current[index + 1] = if pattern[index] == "**" {
+                if index + 1 == pattern.len() {
+                    previous[index + 1] || previous[index]
+                } else {
+                    current[index] || previous[index + 1]
+                }
+            } else {
+                previous[index] && component_glob(pattern[index], component)
+            };
+        }
+        previous = current;
+    }
+    previous[pattern.len()]
 }
 
 fn eval_ignore(target: &Path, patterns: &[IgnorePattern]) -> bool {
     let mut result = false;
     for entry in patterns {
+        if !ignore_pattern_within_limits(&entry.pattern) {
+            return true;
+        }
         let negated = entry.pattern.starts_with('!');
         let raw = entry.pattern.strip_prefix('!').unwrap_or(&entry.pattern);
         let directory_only = raw.ends_with('/');
@@ -1640,6 +2128,38 @@ fn resolves_under(path: &Path, root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Resolve the separately indexed managed-memory tree without crossing a
+/// symlink/reparse boundary or leaving the canonical source root.
+pub(crate) fn managed_memory_directory(root: &Path, configured_output: &Path) -> Option<PathBuf> {
+    let root = fs::canonicalize(root).ok()?;
+    let memory = configured_output.join("memory");
+    let metadata = fs::symlink_metadata(&memory).ok()?;
+    if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+        return None;
+    }
+    let resolved = fs::canonicalize(&memory).ok()?;
+    if !resolved.starts_with(&root) {
+        return None;
+    }
+    let resolved_metadata = fs::symlink_metadata(&resolved).ok()?;
+    (resolved_metadata.is_dir() && !metadata_is_reparse_point(&resolved_metadata))
+        .then_some(resolved)
+}
+
 pub(crate) fn output_dir(root: &Path, options: &DetectOptions) -> PathBuf {
     options.output_dir.clone().map_or_else(
         || {
@@ -1670,11 +2190,14 @@ struct WalkState<'a> {
     options: &'a DetectOptions,
     configured_output: PathBuf,
     patterns: Vec<IgnorePattern>,
+    patterns_retained_bytes: usize,
     paths: Vec<DiscoveredPath>,
     ignored: Vec<String>,
     pruned_noise: Vec<String>,
     skipped_sensitive: Vec<String>,
     errors: Vec<String>,
+    ignore_diagnostics_retained: usize,
+    fatal_ignore_error: Option<String>,
     active_targets: HashSet<PathBuf>,
     ignore_cache: HashMap<PathBuf, bool>,
 }
@@ -1686,14 +2209,34 @@ struct DiscoveredPath {
 }
 
 impl WalkState<'_> {
+    fn extend_ignore_policy(&mut self, mut loaded: IgnoreLoadResult) -> Option<String> {
+        let truncated = loaded.truncated_sources > 0;
+        let fatal = truncated.then(|| {
+            loaded.diagnostics.first().cloned().unwrap_or_else(|| {
+                "ignore policy source was rejected without a retained diagnostic".to_owned()
+            })
+        });
+        self.patterns.append(&mut loaded.patterns);
+        self.patterns_retained_bytes = self
+            .patterns_retained_bytes
+            .saturating_add(loaded.retained_bytes);
+        let remaining =
+            MAX_RETAINED_IGNORE_DIAGNOSTICS.saturating_sub(self.ignore_diagnostics_retained);
+        let retained = loaded.diagnostics.len().min(remaining);
+        self.errors
+            .extend(loaded.diagnostics.into_iter().take(retained));
+        self.ignore_diagnostics_retained =
+            self.ignore_diagnostics_retained.saturating_add(retained);
+        fatal
+    }
+
     fn walk(&mut self, directory: &Path, memory_tree: bool) {
+        if self.fatal_ignore_error.is_some() {
+            return;
+        }
         let target = fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
         if !self.active_targets.insert(target.clone()) {
             return;
-        }
-        if !memory_tree && directory != self.root {
-            self.patterns
-                .extend(load_dir_ignore(directory, self.options.honor_gitignore));
         }
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
@@ -1704,6 +2247,19 @@ impl WalkState<'_> {
                 return;
             }
         };
+        if !memory_tree && directory != self.root {
+            let remaining = MAX_IGNORE_PATTERNS.saturating_sub(self.patterns.len());
+            if let Some(diagnostic) = self.extend_ignore_policy(load_dir_ignore(
+                directory,
+                self.options.honor_gitignore,
+                remaining,
+                MAX_IGNORE_RETAINED_BYTES.saturating_sub(self.patterns_retained_bytes),
+            )) {
+                self.fatal_ignore_error = Some(diagnostic);
+                self.active_targets.remove(&target);
+                return;
+            }
+        }
         let mut collected = Vec::new();
         for entry in entries {
             match entry {
@@ -1716,6 +2272,9 @@ impl WalkState<'_> {
         let mut entries = collected;
         entries.sort_by_key(fs::DirEntry::file_name);
         for entry in entries {
+            if self.fatal_ignore_error.is_some() {
+                break;
+            }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             let Ok(kind) = entry.file_type() else {
@@ -1723,6 +2282,22 @@ impl WalkState<'_> {
                     .push(format!("{}: unable to inspect file type", path.display()));
                 continue;
             };
+            if memory_tree {
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata) if !metadata_is_reparse_point(&metadata) => {}
+                    Ok(_) => {
+                        self.skipped_sensitive.push(format!(
+                            "{} [managed memory symlink or reparse point]",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        self.errors.push(format!("{}: {error}", path.display()));
+                        continue;
+                    }
+                }
+            }
             let symlink = kind.is_symlink();
             let directory_entry = kind.is_dir() || (symlink && path.is_dir());
             if directory_entry {
@@ -1735,6 +2310,25 @@ impl WalkState<'_> {
                         "{} [directory name ending in ! is reserved for virtual container members]",
                         path.display()
                     ));
+                    continue;
+                }
+                if path
+                    .strip_prefix(self.root)
+                    .unwrap_or(&path)
+                    .components()
+                    .any(|component| {
+                        matches!(component, Component::Normal(value) if value.to_str().is_none())
+                    })
+                {
+                    self.skipped_sensitive.push(format!(
+                        "{} [non-Unicode directory boundary]",
+                        path.display()
+                    ));
+                    continue;
+                }
+                if is_sensitive_directory(&path) {
+                    self.skipped_sensitive
+                        .push(format!("{} [sensitive directory]", path.display()));
                     continue;
                 }
                 if !memory_tree {
@@ -1765,6 +2359,14 @@ impl WalkState<'_> {
                                 "{} [symlink target outside scan root]",
                                 path.display()
                             ));
+                            continue;
+                        }
+                        if fs::canonicalize(&path)
+                            .ok()
+                            .is_some_and(|target| is_sensitive_directory(&target))
+                        {
+                            self.skipped_sensitive
+                                .push(format!("{} [sensitive symlink target]", path.display()));
                             continue;
                         }
                     }
@@ -1855,30 +2457,48 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
         );
     }
     let configured_output = output_dir(&root, options);
-    let mut patterns = load_ignore_patterns(&root, options.honor_gitignore);
-    patterns.extend(options.extra_excludes.iter().filter_map(|pattern| {
-        parse_ignore_line(pattern).map(|pattern| IgnorePattern {
-            anchor: root.clone(),
-            pattern,
-        })
-    }));
+    let mut ignore_policy = load_ignore_patterns_bounded(&root, options.honor_gitignore);
+    let remaining = MAX_IGNORE_PATTERNS.saturating_sub(ignore_policy.patterns.len());
+    let remaining_bytes = MAX_IGNORE_RETAINED_BYTES.saturating_sub(ignore_policy.retained_bytes);
+    ignore_policy.merge(load_extra_ignore_patterns(
+        &root,
+        &options.extra_excludes,
+        remaining,
+        remaining_bytes,
+    ));
+    if ignore_policy.truncated_sources > 0 {
+        let diagnostic = ignore_policy.diagnostics.first().map_or(
+            "ignore policy source was rejected without a retained diagnostic",
+            String::as_str,
+        );
+        anyhow::bail!("ignore policy could not be loaded safely: {diagnostic}");
+    }
+    let ignore_diagnostics_retained = ignore_policy.diagnostics.len();
+    let memory = managed_memory_directory(&root, &configured_output);
     let mut state = WalkState {
         root: &root,
         options,
         configured_output: configured_output.clone(),
-        patterns,
+        patterns: ignore_policy.patterns,
+        patterns_retained_bytes: ignore_policy.retained_bytes,
         paths: Vec::new(),
         ignored: Vec::new(),
         pruned_noise: Vec::new(),
         skipped_sensitive: Vec::new(),
-        errors: Vec::new(),
+        errors: ignore_policy.diagnostics,
+        ignore_diagnostics_retained,
+        fatal_ignore_error: None,
         active_targets: HashSet::new(),
         ignore_cache: HashMap::new(),
     };
     state.walk(&root, false);
-    let memory = configured_output.join("memory");
-    if memory.is_dir() {
-        state.walk(&memory, true);
+    if state.fatal_ignore_error.is_none()
+        && let Some(memory) = &memory
+    {
+        state.walk(memory, true);
+    }
+    if let Some(diagnostic) = &state.fatal_ignore_error {
+        anyhow::bail!("ignore policy could not be loaded safely: {diagnostic}");
     }
     // A physical source is indexed once. Prefer its ordinary in-tree spelling
     // over a symlink alias, then use lexical order as the stable tie-breaker.
@@ -1907,7 +2527,9 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
     for discovered in state.paths {
         let path = discovered.logical;
         let physical = discovered.physical;
-        let in_memory = memory.is_dir() && path.starts_with(&memory);
+        let in_memory = memory
+            .as_ref()
+            .is_some_and(|memory| path.starts_with(memory));
         if path.starts_with(&converted) || physical.starts_with(&converted) {
             continue;
         }
@@ -2595,6 +3217,212 @@ mod tests {
             .write_all(b"<document>opened generation</document>")
             .expect("write Office ZIP member");
         writer.finish().expect("finish Office ZIP fixture");
+    }
+
+    #[test]
+    fn retained_ignore_byte_budget_rejects_whole_large_sources() {
+        let fixture = tempdir().expect("temporary ignore fixture");
+        let anchor = fixture.path();
+        let mut loaded = IgnoreLoadResult::default();
+        let byte_budget = 12usize * 1024;
+        for index in 0..64 {
+            let path = anchor.join(format!("ignore-{index}"));
+            let pattern = format!("{}-{index}\n", "x".repeat(2 * 1024));
+            fs::write(&path, pattern).expect("write large one-rule source");
+            let remaining_patterns = 64usize.saturating_sub(loaded.patterns.len());
+            let remaining_bytes = byte_budget.saturating_sub(loaded.retained_bytes);
+            loaded.merge(read_ignore_file(
+                &path,
+                anchor,
+                remaining_patterns,
+                remaining_bytes,
+            ));
+        }
+
+        assert!(loaded.retained_bytes <= byte_budget);
+        assert!(loaded.patterns.len() < 64);
+        assert!(loaded.truncated_sources > 0);
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("retained-byte budget")));
+    }
+
+    #[test]
+    fn retained_ignore_admission_is_independent_of_clone_root_length() {
+        let fixture = tempdir().expect("temporary clone-root fixture");
+        let short = fixture.path().join("a");
+        let long = fixture.path().join("a-very-much-longer-checkout-directory");
+        fs::create_dir_all(&short).expect("create short checkout");
+        fs::create_dir_all(&long).expect("create long checkout");
+        let rules = (0..100)
+            .map(|index| format!("generated-{index}\n"))
+            .collect::<String>();
+        fs::write(short.join(".graphoxideignore"), &rules).expect("write short policy");
+        fs::write(long.join(".graphoxideignore"), &rules).expect("write long policy");
+
+        let short = load_ignore_patterns_bounded(&short, true);
+        let long = load_ignore_patterns_bounded(&long, true);
+
+        assert_eq!(short.truncated_sources, 0);
+        assert_eq!(long.truncated_sources, 0);
+        assert_eq!(short.patterns.len(), long.patterns.len());
+        assert_eq!(short.retained_bytes, long.retained_bytes);
+    }
+
+    #[test]
+    fn git_control_pointers_are_bounded_and_fail_closed() {
+        let fixture = tempdir().expect("temporary Git-control fixture");
+        let project = fixture.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(project.join(".git"), vec![b'x'; MAX_GIT_CONTROL_BYTES + 1])
+            .expect("write oversized Git pointer");
+
+        let oversized = load_ignore_patterns_bounded(&project, true);
+        assert_eq!(oversized.truncated_sources, 1);
+        assert!(oversized
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("Git pointer could not be read safely")));
+
+        let worktree = fixture.path().join("worktree");
+        let git_dir = fixture.path().join("git-data");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        fs::create_dir_all(&git_dir).expect("create Git directory");
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .expect("write Git pointer");
+        fs::write(
+            git_dir.join("commondir"),
+            vec![b'x'; MAX_GIT_CONTROL_BYTES + 1],
+        )
+        .expect("write oversized commondir pointer");
+
+        let commondir = load_ignore_patterns_bounded(&worktree, true);
+        assert_eq!(commondir.truncated_sources, 1);
+        assert!(commondir
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("commondir pointer could not be read safely")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_info_exclude_metadata_errors_abort_detection() {
+        let fixture = tempdir().expect("temporary Git-info fixture");
+        let project = fixture.path().join("project");
+        let git_dir = project.join(".git");
+        fs::create_dir_all(&git_dir).expect("create Git directory");
+        fs::write(project.join("source.rs"), "fn main() {}\n").expect("write project source");
+        std::os::unix::fs::symlink("info", git_dir.join("info"))
+            .expect("create self-referential info path");
+
+        let loaded = load_ignore_patterns_bounded(&project, true);
+        assert_eq!(loaded.truncated_sources, 1);
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("Git info/exclude metadata")));
+
+        let error = detect(&project, &DetectOptions::default())
+            .expect_err("unsafe Git ignore metadata must abort detection")
+            .to_string();
+        assert!(error.contains("ignore policy could not be loaded safely"));
+        assert!(error.contains("Git info/exclude metadata"));
+    }
+
+    #[test]
+    fn adversarial_double_star_matching_is_iterative_and_rule_bounded() {
+        let mut segments = Vec::new();
+        for _ in 0..60 {
+            segments.push("**");
+            segments.push("a");
+        }
+        segments.push("target[0-9]?.rs");
+        let pattern = segments.join("/");
+        let matching_path = format!("{}/target7x.rs", vec!["a"; 60].join("/"));
+        let nonmatching_path = format!("{}/never.rs", vec!["a"; 120].join("/"));
+
+        assert!(ignore_pattern_within_limits(&pattern));
+        assert!(anchored_glob(&matching_path, &pattern));
+        assert!(!anchored_glob(&nonmatching_path, &pattern));
+
+        let over_segment_limit = format!("{}/target.rs", vec!["**"; 129].join("/"));
+        assert!(!ignore_pattern_within_limits(&over_segment_limit));
+        assert!(is_ignored(
+            Path::new("/repo/ordinary.rs"),
+            Path::new("/repo"),
+            &[IgnorePattern {
+                anchor: PathBuf::from("/repo"),
+                pattern: over_segment_limit,
+            }]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignore_sources_reject_symlinks_fifos_and_unreadable_files() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt as _, os::unix::fs::PermissionsExt as _};
+
+        let fixture = tempdir().expect("temporary unsafe-ignore fixture");
+        let outside = tempdir().expect("outside ignore fixture");
+        let target = outside.path().join("outside-ignore");
+        fs::write(&target, "private.rs\n").expect("write outside ignore");
+        let alias = fixture.path().join("symlink-ignore");
+        std::os::unix::fs::symlink(&target, &alias).expect("create ignore symlink");
+        let symlink_result = read_ignore_file(
+            &alias,
+            fixture.path(),
+            MAX_IGNORE_PATTERNS,
+            MAX_IGNORE_RETAINED_BYTES,
+        );
+        assert!(symlink_result.patterns.is_empty());
+        assert_eq!(symlink_result.truncated_sources, 1);
+
+        let fifo = fixture.path().join("fifo-ignore");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).expect("FIFO path");
+        // SAFETY: `fifo_path` is a valid NUL-terminated pathname owned for the
+        // duration of the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        let fifo_result = read_ignore_file(
+            &fifo,
+            fixture.path(),
+            MAX_IGNORE_PATTERNS,
+            MAX_IGNORE_RETAINED_BYTES,
+        );
+        assert!(fifo_result.patterns.is_empty());
+        assert_eq!(fifo_result.truncated_sources, 1);
+
+        let unreadable = fixture.path().join("unreadable-ignore");
+        fs::write(&unreadable, "private.rs\n").expect("write unreadable ignore");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
+            .expect("lock ignore source");
+        let runner_cannot_open = open_source_nofollow(&unreadable).is_err();
+        let unreadable_result = read_ignore_file(
+            &unreadable,
+            fixture.path(),
+            MAX_IGNORE_PATTERNS,
+            MAX_IGNORE_RETAINED_BYTES,
+        );
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600))
+            .expect("restore ignore source");
+        if runner_cannot_open {
+            assert!(unreadable_result.patterns.is_empty());
+            assert_eq!(unreadable_result.truncated_sources, 1);
+        }
+
+        let project = fixture.path().join("symlinked-git-project");
+        fs::create_dir(&project).expect("create symlinked Git project");
+        std::os::unix::fs::symlink(outside.path(), project.join(".git"))
+            .expect("create Git control symlink");
+        let git_result = load_ignore_patterns_bounded(&project, true);
+        assert_eq!(git_result.truncated_sources, 1);
+        assert!(git_result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("Git control path")));
     }
 
     #[test]

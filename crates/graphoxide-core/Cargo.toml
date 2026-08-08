@@ -18,6 +18,9 @@ sha2.workspace = true
 hex.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 libc = "0.2"
 proptest = "1"
