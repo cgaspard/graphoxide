@@ -2,7 +2,7 @@
   "name": "graphoxide-vscode",
   "displayName": "Graphoxide",
   "description": "Explore, query, and maintain Graphoxide code knowledge graphs without leaving VS Code.",
-  "version": "0.8.2",
+  "version": "0.10.0",
   "publisher": "cgaspard",
   "license": "Apache-2.0",
   "icon": "media/icon.png",

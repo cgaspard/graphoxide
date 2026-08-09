@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0 — 2026-08-09
+
+- Bundled semantic Graphviz DOT extraction, recursive ZIP/TAR/GZIP indexing, and
+  bounded provenance for supported PDF, OOXML, OpenDocument, and EPUB content.
+- Added validated local parser-result reuse for eligible extension-managed
+  builds while keeping default indexing offline and graph output deterministic.
+- Included `graphoxide enrich` in the bundled executable as a CLI-only explicit
+  opt-in; the extension never selects a profile, collects consent, or initiates
+  provider requests.
+- Qualified cold, warm, and incremental bundled indexing with a
+  content-addressed CI corpus and server-enforced benchmark and qualification
+  regression tests, without introducing timing thresholds.
+- Hardened container, document, cache, and graph-identity boundaries while
+  preserving nested source, page, package-part, and relationship provenance.
+
 ## 0.8.2 — 2026-08-08
 
 - Bundled `graphoxide index`, which publishes a graph, incremental manifest, and
