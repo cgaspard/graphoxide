@@ -11,6 +11,14 @@ const NS_CONTENT_TYPES: &str = "http://schemas.openxmlformats.org/package/2006/c
 const NS_PACKAGE_RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const NS_OFFICE_RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const NS_SHEET: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const NS_PRESENTATION: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+const NS_DRAWING: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const NS_ODF_OFFICE: &str = "urn:oasis:names:tc:opendocument:xmlns:office:1.0";
+const NS_ODF_TEXT: &str = "urn:oasis:names:tc:opendocument:xmlns:text:1.0";
+const NS_ODF_TABLE: &str = "urn:oasis:names:tc:opendocument:xmlns:table:1.0";
+const NS_ODF_DRAW: &str = "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0";
+const NS_ODF_MANIFEST: &str = "urn:oasis:names:tc:opendocument:xmlns:manifest:1.0";
 const NS_EPUB_CONTAINER: &str = "urn:oasis:names:tc:opendocument:xmlns:container";
 const NS_OPF: &str = "http://www.idpf.org/2007/opf";
 const NS_DC: &str = "http://purl.org/dc/elements/1.1/";
@@ -62,6 +70,35 @@ fn graph(project: &Path) -> Value {
         .expect("graph JSON")
 }
 
+fn assert_package_coverage(project: &Path, expected: &[(&str, &str)]) {
+    let report: Value = serde_json::from_slice(
+        &fs::read(managed(project, "coverage.json")).expect("coverage bytes"),
+    )
+    .expect("coverage JSON");
+    assert_eq!(report["complete"], true, "coverage report must be complete");
+    let files = report["files"].as_array().expect("coverage files");
+    for (source_file, format_id) in expected {
+        let outcomes = files
+            .iter()
+            .filter(|file| file["path"] == *source_file)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes.len(),
+            1,
+            "{source_file}: expected exactly one coverage outcome: {files:#?}"
+        );
+        assert_eq!(outcomes[0]["status"], "covered", "{source_file}: status");
+        assert_eq!(
+            outcomes[0]["declared_capability"], "structural_partial",
+            "{source_file}: capability"
+        );
+        assert_eq!(
+            outcomes[0]["format_id"], *format_id,
+            "{source_file}: format"
+        );
+    }
+}
+
 fn zip_bytes(entries: Vec<(String, Vec<u8>)>) -> Vec<u8> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(cursor);
@@ -93,15 +130,15 @@ fn document_package_zip(mimetype: &str, entries: Vec<(String, Vec<u8>)>) -> Vec<
     writer.finish().expect("finish ZIP").into_inner()
 }
 
-fn content_types() -> String {
+fn content_types(main_part: &str, main_type: &str) -> String {
     format!(
-        r#"<Types xmlns="{NS_CONTENT_TYPES}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#
+        r#"<Types xmlns="{NS_CONTENT_TYPES}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/{main_part}" ContentType="{main_type}"/></Types>"#
     )
 }
 
-fn package_relationships() -> String {
+fn package_relationships(target: &str) -> String {
     format!(
-        r#"<Relationships xmlns="{NS_PACKAGE_RELS}"><Relationship Id="rIdRoot" Type="{NS_OFFICE_RELS}/officeDocument" Target="word/document.xml"/></Relationships>"#
+        r#"<Relationships xmlns="{NS_PACKAGE_RELS}"><Relationship Id="rIdRoot" Type="{NS_OFFICE_RELS}/officeDocument" Target="{target}"/></Relationships>"#
     )
 }
 
@@ -119,8 +156,18 @@ fn docx_with_sections(sections: &[&str]) -> Vec<u8> {
         r#"<Relationships xmlns="{NS_PACKAGE_RELS}"><Relationship Id="rIdTheme" Type="{NS_OFFICE_RELS}/theme" Target="media/shared.png"/><Relationship Id="rIdImage" Type="{NS_OFFICE_RELS}/image" Target="media/shared.png"/></Relationships>"#
     );
     zip_bytes(vec![
-        ("[Content_Types].xml".into(), content_types().into_bytes()),
-        ("_rels/.rels".into(), package_relationships().into_bytes()),
+        (
+            "[Content_Types].xml".into(),
+            content_types(
+                "word/document.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+            )
+            .into_bytes(),
+        ),
+        (
+            "_rels/.rels".into(),
+            package_relationships("word/document.xml").into_bytes(),
+        ),
         ("word/document.xml".into(), document.into_bytes()),
         (
             "word/_rels/document.xml.rels".into(),
@@ -128,6 +175,126 @@ fn docx_with_sections(sections: &[&str]) -> Vec<u8> {
         ),
         ("word/media/shared.png".into(), b"inert fixture".to_vec()),
     ])
+}
+
+fn xlsx_with_ordered_sheets() -> Vec<u8> {
+    let workbook = format!(
+        r#"<workbook xmlns="{NS_SHEET}" xmlns:r="{NS_OFFICE_RELS}"><sheets><sheet name="Declared second" sheetId="1" r:id="rId2"/><sheet name="Declared first" sheetId="2" r:id="rId1"/></sheets></workbook>"#
+    );
+    let relationships = format!(
+        r#"<Relationships xmlns="{NS_PACKAGE_RELS}"><Relationship Id="rId1" Type="{NS_OFFICE_RELS}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="{NS_OFFICE_RELS}/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#
+    );
+    let shared_strings = format!(
+        r#"<sst xmlns="{NS_SHEET}" count="2" uniqueCount="2"><si><t>Shared one</t></si><si><t>Shared two</t></si></sst>"#
+    );
+    let sheet = |cell: &str, shared_index: usize| {
+        format!(
+            r#"<worksheet xmlns="{NS_SHEET}"><sheetData><row r="1"><c r="{cell}" t="s"><v>{shared_index}</v></c></row></sheetData></worksheet>"#
+        )
+    };
+    zip_bytes(vec![
+        (
+            "[Content_Types].xml".into(),
+            content_types(
+                "xl/workbook.xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            )
+            .into_bytes(),
+        ),
+        (
+            "_rels/.rels".into(),
+            package_relationships("xl/workbook.xml").into_bytes(),
+        ),
+        ("xl/workbook.xml".into(), workbook.into_bytes()),
+        (
+            "xl/_rels/workbook.xml.rels".into(),
+            relationships.into_bytes(),
+        ),
+        ("xl/sharedStrings.xml".into(), shared_strings.into_bytes()),
+        (
+            "xl/worksheets/sheet1.xml".into(),
+            sheet("A1", 0).into_bytes(),
+        ),
+        (
+            "xl/worksheets/sheet2.xml".into(),
+            sheet("B2", 1).into_bytes(),
+        ),
+    ])
+}
+
+fn pptx_with_ordered_slides() -> Vec<u8> {
+    let presentation = format!(
+        r#"<p:presentation xmlns:p="{NS_PRESENTATION}" xmlns:r="{NS_OFFICE_RELS}"><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId1"/></p:sldIdLst></p:presentation>"#
+    );
+    let relationships = format!(
+        r#"<Relationships xmlns="{NS_PACKAGE_RELS}"><Relationship Id="rId1" Type="{NS_OFFICE_RELS}/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="{NS_OFFICE_RELS}/slide" Target="slides/slide2.xml"/></Relationships>"#
+    );
+    let slide = |text: &str| {
+        format!(
+            r#"<p:sld xmlns:p="{NS_PRESENTATION}" xmlns:a="{NS_DRAWING}"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+        )
+    };
+    zip_bytes(vec![
+        (
+            "[Content_Types].xml".into(),
+            content_types(
+                "ppt/presentation.xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+            )
+            .into_bytes(),
+        ),
+        (
+            "_rels/.rels".into(),
+            package_relationships("ppt/presentation.xml").into_bytes(),
+        ),
+        (
+            "ppt/presentation.xml".into(),
+            presentation.into_bytes(),
+        ),
+        (
+            "ppt/_rels/presentation.xml.rels".into(),
+            relationships.into_bytes(),
+        ),
+        (
+            "ppt/slides/slide1.xml".into(),
+            slide("Physical slide one").into_bytes(),
+        ),
+        (
+            "ppt/slides/slide2.xml".into(),
+            slide("Declared first slide").into_bytes(),
+        ),
+    ])
+}
+
+fn odf_with_ordered_units(extension: &str) -> Vec<u8> {
+    let (media_type, body) = match extension {
+        "odt" => (
+            "application/vnd.oasis.opendocument.text",
+            r#"<office:text><text:section text:name="Opening"><text:p>ODT opening</text:p></text:section><text:section text:name="Closing"><text:p>ODT closing</text:p></text:section></office:text>"#,
+        ),
+        "ods" => (
+            "application/vnd.oasis.opendocument.spreadsheet",
+            r#"<office:spreadsheet><table:table table:name="Budget"><table:table-row><table:table-cell office:value-type="string"><text:p>ODS first</text:p></table:table-cell></table:table-row></table:table><table:table table:name="Forecast"><table:table-row><table:table-cell office:value-type="string"><text:p>ODS second</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet>"#,
+        ),
+        "odp" => (
+            "application/vnd.oasis.opendocument.presentation",
+            r#"<office:presentation><draw:page draw:name="Intro"><draw:frame><draw:text-box><text:p>ODP first</text:p></draw:text-box></draw:frame></draw:page><draw:page draw:name="Finish"><draw:frame><draw:text-box><text:p>ODP second</text:p></draw:text-box></draw:frame></draw:page></office:presentation>"#,
+        ),
+        _ => panic!("unsupported ODF test suffix"),
+    };
+    let content = format!(
+        r#"<office:document-content xmlns:office="{NS_ODF_OFFICE}" xmlns:text="{NS_ODF_TEXT}" xmlns:table="{NS_ODF_TABLE}" xmlns:draw="{NS_ODF_DRAW}" office:version="1.3"><office:body>{body}</office:body></office:document-content>"#
+    );
+    let manifest = format!(
+        r#"<manifest:manifest xmlns:manifest="{NS_ODF_MANIFEST}" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:media-type="{media_type}"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>"#
+    );
+    document_package_zip(
+        media_type,
+        vec![
+            ("content.xml".into(), content.into_bytes()),
+            ("META-INF/manifest.xml".into(), manifest.into_bytes()),
+        ],
+    )
 }
 
 fn epub_with_duplicate_labels_and_self_link() -> Vec<u8> {
@@ -155,17 +322,85 @@ fn epub_with_duplicate_labels_and_self_link() -> Vec<u8> {
 }
 
 fn document_nodes<'a>(graph: &'a Value, source_file: &str) -> (&'a Value, Vec<&'a Value>) {
+    package_nodes(graph, source_file, "docx_document", "document_section")
+}
+
+fn package_nodes<'a>(
+    graph: &'a Value,
+    source_file: &str,
+    root_type: &str,
+    unit_type: &str,
+) -> (&'a Value, Vec<&'a Value>) {
     let nodes = graph["nodes"].as_array().expect("graph nodes");
-    let root = nodes
+    let roots = nodes
         .iter()
-        .find(|node| node["source_file"] == source_file && node["type"] == "docx_document")
-        .expect("DOCX document root");
+        .filter(|node| node["source_file"] == source_file && node["type"] == root_type)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roots.len(),
+        1,
+        "{source_file}: expected exactly one {root_type} package root"
+    );
+    let root = roots[0];
     let mut units = nodes
         .iter()
-        .filter(|node| node["source_file"] == source_file && node["type"] == "document_section")
+        .filter(|node| node["source_file"] == source_file && node["type"] == unit_type)
         .collect::<Vec<_>>();
     units.sort_unstable_by_key(|node| node["unit_ordinal"].as_u64().expect("unit ordinal"));
     (root, units)
+}
+
+fn assert_package_units(
+    graph: &Value,
+    source_file: &str,
+    format: &str,
+    root_type: &str,
+    unit_type: &str,
+    expected_units: &[(&str, &str)],
+) {
+    let (root, units) = package_nodes(graph, source_file, root_type, unit_type);
+    assert_eq!(root["_origin"], "document_package", "{source_file}: origin");
+    assert_eq!(root["format"], format, "{source_file}: format");
+    assert_eq!(root["parse_status"], "complete", "{source_file}: status");
+    assert_eq!(
+        root["format_capability"], "structural_partial",
+        "{source_file}: capability"
+    );
+    assert_eq!(root["source_location"], Value::Null);
+    assert_eq!(units.len(), expected_units.len(), "{source_file}: units");
+    for (index, (unit, (internal_part, expected_text))) in
+        units.iter().zip(expected_units).enumerate()
+    {
+        assert_eq!(unit["_origin"], "document_package", "{source_file}: unit");
+        assert_eq!(unit["source_file"], source_file);
+        assert_eq!(unit["source_location"], Value::Null);
+        assert_eq!(unit["unit_ordinal"], index + 1);
+        assert_eq!(unit["internal_part"], *internal_part);
+        assert!(
+            unit["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(expected_text)),
+            "{source_file}: unit {} missing {expected_text:?}: {unit:#?}",
+            index + 1
+        );
+        let contains_edges = graph["links"]
+            .as_array()
+            .expect("graph links")
+            .iter()
+            .filter(|edge| {
+                edge["relation"] == "contains"
+                    && edge["source_file"] == source_file
+                    && edge["source"] == root["id"]
+                    && edge["target"] == unit["id"]
+            })
+            .count();
+        assert_eq!(
+            contains_edges,
+            1,
+            "{source_file}: unit {} must have exactly one root contains edge",
+            index + 1
+        );
+    }
 }
 
 fn assert_parallel_relationship_evidence(graph: &Value, source_file: &str) {
@@ -203,6 +438,11 @@ fn default_clustered_index_and_warm_cache_are_worker_deterministic() {
     let publication = epub_with_duplicate_labels_and_self_link();
     fs::create_dir(&project).expect("project");
     fs::write(project.join("handbook.docx"), &handbook).expect("DOCX fixture");
+    fs::write(project.join("workbook.xlsx"), xlsx_with_ordered_sheets()).expect("XLSX fixture");
+    fs::write(project.join("slides.pptx"), pptx_with_ordered_slides()).expect("PPTX fixture");
+    fs::write(project.join("notes.odt"), odf_with_ordered_units("odt")).expect("ODT fixture");
+    fs::write(project.join("budget.ods"), odf_with_ordered_units("ods")).expect("ODS fixture");
+    fs::write(project.join("talk.odp"), odf_with_ordered_units("odp")).expect("ODP fixture");
     fs::write(project.join("publication.epub"), &publication).expect("EPUB fixture");
     let direct_epub = graphoxide_extract::extract(&project.join("publication.epub"))
         .expect("direct EPUB fixture extraction");
@@ -268,28 +508,89 @@ fn default_clustered_index_and_warm_cache_are_worker_deterministic() {
     );
 
     let indexed = graph(&project);
-    let (root, units) = document_nodes(&indexed, "handbook.docx");
-    assert_eq!(root["format_capability"], "structural_partial");
-    assert_eq!(root["parse_status"], "complete");
-    assert_eq!(units.len(), 2);
-    assert_eq!(units[0]["unit_ordinal"], 1);
-    assert_eq!(units[0]["source_location"], Value::Null);
-    assert_eq!(units[0]["internal_part"], "word/document.xml");
-    assert!(units[0]["text"]
-        .as_str()
-        .is_some_and(|text| text.contains("Opening section")));
-    assert!(units[1]["text"]
-        .as_str()
-        .is_some_and(|text| text.contains("Closing section")));
-    let links = indexed["links"].as_array().expect("clustered graph links");
-    let contains_for = |source_file: &str| {
-        links
-            .iter()
-            .filter(|edge| edge["relation"] == "contains" && edge["source_file"] == source_file)
-            .count()
-    };
-    assert_eq!(contains_for("handbook.docx"), 2, "{links:#?}");
-    assert_eq!(contains_for("publication.epub"), 2, "{links:#?}");
+    assert_package_coverage(
+        &project,
+        &[
+            ("handbook.docx", "office-open-xml"),
+            ("workbook.xlsx", "office-open-xml"),
+            ("slides.pptx", "office-container-documents"),
+            ("notes.odt", "office-container-documents"),
+            ("budget.ods", "office-container-documents"),
+            ("talk.odp", "office-container-documents"),
+            ("publication.epub", "office-container-documents"),
+        ],
+    );
+    assert_package_units(
+        &indexed,
+        "handbook.docx",
+        "docx",
+        "docx_document",
+        "document_section",
+        &[
+            ("word/document.xml", "Opening section"),
+            ("word/document.xml", "Closing section"),
+        ],
+    );
+    assert_package_units(
+        &indexed,
+        "workbook.xlsx",
+        "xlsx",
+        "xlsx_workbook",
+        "workbook_sheet",
+        &[
+            ("xl/worksheets/sheet2.xml", "Shared two"),
+            ("xl/worksheets/sheet1.xml", "Shared one"),
+        ],
+    );
+    assert_package_units(
+        &indexed,
+        "slides.pptx",
+        "pptx",
+        "pptx_presentation",
+        "presentation_slide",
+        &[
+            ("ppt/slides/slide2.xml", "Declared first slide"),
+            ("ppt/slides/slide1.xml", "Physical slide one"),
+        ],
+    );
+    assert_package_units(
+        &indexed,
+        "notes.odt",
+        "odt",
+        "odt_document",
+        "document_section",
+        &[
+            ("content.xml", "ODT opening"),
+            ("content.xml", "ODT closing"),
+        ],
+    );
+    assert_package_units(
+        &indexed,
+        "budget.ods",
+        "ods",
+        "ods_workbook",
+        "workbook_sheet",
+        &[("content.xml", "ODS first"), ("content.xml", "ODS second")],
+    );
+    assert_package_units(
+        &indexed,
+        "talk.odp",
+        "odp",
+        "odp_presentation",
+        "presentation_slide",
+        &[("content.xml", "ODP first"), ("content.xml", "ODP second")],
+    );
+    assert_package_units(
+        &indexed,
+        "publication.epub",
+        "epub",
+        "epub_publication",
+        "epub_spine_item",
+        &[
+            ("EPUB/one.xhtml", "First EPUB unit"),
+            ("EPUB/two.xhtml", "Second EPUB unit"),
+        ],
+    );
     assert_parallel_relationship_evidence(&indexed, "handbook.docx");
     let mut epub_units = indexed["nodes"]
         .as_array()
@@ -337,9 +638,9 @@ fn default_clustered_index_and_warm_cache_are_worker_deterministic() {
     let report: Value =
         serde_json::from_slice(&fs::read(warm_report).expect("warm runtime report"))
             .expect("runtime report JSON");
-    assert_eq!(report["cache"]["metadata_hits"], 2);
-    assert_eq!(report["cache"]["payload_reads_avoided"], 2);
-    assert_eq!(report["cache"]["parses_avoided"], 2);
+    assert_eq!(report["cache"]["metadata_hits"], 7);
+    assert_eq!(report["cache"]["payload_reads_avoided"], 7);
+    assert_eq!(report["cache"]["parses_avoided"], 7);
 
     let audit = graphoxide(&project)
         .args(["audit", ".", "--json", "--strict", "--force"])
