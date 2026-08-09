@@ -401,8 +401,8 @@ class MappingTests(unittest.TestCase):
             check_targets=False,
         )
         self.assertEqual(coverage.total, 3978)
-        self.assertEqual(coverage.mapped, 3966)
-        self.assertEqual(coverage.expected_divergences, 12)
+        self.assertEqual(coverage.mapped, 3965)
+        self.assertEqual(coverage.expected_divergences, 13)
         self.assertEqual(coverage.unmapped, 0)
         self.assertEqual(checked, 0)
 

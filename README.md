@@ -712,7 +712,7 @@ Questions and full responses may contain sensitive project context, so choose th
 
 The Python reference implementation is kept in the gitignored `upstream/`
 checkout as a differential oracle. The pinned 3,978-case inventory is accounted
-for by 3,966 executable parity mappings and 12 reviewed expected divergences;
+for by 3,965 executable parity mappings and 13 reviewed expected divergences;
 expected divergences are reported separately and never presented as blanket
 parity. The end-to-end corpus gate also compares reviewed deterministic graphs
 from both implementations.
