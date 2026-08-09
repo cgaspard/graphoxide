@@ -306,6 +306,20 @@ inventory without being decompressed. BZIP2, XZ, Zstandard, 7z, and RAR remain
 inventory-only. Encrypted members, links, special entries, and unsupported ZIP
 compression reject that archive before any child dispatch.
 
+PDF inputs use an in-process, byte-only parser for bounded classic-xref
+documents. It supports raw or single-Flate page streams and a conservative
+Type 1 Standard-14/WinAnsi text subset, emitting deterministic document and
+page facts with page-numbered provenance under explicit input, object, page,
+decoded-stream, text, and fact ceilings. Encrypted, incremental, hybrid-xref,
+object-stream, unsupported-font/filter, malformed, or over-limit PDFs retain a
+stable inventory diagnostic instead of attempting unbounded recovery. Actions,
+annotations, embedded files, external references, images, and JavaScript are
+never traversed or executed; OCR and rendering remain explicit future
+enrichment work. The isolated runtime's shared parser arena applies an
+additional 16× source admission, so its current 16 MiB per-file policy admits
+semantic PDF parsing only below roughly 1 MiB even though the registry's
+absolute PDF input ceiling is 16 MiB.
+
 The walker honors `.gitignore` and `.graphoxideignore`, skips dependency/build/cache directories and sensitive credential files, and never re-ingests `graphoxide-out/`. The `outer!/member` source spelling is reserved for logical archive members, so physical directory names ending in `!` are skipped with a discovery diagnostic.
 
 ## Deterministic graph-build benchmark profiles

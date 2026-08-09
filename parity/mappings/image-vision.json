@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "mappings": [
-    {"upstream":"tests/test_image_vision.py::test_pdf_routed_through_pypdf_not_readtext","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pdf_routed_through_pypdf_not_readtext"}]},
+    {"upstream":"tests/test_image_vision.py::test_pdf_routed_through_pypdf_not_readtext","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pdf_routed_through_bounded_pdf_reader_not_readtext"}]},
     {"upstream":"tests/test_image_vision.py::test_pdf_is_not_treated_as_vision_image","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_pdf_is_not_treated_as_vision_image"}]},
     {"upstream":"tests/test_image_vision.py::test_non_pdf_still_read_as_plain_text","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_non_pdf_still_read_as_plain_text"}]},
     {"upstream":"tests/test_image_vision.py::test_read_files_skips_out_of_root_symlink","targets":[{"runner":"rust","package":"graphoxide-extract","id":"test_read_files_skips_out_of_root_symlink"}]},

@@ -1,5 +1,7 @@
 use graphoxide_core::Extraction;
-use graphoxide_extract::format_registry::{format_registry, ByteAdapterKind, FormatCapability};
+use graphoxide_extract::format_registry::{
+    format_registry, ByteAdapterKind, FormatCapability, PDF_LIMITS,
+};
 use serde_json::Value;
 use std::{fs, path::Path};
 
@@ -281,9 +283,13 @@ fn dot_is_semantic_full_while_other_diagram_scanners_remain_partial() {
 }
 
 #[test]
-fn pdf_registry_does_not_promise_unbounded_semantic_decoding() {
+fn pdf_registry_promises_only_bounded_structural_page_extraction() {
     let spec = format_registry()
         .find_by_path(Path::new("document.pdf"))
         .expect("PDF format is registered");
-    assert_eq!(spec.capability, FormatCapability::InventoryOnly);
+    assert_eq!(spec.capability, FormatCapability::StructuralPartial);
+    assert_eq!(spec.limits, PDF_LIMITS);
+    assert_eq!(spec.limits.max_input_bytes, 16 * 1024 * 1024);
+    assert_eq!(spec.limits.max_records, 1_025);
+    assert_eq!(spec.limits.max_expansion_ratio, 64);
 }

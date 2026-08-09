@@ -15,10 +15,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
-// Bump whenever a built-in extractor's persisted fact schema changes. Stage 5
-// adds bounded recursive ZIP/TAR/GZIP child facts, so v26 inventory-only archive
-// entries must not be replayed into an incremental build.
-pub const AST_CACHE_VERSION: u32 = 27;
+// Bump whenever a built-in extractor's persisted fact schema changes. Version
+// 28 replaces PDF inventory/text fallback entries with bounded document and
+// page facts, which must not mix with an incremental build's older cache rows.
+pub const AST_CACHE_VERSION: u32 = 28;
 
 /// Wire version for the extraction-owned payload stored inside runtime-v1.
 ///
