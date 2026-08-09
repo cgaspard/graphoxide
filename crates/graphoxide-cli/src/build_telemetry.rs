@@ -217,6 +217,48 @@ pub struct RuntimeSimdTelemetry {
     pub enabled_kernels: Vec<String>,
 }
 
+/// Truthful per-run evidence for the isolated extraction cache.
+///
+/// These counters describe completed control-plane decisions rather than
+/// speculative probes. They remain outside graph artifacts so observing the
+/// cache can never change deterministic graph bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RuntimeCacheTelemetry {
+    pub enabled: bool,
+    pub metadata_hits: u64,
+    pub runtime_hits: u64,
+    pub legacy_hits: u64,
+    pub misses: u64,
+    pub bypasses: u64,
+    pub stale_or_corrupt: u64,
+    pub probe_failures: u64,
+    pub payload_reads_avoided: u64,
+    pub parses_avoided: u64,
+    pub stores: u64,
+    pub already_present: u64,
+    pub store_failures: u64,
+}
+
+impl From<graphoxide_extract::cache::RuntimeCacheTelemetry> for RuntimeCacheTelemetry {
+    fn from(cache: graphoxide_extract::cache::RuntimeCacheTelemetry) -> Self {
+        Self {
+            enabled: cache.enabled,
+            metadata_hits: cache.metadata_hits,
+            runtime_hits: cache.runtime_hits,
+            legacy_hits: cache.legacy_hits,
+            misses: cache.misses,
+            bypasses: cache.bypasses,
+            stale_or_corrupt: cache.stale_or_corrupt,
+            probe_failures: cache.probe_failures,
+            payload_reads_avoided: cache.payload_reads_avoided,
+            parses_avoided: cache.parses_avoided,
+            stores: cache.stores,
+            already_present: cache.already_present,
+            store_failures: cache.store_failures,
+        }
+    }
+}
+
 impl RuntimeSimdTelemetry {
     pub fn detect() -> Self {
         let mut detected_features = Vec::new();
@@ -275,6 +317,7 @@ pub struct IndexRuntimeTelemetryV1 {
     pub schema_version: u8,
     pub build: BuildTelemetry,
     pub runtime: IndexRuntimeConfiguration,
+    pub cache: RuntimeCacheTelemetry,
     pub simd: RuntimeSimdTelemetry,
 }
 
@@ -284,6 +327,7 @@ impl IndexRuntimeTelemetryV1 {
             schema_version: INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION,
             build,
             runtime: IndexRuntimeConfiguration::legacy(),
+            cache: RuntimeCacheTelemetry::default(),
             simd: RuntimeSimdTelemetry::detect(),
         }
     }
@@ -294,8 +338,16 @@ impl IndexRuntimeTelemetryV1 {
             schema_version: INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION,
             build,
             runtime,
+            cache: RuntimeCacheTelemetry::default(),
             simd: RuntimeSimdTelemetry::detect(),
         }
+    }
+
+    /// Attach the cache evidence collected by the isolated extraction run.
+    #[must_use]
+    pub const fn with_cache(mut self, cache: RuntimeCacheTelemetry) -> Self {
+        self.cache = cache;
+        self
     }
 }
 
@@ -371,6 +423,8 @@ mod tests {
         assert_eq!(value["runtime"]["execution_model"], "legacy");
         assert_eq!(value["runtime"]["io_workers"], serde_json::Value::Null);
         assert_eq!(value["runtime"]["admission"], serde_json::Value::Null);
+        assert_eq!(value["cache"]["enabled"], false);
+        assert_eq!(value["cache"]["runtime_hits"], 0);
         assert!(value["simd"]["detected_features"].is_array());
         assert!(value["simd"]["enabled_kernels"]
             .as_array()
@@ -424,6 +478,50 @@ mod tests {
             value["runtime"]["admission"]["effective_compute_workers"],
             2
         );
+        assert_eq!(value["cache"]["enabled"], false);
+    }
+
+    #[test]
+    fn isolated_sidecar_records_truthful_cache_counters() {
+        let report = IndexRuntimeTelemetryV1::isolated(
+            BuildTelemetry::new(
+                BuildOperation::Index,
+                BuildMode::Incremental,
+                BuildStatus::Rebuilt,
+                PathBuf::from("graphoxide-out/graph.json"),
+            ),
+            IndexRuntimeConfiguration::legacy(),
+        )
+        .with_cache(RuntimeCacheTelemetry {
+            enabled: true,
+            metadata_hits: 2,
+            runtime_hits: 3,
+            legacy_hits: 1,
+            misses: 4,
+            bypasses: 5,
+            stale_or_corrupt: 6,
+            probe_failures: 7,
+            payload_reads_avoided: 2,
+            parses_avoided: 6,
+            stores: 8,
+            already_present: 9,
+            store_failures: 10,
+        });
+        let value = serde_json::to_value(report).unwrap();
+
+        assert_eq!(value["cache"]["enabled"], true);
+        assert_eq!(value["cache"]["metadata_hits"], 2);
+        assert_eq!(value["cache"]["runtime_hits"], 3);
+        assert_eq!(value["cache"]["legacy_hits"], 1);
+        assert_eq!(value["cache"]["misses"], 4);
+        assert_eq!(value["cache"]["bypasses"], 5);
+        assert_eq!(value["cache"]["stale_or_corrupt"], 6);
+        assert_eq!(value["cache"]["probe_failures"], 7);
+        assert_eq!(value["cache"]["payload_reads_avoided"], 2);
+        assert_eq!(value["cache"]["parses_avoided"], 6);
+        assert_eq!(value["cache"]["stores"], 8);
+        assert_eq!(value["cache"]["already_present"], 9);
+        assert_eq!(value["cache"]["store_failures"], 10);
     }
 
     #[test]

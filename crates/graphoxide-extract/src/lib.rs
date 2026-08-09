@@ -87,24 +87,28 @@ pub struct RuntimeProjectExtraction {
     pub read_failures: Vec<graphoxide_index_runtime::FileReadFailure>,
 }
 
-/// Divide the CPU-arena partition across the workers the runtime will actually
-/// start. The deferred scan reserves half of that partition for source bytes
-/// retained by the project resolver while other workers are still parsing.
+const MAX_ISOLATED_PARSER_ALLOWANCE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Choose one per-file parser policy from the memory budget alone.
+///
+/// Worker count and corpus size are scheduling inputs, not semantic inputs:
+/// changing either must not alter bounded facts or cache keys for an unchanged
+/// source. A shared [`RuntimeParserAdmission`] below gates cold parses so the
+/// sum of their fixed allowances never exceeds this parser pool. The deferred
+/// scan reserves half of the CPU partition for source bytes retained by the
+/// project resolver.
 fn isolated_parser_layout(
     config: graphoxide_index_runtime::IndexRuntimeConfig,
-    request_count: usize,
     reserve_resolver_snapshot: bool,
 ) -> (usize, usize) {
-    let evidence = config.execution_evidence(request_count);
+    let cpu_arenas_bytes = config.memory_budget().cpu_arenas_bytes;
     let resolver_snapshot_bytes = if reserve_resolver_snapshot {
-        evidence.cpu_arenas_bytes / 2
+        cpu_arenas_bytes / 2
     } else {
         0
     };
-    let parser_pool_bytes = evidence
-        .cpu_arenas_bytes
-        .saturating_sub(resolver_snapshot_bytes);
-    let parser_allowance_bytes = parser_pool_bytes / evidence.effective_compute_workers.max(1);
+    let parser_pool_bytes = cpu_arenas_bytes.saturating_sub(resolver_snapshot_bytes);
+    let parser_allowance_bytes = parser_pool_bytes.clamp(1, MAX_ISOLATED_PARSER_ALLOWANCE_BYTES);
     (parser_allowance_bytes, resolver_snapshot_bytes)
 }
 
@@ -171,7 +175,9 @@ pub fn extract_project_with_runtime(
         })
         .collect::<std::io::Result<Vec<_>>>()?;
     let contexts = Arc::new(contexts);
-    let (parser_allowance_bytes, _) = isolated_parser_layout(config, requests.len(), false);
+    let (parser_allowance_bytes, _) = isolated_parser_layout(config, false);
+    let parser_pool_bytes = config.memory_budget().cpu_arenas_bytes;
+    let parser_admission = Arc::new(RuntimeParserAdmission::new(parser_pool_bytes));
     let output_budget = config.memory_budget().cache_and_runs_bytes;
     let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
     let completed = read_files_concurrently(config, requests, move |input| {
@@ -179,6 +185,9 @@ pub fn extract_project_with_runtime(
         let (path, _) = contexts
             .get(relative)
             .expect("runtime ticket context must exist");
+        let _parser_permit = parser_admission
+            .acquire_with_cancellation(parser_allowance_bytes, None)
+            .expect("validated runtime config must admit its canonical parser allowance");
         let extraction = engine::extract_as_bytes_with_parser_allowance(
             path,
             relative,
@@ -342,6 +351,10 @@ pub struct DeferredProjectExtractionResult {
     pub unchanged_sources: usize,
     /// Previously-manifested sources that are no longer part of this scan.
     pub deleted_sources: usize,
+    /// Deterministic cache decisions for this scan. This is separate from
+    /// `unchanged_sources`: manifest/baseline reuse after a payload hash match
+    /// is not misreported as a runtime artifact hit.
+    pub runtime_cache: cache::RuntimeCacheTelemetry,
     /// Fail-open runtime-v1 cache persistence diagnostics. Cache failures do
     /// not invalidate a completed extraction or alter graph publication.
     pub runtime_cache_diagnostics: Vec<String>,
@@ -414,38 +427,332 @@ struct RuntimeScanRow {
     indexed: bool,
     snapshot_source: Option<Vec<u8>>,
     warning: Option<String>,
+    runtime_manifest: Option<cache::RuntimeAstManifestEvidence>,
+    runtime_cache: cache::RuntimeCacheTelemetry,
+    runtime_cache_diagnostics: Vec<String>,
+}
+
+#[derive(Debug)]
+enum RuntimeCacheHitUseError {
+    Rejected(cache::RuntimeAstCacheRejection),
+    ExceedsOutputAdmission,
+}
+
+// `serde_json` can expand deeply nested singleton objects far beyond their
+// compact wire representation. Cache artifacts live in Graphoxide's managed
+// output, but still receive a deliberately high pre-decode scratch charge so
+// copied, stale, or malformed local state fails open before fact allocation.
+const RUNTIME_CACHE_DECODE_EXPANSION_MULTIPLIER: usize = 256;
+
+fn decode_admitted_runtime_cache_hit(
+    hit: graphoxide_index_runtime::cache::RuntimeCacheHit,
+    evidence: &cache::RuntimeAstCacheEvidence,
+    output_admission: &RuntimeOutputAdmission,
+    cancellation: &graphoxide_index_runtime::RuntimeCancellation,
+) -> Result<graphoxide_core::Extraction, RuntimeCacheHitUseError> {
+    // The cache service separately retains shared transfer credit for the raw
+    // payload until `hit` is dropped. Validate the integrity-checked runtime
+    // preamble and fact-affecting header before admitting conservative serde
+    // scratch space or allocating extraction facts.
+    cache::validate_runtime_ast_cache_payload_header(hit.source, &hit.payload, evidence)
+        .map_err(RuntimeCacheHitUseError::Rejected)?;
+    let decode_charge = hit
+        .payload
+        .len()
+        .checked_mul(RUNTIME_CACHE_DECODE_EXPANSION_MULTIPLIER)
+        .ok_or(RuntimeCacheHitUseError::ExceedsOutputAdmission)?;
+    let reservation = output_admission
+        .try_reserve_temporary_with_cancellation(decode_charge, Some(cancellation))
+        .ok_or(RuntimeCacheHitUseError::ExceedsOutputAdmission)?;
+    let extraction = cache::decode_runtime_ast_cache_payload(hit.source, &hit.payload, evidence)
+        .map_err(RuntimeCacheHitUseError::Rejected)?;
+    let retained_bytes = extraction_retained_bytes(&extraction)
+        .map_err(|_| RuntimeCacheHitUseError::ExceedsOutputAdmission)?;
+    if !reservation.commit(retained_bytes) {
+        return Err(RuntimeCacheHitUseError::ExceedsOutputAdmission);
+    }
+    Ok(extraction)
+}
+
+fn validate_admitted_runtime_cache_hit(
+    hit: graphoxide_index_runtime::cache::RuntimeCacheHit,
+    evidence: &cache::RuntimeAstCacheEvidence,
+) -> Result<(), RuntimeCacheHitUseError> {
+    cache::validate_runtime_ast_cache_payload_header(hit.source, &hit.payload, evidence)
+        .map(|_| ())
+        .map_err(RuntimeCacheHitUseError::Rejected)
+}
+
+fn persist_runtime_cache_extraction(
+    client: &graphoxide_index_runtime::cache::RuntimeCacheIoClient,
+    evidence: &cache::RuntimeAstCacheEvidence,
+    extraction: &graphoxide_core::Extraction,
+    replace_existing: bool,
+    cancellation: &graphoxide_index_runtime::RuntimeCancellation,
+) -> Result<
+    graphoxide_index_runtime::cache::RuntimeCacheIoPersistOutcome,
+    graphoxide_index_runtime::cache::RuntimeCacheIoServiceError,
+> {
+    let encoded_bytes = cache::runtime_ast_cache_payload_len(evidence, extraction)
+        .map_err(graphoxide_index_runtime::cache::RuntimeCacheIoServiceError::Cache)?;
+    client.persist_encoded_with_cancellation(
+        evidence.key,
+        encoded_bytes,
+        replace_existing,
+        cancellation,
+        |output| cache::encode_runtime_ast_cache_payload_into(output, evidence, extraction),
+    )
+}
+
+fn runtime_manifest_byte_limit(cache_and_runs_bytes: usize, admitted_files: usize) -> usize {
+    const MANIFEST_BASE_BYTES: usize = 4 * 1024;
+    const MANIFEST_BYTES_PER_FILE: usize = 8 * 1024;
+    const MAX_RUNTIME_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
+
+    MANIFEST_BASE_BYTES
+        .saturating_add(admitted_files.saturating_mul(MANIFEST_BYTES_PER_FILE))
+        .min(cache_and_runs_bytes / 64)
+        .min(MAX_RUNTIME_MANIFEST_BYTES)
+}
+
+fn runtime_manifest_reservation(cache_and_runs_bytes: usize, admitted_files: usize) -> usize {
+    runtime_manifest_byte_limit(cache_and_runs_bytes, admitted_files)
+        .saturating_mul(32)
+        .min(cache_and_runs_bytes / 2)
+}
+
+#[derive(Debug)]
+struct RuntimeParserAdmission {
+    byte_limit: usize,
+    active_bytes: std::sync::Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+
+impl RuntimeParserAdmission {
+    fn new(byte_limit: usize) -> Self {
+        Self {
+            byte_limit,
+            active_bytes: std::sync::Mutex::new(0),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    fn acquire_with_cancellation(
+        &self,
+        bytes: usize,
+        cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+    ) -> Option<RuntimeParserPermit<'_>> {
+        let mut active = self
+            .active_bytes
+            .lock()
+            .expect("parser admission mutex poisoned");
+        loop {
+            if cancellation.is_some_and(|token| token.is_cancelled()) || bytes > self.byte_limit {
+                return None;
+            }
+            if active
+                .checked_add(bytes)
+                .is_some_and(|next| next <= self.byte_limit)
+            {
+                *active += bytes;
+                return Some(RuntimeParserPermit {
+                    admission: self,
+                    reserved: bytes,
+                });
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(active, std::time::Duration::from_millis(10))
+                .expect("parser admission mutex poisoned while waiting");
+            active = next;
+        }
+    }
+
+    #[cfg(test)]
+    fn active_bytes(&self) -> usize {
+        *self
+            .active_bytes
+            .lock()
+            .expect("parser admission mutex poisoned")
+    }
+}
+
+struct RuntimeParserPermit<'a> {
+    admission: &'a RuntimeParserAdmission,
+    reserved: usize,
+}
+
+impl Drop for RuntimeParserPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .admission
+            .active_bytes
+            .lock()
+            .expect("parser admission mutex poisoned");
+        *active = active
+            .checked_sub(self.reserved)
+            .expect("parser admission accounting underflow");
+        self.admission.changed.notify_all();
+    }
 }
 
 #[derive(Debug)]
 struct RuntimeOutputAdmission {
     byte_limit: usize,
-    retained_bytes: std::sync::atomic::AtomicUsize,
+    state: std::sync::Mutex<RuntimeOutputAdmissionState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeOutputAdmissionState {
+    retained_bytes: usize,
+    temporary_bytes: usize,
 }
 
 impl RuntimeOutputAdmission {
-    const fn new(byte_limit: usize) -> Self {
+    fn new(byte_limit: usize) -> Self {
         Self {
             byte_limit,
-            retained_bytes: std::sync::atomic::AtomicUsize::new(0),
+            state: std::sync::Mutex::new(RuntimeOutputAdmissionState::default()),
+            changed: std::sync::Condvar::new(),
         }
     }
 
     fn try_reserve(&self, bytes: usize) -> bool {
-        use std::sync::atomic::Ordering;
+        self.try_reserve_with_cancellation(bytes, None)
+    }
 
-        self.retained_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |retained| {
-                retained
+    fn try_reserve_with_cancellation(
+        &self,
+        bytes: usize,
+        cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+    ) -> bool {
+        let mut state = self.state.lock().expect("output admission mutex poisoned");
+        loop {
+            if cancellation.is_some_and(|token| token.is_cancelled())
+                || state
+                    .retained_bytes
                     .checked_add(bytes)
-                    .filter(|next| *next <= self.byte_limit)
-            })
-            .is_ok()
+                    .is_none_or(|eventual| eventual > self.byte_limit)
+            {
+                return false;
+            }
+            if state
+                .retained_bytes
+                .checked_add(state.temporary_bytes)
+                .and_then(|current| current.checked_add(bytes))
+                .is_some_and(|current| current <= self.byte_limit)
+            {
+                state.retained_bytes += bytes;
+                return true;
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, std::time::Duration::from_millis(10))
+                .expect("output admission mutex poisoned while waiting");
+            state = next;
+        }
     }
 
     fn retained_bytes(&self) -> usize {
-        use std::sync::atomic::Ordering;
+        self.state
+            .lock()
+            .expect("output admission mutex poisoned")
+            .retained_bytes
+    }
 
-        self.retained_bytes.load(Ordering::Acquire)
+    fn try_reserve_temporary_with_cancellation(
+        &self,
+        bytes: usize,
+        cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+    ) -> Option<RuntimeOutputReservation<'_>> {
+        let mut state = self.state.lock().expect("output admission mutex poisoned");
+        loop {
+            if cancellation.is_some_and(|token| token.is_cancelled())
+                || state
+                    .retained_bytes
+                    .checked_add(bytes)
+                    .is_none_or(|eventual| eventual > self.byte_limit)
+            {
+                return None;
+            }
+            if state
+                .retained_bytes
+                .checked_add(state.temporary_bytes)
+                .and_then(|current| current.checked_add(bytes))
+                .is_some_and(|current| current <= self.byte_limit)
+            {
+                state.temporary_bytes += bytes;
+                break;
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, std::time::Duration::from_millis(10))
+                .expect("output admission mutex poisoned while waiting");
+            state = next;
+        }
+        Some(RuntimeOutputReservation {
+            admission: self,
+            reserved: bytes,
+            active: true,
+        })
+    }
+}
+
+struct RuntimeOutputReservation<'a> {
+    admission: &'a RuntimeOutputAdmission,
+    reserved: usize,
+    active: bool,
+}
+
+impl RuntimeOutputReservation<'_> {
+    fn commit(mut self, actual_bytes: usize) -> bool {
+        let mut state = self
+            .admission
+            .state
+            .lock()
+            .expect("output admission mutex poisoned");
+        state.temporary_bytes = state
+            .temporary_bytes
+            .checked_sub(self.reserved)
+            .expect("temporary output admission accounting underflow");
+        if actual_bytes > self.reserved {
+            // A cache decoder must acquire enough credit before serde is
+            // allowed to allocate. Growing the reservation after decoding
+            // would make the admission boundary observational rather than a
+            // bound, so an underestimated expansion is a safe cache miss.
+            self.active = false;
+            self.admission.changed.notify_all();
+            return false;
+        }
+        state.retained_bytes = state
+            .retained_bytes
+            .checked_add(actual_bytes)
+            .expect("retained output admission accounting overflow");
+        debug_assert!(
+            state.retained_bytes.saturating_add(state.temporary_bytes) <= self.admission.byte_limit
+        );
+        self.active = false;
+        self.admission.changed.notify_all();
+        true
+    }
+}
+
+impl Drop for RuntimeOutputReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let mut state = self
+                .admission
+                .state
+                .lock()
+                .expect("output admission mutex poisoned");
+            state.temporary_bytes = state
+                .temporary_bytes
+                .checked_sub(self.reserved)
+                .expect("temporary output admission accounting underflow");
+            self.active = false;
+            self.admission.changed.notify_all();
+        }
     }
 }
 
@@ -658,6 +965,80 @@ fn normalized_previous_manifest(
         }
     }
     normalized
+}
+
+fn normalized_previous_manifest_owned(
+    manifest: cache::Manifest,
+    resolved_root: &std::path::Path,
+    original_root: &std::path::Path,
+) -> cache::Manifest {
+    fn manifest_key_is_absolute(stored: &str) -> bool {
+        let portable = stored.replace('\\', "/");
+        std::path::Path::new(stored).is_absolute()
+            || portable.starts_with("//")
+            || portable.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+    }
+
+    fn normalize_relative(stored: &str) -> Option<String> {
+        use unicode_normalization::UnicodeNormalization as _;
+
+        if stored.contains('\0') {
+            return None;
+        }
+        let portable = stored.replace('\\', "/").nfc().collect::<String>();
+        let mut components = Vec::new();
+        for component in portable.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => return None,
+                component => components.push(component),
+            }
+        }
+        (!components.is_empty()).then(|| components.join("/"))
+    }
+
+    let mut staged = std::collections::BTreeMap::<String, (bool, cache::ManifestEntry)>::new();
+    // Preserve the compatibility precedence of the borrowed helper without
+    // cloning or partitioning an attacker-sized manifest. The small boolean
+    // records whether the winning row was relative so one input pass can give
+    // portable relative rows precedence over legacy absolute spellings.
+    // Absolute compatibility rows are handled lexically: manifest data must
+    // never trigger a host/UNC filesystem probe, and paths outside the two
+    // already-known roots vanish.
+    for (stored, entry) in manifest {
+        let is_absolute = manifest_key_is_absolute(&stored);
+        let path = std::path::Path::new(&stored);
+        let key = if is_absolute {
+            if !path.is_absolute() {
+                None
+            } else {
+                path.strip_prefix(resolved_root)
+                    .or_else(|_| path.strip_prefix(original_root))
+                    .ok()
+                    .and_then(|relative| normalize_relative(&relative.to_string_lossy()))
+            }
+        } else {
+            normalize_relative(&stored)
+        };
+        if let Some(key) = key {
+            let is_relative = !is_absolute;
+            match staged.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((is_relative, entry));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot)
+                    if is_relative >= slot.get().0 =>
+                {
+                    slot.insert((is_relative, entry));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+    }
+    staged
+        .into_iter()
+        .map(|(key, (_, entry))| (key, entry))
+        .collect()
 }
 
 const RESOLUTION_BASELINE_WORKING_SET_MULTIPLIER: usize = 8;
@@ -926,28 +1307,62 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
             }
         }
     }
-    let manifest_path = managed_output_dir.join("manifest.json");
+    let cache_and_runs_budget = config.memory_budget().cache_and_runs_bytes;
+    let manifest_byte_limit = runtime_manifest_byte_limit(cache_and_runs_budget, contexts.len());
+    // Manifest entries have a fixed schema, but decoding and lexical
+    // normalization briefly overlap tree-node storage. Reserve a conservative
+    // 32x expansion while the one-pass priority staging map is consumed.
+    let manifest_reservation = runtime_manifest_reservation(cache_and_runs_budget, contexts.len());
+    let bounded_manifest =
+        cache::load_manifest_from_output_bounded(&managed_output_dir, manifest_byte_limit);
+    let cache::RuntimeManifestLoad {
+        manifest: loaded_manifest,
+        status: manifest_status,
+    } = bounded_manifest;
+    let committed_manifest_exists = manifest_status == cache::RuntimeManifestLoadStatus::Loaded;
     let baseline_graph_path = managed_output_dir.join("graph.json");
-    let committed_manifest_exists = manifest_path.is_file();
     let committed_baseline_eligible = committed_manifest_exists && baseline_graph_path.is_file();
-    let previous = if committed_manifest_exists && !baseline_graph_path.is_file() {
-        // A manifest without its matching committed graph cannot authorize a
-        // delta: there are no unchanged facts to retain or use for resolution.
-        // Treat every indexed row as fresh and republish both artifacts.
-        cache::Manifest::new()
+    // Keep cache authorization evidence even when graph.json is absent. It
+    // cannot authorize an incremental graph delta, but a strong metadata-only
+    // hit can still restore the extraction used for a clean graph rebuild.
+    let cache_previous = Arc::new(normalized_previous_manifest_owned(
+        loaded_manifest,
+        &resolved_root,
+        root,
+    ));
+    let previous = if committed_baseline_eligible {
+        Arc::clone(&cache_previous)
     } else {
-        normalized_previous_manifest(
-            &cache::load_manifest_from_output(&managed_output_dir),
-            &resolved_root,
-            root,
-        )
+        Arc::new(cache::Manifest::new())
     };
-    // Runtime-v1 payload persistence remains disabled until this entrypoint has
-    // a validated read-through path. Serializing every completed extraction
-    // into a write-only cache would duplicate retained output and consume the
-    // cache/run memory partition without avoiding any parser work.
-    let runtime_cache_diagnostics = Vec::new();
-    let requests = contexts
+
+    let mut runtime_cache = cache::RuntimeCacheTelemetry::default();
+    let mut runtime_cache_diagnostics = Vec::new();
+    match manifest_status {
+        cache::RuntimeManifestLoadStatus::Loaded | cache::RuntimeManifestLoadStatus::Missing => {}
+        cache::RuntimeManifestLoadStatus::Oversize => {
+            runtime_cache.stale_or_corrupt = runtime_cache.stale_or_corrupt.saturating_add(1);
+            runtime_cache_diagnostics.push(format!(
+                "runtime manifest exceeded its {manifest_byte_limit}-byte safety limit; rebuilding without metadata cache authorization"
+            ));
+        }
+        cache::RuntimeManifestLoadStatus::Corrupt => {
+            runtime_cache.stale_or_corrupt = runtime_cache.stale_or_corrupt.saturating_add(1);
+            runtime_cache_diagnostics.push(
+                "runtime manifest was corrupt; rebuilding without metadata cache authorization"
+                    .to_owned(),
+            );
+        }
+        cache::RuntimeManifestLoadStatus::UnsafeOrUnreadable => {
+            runtime_cache.probe_failures = runtime_cache.probe_failures.saturating_add(1);
+            runtime_cache_diagnostics.push(
+                "runtime manifest was unsafe or unreadable; rebuilding without metadata cache authorization"
+                    .to_owned(),
+            );
+        }
+    }
+
+    let all_requests = contexts
         .iter()
         .enumerate()
         .map(|(ordinal, (relative, context))| {
@@ -958,19 +1373,209 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
             )
         })
         .collect::<std::io::Result<Vec<_>>>()?;
-    let contexts = Arc::new(contexts);
-    let contexts_for_compute = Arc::clone(&contexts);
-    let previous_for_compute = Arc::new(previous.clone());
     // Resolver source bytes remain live while sibling workers may still parse.
     // Give each phase a disjoint portion of the shared CPU-arena partition.
-    let (parser_allowance_bytes, snapshot_budget) =
-        isolated_parser_layout(config, requests.len(), true);
+    let (parser_allowance_bytes, snapshot_budget) = isolated_parser_layout(config, true);
+    let parser_pool_bytes = config
+        .memory_budget()
+        .cpu_arenas_bytes
+        .saturating_sub(snapshot_budget);
+    let parser_admission = Arc::new(RuntimeParserAdmission::new(parser_pool_bytes));
+    let runtime_cache_options = cache::RuntimeAstCacheOptions::isolated(
+        u64::try_from(parser_allowance_bytes).unwrap_or(u64::MAX),
+    );
+    let budget_after_manifest = cache_and_runs_budget.saturating_sub(manifest_reservation);
+    let cache_service_budget = budget_after_manifest / 2;
+    let mut runtime_cache_service = if cache_service_budget == 0 {
+        None
+    } else {
+        match graphoxide_index_runtime::cache::RuntimeCacheIoService::start_for_memory_budget(
+            managed_output_dir.clone(),
+            cache_service_budget,
+        ) {
+            Ok(service)
+                if service.memory_accounting().max_resident_bytes <= budget_after_manifest =>
+            {
+                runtime_cache.enabled = true;
+                Some(service)
+            }
+            Ok(service) => {
+                let reserved = service.memory_accounting().max_resident_bytes;
+                let _ = service.shutdown();
+                runtime_cache.probe_failures = runtime_cache.probe_failures.saturating_add(1);
+                runtime_cache_diagnostics.push(format!(
+                    "runtime cache requires {reserved} managed bytes, exceeding its {budget_after_manifest}-byte remaining cache/run partition; continuing without it"
+                ));
+                None
+            }
+            Err(error) => {
+                runtime_cache.probe_failures = runtime_cache.probe_failures.saturating_add(1);
+                runtime_cache_diagnostics.push(format!(
+                    "runtime cache could not start; continuing without it: {error}"
+                ));
+                None
+            }
+        }
+    };
+    let cache_client = runtime_cache_service
+        .as_ref()
+        .map(graphoxide_index_runtime::cache::RuntimeCacheIoService::client);
+    let cache_reservation = runtime_cache_service
+        .as_ref()
+        .map_or(0, |service| service.memory_accounting().max_resident_bytes);
+    let output_budget = budget_after_manifest.saturating_sub(cache_reservation);
+    let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
+
+    // Probe metadata-authorized entries in stable request order. Only sources
+    // the project resolver does not need may avoid their payload read.
+    let mut requests = Vec::with_capacity(all_requests.len());
+    let mut metadata_rows = Vec::new();
+    let mut preflight_skip_probe = BTreeMap::<String, bool>::new();
+    for request in all_requests {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
+        let relative = request.identity.normalized_path.to_string();
+        let Some(context) = contexts.get(relative.as_str()) else {
+            requests.push(request);
+            continue;
+        };
+        let Some(prior_entry) = cache_previous.get(relative.as_str()) else {
+            requests.push(request);
+            continue;
+        };
+        let Some(prior_cache) = prior_entry.runtime_cache else {
+            requests.push(request);
+            continue;
+        };
+        let Some(evidence) = cache::runtime_ast_cache_evidence_from_digest(
+            &relative,
+            prior_cache.content_digest,
+            runtime_cache_options,
+        ) else {
+            requests.push(request);
+            continue;
+        };
+        if force
+            || !context.indexed
+            || !cache::runtime_ast_cache_is_eligible(&relative)
+            || crate::js_resolution::ProjectSnapshot::needs_file(&relative)
+            || prior_entry.ast_version != cache::AST_CACHE_VERSION
+            || evidence.key.as_bytes() != prior_cache.artifact_key
+        {
+            requests.push(request);
+            continue;
+        }
+        let Some(client) = cache_client.as_ref() else {
+            requests.push(request);
+            continue;
+        };
+        let metadata_request =
+            graphoxide_index_runtime::cache::RuntimeCacheMetadataProbeRequest::new(
+                evidence.key,
+                request.clone(),
+                graphoxide_index_runtime::SourceIdentityEvidence::from_digest(
+                    prior_cache.source_identity_digest,
+                ),
+            );
+        match client.probe_metadata_only_with_cancellation(metadata_request, &cancellation) {
+            Ok(probe) => {
+                if probe.runtime_rejected_before_legacy {
+                    runtime_cache.stale_or_corrupt =
+                        runtime_cache.stale_or_corrupt.saturating_add(1);
+                }
+                match probe.outcome {
+                    graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::Hit(hit) => {
+                        let decoded = if committed_baseline_eligible {
+                            validate_admitted_runtime_cache_hit(hit, &evidence).map(|()| None)
+                        } else {
+                            decode_admitted_runtime_cache_hit(
+                                hit,
+                                &evidence,
+                                &output_admission,
+                                &cancellation,
+                            )
+                            .map(Some)
+                        };
+                        match decoded {
+                            Ok(extraction) => {
+                                let mut row_cache = cache::RuntimeCacheTelemetry::enabled();
+                                row_cache.metadata_hits = 1;
+                                row_cache.payload_reads_avoided = 1;
+                                row_cache.parses_avoided = 1;
+                                metadata_rows.push(RuntimeScanRow {
+                                    relative,
+                                    extraction,
+                                    mtime: prior_entry.mtime,
+                                    hash: prior_entry.ast_hash.clone(),
+                                    changed: !committed_baseline_eligible,
+                                    indexed: true,
+                                    snapshot_source: None,
+                                    warning: None,
+                                    runtime_manifest: Some(prior_cache),
+                                    runtime_cache: row_cache,
+                                    runtime_cache_diagnostics: Vec::new(),
+                                });
+                            }
+                            Err(RuntimeCacheHitUseError::Rejected(rejection)) => {
+                                runtime_cache.stale_or_corrupt =
+                                    runtime_cache.stale_or_corrupt.saturating_add(1);
+                                runtime_cache.misses = runtime_cache.misses.saturating_add(1);
+                                runtime_cache_diagnostics.push(format!(
+                                    "runtime cache envelope for {relative} was rejected ({rejection:?}); reparsing"
+                                ));
+                                preflight_skip_probe.insert(relative, true);
+                                requests.push(request);
+                            }
+                            Err(RuntimeCacheHitUseError::ExceedsOutputAdmission) => {
+                                runtime_cache.misses = runtime_cache.misses.saturating_add(1);
+                                runtime_cache_diagnostics.push(format!(
+                                    "runtime cache payload for {relative} exceeded decoded-output admission; reparsing"
+                                ));
+                                preflight_skip_probe.insert(relative, false);
+                                requests.push(request);
+                            }
+                        }
+                    }
+                    graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::Missing => {
+                        runtime_cache.misses = runtime_cache.misses.saturating_add(1);
+                        preflight_skip_probe.insert(relative, false);
+                        requests.push(request);
+                    }
+                    graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::RejectedCorruptOrStale => {
+                        runtime_cache.stale_or_corrupt =
+                            runtime_cache.stale_or_corrupt.saturating_add(1);
+                        runtime_cache.misses = runtime_cache.misses.saturating_add(1);
+                        preflight_skip_probe.insert(relative, false);
+                        requests.push(request);
+                    }
+                    graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::SourceChanged
+                    | graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::MetadataOnlyUnsupported => {
+                        requests.push(request);
+                    }
+                }
+            }
+            Err(error) => {
+                runtime_cache.probe_failures = runtime_cache.probe_failures.saturating_add(1);
+                runtime_cache_diagnostics.push(format!(
+                    "runtime metadata cache probe for {relative} failed; reading the source: {error}"
+                ));
+                requests.push(request);
+            }
+        }
+    }
+
+    let contexts = Arc::new(contexts);
+    let contexts_for_compute = Arc::clone(&contexts);
+    let previous_for_compute = Arc::clone(&previous);
+    let preflight_skip_probe = Arc::new(preflight_skip_probe);
     let snapshot_admission = Arc::new(crate::js_resolution::ProjectSnapshotAdmission::new(
         snapshot_budget,
     ));
-    let output_budget = config.memory_budget().cache_and_runs_bytes;
-    let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
     let output_admission_for_compute = Arc::clone(&output_admission);
+    let parser_admission_for_compute = Arc::clone(&parser_admission);
+    let cache_client_for_compute = cache_client.clone();
     let compute_cancellation = cancellation.clone();
     let completed = read_files_concurrently_with_cancellation(
         config,
@@ -1006,36 +1611,216 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
                 "isolated project resolution snapshot exceeds its {snapshot_budget}-byte budget"
             );
         }
+        let source_identity = input.source_identity_evidence();
+        let cache_eligible = indexed && cache::runtime_ast_cache_is_eligible(&relative);
+        let evidence = cache_eligible
+            .then(|| {
+                cache::runtime_ast_cache_evidence(
+                    &relative,
+                    input.bytes(),
+                    runtime_cache_options,
+                )
+            })
+            .flatten();
         let hash = indexed.then(|| format!("{:x}", md5::Md5::digest(input.bytes())));
+        let previous_entry = previous_for_compute.get(relative.as_str());
+        let cache_policy_changed = evidence.as_ref().is_some_and(|evidence| {
+            previous_entry
+                .and_then(|entry| entry.runtime_cache)
+                .is_none_or(|stored| stored.artifact_key != evidence.key.as_bytes())
+        });
+        let preflight_requires_repair = preflight_skip_probe.contains_key(relative.as_str());
         let changed = indexed
             && (force
-                || previous_for_compute
-                    .get(relative.as_str())
-                    .is_none_or(|entry| {
-                        entry.ast_version != cache::AST_CACHE_VERSION
-                            || entry.ast_hash != hash.as_deref().unwrap_or_default()
-                    }));
-        let (extraction, warning) = if changed {
-            match engine::extract_as_bytes_with_parser_allowance(
-                path,
-                &relative,
-                input.bytes(),
-                parser_allowance_bytes,
-            )
-            .with_context(|| format!("extract {relative}"))
-            {
-                Ok(extraction) => (Some(extraction), None),
-                Err(error) => (None, Some(format!("skipped {relative}: {error:#}"))),
-            }
+                || !committed_baseline_eligible
+                || previous_entry.is_none_or(|entry| {
+                    entry.ast_version != cache::AST_CACHE_VERSION
+                        || entry.ast_hash != hash.as_deref().unwrap_or_default()
+                })
+                || cache_policy_changed
+                || preflight_requires_repair);
+        let runtime_manifest = evidence.as_ref().and_then(|evidence| {
+            source_identity.map(|identity| cache::RuntimeAstManifestEvidence {
+                content_digest: evidence.content_digest,
+                source_identity_digest: identity.digest(),
+                artifact_key: evidence.key.as_bytes(),
+            })
+        });
+        let mut row_cache = if cache_client_for_compute.is_some() {
+            cache::RuntimeCacheTelemetry::enabled()
         } else {
-            (None, None)
+            cache::RuntimeCacheTelemetry::default()
         };
-        if let Some(extraction) = &extraction {
-            let retained_bytes = extraction_retained_bytes(extraction)?;
+        let mut row_cache_diagnostics = Vec::new();
+        let mut extraction = None;
+        let mut warning = None;
+        let mut should_persist = false;
+        let mut replace_existing = false;
+
+        if changed {
+            if force || evidence.is_none() {
+                if cache_client_for_compute.is_some() {
+                    row_cache.bypasses = row_cache.bypasses.saturating_add(1);
+                }
+                should_persist = evidence.is_some() && cache_client_for_compute.is_some();
+                // `--force` makes the fresh parser result authoritative. A
+                // valid outer runtime frame with a forged or stale inner
+                // envelope must not survive as AlreadyPresent.
+                replace_existing = force && evidence.is_some();
+            } else if cache_client_for_compute.is_none() {
+                // Startup/protocol failure is recorded once at the control
+                // plane. It is not a per-file policy bypass.
+            } else if let Some(preflight_replace) =
+                preflight_skip_probe.get(relative.as_str()).copied()
+            {
+                // The control-plane metadata probe already classified this
+                // exact key. Avoid counting or transferring the same miss a
+                // second time after the verified source read.
+                replace_existing = preflight_replace;
+                should_persist = true;
+            } else if let (Some(evidence), Some(client)) =
+                (evidence.as_ref(), cache_client_for_compute.as_ref())
+            {
+                match client.probe_with_cancellation(evidence.key, &compute_cancellation) {
+                    Ok(probe) => match probe.outcome {
+                        graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::Hit(hit) => {
+                            let source = hit.source;
+                            debug_assert_eq!(
+                                source,
+                                graphoxide_index_runtime::cache::RuntimeCacheSource::RuntimeV1
+                            );
+                            match decode_admitted_runtime_cache_hit(
+                                hit,
+                                evidence,
+                                &output_admission_for_compute,
+                                &compute_cancellation,
+                            ) {
+                                Ok(cached) => {
+                                    row_cache.record_hit(source);
+                                    extraction = Some(cached);
+                                }
+                                Err(RuntimeCacheHitUseError::Rejected(rejection)) => {
+                                    row_cache.stale_or_corrupt =
+                                        row_cache.stale_or_corrupt.saturating_add(1);
+                                    row_cache.misses = row_cache.misses.saturating_add(1);
+                                    replace_existing = true;
+                                    should_persist = true;
+                                    row_cache_diagnostics.push(format!(
+                                        "runtime cache envelope for {relative} was rejected ({rejection:?}); reparsing"
+                                    ));
+                                }
+                                Err(RuntimeCacheHitUseError::ExceedsOutputAdmission) => {
+                                    row_cache.misses = row_cache.misses.saturating_add(1);
+                                    should_persist = true;
+                                    row_cache_diagnostics.push(format!(
+                                        "runtime cache payload for {relative} exceeded decoded-output admission; reparsing"
+                                    ));
+                                }
+                            }
+                        }
+                        graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::Missing => {
+                            row_cache.misses = row_cache.misses.saturating_add(1);
+                            should_persist = true;
+                        }
+                        graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::RejectedCorruptOrStale => {
+                            row_cache.stale_or_corrupt =
+                                row_cache.stale_or_corrupt.saturating_add(1);
+                            row_cache.misses = row_cache.misses.saturating_add(1);
+                            should_persist = true;
+                        }
+                        graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::SourceChanged
+                        | graphoxide_index_runtime::cache::RuntimeCacheProbeOutcome::MetadataOnlyUnsupported => {
+                            row_cache.misses = row_cache.misses.saturating_add(1);
+                            should_persist = true;
+                        }
+                    },
+                    Err(error) => {
+                        row_cache.probe_failures = row_cache.probe_failures.saturating_add(1);
+                        row_cache.misses = row_cache.misses.saturating_add(1);
+                        should_persist = true;
+                        row_cache_diagnostics.push(format!(
+                            "runtime cache probe for {relative} failed; reparsing: {error}"
+                        ));
+                    }
+                }
+            }
+
             anyhow::ensure!(
-                output_admission_for_compute.try_reserve(retained_bytes),
-                "isolated retained extraction output exceeds its {output_budget}-byte budget at {relative}"
+                !compute_cancellation.is_cancelled(),
+                "isolated extraction cancelled"
             );
+            if extraction.is_none() {
+                let Some(_parser_permit) = parser_admission_for_compute
+                    .acquire_with_cancellation(
+                        parser_allowance_bytes,
+                        Some(&compute_cancellation),
+                    )
+                else {
+                    anyhow::ensure!(
+                        !compute_cancellation.is_cancelled(),
+                        "isolated extraction cancelled"
+                    );
+                    anyhow::bail!(
+                        "isolated parser allowance exceeds its {parser_pool_bytes}-byte pool"
+                    );
+                };
+                match engine::extract_as_bytes_with_parser_allowance(
+                    path,
+                    &relative,
+                    input.bytes(),
+                    parser_allowance_bytes,
+                )
+                    .with_context(|| format!("extract {relative}"))
+                {
+                    Ok(parsed) => {
+                        let retained_bytes = extraction_retained_bytes(&parsed)?;
+                        if !output_admission_for_compute.try_reserve_with_cancellation(
+                            retained_bytes,
+                            Some(&compute_cancellation),
+                        ) {
+                            anyhow::ensure!(
+                                !compute_cancellation.is_cancelled(),
+                                "isolated extraction cancelled"
+                            );
+                            anyhow::bail!(
+                                "isolated retained extraction output exceeds its {output_budget}-byte budget at {relative}"
+                            );
+                        }
+                        extraction = Some(parsed);
+                    }
+                    Err(error) => {
+                        warning = Some(format!("skipped {relative}: {error:#}"));
+                    }
+                }
+            }
+            if should_persist
+                && let (Some(client), Some(evidence), Some(extraction)) = (
+                    cache_client_for_compute.as_ref(),
+                    evidence.as_ref(),
+                    extraction.as_ref(),
+                )
+                && !extraction.nodes.is_empty()
+            {
+                anyhow::ensure!(
+                    !compute_cancellation.is_cancelled(),
+                    "isolated extraction cancelled"
+                );
+                match persist_runtime_cache_extraction(
+                    client,
+                    evidence,
+                    extraction,
+                    replace_existing,
+                    &compute_cancellation,
+                ) {
+                    Ok(outcome) => row_cache.record_persist(outcome),
+                    Err(error) => {
+                        row_cache.store_failures = row_cache.store_failures.saturating_add(1);
+                        row_cache_diagnostics.push(format!(
+                            "runtime cache persistence for {relative} failed: {error}"
+                        ));
+                    }
+                }
+            }
         }
         anyhow::ensure!(
             !compute_cancellation.is_cancelled(),
@@ -1051,6 +1836,9 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
             indexed,
             snapshot_source,
             warning,
+            runtime_manifest,
+            runtime_cache: row_cache,
+            runtime_cache_diagnostics: row_cache_diagnostics,
         })
     },
     )
@@ -1060,13 +1848,30 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         !cancellation.is_cancelled(),
         "isolated extraction cancelled"
     );
-    let mut rows = Vec::with_capacity(completed.completed.len());
+    let mut rows = metadata_rows;
+    rows.reserve(completed.completed.len());
     for completed in completed.completed {
         anyhow::ensure!(
             !cancellation.is_cancelled(),
             "isolated extraction cancelled"
         );
         rows.push(completed.value?);
+    }
+    rows.sort_by(|left, right| left.relative.cmp(&right.relative));
+    for row in &rows {
+        runtime_cache.merge(row.runtime_cache);
+        runtime_cache_diagnostics.extend(row.runtime_cache_diagnostics.iter().cloned());
+    }
+    runtime_cache_diagnostics.sort();
+    runtime_cache_diagnostics.dedup();
+    drop(cache_client);
+    if let Some(service) = runtime_cache_service.take()
+        && let Err(error) = service.shutdown()
+    {
+        runtime_cache.store_failures = runtime_cache.store_failures.saturating_add(1);
+        runtime_cache_diagnostics.push(format!(
+            "runtime cache I/O owner did not shut down cleanly: {error}"
+        ));
     }
     let mut warnings = completed
         .failures
@@ -1153,6 +1958,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
                     ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: row.hash.clone(),
                     semantic_hash,
+                    runtime_cache: row.runtime_manifest,
                 },
             )
         })
@@ -1302,6 +2108,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         changed_sources,
         unchanged_sources,
         deleted_sources,
+        runtime_cache,
         runtime_cache_diagnostics,
         resolution_snapshot_diagnostics,
         pending_manifest: PendingProjectManifest {
@@ -1435,6 +2242,7 @@ pub fn extract_project_with_scan_options_deferred_manifest(
                     ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: hash.clone(),
                     semantic_hash,
+                    runtime_cache: None,
                 },
             )
         })
@@ -1474,6 +2282,7 @@ pub fn extract_project_with_scan_options_deferred_manifest(
         changed_sources: succeeded,
         unchanged_sources: 0,
         deleted_sources: 0,
+        runtime_cache: cache::RuntimeCacheTelemetry::default(),
         runtime_cache_diagnostics: Vec::new(),
         resolution_snapshot_diagnostics: Vec::new(),
         pending_manifest: PendingProjectManifest {
@@ -1733,6 +2542,7 @@ where
                     ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: hash.clone(),
                     semantic_hash,
+                    runtime_cache: None,
                 },
             )
         })
@@ -2132,31 +2942,510 @@ mod tests {
     }
 
     #[test]
-    fn isolated_parser_allowance_uses_effective_workers_and_disjoint_snapshot_space() {
-        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
-            memory_budget_bytes: 4 * 1024 * 1024,
-            io_workers: 64,
-            compute_workers: 64,
+    fn isolated_parser_allowance_is_worker_independent_and_aggregate_bounded() {
+        let serial = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 512 * 1024 * 1024,
+            io_workers: 1,
+            compute_workers: 1,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
         };
-        let evidence = runtime.execution_evidence(2);
-        assert_eq!(evidence.effective_compute_workers, 2);
-        let (extract_only, no_snapshot) = super::isolated_parser_layout(runtime, 2, false);
+        let parallel = graphoxide_index_runtime::IndexRuntimeConfig {
+            compute_workers: 8,
+            ..serial
+        };
+        let serial_evidence = serial.execution_evidence(8);
+        let parallel_evidence = parallel.execution_evidence(8);
+        assert_eq!(serial_evidence.effective_compute_workers, 1);
+        assert_eq!(parallel_evidence.effective_compute_workers, 8);
+
+        let (extract_only, no_snapshot) = super::isolated_parser_layout(serial, false);
+        let (parallel_extract_only, parallel_no_snapshot) =
+            super::isolated_parser_layout(parallel, false);
         assert_eq!(no_snapshot, 0);
-        assert_eq!(
-            extract_only * evidence.effective_compute_workers,
-            evidence.cpu_arenas_bytes
+        assert_eq!(parallel_no_snapshot, 0);
+        assert_eq!(extract_only, parallel_extract_only);
+        assert_eq!(extract_only, super::MAX_ISOLATED_PARSER_ALLOWANCE_BYTES);
+
+        let (scan_parser, snapshot) = super::isolated_parser_layout(serial, true);
+        let (parallel_scan_parser, parallel_snapshot) =
+            super::isolated_parser_layout(parallel, true);
+        assert_eq!(scan_parser, parallel_scan_parser);
+        assert_eq!(snapshot, parallel_snapshot);
+        assert_eq!(scan_parser, super::MAX_ISOLATED_PARSER_ALLOWANCE_BYTES);
+        assert_eq!(snapshot, parallel_evidence.cpu_arenas_bytes / 2);
+        let parser_pool = parallel_evidence.cpu_arenas_bytes.saturating_sub(snapshot);
+        assert!(parser_pool / scan_parser >= 3);
+    }
+
+    #[test]
+    fn isolated_parser_admission_wait_is_cancellation_aware() {
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 4 * 1024 * 1024,
+            io_workers: 1,
+            compute_workers: 8,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 4 * 1024,
+        };
+        let (allowance, snapshot) = super::isolated_parser_layout(runtime, true);
+        let parser_pool = runtime
+            .memory_budget()
+            .cpu_arenas_bytes
+            .saturating_sub(snapshot);
+        assert_eq!(allowance, parser_pool);
+        let admission = std::sync::Arc::new(super::RuntimeParserAdmission::new(parser_pool));
+        let held = admission
+            .acquire_with_cancellation(allowance, None)
+            .expect("first parser permit");
+        assert_eq!(admission.active_bytes(), allowance);
+
+        let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+        let worker_admission = std::sync::Arc::clone(&admission);
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let admitted = worker_admission
+                .acquire_with_cancellation(allowance, Some(&worker_cancellation))
+                .is_some();
+            sender.send(admitted).expect("return parser admission");
+        });
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_millis(25)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        cancellation.cancel();
+        assert!(!receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("cancelled parser waiter wakes"));
+        drop(held);
+        worker.join().expect("parser admission worker");
+        assert_eq!(admission.active_bytes(), 0);
+    }
+
+    #[test]
+    fn near_limit_parser_facts_and_manifest_keys_are_worker_independent() {
+        let fixture = Fixture::new();
+        let serial_output = tempfile::tempdir().expect("serial output root");
+        let parallel_output = tempfile::tempdir().expect("parallel output root");
+        let serial_runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            memory_budget_bytes: 512 * 1024 * 1024,
+            io_workers: 1,
+            compute_workers: 1,
+            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+            read_batch_bytes: 64 * 1024,
+        };
+        let parallel_runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            io_workers: 2,
+            compute_workers: 4,
+            ..serial_runtime
+        };
+        let (allowance, _) = super::isolated_parser_layout(serial_runtime, true);
+        assert_eq!(allowance, 16 * 1024 * 1024);
+        assert!(super::parser_budget::ParserPlan::for_source(allowance, 1022 * 1024).is_some());
+        assert!(
+            super::parser_budget::ParserPlan::for_source(allowance, 1024 * 1024).is_none(),
+            "the fixed policy must reject a registered source whose 16x scratch plus fixed overhead exceeds 16 MiB"
         );
 
-        let (scan_parser, snapshot) = super::isolated_parser_layout(runtime, 2, true);
-        assert!(
-            scan_parser
-                .saturating_mul(evidence.effective_compute_workers)
-                .saturating_add(snapshot)
-                <= evidence.cpu_arenas_bytes
+        for index in 0..4 {
+            let declaration = format!("message NearLimit{index} {{ string value = 1; }}\n");
+            let target_len: usize = 1022 * 1024;
+            let mut source = "// bounded parser padding\n".repeat(
+                target_len
+                    .saturating_sub(declaration.len())
+                    .div_ceil("// bounded parser padding\n".len()),
+            );
+            source.truncate(target_len.saturating_sub(declaration.len()));
+            source.push_str(&declaration);
+            fixture.write(&format!("near_{index}.proto"), &source);
+        }
+
+        let serial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &serial_output.path().join("graphoxide-out"),
+            false,
+            &super::detect::DetectOptions::default(),
+            serial_runtime,
+        )
+        .expect("serial near-limit extraction");
+        let parallel = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &parallel_output.path().join("graphoxide-out"),
+            false,
+            &super::detect::DetectOptions::default(),
+            parallel_runtime,
+        )
+        .expect("parallel near-limit extraction");
+        assert_eq!(serial.runtime_cache.stores, 4);
+        assert_eq!(parallel.runtime_cache.stores, 4);
+        assert_eq!(
+            serde_json::to_vec(&serial.extractions).expect("serial extraction JSON"),
+            serde_json::to_vec(&parallel.extractions).expect("parallel extraction JSON"),
+            "near-limit bounded facts must not depend on worker count"
         );
-        assert_eq!(snapshot, evidence.cpu_arenas_bytes / 2);
+        assert_eq!(
+            serde_json::to_vec_pretty(&serial.pending_manifest.entries)
+                .expect("serial manifest JSON"),
+            serde_json::to_vec_pretty(&parallel.pending_manifest.entries)
+                .expect("parallel manifest JSON"),
+            "cache keys and strong source identity must be scheduler independent"
+        );
+    }
+
+    #[test]
+    fn bounded_manifest_normalization_drops_hostile_absolute_keys_lexically() {
+        let fixture = Fixture::new();
+        let inside = fixture.root.join("inside.py");
+        let mut manifest = super::cache::Manifest::new();
+        manifest.insert(
+            inside.to_string_lossy().into_owned(),
+            super::cache::ManifestEntry {
+                ast_hash: "inside".into(),
+                ..super::cache::ManifestEntry::default()
+            },
+        );
+        manifest.insert(
+            "/definitely-outside-graphoxide/secret.py".into(),
+            super::cache::ManifestEntry {
+                ast_hash: "outside".into(),
+                ..super::cache::ManifestEntry::default()
+            },
+        );
+        manifest.insert(
+            r"C:\\host\share\secret.py".into(),
+            super::cache::ManifestEntry {
+                ast_hash: "windows-hostile".into(),
+                ..super::cache::ManifestEntry::default()
+            },
+        );
+        manifest.insert(
+            "relative.py".into(),
+            super::cache::ManifestEntry {
+                ast_hash: "relative".into(),
+                ..super::cache::ManifestEntry::default()
+            },
+        );
+
+        let normalized =
+            super::normalized_previous_manifest_owned(manifest, &fixture.root, &fixture.root);
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized["inside.py"].ast_hash, "inside");
+        assert_eq!(normalized["relative.py"].ast_hash, "relative");
+    }
+
+    #[test]
+    fn runtime_manifest_reservation_keeps_the_full_normalization_expansion() {
+        let budget = 64 * 1024 * 1024;
+        let byte_limit = super::runtime_manifest_byte_limit(budget, usize::MAX);
+        let reservation = super::runtime_manifest_reservation(budget, usize::MAX);
+        assert_eq!(byte_limit, budget / 64);
+        assert_eq!(reservation, byte_limit * 32);
+        assert_eq!(reservation, budget / 2);
+    }
+
+    #[test]
+    fn runtime_cache_dense_extra_maps_are_precharged_before_decode() {
+        let relative = "dense.py";
+        let source = b"def dense(): pass\n";
+        let evidence = super::cache::runtime_ast_cache_evidence(
+            relative,
+            source,
+            super::cache::RuntimeAstCacheOptions::isolated(1024 * 1024),
+        )
+        .expect("runtime cache evidence");
+        let mut extra = std::collections::BTreeMap::new();
+        for index in 0..4_096 {
+            extra.insert(
+                format!("k{index:04}"),
+                serde_json::Value::String("v".into()),
+            );
+        }
+        let extraction = graphoxide_core::Extraction {
+            nodes: vec![graphoxide_core::Node {
+                id: "dense".into(),
+                label: "dense()".into(),
+                file_type: "code".into(),
+                source_file: relative.into(),
+                source_location: Some("L1".into()),
+                community: None,
+                extra,
+            }],
+            ..graphoxide_core::Extraction::default()
+        };
+        let payload = super::cache::encode_runtime_ast_cache_payload(&evidence, &extraction)
+            .expect("encode dense envelope");
+        let retained = super::extraction_retained_bytes(&extraction).expect("retained estimate");
+        super::cache::validate_runtime_ast_cache_payload_header(
+            graphoxide_index_runtime::cache::RuntimeCacheSource::RuntimeV1,
+            &payload,
+            &evidence,
+        )
+        .expect("validated runtime cache header");
+        let decode_charge = payload
+            .len()
+            .checked_mul(super::RUNTIME_CACHE_DECODE_EXPANSION_MULTIPLIER)
+            .expect("bounded decode charge");
+        assert!(
+            decode_charge >= retained,
+            "conservative decode charge {decode_charge} must cover {retained} retained bytes"
+        );
+        let replay = super::cache::decode_runtime_ast_cache_payload(
+            graphoxide_index_runtime::cache::RuntimeCacheSource::RuntimeV1,
+            &payload,
+            &evidence,
+        )
+        .expect("dense envelope direct round trip");
+        assert_eq!(replay.nodes.len(), extraction.nodes.len());
+
+        let temp = tempfile::tempdir().expect("temporary runtime cache");
+        let mut runtime = graphoxide_index_runtime::cache::RuntimeCache::open(temp.path())
+            .expect("open runtime cache");
+        runtime
+            .put(evidence.key, &payload)
+            .expect("persist dense envelope");
+        let hit = runtime.get(evidence.key).expect("dense runtime hit");
+        let admission = super::RuntimeOutputAdmission::new(decode_charge.saturating_sub(1));
+        assert!(matches!(
+            super::decode_admitted_runtime_cache_hit(
+                hit,
+                &evidence,
+                &admission,
+                &graphoxide_index_runtime::RuntimeCancellation::new(),
+            ),
+            Err(super::RuntimeCacheHitUseError::ExceedsOutputAdmission)
+        ));
+        assert_eq!(
+            admission.retained_bytes(),
+            0,
+            "a pre-decode admission miss must release all temporary credit"
+        );
+
+        let mut wrong_header = payload.clone();
+        wrong_header[0] ^= 0x5a;
+        let wrong_header_temp = tempfile::tempdir().expect("wrong-header runtime cache");
+        let mut wrong_header_runtime =
+            graphoxide_index_runtime::cache::RuntimeCache::open(wrong_header_temp.path())
+                .expect("open wrong-header runtime cache");
+        wrong_header_runtime
+            .put(evidence.key, &wrong_header)
+            .expect("persist wrong-header envelope");
+        let hit = wrong_header_runtime
+            .get(evidence.key)
+            .expect("wrong-header runtime hit");
+        let admission = super::RuntimeOutputAdmission::new(retained.saturating_mul(2));
+        assert!(matches!(
+            super::decode_admitted_runtime_cache_hit(
+                hit,
+                &evidence,
+                &admission,
+                &graphoxide_index_runtime::RuntimeCancellation::new(),
+            ),
+            Err(super::RuntimeCacheHitUseError::Rejected(
+                super::cache::RuntimeAstCacheRejection::Preamble
+            ))
+        ));
+        assert_eq!(
+            admission.retained_bytes(),
+            0,
+            "a wrong header must be rejected before output admission"
+        );
+    }
+
+    #[test]
+    fn runtime_cache_nested_singletons_are_admitted_before_full_decode() {
+        let relative = "nested.py";
+        let source = b"def nested(): pass\n";
+        let evidence = super::cache::runtime_ast_cache_evidence(
+            relative,
+            source,
+            super::cache::RuntimeAstCacheOptions::isolated(1024 * 1024),
+        )
+        .expect("runtime cache evidence");
+        let mut nested = serde_json::Value::String("leaf".into());
+        for depth in (0..96).rev() {
+            let mut singleton = serde_json::Map::new();
+            singleton.insert(format!("k{depth}"), nested);
+            nested = serde_json::Value::Object(singleton);
+        }
+        let extraction = graphoxide_core::Extraction {
+            nodes: vec![graphoxide_core::Node {
+                id: "nested".into(),
+                label: "nested()".into(),
+                file_type: "code".into(),
+                source_file: relative.into(),
+                source_location: Some("L1".into()),
+                community: None,
+                extra: std::collections::BTreeMap::from([("nested".into(), nested)]),
+            }],
+            ..graphoxide_core::Extraction::default()
+        };
+        let mut payload = super::cache::encode_runtime_ast_cache_payload(&evidence, &extraction)
+            .expect("encode nested envelope");
+        let retained = super::extraction_retained_bytes(&extraction).expect("retained estimate");
+        let decode_charge = payload
+            .len()
+            .checked_mul(super::RUNTIME_CACHE_DECODE_EXPANSION_MULTIPLIER)
+            .expect("bounded decode charge");
+        assert!(
+            decode_charge >= retained,
+            "nested singleton charge {decode_charge} must cover {retained} retained bytes"
+        );
+
+        let needle = b"\"source_file\":\"nested.py\"";
+        let replacement = b"\"source_file\":\"forged.py\"";
+        let offset = payload
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("serialized source provenance");
+        payload[offset..offset + needle.len()].copy_from_slice(replacement);
+
+        let temp = tempfile::tempdir().expect("temporary nested runtime cache");
+        let mut runtime = graphoxide_index_runtime::cache::RuntimeCache::open(temp.path())
+            .expect("open nested runtime cache");
+        runtime
+            .put(evidence.key, &payload)
+            .expect("persist nested envelope");
+        let hit = runtime.get(evidence.key).expect("nested runtime hit");
+        let admission = super::RuntimeOutputAdmission::new(decode_charge.saturating_sub(1));
+        assert!(matches!(
+            super::decode_admitted_runtime_cache_hit(
+                hit,
+                &evidence,
+                &admission,
+                &graphoxide_index_runtime::RuntimeCancellation::new(),
+            ),
+            Err(super::RuntimeCacheHitUseError::ExceedsOutputAdmission)
+        ));
+        assert_eq!(admission.retained_bytes(), 0);
+
+        let hit = runtime
+            .get(evidence.key)
+            .expect("second nested runtime hit");
+        let admission = super::RuntimeOutputAdmission::new(decode_charge);
+        assert!(matches!(
+            super::decode_admitted_runtime_cache_hit(
+                hit,
+                &evidence,
+                &admission,
+                &graphoxide_index_runtime::RuntimeCancellation::new(),
+            ),
+            Err(super::RuntimeCacheHitUseError::Rejected(
+                super::cache::RuntimeAstCacheRejection::Provenance
+            ))
+        ));
+        assert_eq!(admission.retained_bytes(), 0);
+    }
+
+    #[test]
+    fn runtime_output_admission_coordinates_temporary_and_final_worker_charges() {
+        let admission = std::sync::Arc::new(super::RuntimeOutputAdmission::new(100));
+        let temporary = admission
+            .try_reserve_temporary_with_cancellation(80, None)
+            .expect("temporary decode reservation");
+        let worker_admission = std::sync::Arc::clone(&admission);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(worker_admission.try_reserve(30))
+                .expect("return final reservation result");
+        });
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_millis(25)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(temporary.commit(20));
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("final reservation wakes after temporary commit"));
+        worker.join().expect("reservation worker");
+        assert_eq!(admission.retained_bytes(), 50);
+
+        let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+        let blocked = std::sync::Arc::new(super::RuntimeOutputAdmission::new(100));
+        let held = blocked
+            .try_reserve_temporary_with_cancellation(80, None)
+            .expect("held temporary reservation");
+        let blocked_worker = std::sync::Arc::clone(&blocked);
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let admitted = blocked_worker
+                .try_reserve_temporary_with_cancellation(30, Some(&worker_cancellation))
+                .is_some();
+            sender.send(admitted).expect("return cancelled admission");
+        });
+        cancellation.cancel();
+        assert!(!receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("cancelled waiter wakes"));
+        drop(held);
+        worker.join().expect("cancelled reservation worker");
+    }
+
+    #[test]
+    fn runtime_cache_mixed_warm_and_cold_outcomes_are_worker_deterministic() {
+        let mut expected = None;
+        for workers in [1, 2, 8] {
+            let fixture = Fixture::new();
+            fixture.write("a.py", "def alpha():\n    return 1\n");
+            fixture.write("b.py", "def beta():\n    return 2\n");
+            fixture.write("c.py", "def gamma():\n    return 3\n");
+            let output = fixture.root.join("graphoxide-out");
+            let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+                memory_budget_bytes: 32 * 1024 * 1024,
+                io_workers: workers,
+                compute_workers: workers,
+                io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+                read_batch_bytes: 4 * 1024,
+            };
+            let cold = super::extract_project_with_runtime_scan_options_deferred_manifest(
+                &fixture.root,
+                false,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("cold worker-determinism scan");
+            assert_eq!(cold.runtime_cache.stores, 3);
+            commit_runtime_baseline(cold, &fixture.root, &output);
+
+            fixture.write("c.py", "def gamma():\n    return 4\n");
+            let mixed = super::extract_project_with_runtime_scan_options_deferred_manifest(
+                &fixture.root,
+                false,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("mixed warm/cold worker-determinism scan");
+            let observation = (
+                mixed.runtime_cache.metadata_hits,
+                mixed.runtime_cache.runtime_hits,
+                mixed.runtime_cache.misses,
+                mixed.runtime_cache.parses_avoided,
+                mixed.runtime_cache.stores,
+                mixed.changed_sources,
+                serde_json::to_value(&mixed.extractions).expect("mixed extraction JSON"),
+            );
+            assert_eq!(observation.0, 2, "metadata hits with {workers} workers");
+            assert_eq!(observation.1, 0, "runtime hits with {workers} workers");
+            assert_eq!(observation.2, 1, "cache misses with {workers} workers");
+            assert_eq!(observation.3, 2, "parses avoided with {workers} workers");
+            assert_eq!(observation.4, 1, "stores with {workers} workers");
+            assert_eq!(observation.5, 1, "changed sources with {workers} workers");
+            if let Some(expected) = &expected {
+                assert_eq!(
+                    &observation, expected,
+                    "cache telemetry or facts changed with {workers} workers"
+                );
+            } else {
+                expected = Some(observation);
+            }
+        }
     }
 
     #[test]
@@ -2962,17 +4251,11 @@ mod tests {
     }
 
     #[test]
-    fn isolated_runtime_scan_does_not_persist_write_only_runtime_payloads() {
+    fn isolated_runtime_cache_cold_warm_and_force_paths_are_truthful() {
         let fixture = Fixture::new();
         fixture.write("lib.rs", "pub fn indexed() {}\n");
         let output = fixture.root.join("graphoxide-out");
-        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
-            memory_budget_bytes: 4 * 1024 * 1024,
-            io_workers: 2,
-            compute_workers: 2,
-            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
-            read_batch_bytes: 4 * 1024,
-        };
+        let runtime = runtime_config(32 * 1024 * 1024);
         let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
             &fixture.root,
             true,
@@ -2984,12 +4267,33 @@ mod tests {
         .expect("isolated runtime scan");
         assert!(result.runtime_cache_diagnostics.is_empty());
         assert_eq!(result.changed_sources, 1);
+        assert!(result.runtime_cache.enabled);
+        assert_eq!(result.runtime_cache.bypasses, 1);
+        assert_eq!(result.runtime_cache.stores, 1);
         assert!(
-            !output.join("cache/runtime-v1").exists(),
-            "production must not duplicate extraction output into a cache that has no read-through path"
+            output.join("cache/runtime-v1").exists(),
+            "successful extraction must be available to the runtime read-through path"
         );
+        let retained_output_bytes = result.retained_output_bytes;
+        commit_runtime_baseline(result, &fixture.root, &output);
 
-        let second = super::extract_project_with_runtime_scan_options_deferred_manifest(
+        let warm = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("warm isolated runtime scan");
+        assert_eq!(warm.changed_sources, 0);
+        assert_eq!(warm.unchanged_sources, 1);
+        assert!(warm.extractions.is_empty());
+        assert_eq!(warm.runtime_cache.metadata_hits, 1);
+        assert_eq!(warm.runtime_cache.payload_reads_avoided, 1);
+        assert_eq!(warm.runtime_cache.parses_avoided, 1);
+
+        let forced = super::extract_project_with_runtime_scan_options_deferred_manifest(
             &fixture.root,
             true,
             &output,
@@ -2999,10 +4303,208 @@ mod tests {
         )
         .expect("forced isolated runtime rescan");
         assert_eq!(
-            second.retained_output_bytes, result.retained_output_bytes,
-            "disabling write-only persistence must not perturb deterministic output admission"
+            forced.retained_output_bytes, retained_output_bytes,
+            "force bypass must not perturb deterministic output admission"
         );
-        assert!(!output.join("cache/runtime-v1").exists());
+        assert_eq!(forced.runtime_cache.bypasses, 1);
+        assert_eq!(forced.runtime_cache.metadata_hits, 0);
+        assert_eq!(forced.runtime_cache.runtime_hits, 0);
+        assert_eq!(forced.runtime_cache.stores, 1);
+        assert_eq!(forced.runtime_cache.already_present, 0);
+    }
+
+    #[test]
+    fn isolated_runtime_force_replaces_a_valid_outer_wrong_inner_artifact() {
+        let fixture = Fixture::new();
+        let relative = "main.py";
+        let source = b"def answer():\n    return 42\n";
+        let source_path = fixture.root.join(relative);
+        fs::write(&source_path, source).expect("write Python source");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let (parser_allowance, _) = super::isolated_parser_layout(runtime, true);
+        let evidence = super::cache::runtime_ast_cache_evidence(
+            relative,
+            source,
+            super::cache::RuntimeAstCacheOptions::isolated(
+                u64::try_from(parser_allowance).expect("parser allowance fits u64"),
+            ),
+        )
+        .expect("runtime cache evidence");
+        let mut forged = super::engine::extract_as_bytes_with_parser_allowance(
+            &source_path,
+            relative,
+            source,
+            parser_allowance,
+        )
+        .expect("fresh Python extraction");
+        let forged_function = forged
+            .nodes
+            .iter_mut()
+            .find(|node| node.label == "answer()")
+            .expect("answer function node");
+        forged_function.label = "forged()".into();
+        let forged_payload = super::cache::encode_runtime_ast_cache_payload(&evidence, &forged)
+            .expect("encode forged inner envelope");
+        let mut artifact_store = graphoxide_index_runtime::cache::RuntimeCache::open(&output)
+            .expect("open runtime artifact store");
+        artifact_store
+            .put(evidence.key, &forged_payload)
+            .expect("seed valid outer frame with forged facts");
+        drop(artifact_store);
+
+        let forced = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("force scan replaces forged runtime artifact");
+        assert_eq!(forced.runtime_cache.bypasses, 1);
+        assert_eq!(forced.runtime_cache.stores, 1);
+        assert_eq!(forced.runtime_cache.already_present, 0);
+        commit_runtime_baseline(forced, &fixture.root, &output);
+
+        fs::remove_file(output.join("graph.json")).expect("remove graph to require fact replay");
+        let rebuilt = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("warm replay after force replacement");
+        assert_eq!(rebuilt.runtime_cache.metadata_hits, 1);
+        assert_eq!(rebuilt.runtime_cache.parses_avoided, 1);
+        assert!(rebuilt
+            .extractions
+            .iter()
+            .any(|extraction| { extraction.nodes.iter().any(|node| node.label == "answer()") }));
+        assert!(rebuilt
+            .extractions
+            .iter()
+            .all(|extraction| { extraction.nodes.iter().all(|node| node.label != "forged()") }));
+    }
+
+    #[test]
+    fn isolated_runtime_cache_keeps_javascript_family_on_contextual_bypass() {
+        let fixture = Fixture::new();
+        fixture.write("main.ts", "export const answer: number = 42;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let cold = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("cold TypeScript scan");
+        assert_eq!(cold.runtime_cache.bypasses, 1);
+        assert_eq!(cold.runtime_cache.stores, 0);
+        assert!(cold
+            .pending_manifest
+            .entries
+            .get("main.ts")
+            .expect("TypeScript manifest row")
+            .runtime_cache
+            .is_none());
+        commit_runtime_baseline(cold, &fixture.root, &output);
+
+        let warm = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("warm TypeScript scan");
+        assert_eq!(warm.changed_sources, 0);
+        assert!(warm.extractions.is_empty());
+        assert_eq!(warm.runtime_cache.metadata_hits, 0);
+        assert_eq!(warm.runtime_cache.runtime_hits, 0);
+        assert_eq!(warm.runtime_cache.legacy_hits, 0);
+        assert_eq!(warm.runtime_cache.stores, 0);
+    }
+
+    #[test]
+    fn isolated_runtime_cache_does_not_replay_path_aware_legacy_artifacts() {
+        let fixture = Fixture::new();
+        let source = b"def answer():\n    return 42\n";
+        let source_path = fixture.root.join("main.py");
+        fs::write(&source_path, source).expect("write Python source");
+        let output = fixture.root.join("graphoxide-out");
+        let path_aware = super::engine::extract_as(&source_path, "main.py")
+            .expect("legacy path-aware extraction");
+        super::cache::ast_cache_put_to_output(&output, "main.py", source, &path_aware)
+            .expect("legacy AST artifact");
+
+        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime_config(32 * 1024 * 1024),
+        )
+        .expect("isolated scan beside a legacy artifact");
+        assert_eq!(result.runtime_cache.legacy_hits, 0);
+        assert_eq!(result.runtime_cache.runtime_hits, 0);
+        assert_eq!(result.runtime_cache.misses, 1);
+        assert_eq!(result.runtime_cache.parses_avoided, 0);
+        assert_eq!(result.runtime_cache.stores, 1);
+    }
+
+    #[test]
+    fn isolated_runtime_cache_repairs_a_missing_artifact_with_graph_present() {
+        let fixture = Fixture::new();
+        fixture.write("main.py", "def answer():\n    return 42\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let cold = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("cold Python scan");
+        assert_eq!(cold.runtime_cache.stores, 1);
+        commit_runtime_baseline(cold, &fixture.root, &output);
+        fs::remove_dir_all(output.join("cache/runtime-v1")).expect("remove runtime artifact store");
+
+        let repaired = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("repair missing runtime artifact");
+        assert_eq!(repaired.changed_sources, 1);
+        assert_eq!(repaired.runtime_cache.misses, 1);
+        assert_eq!(repaired.runtime_cache.stores, 1);
+        assert_eq!(repaired.runtime_cache.parses_avoided, 0);
+        commit_runtime_baseline(repaired, &fixture.root, &output);
+
+        let warm = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("warm scan after repair");
+        assert_eq!(warm.runtime_cache.metadata_hits, 1);
+        assert_eq!(warm.runtime_cache.parses_avoided, 1);
     }
 
     #[test]

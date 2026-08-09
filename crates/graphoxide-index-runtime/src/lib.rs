@@ -709,6 +709,12 @@ pub struct ReadyInput {
     /// Immutable metadata captured by the I/O owner for this exact source
     /// generation. CPU workers use this instead of probing the source path.
     pub file_identity: FileIdentity,
+    /// Strong, opaque source-generation evidence captured by the I/O owner.
+    ///
+    /// `None` is reserved for synthetic buffers that were not produced by a
+    /// verified filesystem/backend read. The opaque digest binds physical
+    /// path and root identity without revealing either value.
+    source_identity_evidence: Option<SourceIdentityEvidence>,
     /// Optional raw BLAKE3 digest, filled by the CPU preflight stage.
     pub content_digest: Option<[u8; 32]>,
     buffer: BufferLease,
@@ -724,6 +730,7 @@ impl ReadyInput {
                 length_bytes: buffer.as_bytes().len() as u64,
                 modified: None,
             },
+            source_identity_evidence: None,
             content_digest: None,
             buffer,
         }
@@ -732,14 +739,23 @@ impl ReadyInput {
     fn with_file_identity(
         identity: InputIdentity,
         buffer: BufferLease,
-        file_identity: FileIdentity,
+        source_identity: IoReadIdentity,
+        source_identity_evidence: Option<SourceIdentityEvidence>,
     ) -> Self {
         Self {
             identity,
-            file_identity,
+            file_identity: source_identity.file_identity,
+            source_identity_evidence,
             content_digest: None,
             buffer,
         }
+    }
+
+    /// Return strong source-generation evidence captured around the complete
+    /// source read, if the active backend can provide it.
+    #[must_use]
+    pub const fn source_identity_evidence(&self) -> Option<SourceIdentityEvidence> {
+        self.source_identity_evidence
     }
 
     /// Attach a preflight content digest without allocating or copying bytes.
@@ -799,6 +815,13 @@ pub struct FileReadRequest {
     /// validation. When present, I/O refuses a different source generation
     /// even if replacement happened before the worker's first probe.
     expected_identity: Option<IoReadIdentity>,
+    /// Canonical root retained only for control/I/O-plane containment checks.
+    /// CPU-facing [`ReadyInput`] values never receive this path capability.
+    verified_root: Option<PathBuf>,
+    /// Stable platform identity of the canonical root directory. Unlike a
+    /// file generation it deliberately excludes directory mtime/ctime, which
+    /// change when unrelated children are added or removed.
+    verified_root_identity: Option<[u8; 32]>,
 }
 
 impl FileReadRequest {
@@ -810,6 +833,8 @@ impl FileReadRequest {
             path,
             max_bytes: DEFAULT_MAX_INPUT_BYTES,
             expected_identity: None,
+            verified_root: None,
+            verified_root_identity: None,
         }
     }
 
@@ -841,6 +866,8 @@ impl FileReadRequest {
             path,
             max_bytes: DEFAULT_MAX_INPUT_BYTES,
             expected_identity: Some(expected_identity),
+            verified_root: None,
+            verified_root_identity: None,
         })
     }
 
@@ -856,6 +883,7 @@ impl FileReadRequest {
         root: &std::path::Path,
     ) -> io::Result<Self> {
         let canonical_root = fs::canonicalize(root)?;
+        let root_identity_before = root_platform_identity(&canonical_root)?;
         let canonical_before = fs::canonicalize(&path)?;
         if !canonical_before.starts_with(&canonical_root) {
             return Err(io::Error::new(
@@ -863,14 +891,20 @@ impl FileReadRequest {
                 "verified source resolves outside its scan root",
             ));
         }
-        let request = Self::new_verified(identity, canonical_before.clone())?;
+        let mut request = Self::new_verified(identity, canonical_before.clone())?;
         let canonical_after = fs::canonicalize(&path)?;
-        if canonical_after != canonical_before || !canonical_after.starts_with(&canonical_root) {
+        let root_identity_after = root_platform_identity(&canonical_root)?;
+        if canonical_after != canonical_before
+            || !canonical_after.starts_with(&canonical_root)
+            || root_identity_after != root_identity_before
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "verified source changed while binding it to the scan root",
             ));
         }
+        request.verified_root = Some(canonical_root);
+        request.verified_root_identity = root_identity_before;
         Ok(request)
     }
 
@@ -879,6 +913,79 @@ impl FileReadRequest {
     pub const fn with_max_bytes(mut self, max_bytes: usize) -> Self {
         self.max_bytes = max_bytes;
         self
+    }
+
+    /// Return the strong source identity captured while this verified request
+    /// was admitted. Unverified requests and unsupported platforms return
+    /// `None` and therefore cannot authorize metadata-only cache reuse.
+    #[must_use]
+    pub fn source_identity_evidence(&self) -> Option<SourceIdentityEvidence> {
+        self.expected_identity
+            .and_then(|identity| self.bound_source_identity_evidence(identity))
+    }
+
+    /// Begin a metadata-only cache validation window.
+    ///
+    /// The returned guard holds the exact no-follow source handle observed at
+    /// the start of the window. Callers may perform a cache lookup and decode
+    /// while holding it, then must call [`MetadataOnlyValidationGuard::finish`]
+    /// before accepting the cached result. Only requests verified beneath a
+    /// canonical root can produce a guard.
+    pub fn begin_metadata_only_validation(
+        &self,
+        cancellation: &RuntimeCancellation,
+    ) -> io::Result<Option<MetadataOnlyValidationGuard>> {
+        if cancellation.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "metadata-only cache validation cancelled",
+            ));
+        }
+        let Some(root) = self.verified_root.as_ref() else {
+            return Ok(None);
+        };
+        let Some(root_identity) = self.verified_root_identity else {
+            return Ok(None);
+        };
+        if !verified_path_binding_is_current(&self.path, root, root_identity)? {
+            return Ok(None);
+        }
+        let file = open_source_nofollow(&self.path)?;
+        let identity = opened_source_identity(&file)?;
+        if self
+            .expected_identity
+            .is_some_and(|expected| expected != identity)
+        {
+            return Ok(None);
+        }
+        let Some(evidence) = self.bound_source_identity_evidence(identity) else {
+            return Ok(None);
+        };
+        Ok(Some(MetadataOnlyValidationGuard {
+            path: self.path.clone(),
+            verified_root: root.clone(),
+            verified_root_identity: root_identity,
+            file,
+            identity,
+            evidence,
+        }))
+    }
+
+    fn bound_source_identity_evidence(
+        &self,
+        identity: IoReadIdentity,
+    ) -> Option<SourceIdentityEvidence> {
+        let root = self.verified_root.as_ref()?;
+        let root_identity = self.verified_root_identity?;
+        let platform_digest = identity.platform_identity_digest()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"graphoxide-bound-source-identity-v1\0");
+        hasher.update(&platform_digest);
+        hasher.update(&root_identity);
+        hash_path_identity(&mut hasher, root);
+        hasher.update(b"\0");
+        hash_path_identity(&mut hasher, &self.path);
+        Some(SourceIdentityEvidence(*hasher.finalize().as_bytes()))
     }
 }
 
@@ -895,6 +1002,125 @@ pub struct FileIdentity {
     pub modified: Option<SystemTime>,
 }
 
+/// Opaque, persistent evidence for one strongly identified source generation.
+///
+/// The digest binds the admitted canonical root and physical source path to
+/// Unix device/inode/ctime identity or Windows volume, 128-bit file ID,
+/// creation time, last-write time, and change time.
+/// On Windows, change time detects ordinary same-size rewrites even when the
+/// caller restores last-write time. It is not an authenticity primitive:
+/// metadata-only reuse assumes no same-user actor with `FILE_WRITE_ATTRIBUTES`
+/// is concurrently forging the source's identity fields.
+/// Cache callers must additionally bind their normalized logical path,
+/// extractor version, canonical options, and content evidence. Other targets
+/// safely fall back to payload reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceIdentityEvidence([u8; 32]);
+
+impl SourceIdentityEvidence {
+    /// Restore opaque evidence persisted in a trusted Graphoxide manifest.
+    #[must_use]
+    pub const fn from_digest(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
+    /// Raw stable digest for a cache envelope or manifest.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Opaque strong identity for a caller-owned, already-open regular file.
+///
+/// This is intended for bounded control-plane readers such as the runtime
+/// manifest loader. Compare observations from the same held handle before and
+/// after reading. It is not source-path-bound evidence and must not be used to
+/// authorize metadata-only source cache hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenedFileIdentity {
+    identity: IoReadIdentity,
+}
+
+impl OpenedFileIdentity {
+    /// Logical file length at this handle observation.
+    #[must_use]
+    pub const fn length_bytes(self) -> u64 {
+        self.identity.file_identity.length_bytes
+    }
+}
+
+/// Validate a caller-owned opened handle as regular, non-reparse, single-link,
+/// and strongly identified by the current filesystem.
+///
+/// `Ok(None)` means the platform/filesystem did not provide strong generation
+/// evidence; callers must disable persistent replay and take their cold path.
+/// The caller remains responsible for opening the handle with a final-component
+/// no-follow policy and validating any path/root containment it requires.
+pub fn validate_opened_regular_single_link(file: &File) -> io::Result<Option<OpenedFileIdentity>> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "opened cache control file must be regular",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "opened cache control file must have exactly one link",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{fs::MetadataExt as _, io::AsRawHandle as _};
+        use windows_sys::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{
+                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+                FILE_ATTRIBUTE_REPARSE_POINT,
+            },
+        };
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "opened cache control file must not be a reparse point",
+            ));
+        }
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` owns a live handle and `information` is exact writable
+        // output storage for this synchronous query.
+        let succeeded = unsafe {
+            GetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                std::ptr::addr_of_mut!(information),
+            )
+        };
+        if succeeded == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if information.nNumberOfLinks != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "opened cache control file must have exactly one link",
+            ));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Ok(None);
+    }
+    let identity = opened_source_identity(file)?;
+    if identity.strong_revision.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(OpenedFileIdentity { identity }))
+}
+
 impl FileIdentity {
     fn from_metadata(metadata: &fs::Metadata) -> Self {
         Self {
@@ -906,21 +1132,30 @@ impl FileIdentity {
 
 /// Internal identity snapshot used only by the I/O plane while a file is
 /// being read. The portable public identity remains stable. Unix builds also
-/// compare device, inode, and ctime; Windows builds compare volume serial,
-/// file index, creation time, and last-write time. These generation fields
-/// catch equal-length replacement and writes that a coarse portable mtime
-/// misses.
+/// compare device, inode, and ctime. Windows ordinary read-race checks compare
+/// the handle's volume serial, legacy file index, creation time, and last-write
+/// time; persistent strong evidence additionally requires the full 128-bit
+/// file ID and change time. Under the same-user metadata-forgery exclusion,
+/// these generation fields catch ordinary equal-length replacement and writes
+/// that a coarse or restored portable mtime misses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoReadIdentity {
     /// The portable snapshot copied into [`ReadyInput`] after a stable read.
     pub file_identity: FileIdentity,
     /// Opaque backend revision fields used only to compare read observations.
     ///
-    /// Filesystem backends use device/inode/ctime on Unix and volume/file ID
-    /// plus timestamps on Windows. Test and alternate I/O backends may provide
-    /// any deterministic generation values; the runtime only checks equality
-    /// and never interprets these values.
+    /// Filesystem backends use device/inode/ctime on Unix and the legacy
+    /// volume/file-index plus handle timestamps on Windows. Test and alternate
+    /// I/O backends may provide any deterministic generation values; the
+    /// runtime only checks equality and never interprets these values.
     revision: [u64; 4],
+    /// Generation evidence strong enough for persistent metadata-only reuse
+    /// within the documented same-user metadata-forgery exclusion. On Windows
+    /// this contains the volume, full 128-bit file ID, creation time,
+    /// last-write time, and change time. Injected backends and filesystems
+    /// without trustworthy generation fields deliberately leave this absent
+    /// while retaining ordinary read-race checks.
+    strong_revision: Option<[u64; 6]>,
 }
 
 impl IoReadIdentity {
@@ -935,6 +1170,44 @@ impl IoReadIdentity {
         Self {
             file_identity,
             revision,
+            strong_revision: None,
+        }
+    }
+
+    const fn with_strong_revision(
+        file_identity: FileIdentity,
+        revision: [u64; 4],
+        strong_revision: [u64; 6],
+    ) -> Self {
+        Self {
+            file_identity,
+            revision,
+            strong_revision: Some(strong_revision),
+        }
+    }
+
+    /// Produce opaque strong evidence suitable for persistent cache
+    /// validation. Unsupported platforms deliberately return `None`.
+    #[must_use]
+    fn platform_identity_digest(self) -> Option<[u8; 32]> {
+        #[cfg(any(unix, windows))]
+        {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"graphoxide-source-identity-v1\0");
+            #[cfg(unix)]
+            hasher.update(b"unix\0");
+            #[cfg(windows)]
+            hasher.update(b"windows\0");
+            hasher.update(&self.file_identity.length_bytes.to_le_bytes());
+            hash_system_time(&mut hasher, self.file_identity.modified);
+            for component in self.strong_revision? {
+                hasher.update(&component.to_le_bytes());
+            }
+            Some(*hasher.finalize().as_bytes())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
         }
     }
 
@@ -944,14 +1217,16 @@ impl IoReadIdentity {
         {
             use std::os::unix::fs::MetadataExt as _;
 
-            Self::new(
-                FileIdentity::from_metadata(metadata),
-                [
-                    metadata.dev(),
-                    metadata.ino(),
-                    metadata.ctime() as u64,
-                    metadata.ctime_nsec() as u64,
-                ],
+            let revision = [
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime() as u64,
+                metadata.ctime_nsec() as u64,
+            ];
+            let portable = FileIdentity::from_metadata(metadata);
+            unix_strong_identity_components(revision).map_or_else(
+                || Self::new(portable, revision),
+                |strong| Self::with_strong_revision(portable, revision, strong),
             )
         }
         #[cfg(not(any(unix, windows)))]
@@ -959,6 +1234,250 @@ impl IoReadIdentity {
             Self::new(FileIdentity::from_metadata(metadata), [0; 4])
         }
     }
+}
+
+#[cfg(any(unix, test))]
+fn unix_strong_identity_components(revision: [u64; 4]) -> Option<[u64; 6]> {
+    let [device, inode, ctime_seconds, ctime_nanoseconds] = revision;
+    if device == 0 || inode == 0 || (ctime_seconds == 0 && ctime_nanoseconds == 0) {
+        return None;
+    }
+    Some([device, inode, ctime_seconds, ctime_nanoseconds, 0, 0])
+}
+
+#[cfg(any(windows, test))]
+fn windows_strong_identity_components(
+    observed_volume: u64,
+    file_id_volume: u64,
+    file_id: [u8; 16],
+    creation_time: i64,
+    last_write_time: i64,
+    change_time: i64,
+) -> Option<[u64; 6]> {
+    if observed_volume == 0
+        || file_id_volume != observed_volume
+        || file_id == [0; 16]
+        || creation_time == 0
+        || last_write_time == 0
+        || change_time == 0
+    {
+        return None;
+    }
+    Some([
+        file_id_volume,
+        u64::from_le_bytes(file_id[..8].try_into().expect("8-byte file ID half")),
+        u64::from_le_bytes(file_id[8..].try_into().expect("8-byte file ID half")),
+        creation_time as u64,
+        last_write_time as u64,
+        change_time as u64,
+    ])
+}
+
+#[cfg(unix)]
+fn hash_path_identity(hasher: &mut blake3::Hasher, path: &Path) {
+    use std::os::unix::ffi::OsStrExt as _;
+    hasher.update(path.as_os_str().as_bytes());
+}
+
+#[cfg(windows)]
+fn hash_path_identity(hasher: &mut blake3::Hasher, path: &Path) {
+    use std::os::windows::ffi::OsStrExt as _;
+    for unit in path.as_os_str().encode_wide() {
+        hasher.update(&unit.to_le_bytes());
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hash_path_identity(hasher: &mut blake3::Hasher, path: &Path) {
+    hasher.update(path.to_string_lossy().as_bytes());
+}
+
+#[cfg(unix)]
+fn root_platform_identity(path: &Path) -> io::Result<Option<[u8; 32]>> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "verified root must be a non-symlink directory",
+        ));
+    }
+    if metadata.dev() == 0 || metadata.ino() == 0 {
+        return Ok(None);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"graphoxide-root-identity-v1\0unix\0");
+    hasher.update(&metadata.dev().to_le_bytes());
+    hasher.update(&metadata.ino().to_le_bytes());
+    Ok(Some(*hasher.finalize().as_bytes()))
+}
+
+#[cfg(windows)]
+fn root_platform_identity(path: &Path) -> io::Result<Option<[u8; 32]>> {
+    use std::os::windows::{fs::MetadataExt as _, fs::OpenOptionsExt as _, io::AsRawHandle as _};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+        },
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let directory = options.open(path)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "verified root must be a non-reparse directory",
+        ));
+    }
+    let mut basic = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `directory` owns a live handle and `basic` is exact writable
+    // output storage for this synchronous query.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(
+            directory.as_raw_handle() as HANDLE,
+            std::ptr::addr_of_mut!(basic),
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: same live handle and exact `FILE_ID_INFO` output size.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            directory.as_raw_handle() as HANDLE,
+            FileIdInfo,
+            std::ptr::addr_of_mut!(id).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if succeeded == 0
+        || id.VolumeSerialNumber != u64::from(basic.dwVolumeSerialNumber)
+        || id.VolumeSerialNumber == 0
+        || id.FileId.Identifier == [0; 16]
+    {
+        return Ok(None);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"graphoxide-root-identity-v1\0windows\0");
+    hasher.update(&id.VolumeSerialNumber.to_le_bytes());
+    hasher.update(&id.FileId.Identifier);
+    Ok(Some(*hasher.finalize().as_bytes()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn root_platform_identity(_path: &Path) -> io::Result<Option<[u8; 32]>> {
+    Ok(None)
+}
+
+#[cfg(any(unix, windows))]
+fn hash_system_time(hasher: &mut blake3::Hasher, value: Option<SystemTime>) {
+    match value {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(value) => match value.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => {
+                hasher.update(&[1]);
+                hasher.update(&duration.as_secs().to_le_bytes());
+                hasher.update(&duration.subsec_nanos().to_le_bytes());
+            }
+            Err(error) => {
+                let duration = error.duration();
+                hasher.update(&[2]);
+                hasher.update(&duration.as_secs().to_le_bytes());
+                hasher.update(&duration.subsec_nanos().to_le_bytes());
+            }
+        },
+    }
+}
+
+/// Handle-held validation for a manifest-authorized metadata-only cache hit.
+///
+/// Keeping the original source handle open across lookup and decode prevents
+/// two independent path probes from blessing different source generations.
+/// `finish` also verifies that the path still resolves to this handle beneath
+/// its admitted root before a caller may accept the cached value.
+#[derive(Debug)]
+pub struct MetadataOnlyValidationGuard {
+    path: PathBuf,
+    verified_root: PathBuf,
+    verified_root_identity: [u8; 32],
+    file: File,
+    identity: IoReadIdentity,
+    evidence: SourceIdentityEvidence,
+}
+
+impl MetadataOnlyValidationGuard {
+    /// Evidence a cache envelope must match before it is worth decoding.
+    #[must_use]
+    pub const fn evidence(&self) -> SourceIdentityEvidence {
+        self.evidence
+    }
+
+    /// Finish the validation window after cache lookup and decoding.
+    ///
+    /// `Ok(false)` is a safe cache miss: the held source or its current path
+    /// binding changed. I/O faults remain errors so callers can surface the
+    /// same source-read diagnostic they would have produced on a cold path.
+    pub fn finish(self, cancellation: &RuntimeCancellation) -> io::Result<bool> {
+        if cancellation.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "metadata-only cache validation cancelled",
+            ));
+        }
+        let held_after = opened_source_identity(&self.file)?;
+        if held_after != self.identity
+            || !verified_path_binding_is_current(
+                &self.path,
+                &self.verified_root,
+                self.verified_root_identity,
+            )?
+        {
+            return Ok(false);
+        }
+        let current = open_source_nofollow(&self.path)?;
+        let current_identity = opened_source_identity(&current)?;
+        if current_identity != self.identity {
+            return Ok(false);
+        }
+        if cancellation.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "metadata-only cache validation cancelled",
+            ));
+        }
+        verified_path_binding_is_current(
+            &self.path,
+            &self.verified_root,
+            self.verified_root_identity,
+        )
+    }
+}
+
+fn verified_path_binding_is_current(
+    path: &Path,
+    root: &Path,
+    expected_root_identity: [u8; 32],
+) -> io::Result<bool> {
+    if root_platform_identity(root)? != Some(expected_root_identity) {
+        return Ok(false);
+    }
+    let current = match fs::canonicalize(path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(current == path && current.starts_with(root))
 }
 
 /// I/O-only adapter for source metadata and byte reads.
@@ -1014,7 +1533,10 @@ fn open_source_nofollow(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        // O_NOFOLLOW alone does not prevent a FIFO substitution from blocking
+        // before the held-handle regular-file validation. O_NONBLOCK is inert
+        // for regular files and makes special-file rejection bounded.
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
@@ -1029,13 +1551,33 @@ fn open_source_nofollow(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+fn opened_source_identity(file: &File) -> io::Result<IoReadIdentity> {
+    #[cfg(windows)]
+    {
+        windows_file_identity(file)
+    }
+    #[cfg(not(windows))]
+    {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "verified source must be a regular file",
+            ));
+        }
+        Ok(IoReadIdentity::from_metadata(&metadata))
+    }
+}
+
 #[cfg(windows)]
 fn windows_file_identity(file: &File) -> io::Result<IoReadIdentity> {
     use std::os::windows::{fs::MetadataExt as _, io::AsRawHandle as _};
     use windows_sys::Win32::{
         Foundation::HANDLE,
         Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+            FileBasicInfo, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
+            FILE_ID_INFO,
         },
     };
 
@@ -1062,14 +1604,57 @@ fn windows_file_identity(file: &File) -> io::Result<IoReadIdentity> {
     }
     let file_index =
         (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-    Ok(IoReadIdentity::new(
-        FileIdentity::from_metadata(&metadata),
-        [
-            u64::from(information.dwVolumeSerialNumber),
-            file_index,
-            metadata.creation_time(),
-            metadata.last_write_time(),
-        ],
+    let portable = FileIdentity::from_metadata(&metadata);
+    let fallback_revision = [
+        u64::from(information.dwVolumeSerialNumber),
+        file_index,
+        metadata.creation_time(),
+        metadata.last_write_time(),
+    ];
+
+    let mut id = FILE_ID_INFO::default();
+    let mut basic = FILE_BASIC_INFO::default();
+    // SAFETY: `file` owns a live handle and both outputs are exact writable
+    // structures for their respective synchronous information classes.
+    let id_succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileIdInfo,
+            std::ptr::addr_of_mut!(id).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    // SAFETY: same handle lifetime and exact output-size argument as above.
+    let basic_succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileBasicInfo,
+            std::ptr::addr_of_mut!(basic).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if id_succeeded == 0 || basic_succeeded == 0 {
+        // The ordinary read-race identity remains available. Metadata-only
+        // persistent reuse is disabled because the filesystem did not supply
+        // its 128-bit ID and change-time field. Within the same-user
+        // metadata-forgery exclusion, that field detects ordinary same-size
+        // rewrites even when last-write time is restored.
+        return Ok(IoReadIdentity::new(portable, fallback_revision));
+    }
+    let Some(strong_revision) = windows_strong_identity_components(
+        u64::from(information.dwVolumeSerialNumber),
+        id.VolumeSerialNumber,
+        id.FileId.Identifier,
+        basic.CreationTime,
+        basic.LastWriteTime,
+        basic.ChangeTime,
+    ) else {
+        return Ok(IoReadIdentity::new(portable, fallback_revision));
+    };
+    Ok(IoReadIdentity::with_strong_revision(
+        portable,
+        fallback_revision,
+        strong_revision,
     ))
 }
 
@@ -1080,16 +1665,7 @@ struct FileSystemIoHandle {
 
 impl IoReadHandle for FileSystemIoHandle {
     fn identity(&self) -> io::Result<IoReadIdentity> {
-        #[cfg(windows)]
-        {
-            windows_file_identity(&self.file)
-        }
-        #[cfg(not(windows))]
-        {
-            self.file
-                .metadata()
-                .map(|metadata| IoReadIdentity::from_metadata(&metadata))
-        }
+        opened_source_identity(&self.file)
     }
 
     fn read_batch(&mut self, destination: &mut [u8]) -> io::Result<usize> {
@@ -1871,7 +2447,8 @@ fn read_ready_input(
                 ReadyInput::with_file_identity(
                     request.identity.clone(),
                     buffer,
-                    before.file_identity,
+                    before,
+                    request.bound_source_identity_evidence(before),
                 ),
                 credit,
             ));
@@ -2482,6 +3059,28 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fifo_source_open_is_nonblocking_and_held_handle_validation_rejects_it() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+
+        let temp = tempfile::tempdir().expect("temporary source root");
+        let fifo = temp.path().join("source.fifo");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).expect("FIFO path has no NUL");
+        // SAFETY: `fifo_c` is a live NUL-terminated pathname and mkfifo does
+        // not retain the pointer after returning.
+        let result = unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo failed: {}", io::Error::last_os_error());
+
+        let file = open_source_nofollow(&fifo).expect("nonblocking FIFO open");
+        assert_eq!(
+            opened_source_identity(&file)
+                .expect_err("FIFO must fail held-handle regular-file validation")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
     #[test]
     fn generation_revision_distinguishes_equal_portable_metadata() {
         let portable = FileIdentity {
@@ -2493,6 +3092,20 @@ mod tests {
             IoReadIdentity::new(portable, [11, 23, 33, 44]),
             "a different platform file index must reject an equal-size replacement"
         );
+    }
+
+    #[test]
+    fn persistent_identity_components_fail_closed_when_generation_is_weak() {
+        assert!(unix_strong_identity_components([1, 2, 3, 4]).is_some());
+        assert!(unix_strong_identity_components([0, 2, 3, 4]).is_none());
+        assert!(unix_strong_identity_components([1, 0, 3, 4]).is_none());
+        assert!(unix_strong_identity_components([1, 2, 0, 0]).is_none());
+
+        let file_id = [7; 16];
+        assert!(windows_strong_identity_components(9, 9, file_id, 1, 2, 3).is_some());
+        assert!(windows_strong_identity_components(9, 8, file_id, 1, 2, 3).is_none());
+        assert!(windows_strong_identity_components(9, 9, [0; 16], 1, 2, 3).is_none());
+        assert!(windows_strong_identity_components(9, 9, file_id, 1, 2, 0).is_none());
     }
 
     #[cfg(windows)]
@@ -3579,6 +4192,165 @@ mod tests {
         )
         .expect_err("out-of-root source must not receive a runtime ticket");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_evidence_binds_canonical_root_and_physical_path() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let first_root = fixture.path().join("first");
+        let second_root = fixture.path().join("second");
+        fs::create_dir(&first_root).expect("first root");
+        fs::create_dir(&second_root).expect("second root");
+        let first = first_root.join("source.rs");
+        let second = second_root.join("alias.rs");
+        fs::write(&first, b"fn source() {}\n").expect("source");
+        fs::hard_link(&first, &second).expect("same physical source under another root");
+
+        let first_request = FileReadRequest::new_verified_under(
+            InputIdentity::new("source.rs", 0),
+            first,
+            &first_root,
+        )
+        .expect("first request");
+        let second_request = FileReadRequest::new_verified_under(
+            InputIdentity::new("alias.rs", 0),
+            second,
+            &second_root,
+        )
+        .expect("second request");
+        assert_ne!(
+            first_request.source_identity_evidence(),
+            second_request.source_identity_evidence(),
+            "moving the same physical generation with its whole root cannot authorize replay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_evidence_and_guard_reject_replaced_root_at_the_same_path() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("scan");
+        let moved = fixture.path().join("moved-scan");
+        fs::create_dir(&root).expect("root");
+        let source = root.join("source.rs");
+        fs::write(&source, b"fn source() {}\n").expect("source");
+        let request = FileReadRequest::new_verified_under(
+            InputIdentity::new("source.rs", 0),
+            source.clone(),
+            &root,
+        )
+        .expect("original request");
+        let original_evidence = request.source_identity_evidence().expect("evidence");
+        let guard = request
+            .begin_metadata_only_validation(&RuntimeCancellation::new())
+            .expect("guard")
+            .expect("strong guard");
+
+        fs::rename(&root, &moved).expect("move original root");
+        fs::create_dir(&root).expect("replacement root");
+        fs::hard_link(moved.join("source.rs"), &source)
+            .expect("same physical source in replacement root");
+        let replacement =
+            FileReadRequest::new_verified_under(InputIdentity::new("source.rs", 0), source, &root)
+                .expect("replacement request");
+        assert_ne!(
+            replacement.source_identity_evidence(),
+            Some(original_evidence)
+        );
+        assert!(!guard
+            .finish(&RuntimeCancellation::new())
+            .expect("finish old guard"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_guard_rejects_same_size_rewrite_with_restored_mtime() {
+        use std::ffi::CString;
+        use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let path = root.path().join("source.rs");
+        fs::write(&path, b"old bytes").expect("initial source");
+        let metadata = fs::metadata(&path).expect("initial metadata");
+        let request = FileReadRequest::new_verified_under(
+            InputIdentity::new("source.rs", 0),
+            path.clone(),
+            root.path(),
+        )
+        .expect("verified request");
+        let guard = request
+            .begin_metadata_only_validation(&RuntimeCancellation::new())
+            .expect("begin validation")
+            .expect("strong identity");
+
+        thread::sleep(std::time::Duration::from_millis(2));
+        fs::write(&path, b"new bytes").expect("same-size rewrite");
+        let path_c = CString::new(path.as_os_str().as_bytes()).expect("path without NUL");
+        let times = [
+            libc::timespec {
+                tv_sec: metadata.atime(),
+                tv_nsec: metadata.atime_nsec() as _,
+            },
+            libc::timespec {
+                tv_sec: metadata.mtime(),
+                tv_nsec: metadata.mtime_nsec() as _,
+            },
+        ];
+        // SAFETY: `path_c` is NUL-terminated and `times` contains the two
+        // initialized timestamps required by `utimensat`.
+        let restored =
+            unsafe { libc::utimensat(libc::AT_FDCWD, path_c.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(restored, 0, "restore source mtime");
+        assert!(!guard
+            .finish(&RuntimeCancellation::new())
+            .expect("finish validation"));
+    }
+
+    #[test]
+    fn verified_read_exports_the_same_bound_source_evidence() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let path = root.path().join("source.rs");
+        fs::write(&path, b"fn source() {}\n").expect("source");
+        let request = FileReadRequest::new_verified_under(
+            InputIdentity::new("source.rs", 0),
+            path,
+            root.path(),
+        )
+        .expect("verified request");
+        let expected = request
+            .source_identity_evidence()
+            .expect("strong request evidence");
+        let result = read_files_concurrently(runtime_config(1, 1), [request], |input| {
+            input.source_identity_evidence()
+        })
+        .expect("verified read");
+        assert_eq!(result.completed[0].value, Some(expected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_file_validator_is_stable_and_rejects_hardlinks() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let path = root.path().join("manifest.json");
+        fs::write(&path, b"{}").expect("manifest");
+        let file = File::open(&path).expect("opened manifest");
+        let before = validate_opened_regular_single_link(&file)
+            .expect("validate before")
+            .expect("strong filesystem identity");
+        assert_eq!(before.length_bytes(), 2);
+        let after = validate_opened_regular_single_link(&file)
+            .expect("validate after")
+            .expect("strong filesystem identity");
+        assert_eq!(before, after);
+
+        fs::hard_link(&path, root.path().join("alias.json")).expect("hardlink");
+        assert_eq!(
+            validate_opened_regular_single_link(&file)
+                .expect_err("hardlinked manifest rejected")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     struct CancellingObserver {

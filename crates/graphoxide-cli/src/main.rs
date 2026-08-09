@@ -872,11 +872,12 @@ fn write_runtime_report_if_requested(
     report: &graphoxide_cli::build_telemetry::BuildTelemetry,
     runtime_report: Option<&std::path::Path>,
     runtime: Option<&graphoxide_cli::build_telemetry::IndexRuntimeConfiguration>,
+    cache: Option<graphoxide_extract::cache::RuntimeCacheTelemetry>,
 ) -> anyhow::Result<()> {
     let Some(path) = runtime_report else {
         return Ok(());
     };
-    let sidecar = runtime.map_or_else(
+    let mut sidecar = runtime.map_or_else(
         || graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV1::legacy(report.clone()),
         |runtime| {
             graphoxide_cli::build_telemetry::IndexRuntimeTelemetryV1::isolated(
@@ -885,6 +886,9 @@ fn write_runtime_report_if_requested(
             )
         },
     );
+    if let Some(cache) = cache {
+        sidecar = sidecar.with_cache(cache.into());
+    }
     graphoxide_cli::build_telemetry::write_runtime_report(path, &sidecar)
         .with_context(|| format!("write runtime telemetry sidecar {}", path.display()))
 }
@@ -1173,6 +1177,7 @@ fn run_project_build_with_cancellation(
     };
     let runtime_telemetry = runtime_config
         .map(|config| isolated_runtime_configuration(config, scan.detection.total_files));
+    let runtime_cache_telemetry = scan.runtime_cache;
     telemetry.stages_ms.scan_extract =
         graphoxide_cli::build_telemetry::elapsed_millis(scan_started);
     telemetry.files.detected = scan.detection.total_files;
@@ -1186,7 +1191,13 @@ fn run_project_build_with_cancellation(
     telemetry
         .warnings
         .extend(scan.detection.walk_errors.iter().cloned());
+    telemetry
+        .warnings
+        .extend(scan.runtime_cache_diagnostics.iter().cloned());
     telemetry.warnings.extend(scan.warnings.iter().cloned());
+    for warning in &scan.runtime_cache_diagnostics {
+        eprintln!("{warning}");
+    }
     for warning in &scan.warnings {
         eprintln!("{warning}");
     }
@@ -1361,6 +1372,7 @@ fn run_project_build_with_cancellation(
             &telemetry,
             runtime_report.as_deref(),
             runtime_telemetry.as_ref(),
+            Some(runtime_cache_telemetry),
         )?;
         return emit_project_build_report(
             &telemetry,
@@ -1477,6 +1489,7 @@ fn run_project_build_with_cancellation(
         &telemetry,
         runtime_report.as_deref(),
         runtime_telemetry.as_ref(),
+        Some(runtime_cache_telemetry),
     )?;
     emit_project_build_report(
         &telemetry,
@@ -2667,7 +2680,7 @@ fn rebuild_watch_project(
 ) -> anyhow::Result<watch_service::RebuildResult> {
     if let Some(runtime_config) = runtime_config {
         watch_service::rebuild_project_with_executor(path, options, |request| {
-            let outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
+            let mut outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
                 path: &request.watch_root,
                 output_directory: &request.output_directory,
                 marker_value: &request.marker_value,
@@ -2677,10 +2690,14 @@ fn rebuild_watch_project(
                 pass: request.pass,
                 runtime_config,
             })?;
+            if runtime_report.is_some() {
+                hydrate_unchanged_graph_report(&mut outcome)?;
+            }
             write_runtime_report_if_requested(
                 &outcome.telemetry,
                 runtime_report,
                 Some(&outcome.runtime_telemetry),
+                Some(outcome.runtime_cache),
             )?;
             Ok(outcome.result)
         })
@@ -2689,6 +2706,7 @@ fn rebuild_watch_project(
         write_runtime_report_if_requested(
             &legacy_rebuild_telemetry(&result),
             runtime_report,
+            None,
             None,
         )?;
         Ok(result)
@@ -3458,7 +3476,7 @@ fn rebuild_legacy(
         }
         watch_service::RebuildStatus::RefusedShrink => String::new(),
     };
-    write_runtime_report_if_requested(&telemetry, runtime_report, None)?;
+    write_runtime_report_if_requested(&telemetry, runtime_report, None, None)?;
     if result.status == watch_service::RebuildStatus::RefusedShrink {
         if json {
             emit_build_report(&telemetry, true, false, "")?;
@@ -3540,7 +3558,7 @@ fn rebuild_isolated(
     let output_directory = managed_output_directory(path, None);
     let _build_lock = watch_service::RebuildLockGuard::acquire(&output_directory, true)?
         .ok_or_else(|| anyhow::anyhow!("failed to acquire the blocking rebuild lock"))?;
-    let outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
+    let mut outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
         path,
         output_directory: &output_directory,
         marker_value: &path.to_string_lossy(),
@@ -3550,10 +3568,14 @@ fn rebuild_isolated(
         pass: 1,
         runtime_config,
     })?;
+    if json || runtime_report.is_some() {
+        hydrate_unchanged_graph_report(&mut outcome)?;
+    }
     write_runtime_report_if_requested(
         &outcome.telemetry,
         runtime_report,
         Some(&outcome.runtime_telemetry),
+        Some(outcome.runtime_cache),
     )?;
     if outcome.result.status == watch_service::RebuildStatus::RefusedShrink {
         if json {
@@ -3592,6 +3614,124 @@ struct IsolatedRebuildOutcome {
     result: watch_service::RebuildResult,
     telemetry: graphoxide_cli::build_telemetry::BuildTelemetry,
     runtime_telemetry: graphoxide_cli::build_telemetry::IndexRuntimeConfiguration,
+    runtime_cache: graphoxide_extract::cache::RuntimeCacheTelemetry,
+}
+
+#[derive(Debug, Default)]
+struct AcceptedGraphNodeStats {
+    count: usize,
+    clustered: bool,
+}
+
+fn deserialize_accepted_graph_nodes<'de, D>(
+    deserializer: D,
+) -> Result<AcceptedGraphNodeStats, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct NodeStatsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for NodeStatsVisitor {
+        type Value = AcceptedGraphNodeStats;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a graph node array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut stats = AcceptedGraphNodeStats::default();
+            while let Some(node) = sequence.next_element::<graphoxide_core::Node>()? {
+                stats.count = stats.count.saturating_add(1);
+                stats.clustered |= node.community.is_some();
+            }
+            Ok(stats)
+        }
+    }
+
+    deserializer.deserialize_seq(NodeStatsVisitor)
+}
+
+fn deserialize_accepted_graph_edges<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct EdgeCountVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for EdgeCountVisitor {
+        type Value = usize;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a graph edge array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut count = 0usize;
+            while sequence.next_element::<graphoxide_core::Edge>()?.is_some() {
+                count = count.saturating_add(1);
+            }
+            Ok(count)
+        }
+    }
+
+    deserializer.deserialize_seq(EdgeCountVisitor)
+}
+
+#[derive(serde::Deserialize)]
+struct AcceptedGraphStats {
+    #[serde(deserialize_with = "deserialize_accepted_graph_nodes")]
+    nodes: AcceptedGraphNodeStats,
+    #[serde(
+        default,
+        alias = "edges",
+        deserialize_with = "deserialize_accepted_graph_edges"
+    )]
+    links: usize,
+}
+
+fn read_accepted_graph_stats(path: &std::path::Path) -> anyhow::Result<AcceptedGraphStats> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open accepted graph {} for telemetry", path.display()))?;
+    let cap = graphoxide_core::max_graph_bytes();
+    let size = file
+        .metadata()
+        .with_context(|| format!("inspect accepted graph {} for telemetry", path.display()))?
+        .len();
+    anyhow::ensure!(
+        size <= cap,
+        "accepted graph {} is {size} bytes, exceeding the {cap}-byte telemetry limit",
+        path.display()
+    );
+    let mut reader = std::io::BufReader::new(file).take(cap.saturating_add(1));
+    let stats = serde_json::from_reader(&mut reader)
+        .with_context(|| format!("read accepted graph {} for telemetry", path.display()))?;
+    anyhow::ensure!(
+        reader.limit() > 0,
+        "accepted graph {} grew beyond the {cap}-byte telemetry limit",
+        path.display()
+    );
+    Ok(stats)
+}
+
+fn hydrate_unchanged_graph_report(outcome: &mut IsolatedRebuildOutcome) -> anyhow::Result<()> {
+    if outcome.result.status != watch_service::RebuildStatus::Unchanged {
+        return Ok(());
+    }
+    let stats = read_accepted_graph_stats(&outcome.result.graph_path)?;
+    outcome.result.stats.nodes = stats.nodes.count;
+    outcome.result.stats.edges = stats.links;
+    outcome.result.clustered = stats.nodes.clustered;
+    outcome.telemetry.graph.nodes = stats.nodes.count;
+    outcome.telemetry.graph.edges = stats.links;
+    outcome.telemetry.graph.clustered = stats.nodes.clustered;
+    Ok(())
 }
 
 struct IsolatedRebuildRequest<'a> {
@@ -3690,6 +3830,7 @@ fn rebuild_isolated_pass(
     }
     let runtime_telemetry =
         isolated_runtime_configuration(runtime_config, scan.detection.total_files);
+    let runtime_cache = scan.runtime_cache;
     let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
         graphoxide_cli::build_telemetry::BuildOperation::Update,
         match scope {
@@ -3761,6 +3902,7 @@ fn rebuild_isolated_pass(
             result,
             telemetry,
             runtime_telemetry,
+            runtime_cache,
         }
     };
     if telemetry.files.changed == 0 && telemetry.files.deleted == 0 && output.is_file() {
