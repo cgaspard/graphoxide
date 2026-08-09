@@ -1764,11 +1764,12 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
                         "isolated parser allowance exceeds its {parser_pool_bytes}-byte pool"
                     );
                 };
-                match engine::extract_as_bytes_with_parser_allowance(
+                match engine::extract_as_bytes_with_parser_allowance_and_cancellation(
                     path,
                     &relative,
                     input.bytes(),
                     parser_allowance_bytes,
+                    &compute_cancellation,
                 )
                     .with_context(|| format!("extract {relative}"))
                 {

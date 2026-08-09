@@ -10,7 +10,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tree_sitter::{Node as TsNode, Parser};
+use tree_sitter::{Node as TsNode, ParseOptions, Parser};
 
 pub(crate) const RUST_IMPORT_PATH: &str = "rust_import_path";
 
@@ -186,7 +186,7 @@ pub(crate) fn has_ast_extractor_bytes(path: &Path, source: &[u8]) -> bool {
 
 pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let source = fs::read(path)?;
-    extract_as_with_path_probes(path, source_file, &source, true, None)
+    extract_as_with_path_probes(path, source_file, &source, true, None, None)
 }
 
 /// Extract a graph fragment from I/O-owned source bytes.
@@ -198,7 +198,7 @@ pub(crate) fn extract_as_bytes(
     source_file: &str,
     source: &[u8],
 ) -> anyhow::Result<Extraction> {
-    extract_as_with_path_probes(path, source_file, source, false, None)
+    extract_as_with_path_probes(path, source_file, source, false, None, None)
 }
 
 /// Extract ready bytes while constraining registered parser scratch and output
@@ -215,6 +215,26 @@ pub(crate) fn extract_as_bytes_with_parser_allowance(
         source,
         false,
         Some(parser_allowance_bytes),
+        None,
+    )
+}
+
+/// Extract ready bytes under the isolated parser allowance while propagating
+/// cooperative cancellation into recursive container decoding.
+pub(crate) fn extract_as_bytes_with_parser_allowance_and_cancellation(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    parser_allowance_bytes: usize,
+    cancellation: &graphoxide_index_runtime::RuntimeCancellation,
+) -> anyhow::Result<Extraction> {
+    extract_as_with_path_probes(
+        path,
+        source_file,
+        source,
+        false,
+        Some(parser_allowance_bytes),
+        Some(cancellation),
     )
 }
 
@@ -224,7 +244,12 @@ fn extract_as_with_path_probes(
     source: &[u8],
     allow_path_probes: bool,
     parser_allowance_bytes: Option<usize>,
+    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
 ) -> anyhow::Result<Extraction> {
+    anyhow::ensure!(
+        cancellation.is_none_or(|token| !token.is_cancelled()),
+        "isolated extraction cancelled"
+    );
     let mut lang = crate::languages::for_path(path);
     let extension = path
         .extension()
@@ -243,16 +268,21 @@ fn extract_as_with_path_probes(
     let registered_extraction = parser_allowance_bytes.map_or_else(
         || crate::format_adapter::extract_registered_format(path, source_file, source, &extension),
         |allowance| {
-            crate::format_adapter::extract_registered_format_with_allowance(
+            crate::format_adapter::extract_registered_format_with_allowance_and_cancellation(
                 path,
                 source_file,
                 source,
                 &extension,
                 Some(allowance),
+                cancellation,
             )
         },
     );
     if let Some(extraction) = registered_extraction {
+        anyhow::ensure!(
+            cancellation.is_none_or(|token| !token.is_cancelled()),
+            "isolated extraction cancelled"
+        );
         return Ok(extraction);
     }
     if crate::dotnet::supports_extension(&extension) {
@@ -375,9 +405,32 @@ fn extract_as_with_path_probes(
     };
     let mut parser = Parser::new();
     parser.set_language(&(lang.language)())?;
-    let tree = parser
-        .parse(parser_source.as_ref(), None)
-        .ok_or_else(|| anyhow::anyhow!("tree-sitter returned no tree"))?;
+    let tree = if let Some(cancellation) = cancellation {
+        let bytes = parser_source.as_ref();
+        let len = bytes.len();
+        let mut read = |offset, _| {
+            if offset < len {
+                &bytes[offset..]
+            } else {
+                &[]
+            }
+        };
+        let mut cancelled = |_: &tree_sitter::ParseState| cancellation.is_cancelled();
+        parser.parse_with_options(
+            &mut read,
+            None,
+            Some(ParseOptions::new().progress_callback(&mut cancelled)),
+        )
+    } else {
+        parser.parse(parser_source.as_ref(), None)
+    };
+    let tree = match tree {
+        Some(tree) => tree,
+        None if cancellation.is_some_and(|token| token.is_cancelled()) => {
+            anyhow::bail!("isolated extraction cancelled")
+        }
+        None => anyhow::bail!("tree-sitter returned no tree"),
+    };
     let stem_owned = Path::new(source_file)
         .with_extension("")
         .to_string_lossy()

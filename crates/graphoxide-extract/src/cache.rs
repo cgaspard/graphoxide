@@ -15,10 +15,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
-// Bump whenever a built-in extractor's persisted fact schema changes. Stage 3
-// replaces the partial DOT scanner with semantic Graphviz facts, so v25 entries
-// must not be replayed into an incremental build.
-pub const AST_CACHE_VERSION: u32 = 26;
+// Bump whenever a built-in extractor's persisted fact schema changes. Stage 5
+// adds bounded recursive ZIP/TAR/GZIP child facts, so v26 inventory-only archive
+// entries must not be replayed into an incremental build.
+pub const AST_CACHE_VERSION: u32 = 27;
 
 /// Wire version for the extraction-owned payload stored inside runtime-v1.
 ///

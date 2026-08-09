@@ -9,10 +9,13 @@
 use flate2::bufread::GzDecoder;
 use quick_xml::{events::Event, Reader};
 use std::{
+    alloc::{alloc_zeroed, Layout},
     cmp,
     collections::BTreeSet,
     io::{BufRead, Cursor, Read},
+    ptr,
 };
+use unicode_normalization::UnicodeNormalization as _;
 
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const ZIP_EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
@@ -153,6 +156,7 @@ pub enum InspectionDiagnostic {
     MemberNameLimit,
     EncryptedMember,
     SymlinkMember,
+    NonRegularMember,
     UnsupportedCompression,
     MemberSizeLimit,
     TotalSizeLimit,
@@ -172,7 +176,9 @@ pub enum InspectionDiagnostic {
     ZstdHeaderInvalid,
     DeclaredSizeUnavailable,
     DecoderUnavailable,
+    MemberDispatchSkipped,
     NestedDispatchStopped,
+    Cancelled,
     UnsupportedArchiveFormat,
     InvalidSvg,
     SvgDocumentTypeForbidden,
@@ -231,14 +237,180 @@ pub struct DispatchableTarMember<'member, 'source> {
 ///
 /// ZIP compression prevents a zero-copy hand-off. The buffer is allocated only
 /// after the central directory, member size, aggregate byte, and compression
-/// ratio limits have all been validated. The visitor cannot retain it, and the
-/// dispatcher reuses its allocation for the next member, so recursively
-/// parsing an archive cannot retain sibling payloads or require filesystem
-/// staging.
+/// ratio limits and caller admission have all been validated. The visitor
+/// cannot retain it, and the allocation is dropped before its opaque admission
+/// permit, so recursively parsing an archive cannot retain sibling payloads or
+/// require filesystem staging.
 #[derive(Debug, Clone, Copy)]
 pub struct DispatchableZipMember<'member, 'bytes> {
     pub member: &'member ContainerMember,
     pub bytes: &'bytes [u8],
+}
+
+/// A bounded single-stream GZIP member decoded into an exact temporary buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchableGzipMember<'member, 'bytes> {
+    pub member: &'member ContainerMember,
+    pub bytes: &'bytes [u8],
+}
+
+/// Pre-allocation decision for one compressed member.
+///
+/// A caller returns an owned permit with [`Self::Dispatch`]. The compressed
+/// visitor keeps that opaque value alive until the exact decoded allocation,
+/// decoder, and child visitor have all finished. [`Self::Skip`] inventories a
+/// member without constructing its decoder, while [`Self::Stop`] ends the
+/// deterministic walk without opening the current member.
+#[derive(Debug)]
+pub enum CompressedMemberAdmission<Permit> {
+    Dispatch(Permit),
+    Skip,
+    Stop,
+}
+
+enum CompressedMemberVisitOutcome {
+    Dispatched {
+        decoded_bytes: u64,
+        continue_visiting: bool,
+    },
+    Skipped,
+    Stopped,
+    Cancelled,
+    Rejected(InspectionDiagnostic),
+}
+
+/// Allocate one fallible, exact-layout byte slice for decoded scratch.
+///
+/// Stable Rust does not yet expose the fallible boxed-slice allocator API.
+/// Using the global allocator directly avoids a `Vec` whose capacity may
+/// exceed the byte count reserved by the caller's opaque scratch permit.
+fn try_zeroed_boxed_slice(length: usize) -> Option<Box<[u8]>> {
+    if length == 0 {
+        return Some(Box::default());
+    }
+    let layout = Layout::array::<u8>(length).ok()?;
+    // SAFETY: `layout` describes exactly `length` initialized `u8` values.
+    // A non-null result belongs to the global allocator and is immediately
+    // converted to a uniquely owned slice with the same layout, so `Box`
+    // later deallocates it correctly.
+    let allocation = ptr::NonNull::new(unsafe { alloc_zeroed(layout) })?;
+    let slice = ptr::slice_from_raw_parts_mut(allocation.as_ptr(), length);
+    // SAFETY: `slice` was built from the allocation above, has its exact
+    // length, and has not been aliased or transferred elsewhere.
+    Some(unsafe { Box::from_raw(slice) })
+}
+
+/// Decode one compressed member only after the caller has supplied an opaque
+/// scratch permit.
+///
+/// Both ZIP and GZIP use this boundary. `finish_reader` validates
+/// representation-specific trailing input while the permit is still live.
+#[allow(clippy::too_many_arguments)]
+fn visit_admitted_compressed_member<Permit, Reader, Admission, Cancellation, Open, Finish, Visit>(
+    member: &ContainerMember,
+    limits: ContainerLimits,
+    is_cancelled: &mut Cancellation,
+    admit: &mut Admission,
+    open_reader: Open,
+    finish_reader: Finish,
+    visit: Visit,
+) -> CompressedMemberVisitOutcome
+where
+    Reader: Read,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    Cancellation: FnMut() -> bool,
+    Open: FnOnce() -> Result<Reader, InspectionDiagnostic>,
+    Finish: FnOnce(Reader) -> Result<(), InspectionDiagnostic>,
+    Visit: FnOnce(&[u8]) -> bool,
+{
+    if is_cancelled() {
+        return CompressedMemberVisitOutcome::Cancelled;
+    }
+    let permit = match admit(member) {
+        CompressedMemberAdmission::Dispatch(permit) => permit,
+        CompressedMemberAdmission::Skip => return CompressedMemberVisitOutcome::Skipped,
+        CompressedMemberAdmission::Stop => return CompressedMemberVisitOutcome::Stopped,
+    };
+    if is_cancelled() {
+        return CompressedMemberVisitOutcome::Cancelled;
+    }
+
+    let declared = member.declared_uncompressed_bytes;
+    if declared > limits.max_member_uncompressed_bytes {
+        return CompressedMemberVisitOutcome::Rejected(InspectionDiagnostic::MemberSizeLimit);
+    }
+    if declared > limits.max_total_uncompressed_bytes {
+        return CompressedMemberVisitOutcome::Rejected(InspectionDiagnostic::TotalSizeLimit);
+    }
+    let payload_len = match usize::try_from(declared) {
+        Ok(length) => length,
+        Err(_) => {
+            return CompressedMemberVisitOutcome::Rejected(InspectionDiagnostic::MemberSizeLimit)
+        }
+    };
+    let mut payload = match try_zeroed_boxed_slice(payload_len) {
+        Some(payload) => payload,
+        None => {
+            return CompressedMemberVisitOutcome::Rejected(InspectionDiagnostic::MemberSizeLimit)
+        }
+    };
+    let mut reader = match open_reader() {
+        Ok(reader) => reader,
+        Err(diagnostic) => return CompressedMemberVisitOutcome::Rejected(diagnostic),
+    };
+
+    let mut offset = 0_usize;
+    while offset < payload.len() {
+        if is_cancelled() {
+            return CompressedMemberVisitOutcome::Cancelled;
+        }
+        let end = offset.saturating_add(READ_BUFFER_BYTES).min(payload.len());
+        match reader.read(&mut payload[offset..end]) {
+            Ok(0) => {
+                return CompressedMemberVisitOutcome::Rejected(
+                    InspectionDiagnostic::DeclaredSizeMismatch,
+                )
+            }
+            Ok(read) => offset += read,
+            Err(_) => {
+                return CompressedMemberVisitOutcome::Rejected(
+                    InspectionDiagnostic::DecompressionFailed,
+                )
+            }
+        }
+    }
+    if is_cancelled() {
+        return CompressedMemberVisitOutcome::Cancelled;
+    }
+    let mut trailing = [0_u8; 1];
+    match reader.read(&mut trailing) {
+        Ok(0) => {}
+        Ok(_) => {
+            return CompressedMemberVisitOutcome::Rejected(
+                InspectionDiagnostic::DeclaredSizeMismatch,
+            )
+        }
+        Err(_) => {
+            return CompressedMemberVisitOutcome::Rejected(
+                InspectionDiagnostic::DecompressionFailed,
+            )
+        }
+    }
+    if let Err(diagnostic) = finish_reader(reader) {
+        return CompressedMemberVisitOutcome::Rejected(diagnostic);
+    }
+    if is_cancelled() {
+        return CompressedMemberVisitOutcome::Cancelled;
+    }
+    let continue_visiting = visit(&payload);
+    // Make the lifetime contract explicit: decoded storage is freed before
+    // the opaque scratch permit returned by the admission plane.
+    drop(payload);
+    drop(permit);
+    CompressedMemberVisitOutcome::Dispatched {
+        decoded_bytes: declared,
+        continue_visiting,
+    }
 }
 
 /// Dimensions and simple animation metadata discovered without decoding pixels.
@@ -330,16 +502,16 @@ pub fn inspect_bytes(
 
 /// Return a recursively dispatchable archive kind for ready bytes.
 ///
-/// This deliberately excludes gzip (including `.svgz`), bzip2, xz, zstd, 7z,
-/// and RAR: this module can inventory those representations but has no
-/// maintained streaming child dispatcher for them. ZIP and TAR are the only
-/// encodings whose member bytes can currently be handed to a child adapter.
+/// This deliberately excludes `.svgz`, bzip2, xz, zstd, 7z, and RAR. ZIP,
+/// TAR, and single-member GZIP are the encodings whose member bytes can
+/// currently be handed to a child adapter under an explicit admission permit.
 pub fn recursive_archive_kind(source_name: &str, bytes: &[u8]) -> Option<ArchiveKind> {
     if is_svgz_name(source_name) && looks_like_gzip(bytes) {
         return None;
     }
     match detect_archive_kind(source_name, bytes) {
         Some(ArchiveKind::Zip) => Some(ArchiveKind::Zip),
+        Some(ArchiveKind::Gzip) => Some(ArchiveKind::Gzip),
         Some(ArchiveKind::Tar) => Some(ArchiveKind::Tar),
         _ => None,
     }
@@ -389,9 +561,57 @@ pub fn visit_tar_members<'a, F>(
     bytes: &'a [u8],
     recursion_depth: u16,
     limits: ContainerLimits,
+    visitor: F,
+) -> ContainerInspection
+where
+    F: for<'member> FnMut(DispatchableTarMember<'member, 'a>) -> bool,
+{
+    visit_tar_members_bounded(bytes, recursion_depth, limits, || false, visitor)
+}
+
+/// Visit regular TAR members with cancellation during metadata parsing and
+/// before every child dispatch.
+///
+/// TAR payloads remain zero-copy, so no scratch permit is needed. Cancellation
+/// is polled at every 512-byte header, while validating trailing zero blocks,
+/// and at each member boundary before the visitor receives borrowed bytes.
+pub fn visit_tar_members_bounded<'a, Cancellation, F>(
+    bytes: &'a [u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: Cancellation,
+    visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    F: for<'member> FnMut(DispatchableTarMember<'member, 'a>) -> bool,
+{
+    visit_tar_members_bounded_with_encounter(
+        bytes,
+        recursion_depth,
+        limits,
+        is_cancelled,
+        |_| true,
+        visitor,
+    )
+}
+
+/// Visit TAR members with a tree-scoped admission decision for every entry.
+///
+/// `encounter` runs in normalized path order for directories and regular files
+/// before any child payload is dispatched. This lets a recursive caller apply
+/// one aggregate member-count ceiling across the complete archive tree.
+pub fn visit_tar_members_bounded_with_encounter<'a, Cancellation, Encounter, F>(
+    bytes: &'a [u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    mut is_cancelled: Cancellation,
+    mut encounter: Encounter,
     mut visitor: F,
 ) -> ContainerInspection
 where
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
     F: for<'member> FnMut(DispatchableTarMember<'member, 'a>) -> bool,
 {
     if !limits.valid() {
@@ -404,12 +624,43 @@ where
         return rejected_container(ArchiveKind::Tar, InspectionDiagnostic::InputTooLarge);
     }
 
-    let parsed = match parse_tar(bytes, limits) {
+    let parsed = match parse_tar(bytes, limits, &mut is_cancelled) {
         Ok(parsed) => parsed,
+        Err(InspectionDiagnostic::Cancelled) => {
+            return cancelled_container(ArchiveKind::Tar, Vec::new(), 0)
+        }
         Err(diagnostic) => return rejected_container(ArchiveKind::Tar, diagnostic),
     };
+    let mut member_order = (0..parsed.members.len()).collect::<Vec<_>>();
+    member_order.sort_unstable_by(|left, right| {
+        parsed.members[*left].path.cmp(&parsed.members[*right].path)
+    });
+    for index in member_order {
+        if is_cancelled() {
+            return cancelled_container(
+                ArchiveKind::Tar,
+                parsed.members,
+                parsed.decompressed_bytes,
+            );
+        }
+        if !encounter(&parsed.members[index]) {
+            return ContainerInspection {
+                kind: ArchiveKind::Tar,
+                status: InspectionStatus::InventoryOnly,
+                members: parsed.members,
+                decompressed_bytes: parsed.decompressed_bytes,
+                diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+            };
+        }
+    }
     if recursion_depth == limits.max_recursion_depth && !parsed.dispatchable.is_empty() {
-        return rejected_container(ArchiveKind::Tar, InspectionDiagnostic::RecursionLimit);
+        return ContainerInspection {
+            kind: ArchiveKind::Tar,
+            status: InspectionStatus::InventoryOnly,
+            members: parsed.members,
+            decompressed_bytes: parsed.decompressed_bytes,
+            diagnostics: vec![InspectionDiagnostic::RecursionLimit],
+        };
     }
 
     let mut dispatch_order = (0..parsed.dispatchable.len()).collect::<Vec<_>>();
@@ -421,6 +672,13 @@ where
             .cmp(&parsed.members[right_member].path)
     });
     for index in dispatch_order {
+        if is_cancelled() {
+            return cancelled_container(
+                ArchiveKind::Tar,
+                parsed.members,
+                parsed.decompressed_bytes,
+            );
+        }
         let entry = &parsed.dispatchable[index];
         if !visitor(DispatchableTarMember {
             member: &parsed.members[entry.member_index],
@@ -438,21 +696,83 @@ where
     parsed.into_inspection()
 }
 
-/// Visit regular ZIP members using a single bounded, temporary payload buffer.
+/// Visit regular ZIP members using bounded, temporary payload storage.
 ///
 /// Unlike TAR, ZIP members are compressed and cannot borrow the source
 /// allocation. This function validates the entire central directory before
-/// allocating a payload, then reuses one exact-size buffer for one regular
-/// file at a time. A visitor returning `false` stops dispatch and yields a
+/// allocating a payload, then allocates one exact-layout boxed slice for each
+/// admitted regular file. A visitor returning `false` stops dispatch and yields a
 /// truthful inventory-only result. This function never opens a path, writes a
 /// member, or invokes a parser.
 pub fn visit_zip_members<F>(
     bytes: &[u8],
     recursion_depth: u16,
     limits: ContainerLimits,
+    visitor: F,
+) -> ContainerInspection
+where
+    F: for<'member, 'payload> FnMut(DispatchableZipMember<'member, 'payload>) -> bool,
+{
+    visit_zip_members_bounded(
+        bytes,
+        recursion_depth,
+        limits,
+        || false,
+        |_| CompressedMemberAdmission::Dispatch(()),
+        visitor,
+    )
+}
+
+/// Visit ZIP members through caller-owned scratch admission and cancellation.
+///
+/// The central directory and every member's path, type, compression, declared
+/// size, and expansion ratio are validated before `admit` is called. A
+/// [`CompressedMemberAdmission::Dispatch`] permit is acquired before a decoder
+/// or output allocation exists and remains live through the child visitor.
+/// Cancellation is polled before every member and before every bounded decoder
+/// read. Skipped members are never opened or decompressed.
+pub fn visit_zip_members_bounded<Permit, Cancellation, Admission, F>(
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: Cancellation,
+    admit: Admission,
+    visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    F: for<'member, 'payload> FnMut(DispatchableZipMember<'member, 'payload>) -> bool,
+{
+    visit_zip_members_bounded_with_encounter(
+        bytes,
+        recursion_depth,
+        limits,
+        is_cancelled,
+        |_| true,
+        admit,
+        visitor,
+    )
+}
+
+/// Visit ZIP members with aggregate admission for every directory and file.
+///
+/// `encounter` is evaluated for the complete, path-sorted metadata inventory
+/// before any decoder is opened. A recursive caller can therefore stop a tree
+/// at one deterministic aggregate member limit without inflating a child.
+pub fn visit_zip_members_bounded_with_encounter<Permit, Cancellation, Encounter, Admission, F>(
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    mut is_cancelled: Cancellation,
+    mut encounter: Encounter,
+    mut admit: Admission,
     mut visitor: F,
 ) -> ContainerInspection
 where
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
     F: for<'member, 'payload> FnMut(DispatchableZipMember<'member, 'payload>) -> bool,
 {
     if !limits.valid() {
@@ -469,120 +789,345 @@ where
         Ok(validated) => validated,
         Err(inspection) => return inspection,
     };
+    for index in validated.dispatch_order.iter().copied() {
+        if is_cancelled() {
+            return ContainerInspection {
+                kind: ArchiveKind::Zip,
+                status: InspectionStatus::InventoryOnly,
+                members: validated.members,
+                decompressed_bytes: 0,
+                diagnostics: vec![InspectionDiagnostic::Cancelled],
+            };
+        }
+        if !encounter(&validated.members[index]) {
+            return ContainerInspection {
+                kind: ArchiveKind::Zip,
+                status: InspectionStatus::InventoryOnly,
+                members: validated.members,
+                decompressed_bytes: 0,
+                diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+            };
+        }
+    }
     if recursion_depth == limits.max_recursion_depth
         && validated
             .members
             .iter()
             .any(|member| member.kind != ContainerMemberKind::Directory)
     {
-        return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::RecursionLimit);
+        return ContainerInspection {
+            kind: ArchiveKind::Zip,
+            status: InspectionStatus::InventoryOnly,
+            members: validated.members,
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::RecursionLimit],
+        };
     }
 
     let mut actual_total = 0_u64;
-    let mut payload = Vec::new();
+    let mut skipped = false;
     for index in validated.dispatch_order.iter().copied() {
         let member_metadata = &validated.members[index];
-        if member_metadata.kind == ContainerMemberKind::Directory {
-            continue;
-        }
-        let mut member = match validated.archive.by_index(index) {
-            Ok(member) => member,
-            Err(_) => {
-                return inventory_only_zip(
-                    validated.members,
-                    InspectionDiagnostic::UnsupportedCompression,
-                )
-            }
-        };
-        let declared = member_metadata.declared_uncompressed_bytes;
-        let payload_len = match usize::try_from(declared) {
-            Ok(length) => length,
-            Err(_) => {
-                return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::MemberSizeLimit)
-            }
-        };
-        payload.clear();
-        if payload.try_reserve_exact(payload_len).is_err() {
-            return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::MemberSizeLimit);
-        }
-        payload.resize(payload_len, 0);
-        if member.read_exact(&mut payload).is_err() {
-            return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::DecompressionFailed);
-        }
-        let mut trailing = [0_u8; 1];
-        match member.read(&mut trailing) {
-            Ok(0) => {}
-            Ok(_) => {
-                return rejected_container(
-                    ArchiveKind::Zip,
-                    InspectionDiagnostic::DeclaredSizeMismatch,
-                )
-            }
-            Err(_) => {
-                return rejected_container(
-                    ArchiveKind::Zip,
-                    InspectionDiagnostic::DecompressionFailed,
-                )
-            }
-        }
-        actual_total = match actual_total.checked_add(declared) {
-            Some(total) if total <= limits.max_total_uncompressed_bytes => total,
-            _ => return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::TotalSizeLimit),
-        };
-        if !visitor(DispatchableZipMember {
-            member: member_metadata,
-            bytes: &payload,
-        }) {
+        if is_cancelled() {
             return ContainerInspection {
                 kind: ArchiveKind::Zip,
                 status: InspectionStatus::InventoryOnly,
                 members: validated.members,
                 decompressed_bytes: actual_total,
-                diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+                diagnostics: vec![InspectionDiagnostic::Cancelled],
             };
+        }
+        if member_metadata.kind == ContainerMemberKind::Directory {
+            continue;
+        }
+        let outcome = visit_admitted_compressed_member(
+            member_metadata,
+            limits,
+            &mut is_cancelled,
+            &mut admit,
+            || {
+                validated
+                    .archive
+                    .by_index(index)
+                    .map_err(|_| InspectionDiagnostic::DecompressionFailed)
+            },
+            |_| Ok(()),
+            |payload| {
+                visitor(DispatchableZipMember {
+                    member: member_metadata,
+                    bytes: payload,
+                })
+            },
+        );
+        match outcome {
+            CompressedMemberVisitOutcome::Dispatched {
+                decoded_bytes,
+                continue_visiting,
+            } => {
+                actual_total = match actual_total.checked_add(decoded_bytes) {
+                    Some(total) if total <= limits.max_total_uncompressed_bytes => total,
+                    _ => {
+                        return rejected_container(
+                            ArchiveKind::Zip,
+                            InspectionDiagnostic::TotalSizeLimit,
+                        )
+                    }
+                };
+                if !continue_visiting {
+                    return ContainerInspection {
+                        kind: ArchiveKind::Zip,
+                        status: InspectionStatus::InventoryOnly,
+                        members: validated.members,
+                        decompressed_bytes: actual_total,
+                        diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+                    };
+                }
+            }
+            CompressedMemberVisitOutcome::Skipped => skipped = true,
+            CompressedMemberVisitOutcome::Stopped => {
+                return ContainerInspection {
+                    kind: ArchiveKind::Zip,
+                    status: InspectionStatus::InventoryOnly,
+                    members: validated.members,
+                    decompressed_bytes: actual_total,
+                    diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+                }
+            }
+            CompressedMemberVisitOutcome::Cancelled => {
+                return ContainerInspection {
+                    kind: ArchiveKind::Zip,
+                    status: InspectionStatus::InventoryOnly,
+                    members: validated.members,
+                    decompressed_bytes: actual_total,
+                    diagnostics: vec![InspectionDiagnostic::Cancelled],
+                }
+            }
+            CompressedMemberVisitOutcome::Rejected(diagnostic) => {
+                return rejected_container(ArchiveKind::Zip, diagnostic)
+            }
         }
     }
     ContainerInspection {
         kind: ArchiveKind::Zip,
+        // A caller-directed skip is a safe, deliberate dispatch policy. It
+        // must not suppress semantics already produced by admitted siblings.
         status: InspectionStatus::Parsed,
         members: validated.members,
         decompressed_bytes: actual_total,
-        diagnostics: Vec::new(),
+        diagnostics: if skipped {
+            vec![InspectionDiagnostic::MemberDispatchSkipped]
+        } else {
+            Vec::new()
+        },
     }
 }
 
-/// Inspect ZIP central-directory metadata without allocating or decoding a
-/// member payload.
+/// Visit one safe GZIP stream with an unmetered compatibility permit.
 ///
-/// Isolated extraction uses this boundary because compressed child bytes
-/// cannot borrow the runtime-owned source allocation. The resulting member
-/// list is truthful, deterministic inventory; semantic child dispatch is
-/// deliberately unavailable until it has a separately accounted streaming
-/// hand-off.
-pub(crate) fn inspect_zip_inventory_bytes(
+/// New isolated callers should use [`visit_gzip_member_bounded`] so decoded
+/// scratch is charged before allocation.
+pub fn visit_gzip_member<F>(
+    source_name: &str,
     bytes: &[u8],
     recursion_depth: u16,
     limits: ContainerLimits,
-) -> ContainerInspection {
+    visitor: F,
+) -> ContainerInspection
+where
+    F: for<'member, 'payload> FnMut(DispatchableGzipMember<'member, 'payload>) -> bool,
+{
+    visit_gzip_member_bounded(
+        source_name,
+        bytes,
+        recursion_depth,
+        limits,
+        || false,
+        |_| CompressedMemberAdmission::Dispatch(()),
+        visitor,
+    )
+}
+
+/// Decode and visit one GZIP member under caller-owned scratch admission.
+///
+/// The optional FNAME is normalized with the same traversal and reserved
+/// namespace policy as ZIP/TAR. Without FNAME, `.tgz` maps to a `.tar` child
+/// and `.gz` strips one suffix, retaining an extension such as `.tar` or
+/// `.json` for byte-only child dispatch. `.svgz` is deliberately inspected but
+/// never handed to this generic archive visitor; its semantic media path is
+/// owned by [`inspect_bytes`]. Concatenated members and trailing bytes are
+/// rejected after exact-size decoding.
+pub fn visit_gzip_member_bounded<Permit, Cancellation, Admission, F>(
+    source_name: &str,
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: Cancellation,
+    admit: Admission,
+    visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    F: for<'member, 'payload> FnMut(DispatchableGzipMember<'member, 'payload>) -> bool,
+{
+    visit_gzip_member_bounded_with_encounter(
+        source_name,
+        bytes,
+        recursion_depth,
+        limits,
+        is_cancelled,
+        |_| true,
+        admit,
+        visitor,
+    )
+}
+
+/// Visit one GZIP member with aggregate tree-member admission.
+#[allow(clippy::too_many_arguments)]
+pub fn visit_gzip_member_bounded_with_encounter<Permit, Cancellation, Encounter, Admission, F>(
+    source_name: &str,
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    mut is_cancelled: Cancellation,
+    mut encounter: Encounter,
+    mut admit: Admission,
+    mut visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    F: for<'member, 'payload> FnMut(DispatchableGzipMember<'member, 'payload>) -> bool,
+{
     if !limits.valid() {
-        return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::InvalidLimits);
+        return rejected_container(ArchiveKind::Gzip, InspectionDiagnostic::InvalidLimits);
     }
     if recursion_depth > limits.max_recursion_depth {
-        return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::RecursionLimit);
+        return rejected_container(ArchiveKind::Gzip, InspectionDiagnostic::RecursionLimit);
     }
     if bytes.len() > limits.max_input_bytes {
-        return rejected_container(ArchiveKind::Zip, InspectionDiagnostic::InputTooLarge);
+        return rejected_container(ArchiveKind::Gzip, InspectionDiagnostic::InputTooLarge);
     }
-    let validated = match validated_zip(bytes, limits) {
-        Ok(validated) => validated,
-        Err(inspection) => return inspection,
+    if is_svgz_name(source_name) {
+        return inspect_gzip(bytes, limits);
+    }
+    let header_name = match gzip_header_name(bytes, limits.max_member_name_bytes) {
+        Ok(name) => name,
+        Err(diagnostic) => return rejected_container(ArchiveKind::Gzip, diagnostic),
     };
-    ContainerInspection {
-        kind: ArchiveKind::Zip,
-        status: InspectionStatus::InventoryOnly,
-        members: validated.members,
-        decompressed_bytes: 0,
-        diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+    let declared = match gzip_declared_size(bytes) {
+        Ok(size) => size,
+        Err(diagnostic) => return rejected_container(ArchiveKind::Gzip, diagnostic),
+    };
+    if declared > limits.max_member_uncompressed_bytes {
+        return rejected_container(ArchiveKind::Gzip, InspectionDiagnostic::MemberSizeLimit);
+    }
+    if declared > limits.max_total_uncompressed_bytes {
+        return rejected_container(ArchiveKind::Gzip, InspectionDiagnostic::TotalSizeLimit);
+    }
+    if compression_ratio_exceeded(declared, bytes.len() as u64, limits.max_compression_ratio) {
+        return rejected_container(
+            ArchiveKind::Gzip,
+            InspectionDiagnostic::CompressionRatioLimit,
+        );
+    }
+    let path = match header_name
+        .or_else(|| inferred_gzip_member_path(source_name, limits.max_member_name_bytes))
+    {
+        Some(path) => path,
+        None => "gzip-stream".to_owned(),
+    };
+    let member = ContainerMember {
+        kind: classify_member(&path, false),
+        path,
+        compressed_bytes: bytes.len() as u64,
+        declared_uncompressed_bytes: declared,
+    };
+    if !encounter(&member) {
+        return ContainerInspection {
+            kind: ArchiveKind::Gzip,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+        };
+    }
+    if recursion_depth == limits.max_recursion_depth {
+        return ContainerInspection {
+            kind: ArchiveKind::Gzip,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::RecursionLimit],
+        };
+    }
+
+    let outcome = visit_admitted_compressed_member(
+        &member,
+        limits,
+        &mut is_cancelled,
+        &mut admit,
+        || Ok(GzDecoder::new(bytes)),
+        |decoder| {
+            let trailing = decoder.into_inner();
+            if trailing.is_empty() {
+                Ok(())
+            } else if looks_like_gzip(trailing) {
+                Err(InspectionDiagnostic::GzipMultipleMembers)
+            } else {
+                Err(InspectionDiagnostic::GzipTrailingBytes)
+            }
+        },
+        |payload| {
+            visitor(DispatchableGzipMember {
+                member: &member,
+                bytes: payload,
+            })
+        },
+    );
+    match outcome {
+        CompressedMemberVisitOutcome::Dispatched {
+            decoded_bytes,
+            continue_visiting,
+        } if continue_visiting => ContainerInspection {
+            kind: ArchiveKind::Gzip,
+            status: InspectionStatus::Parsed,
+            members: vec![member],
+            decompressed_bytes: decoded_bytes,
+            diagnostics: Vec::new(),
+        },
+        CompressedMemberVisitOutcome::Dispatched { decoded_bytes, .. } => ContainerInspection {
+            kind: ArchiveKind::Gzip,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: decoded_bytes,
+            diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+        },
+        CompressedMemberVisitOutcome::Skipped => ContainerInspection {
+            kind: ArchiveKind::Gzip,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::MemberDispatchSkipped],
+        },
+        CompressedMemberVisitOutcome::Stopped => ContainerInspection {
+            kind: ArchiveKind::Gzip,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+        },
+        CompressedMemberVisitOutcome::Cancelled => ContainerInspection {
+            kind: ArchiveKind::Gzip,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::Cancelled],
+        },
+        CompressedMemberVisitOutcome::Rejected(diagnostic) => {
+            rejected_container(ArchiveKind::Gzip, diagnostic)
+        }
     }
 }
 
@@ -620,6 +1165,20 @@ fn rejected_container(kind: ArchiveKind, diagnostic: InspectionDiagnostic) -> Co
     }
 }
 
+fn cancelled_container(
+    kind: ArchiveKind,
+    members: Vec<ContainerMember>,
+    decompressed_bytes: u64,
+) -> ContainerInspection {
+    ContainerInspection {
+        kind,
+        status: InspectionStatus::InventoryOnly,
+        members,
+        decompressed_bytes,
+        diagnostics: vec![InspectionDiagnostic::Cancelled],
+    }
+}
+
 fn unsupported_archive(kind: ArchiveKind) -> ContainerInspection {
     ContainerInspection {
         kind,
@@ -654,7 +1213,7 @@ impl ParsedTar<'_> {
 }
 
 fn inspect_tar(bytes: &[u8], limits: ContainerLimits) -> ContainerInspection {
-    match parse_tar(bytes, limits) {
+    match parse_tar(bytes, limits, &mut || false) {
         Ok(parsed) => parsed.into_inspection(),
         Err(diagnostic) => rejected_container(ArchiveKind::Tar, diagnostic),
     }
@@ -666,10 +1225,14 @@ fn inspect_tar(bytes: &[u8], limits: ContainerLimits) -> ContainerInspection {
 /// entries. PAX, GNU long-name, sparse, link, and device forms need additional
 /// semantics before they can safely participate in recursive dispatch, so they
 /// stop at truthful inventory rather than guessing a pathname or target.
-fn parse_tar<'a>(
+fn parse_tar<'a, Cancellation>(
     bytes: &'a [u8],
     limits: ContainerLimits,
-) -> Result<ParsedTar<'a>, InspectionDiagnostic> {
+    is_cancelled: &mut Cancellation,
+) -> Result<ParsedTar<'a>, InspectionDiagnostic>
+where
+    Cancellation: FnMut() -> bool,
+{
     const TAR_BLOCK_BYTES: usize = 512;
     if bytes.is_empty() {
         return Err(InspectionDiagnostic::TarTruncated);
@@ -682,6 +1245,9 @@ fn parse_tar<'a>(
     let mut total = 0_u64;
 
     while offset < bytes.len() {
+        if is_cancelled() {
+            return Err(InspectionDiagnostic::Cancelled);
+        }
         let header_end = offset
             .checked_add(TAR_BLOCK_BYTES)
             .ok_or(InspectionDiagnostic::TarTruncated)?;
@@ -689,8 +1255,13 @@ fn parse_tar<'a>(
             .get(offset..header_end)
             .ok_or(InspectionDiagnostic::TarTruncated)?;
         if header.iter().all(|byte| *byte == 0) {
-            if bytes[header_end..].iter().any(|byte| *byte != 0) {
-                return Err(InspectionDiagnostic::TarHeaderInvalid);
+            for block in bytes[header_end..].chunks(TAR_BLOCK_BYTES) {
+                if is_cancelled() {
+                    return Err(InspectionDiagnostic::Cancelled);
+                }
+                if block.iter().any(|byte| *byte != 0) {
+                    return Err(InspectionDiagnostic::TarHeaderInvalid);
+                }
             }
             return Ok(ParsedTar {
                 members,
@@ -1220,6 +1791,39 @@ struct ValidatedZip<'a> {
     dispatch_order: Vec<usize>,
 }
 
+fn zip_compression_is_supported(method: zip::CompressionMethod) -> bool {
+    method == zip::CompressionMethod::STORE || method == zip::CompressionMethod::DEFLATE
+}
+
+fn zip_nonregular_entry(
+    is_directory: bool,
+    is_symlink: bool,
+    unix_mode: Option<u32>,
+    declared_size: u64,
+) -> Option<InspectionDiagnostic> {
+    if is_symlink {
+        return Some(InspectionDiagnostic::SymlinkMember);
+    }
+    // ZIP creators may omit Unix type bits. When they are present, require the
+    // pathname spelling and file type to agree and reject devices, sockets,
+    // FIFOs, and other link-like entries before a decoder can be constructed.
+    const UNIX_FILE_TYPE_MASK: u32 = 0o170_000;
+    const UNIX_DIRECTORY: u32 = 0o040_000;
+    const UNIX_REGULAR_FILE: u32 = 0o100_000;
+    if let Some(mode) = unix_mode {
+        let file_type = mode & UNIX_FILE_TYPE_MASK;
+        let expected = if is_directory {
+            UNIX_DIRECTORY
+        } else {
+            UNIX_REGULAR_FILE
+        };
+        if file_type != 0 && file_type != expected {
+            return Some(InspectionDiagnostic::NonRegularMember);
+        }
+    }
+    (is_directory && declared_size != 0).then_some(InspectionDiagnostic::NonRegularMember)
+}
+
 /// Open and validate ZIP metadata before any member payload allocation.
 ///
 /// Invalid, encrypted, symlink, or unsupported-compression entries never
@@ -1251,6 +1855,7 @@ fn validated_zip<'a>(
 
     let mut members = Vec::with_capacity(archive.len());
     let mut seen_paths = BTreeSet::new();
+    let mut unsafe_entries = Vec::new();
     let mut declared_total = 0_u64;
     let mut compressed_total = 0_u64;
     for index in 0..archive.len() {
@@ -1281,21 +1886,25 @@ fn validated_zip<'a>(
                 InspectionDiagnostic::InvalidMemberName,
             ));
         };
-        if member.encrypted() {
-            return Err(inventory_only_zip(
-                members,
-                InspectionDiagnostic::EncryptedMember,
-            ));
-        }
-        if member.is_symlink() {
-            return Err(inventory_only_zip(
-                members,
-                InspectionDiagnostic::SymlinkMember,
-            ));
-        }
-
         let declared = member.size();
         let compressed = member.compressed_size();
+        let unsafe_diagnostic = if member.encrypted() {
+            Some(InspectionDiagnostic::EncryptedMember)
+        } else if let Some(diagnostic) = zip_nonregular_entry(
+            member.is_dir(),
+            member.is_symlink(),
+            member.unix_mode(),
+            declared,
+        ) {
+            Some(diagnostic)
+        } else if !zip_compression_is_supported(member.compression()) {
+            Some(InspectionDiagnostic::UnsupportedCompression)
+        } else {
+            None
+        };
+        if let Some(diagnostic) = unsafe_diagnostic {
+            unsafe_entries.push((path.clone(), diagnostic));
+        }
         if declared > limits.max_member_uncompressed_bytes {
             return Err(rejected_container(
                 ArchiveKind::Zip,
@@ -1333,6 +1942,10 @@ fn validated_zip<'a>(
             declared_uncompressed_bytes: declared,
         });
     }
+    if !unsafe_entries.is_empty() {
+        unsafe_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        return Err(rejected_container(ArchiveKind::Zip, unsafe_entries[0].1));
+    }
     if compression_ratio_exceeded(
         declared_total,
         compressed_total,
@@ -1366,9 +1979,9 @@ fn inspect_zip(bytes: &[u8], limits: ContainerLimits) -> ContainerInspection {
         let mut member = match validated.archive.by_index(index) {
             Ok(member) => member,
             Err(_) => {
-                return inventory_only_zip(
-                    validated.members,
-                    InspectionDiagnostic::UnsupportedCompression,
+                return rejected_container(
+                    ArchiveKind::Zip,
+                    InspectionDiagnostic::DecompressionFailed,
                 )
             }
         };
@@ -1418,19 +2031,6 @@ fn inspect_zip(bytes: &[u8], limits: ContainerLimits) -> ContainerInspection {
         members: validated.members,
         decompressed_bytes: actual_total,
         diagnostics: Vec::new(),
-    }
-}
-
-fn inventory_only_zip(
-    members: Vec<ContainerMember>,
-    diagnostic: InspectionDiagnostic,
-) -> ContainerInspection {
-    ContainerInspection {
-        kind: ArchiveKind::Zip,
-        status: InspectionStatus::InventoryOnly,
-        members,
-        decompressed_bytes: 0,
-        diagnostics: vec![diagnostic],
     }
 }
 
@@ -1615,19 +2215,27 @@ fn normalized_member_path(name: &str, max_bytes: usize) -> Option<String> {
         return None;
     }
     let mut normalized = String::with_capacity(name.len());
-    for component in name.replace('\\', "/").split('/') {
-        if component.is_empty() {
+    let slash_normalized = name.replace('\\', "/");
+    for raw_component in slash_normalized.split('/') {
+        if raw_component.is_empty() {
             continue;
         }
-        if matches!(component, "." | "..") || component.ends_with(':') {
+        let component = raw_component.nfc().collect::<String>();
+        if matches!(component.as_str(), "." | "..") || component.contains(':') {
             return None;
         }
         if !normalized.is_empty() {
             normalized.push('/');
         }
-        normalized.push_str(component);
+        normalized.push_str(&component);
     }
-    (!normalized.is_empty() && normalized.len() <= max_bytes).then_some(normalized)
+    (!normalized.is_empty()
+        && normalized.len() <= max_bytes
+        // `!/` is the canonical virtual-container boundary. Accepting the
+        // same spelling inside one member would let a flat archive path
+        // collide with a genuinely nested provenance path.
+        && !normalized.contains("!/"))
+    .then_some(normalized)
 }
 
 fn classify_member(path: &str, is_directory: bool) -> ContainerMemberKind {
@@ -1708,6 +2316,34 @@ fn inspect_gzip(bytes: &[u8], limits: ContainerLimits) -> ContainerInspection {
         decompressed_bytes: decompressed,
         diagnostics: Vec::new(),
     }
+}
+
+fn gzip_declared_size(bytes: &[u8]) -> Result<u64, InspectionDiagnostic> {
+    // A minimal GZIP stream has a ten-byte header and an eight-byte trailer.
+    // ISIZE is modulo 2^32, but every admitted member is capped well below
+    // that range. Exact-size decoding below rejects a forged wrapped value
+    // before allocating or reading one byte beyond the admitted buffer.
+    if bytes.len() < 18 {
+        return Err(InspectionDiagnostic::GzipHeaderInvalid);
+    }
+    read_u32_le(bytes, bytes.len() - 4)
+        .map(u64::from)
+        .ok_or(InspectionDiagnostic::GzipHeaderInvalid)
+}
+
+fn inferred_gzip_member_path(source_name: &str, maximum_name_bytes: usize) -> Option<String> {
+    let normalized_source = source_name.replace('\\', "/");
+    let name = normalized_source.rsplit('/').next()?;
+    let lower = name.to_ascii_lowercase();
+    let inferred = if lower.ends_with(".tgz") {
+        let stem = name.get(..name.len().checked_sub(4)?)?;
+        (!stem.is_empty()).then(|| format!("{stem}.tar"))?
+    } else if lower.ends_with(".gz") {
+        name.get(..name.len().checked_sub(3)?)?.to_owned()
+    } else {
+        return None;
+    };
+    normalized_member_path(&inferred, maximum_name_bytes)
 }
 
 fn gzip_header_name(
@@ -1840,6 +2476,22 @@ fn inspect_svg(bytes: &[u8], limits: ContainerLimits) -> MediaInspection {
 }
 
 fn inspect_svgz(bytes: &[u8], recursion_depth: u16, limits: ContainerLimits) -> MediaInspection {
+    inspect_svgz_bounded(bytes, recursion_depth, limits, || false, |_| Some(()))
+}
+
+/// Decode and inspect SVGZ while a caller-owned aggregate scratch permit is
+/// held across allocation, decompression, XML preflight, and SVG parsing.
+pub fn inspect_svgz_bounded<Permit, Cancellation, Admission>(
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    mut is_cancelled: Cancellation,
+    mut admit_scratch: Admission,
+) -> MediaInspection
+where
+    Cancellation: FnMut() -> bool,
+    Admission: FnMut(usize) -> Option<Permit>,
+{
     if !limits.valid() {
         return rejected_media(MediaKind::Svgz, InspectionDiagnostic::InvalidLimits);
     }
@@ -1852,25 +2504,78 @@ fn inspect_svgz(bytes: &[u8], recursion_depth: u16, limits: ContainerLimits) -> 
     if let Err(diagnostic) = gzip_header_name(bytes, limits.max_member_name_bytes) {
         return rejected_media(MediaKind::Svgz, diagnostic);
     }
-    // SVGZ needs a contiguous XML slice for the preflight scanner.  This is
-    // the one bounded output allocation; capacity is fixed at the configured
-    // SVG ceiling and the decoder appends directly into it without copies.
-    let mut decoded = Vec::with_capacity(limits.max_svg_bytes);
-    if let Err(diagnostic) = consume_single_gzip(bytes, limits, Some(&mut decoded)) {
-        return rejected_media(MediaKind::Svgz, diagnostic);
+    let declared = match gzip_declared_size(bytes) {
+        Ok(declared) => declared,
+        Err(diagnostic) => return rejected_media(MediaKind::Svgz, diagnostic),
+    };
+    if declared > limits.max_svg_bytes as u64 {
+        return rejected_media(MediaKind::Svgz, InspectionDiagnostic::InputTooLarge);
     }
-    if let Err(diagnostic) = preflight_svg_tokens(&decoded, limits.max_svg_event_bytes) {
-        return rejected_media(MediaKind::Svgz, diagnostic);
+    if compression_ratio_exceeded(declared, bytes.len() as u64, limits.max_compression_ratio) {
+        return rejected_media(MediaKind::Svgz, InspectionDiagnostic::CompressionRatioLimit);
     }
-    match parse_svg(Reader::from_reader(decoded.as_slice()), limits) {
-        Ok(svg) => MediaInspection {
-            kind: MediaKind::Svgz,
-            status: InspectionStatus::Parsed,
-            metadata: None,
-            svg: Some(svg),
-            diagnostics: Vec::new(),
+    let payload_len = match usize::try_from(declared) {
+        Ok(length) => length,
+        Err(_) => return rejected_media(MediaKind::Svgz, InspectionDiagnostic::InputTooLarge),
+    };
+    let member = ContainerMember {
+        path: "svgz-stream.svg".into(),
+        kind: ContainerMemberKind::Svg,
+        compressed_bytes: bytes.len() as u64,
+        declared_uncompressed_bytes: declared,
+    };
+    let mut parsed = None;
+    let outcome = visit_admitted_compressed_member(
+        &member,
+        limits,
+        &mut is_cancelled,
+        &mut |_| match admit_scratch(payload_len) {
+            Some(permit) => CompressedMemberAdmission::Dispatch(permit),
+            None => CompressedMemberAdmission::Stop,
         },
-        Err(diagnostic) => rejected_media(MediaKind::Svgz, diagnostic),
+        || Ok(GzDecoder::new(bytes)),
+        |decoder| {
+            let trailing = decoder.into_inner();
+            if trailing.is_empty() {
+                Ok(())
+            } else if looks_like_gzip(trailing) {
+                Err(InspectionDiagnostic::GzipMultipleMembers)
+            } else {
+                Err(InspectionDiagnostic::GzipTrailingBytes)
+            }
+        },
+        |payload| {
+            parsed = Some(inspect_svg(payload, limits));
+            true
+        },
+    );
+    match outcome {
+        CompressedMemberVisitOutcome::Dispatched { .. } => {
+            let mut inspection = parsed.unwrap_or_else(|| {
+                rejected_media(MediaKind::Svgz, InspectionDiagnostic::InvalidSvg)
+            });
+            inspection.kind = MediaKind::Svgz;
+            inspection
+        }
+        CompressedMemberVisitOutcome::Stopped | CompressedMemberVisitOutcome::Skipped => {
+            MediaInspection {
+                kind: MediaKind::Svgz,
+                status: InspectionStatus::InventoryOnly,
+                metadata: None,
+                svg: None,
+                diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+            }
+        }
+        CompressedMemberVisitOutcome::Cancelled => MediaInspection {
+            kind: MediaKind::Svgz,
+            status: InspectionStatus::InventoryOnly,
+            metadata: None,
+            svg: None,
+            diagnostics: vec![InspectionDiagnostic::Cancelled],
+        },
+        CompressedMemberVisitOutcome::Rejected(diagnostic) => {
+            rejected_media(MediaKind::Svgz, diagnostic)
+        }
     }
 }
 
@@ -2287,14 +2992,18 @@ fn parse_bmff(bytes: &[u8]) -> Option<ImageMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::{write::GzEncoder, Compression};
-    use std::io::Write;
+    use flate2::{write::GzEncoder, Compression, GzBuilder};
+    use std::{cell::Cell, io::Write, rc::Rc};
     use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
     fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        zip_bytes_with_method(entries, CompressionMethod::Deflated)
+    }
+
+    fn zip_bytes_with_method(entries: &[(&str, &[u8])], compression: CompressionMethod) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut writer = ZipWriter::new(cursor);
-        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let options = SimpleFileOptions::default().compression_method(compression);
         for (name, value) in entries {
             writer.start_file(*name, options).unwrap();
             writer.write_all(value).unwrap();
@@ -2306,6 +3015,47 @@ mod tests {
         let mut writer = GzEncoder::new(Vec::new(), Compression::default());
         writer.write_all(value).unwrap();
         writer.finish().unwrap()
+    }
+
+    fn named_gzip_bytes(name: &str, value: &[u8]) -> Vec<u8> {
+        let mut writer = GzBuilder::new()
+            .filename(name)
+            .write(Vec::new(), Compression::default());
+        writer.write_all(value).unwrap();
+        writer.finish().unwrap()
+    }
+
+    fn patch_single_zip_central_u32(bytes: &mut [u8], relative: usize, value: u32) {
+        let central = single_zip_central_offset(bytes);
+        bytes[central + relative..central + relative + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn patch_single_zip_central_u16(bytes: &mut [u8], relative: usize, value: u16) {
+        let central = single_zip_central_offset(bytes);
+        bytes[central + relative..central + relative + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn single_zip_central_offset(bytes: &[u8]) -> usize {
+        bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .expect("central-directory signature")
+    }
+
+    fn corrupt_first_stored_zip_payload(bytes: &mut [u8]) {
+        assert_eq!(bytes.get(..4), Some(b"PK\x03\x04".as_slice()));
+        let name_length = usize::from(read_u16_le(bytes, 26).expect("local name length"));
+        let extra_length = usize::from(read_u16_le(bytes, 28).expect("local extra length"));
+        let payload_offset = 30 + name_length + extra_length;
+        bytes[payload_offset] ^= 0xff;
+    }
+
+    struct TrackingPermit(Rc<Cell<bool>>);
+
+    impl Drop for TrackingPermit {
+        fn drop(&mut self) {
+            assert!(self.0.replace(false), "permit must be live before drop");
+        }
     }
 
     fn tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -2505,6 +3255,198 @@ mod tests {
     }
 
     #[test]
+    fn bounded_zip_holds_permit_through_decode_and_polls_each_read_chunk() {
+        let payload = (0..(READ_BUFFER_BYTES * 2 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let bytes = zip_bytes_with_method(&[("large.bin", &payload)], CompressionMethod::Stored);
+        let permit_active = Rc::new(Cell::new(false));
+        let admitted_active = Rc::clone(&permit_active);
+        let visited_active = Rc::clone(&permit_active);
+        let mut cancellation_polls = 0_usize;
+        let inspected = visit_zip_members_bounded(
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || {
+                cancellation_polls += 1;
+                false
+            },
+            |_| {
+                assert!(!admitted_active.replace(true));
+                CompressedMemberAdmission::Dispatch(TrackingPermit(Rc::clone(&admitted_active)))
+            },
+            |child| {
+                assert!(visited_active.get(), "permit must cover the visitor");
+                assert_eq!(child.bytes, payload);
+                true
+            },
+        );
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+        assert!(
+            !permit_active.get(),
+            "permit must be dropped after dispatch"
+        );
+        assert!(
+            cancellation_polls >= 7,
+            "member, admission, chunks, and visitor boundary are cancellable"
+        );
+
+        let permit_active = Rc::new(Cell::new(false));
+        let admitted_active = Rc::clone(&permit_active);
+        let mut cancellation_polls = 0_usize;
+        let cancelled = visit_zip_members_bounded(
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || {
+                cancellation_polls += 1;
+                cancellation_polls >= 5
+            },
+            |_| {
+                assert!(!admitted_active.replace(true));
+                CompressedMemberAdmission::Dispatch(TrackingPermit(Rc::clone(&admitted_active)))
+            },
+            |_| panic!("cancellation during chunked decode must prevent dispatch"),
+        );
+        assert_eq!(cancelled.status, InspectionStatus::InventoryOnly);
+        assert_eq!(cancelled.diagnostics, vec![InspectionDiagnostic::Cancelled]);
+        assert!(!permit_active.get(), "cancellation must release the permit");
+    }
+
+    #[test]
+    fn zip_skip_and_stop_leave_unadmitted_payloads_inert() {
+        let mut bytes = zip_bytes_with_method(
+            &[
+                ("a-sensitive.txt", b"do not decode"),
+                ("b-safe.txt", b"safe"),
+            ],
+            CompressionMethod::Stored,
+        );
+        corrupt_first_stored_zip_payload(&mut bytes);
+
+        let mut dispatched = Vec::new();
+        let skipped = visit_zip_members_bounded(
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |member| {
+                if member.path == "a-sensitive.txt" {
+                    CompressedMemberAdmission::Skip
+                } else {
+                    CompressedMemberAdmission::Dispatch(())
+                }
+            },
+            |child| {
+                dispatched.push((child.member.path.clone(), child.bytes.to_vec()));
+                true
+            },
+        );
+        assert_eq!(skipped.status, InspectionStatus::Parsed);
+        assert_eq!(
+            skipped.diagnostics,
+            vec![InspectionDiagnostic::MemberDispatchSkipped]
+        );
+        assert_eq!(dispatched, vec![("b-safe.txt".into(), b"safe".to_vec())]);
+
+        let stopped = visit_zip_members_bounded(
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| CompressedMemberAdmission::<()>::Stop,
+            |_| panic!("a stopped member must not be decoded or dispatched"),
+        );
+        assert_eq!(stopped.status, InspectionStatus::InventoryOnly);
+        assert_eq!(
+            stopped.diagnostics,
+            vec![InspectionDiagnostic::NestedDispatchStopped]
+        );
+
+        let opened = visit_zip_members(&bytes, 0, ContainerLimits::default(), |_| true);
+        assert_eq!(opened.status, InspectionStatus::Rejected);
+        assert_eq!(
+            opened.diagnostics,
+            vec![InspectionDiagnostic::DecompressionFailed]
+        );
+    }
+
+    #[test]
+    fn zip_member_names_are_canonical_and_reserve_virtual_boundaries() {
+        for invalid in ["flat!/nested.dot", "folder/drive:name.txt"] {
+            let rejected = visit_zip_members(
+                &zip_bytes(&[(invalid, b"inert")]),
+                0,
+                ContainerLimits::default(),
+                |_| panic!("an invalid member name must never dispatch"),
+            );
+            assert_eq!(rejected.status, InspectionStatus::Rejected);
+            assert_eq!(
+                rejected.diagnostics,
+                vec![InspectionDiagnostic::InvalidMemberName]
+            );
+        }
+
+        let canonical_duplicate = zip_bytes(&[
+            ("caf\u{e9}.txt", b"precomposed"),
+            ("cafe\u{301}.txt", b"decomposed"),
+        ]);
+        let rejected =
+            visit_zip_members(&canonical_duplicate, 0, ContainerLimits::default(), |_| {
+                panic!("canonically equivalent paths must fail before dispatch")
+            });
+        assert_eq!(rejected.status, InspectionStatus::Rejected);
+        assert_eq!(
+            rejected.diagnostics,
+            vec![InspectionDiagnostic::InvalidMemberName]
+        );
+    }
+
+    #[test]
+    fn zip_unsafe_entry_types_fail_closed_before_dispatch() {
+        let mut unsupported =
+            zip_bytes_with_method(&[("unsafe.bin", b"payload")], CompressionMethod::Stored);
+        unsupported[8..10].copy_from_slice(&9_u16.to_le_bytes());
+        patch_single_zip_central_u16(&mut unsupported, 10, 9);
+
+        let mut symlink = zip_bytes_with_method(&[("link", b"target")], CompressionMethod::Stored);
+        let central = single_zip_central_offset(&symlink);
+        symlink[central + 5] = 3;
+        patch_single_zip_central_u32(&mut symlink, 38, 0o120_777_u32 << 16);
+
+        let mut fifo = zip_bytes_with_method(&[("pipe", b"payload")], CompressionMethod::Stored);
+        let central = single_zip_central_offset(&fifo);
+        fifo[central + 5] = 3;
+        patch_single_zip_central_u32(&mut fifo, 38, 0o010_644_u32 << 16);
+
+        let mut encrypted =
+            zip_bytes_with_method(&[("secret", b"payload")], CompressionMethod::Stored);
+        let local_flags = read_u16_le(&encrypted, 6).expect("local flags") | 1;
+        encrypted[6..8].copy_from_slice(&local_flags.to_le_bytes());
+        let central = single_zip_central_offset(&encrypted);
+        let central_flags = read_u16_le(&encrypted, central + 8).expect("central flags") | 1;
+        encrypted[central + 8..central + 10].copy_from_slice(&central_flags.to_le_bytes());
+
+        for (bytes, expected) in [
+            (unsupported, InspectionDiagnostic::UnsupportedCompression),
+            (symlink, InspectionDiagnostic::SymlinkMember),
+            (fifo, InspectionDiagnostic::NonRegularMember),
+            (encrypted, InspectionDiagnostic::EncryptedMember),
+        ] {
+            let rejected = visit_zip_members(&bytes, 0, ContainerLimits::default(), |_| {
+                panic!("an unsafe ZIP entry must fail before dispatch")
+            });
+            assert_eq!(rejected.status, InspectionStatus::Rejected);
+            assert!(
+                rejected.members.is_empty(),
+                "failure must not expose a prefix"
+            );
+            assert_eq!(rejected.diagnostics, vec![expected]);
+        }
+    }
+
+    #[test]
     fn gzip_is_single_member_and_is_streamed_under_limits() {
         let bytes = gzip_bytes(b"bounded gzip source");
         let inspected =
@@ -2528,6 +3470,151 @@ mod tests {
             inspected.diagnostics,
             vec![InspectionDiagnostic::GzipMultipleMembers]
         );
+    }
+
+    #[test]
+    fn bounded_gzip_uses_safe_child_names_and_holds_its_permit() {
+        let payload = b"digraph rack { api -> storage; }";
+        let bytes = named_gzip_bytes("nested/diagram.dot", payload);
+        let permit_active = Rc::new(Cell::new(false));
+        let admitted_active = Rc::clone(&permit_active);
+        let visited_active = Rc::clone(&permit_active);
+        let inspected = visit_gzip_member_bounded(
+            "ignored.gz",
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |member| {
+                assert_eq!(member.path, "nested/diagram.dot");
+                assert!(!admitted_active.replace(true));
+                CompressedMemberAdmission::Dispatch(TrackingPermit(Rc::clone(&admitted_active)))
+            },
+            |child| {
+                assert!(visited_active.get(), "permit must cover GZIP visitor");
+                assert_eq!(child.bytes, payload);
+                true
+            },
+        );
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+        assert_eq!(inspected.members[0].path, "nested/diagram.dot");
+        assert!(!permit_active.get());
+
+        for (source_name, expected) in [
+            ("bundle.tar.gz", "bundle.tar"),
+            ("bundle.tgz", "bundle.tar"),
+        ] {
+            let mut visited = None;
+            let inspected = visit_gzip_member(
+                source_name,
+                &gzip_bytes(b"tar bytes"),
+                0,
+                ContainerLimits::default(),
+                |child| {
+                    visited = Some(child.member.path.clone());
+                    true
+                },
+            );
+            assert_eq!(inspected.status, InspectionStatus::Parsed);
+            assert_eq!(visited.as_deref(), Some(expected));
+        }
+
+        let svgz = gzip_bytes(b"<svg/>");
+        assert_eq!(recursive_archive_kind("icon.svgz", &svgz), None);
+        let inspected = visit_gzip_member_bounded(
+            "icon.svgz",
+            &svgz,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| -> CompressedMemberAdmission<()> {
+                panic!("SVGZ must remain outside generic child admission")
+            },
+            |_| panic!("SVGZ must remain outside generic child dispatch"),
+        );
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+    }
+
+    #[test]
+    fn bounded_gzip_rejects_reserved_names_and_extra_stream_bytes() {
+        for invalid in ["flat!/nested.dot", "nested/drive:name.txt"] {
+            let rejected = visit_gzip_member(
+                "ignored.gz",
+                &named_gzip_bytes(invalid, b"inert"),
+                0,
+                ContainerLimits::default(),
+                |_| panic!("an invalid FNAME must never dispatch"),
+            );
+            assert_eq!(rejected.status, InspectionStatus::Rejected);
+            assert_eq!(
+                rejected.diagnostics,
+                vec![InspectionDiagnostic::InvalidMemberName]
+            );
+        }
+
+        let mut concatenated = gzip_bytes(b"equal");
+        concatenated.extend(gzip_bytes(b"equal"));
+        let rejected = visit_gzip_member(
+            "joined.gz",
+            &concatenated,
+            0,
+            ContainerLimits::default(),
+            |_| panic!("concatenated GZIP streams must never dispatch"),
+        );
+        assert_eq!(rejected.status, InspectionStatus::Rejected);
+        assert_eq!(
+            rejected.diagnostics,
+            vec![InspectionDiagnostic::GzipMultipleMembers]
+        );
+
+        let payload = b"trailing";
+        let mut trailing = gzip_bytes(payload);
+        trailing.push(0xaa);
+        trailing.extend((payload.len() as u32).to_le_bytes());
+        let rejected = visit_gzip_member(
+            "trailing.gz",
+            &trailing,
+            0,
+            ContainerLimits::default(),
+            |_| panic!("trailing GZIP bytes must never dispatch"),
+        );
+        assert_eq!(rejected.status, InspectionStatus::Rejected);
+        assert_eq!(
+            rejected.diagnostics,
+            vec![InspectionDiagnostic::GzipTrailingBytes]
+        );
+    }
+
+    #[test]
+    fn bounded_gzip_cancellation_releases_permit_before_dispatch() {
+        let payload = (0..(READ_BUFFER_BYTES * 2 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let bytes = gzip_bytes(&payload);
+        let permit_active = Rc::new(Cell::new(false));
+        let admitted_active = Rc::clone(&permit_active);
+        let mut cancellation_polls = 0_usize;
+        let cancelled = visit_gzip_member_bounded(
+            "large.bin.gz",
+            &bytes,
+            0,
+            ContainerLimits {
+                max_compression_ratio: u64::MAX,
+                ..ContainerLimits::default()
+            },
+            || {
+                cancellation_polls += 1;
+                cancellation_polls >= 4
+            },
+            |_| {
+                assert!(!admitted_active.replace(true));
+                CompressedMemberAdmission::Dispatch(TrackingPermit(Rc::clone(&admitted_active)))
+            },
+            |_| panic!("cancelled GZIP must not dispatch"),
+        );
+        assert_eq!(cancelled.status, InspectionStatus::InventoryOnly);
+        assert_eq!(cancelled.diagnostics, vec![InspectionDiagnostic::Cancelled]);
+        assert!(!permit_active.get());
     }
 
     #[test]
@@ -2582,6 +3669,75 @@ mod tests {
                 ("nested/diagram.zip".into(), nested.len()),
                 ("notes/readme.txt".into(), b"bounded".len()),
             ]
+        );
+    }
+
+    #[test]
+    fn bounded_tar_polls_during_headers_and_at_member_dispatch() {
+        let tar = tar_bytes(&[("safe.txt", b"safe")]);
+        let mut polls = 0_usize;
+        let during_headers = visit_tar_members_bounded(
+            &tar,
+            0,
+            ContainerLimits::default(),
+            || {
+                polls += 1;
+                polls >= 2
+            },
+            |_| panic!("header-loop cancellation must prevent dispatch"),
+        );
+        assert_eq!(during_headers.status, InspectionStatus::InventoryOnly);
+        assert_eq!(
+            during_headers.diagnostics,
+            vec![InspectionDiagnostic::Cancelled]
+        );
+
+        let mut polls = 0_usize;
+        let at_dispatch = visit_tar_members_bounded(
+            &tar,
+            0,
+            ContainerLimits::default(),
+            || {
+                polls += 1;
+                polls >= 4
+            },
+            |_| panic!("member-boundary cancellation must prevent dispatch"),
+        );
+        assert_eq!(at_dispatch.status, InspectionStatus::InventoryOnly);
+        assert_eq!(at_dispatch.members.len(), 1);
+        assert_eq!(
+            at_dispatch.diagnostics,
+            vec![InspectionDiagnostic::Cancelled]
+        );
+    }
+
+    #[test]
+    fn tar_member_names_share_canonical_reserved_path_policy() {
+        for invalid in ["flat!/nested.dot", "folder/drive:name.txt"] {
+            let rejected = visit_tar_members(
+                &tar_bytes(&[(invalid, b"inert")]),
+                0,
+                ContainerLimits::default(),
+                |_| panic!("an invalid TAR member must never dispatch"),
+            );
+            assert_eq!(rejected.status, InspectionStatus::Rejected);
+            assert_eq!(
+                rejected.diagnostics,
+                vec![InspectionDiagnostic::InvalidMemberName]
+            );
+        }
+
+        let duplicate = tar_bytes(&[
+            ("caf\u{e9}.txt", b"precomposed"),
+            ("cafe\u{301}.txt", b"decomposed"),
+        ]);
+        let rejected = visit_tar_members(&duplicate, 0, ContainerLimits::default(), |_| {
+            panic!("canonically equivalent TAR paths must fail before dispatch")
+        });
+        assert_eq!(rejected.status, InspectionStatus::Rejected);
+        assert_eq!(
+            rejected.diagnostics,
+            vec![InspectionDiagnostic::InvalidMemberName]
         );
     }
 
@@ -2647,7 +3803,7 @@ mod tests {
             },
             |_| panic!("a child must not be dispatched beyond the depth budget"),
         );
-        assert_eq!(max_depth.status, InspectionStatus::Rejected);
+        assert_eq!(max_depth.status, InspectionStatus::InventoryOnly);
         assert_eq!(
             max_depth.diagnostics,
             vec![InspectionDiagnostic::RecursionLimit]
