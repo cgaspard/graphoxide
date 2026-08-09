@@ -1239,7 +1239,7 @@ pub fn is_sensitive(path: &Path) -> bool {
 /// Coverage discovery uses this conservative variant before it attempts any
 /// source handle. Extensionless names that would require shebang inspection
 /// therefore remain sensitive when their names match credential policy.
-pub(crate) fn is_sensitive_path_only(path: &Path) -> bool {
+pub fn is_sensitive_path_only(path: &Path) -> bool {
     is_sensitive_with_path_policy(path, false)
 }
 

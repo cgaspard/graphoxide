@@ -633,7 +633,7 @@ fn preserves_declared_identity(node: &Node) -> bool {
             .extra
             .get("_origin")
             .and_then(serde_json::Value::as_str)
-            == Some("document_package")
+            .is_some_and(|origin| matches!(origin, "document_package" | "enrichment"))
         || (node
             .extra
             .get("diagram_format")

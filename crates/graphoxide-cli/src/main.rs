@@ -111,6 +111,11 @@ impl RuntimeOptions {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Explicitly enrich eligible offline inventory with provider-authored facts.
+    Enrich {
+        #[command(flatten)]
+        args: graphoxide_cli::enrich::EnrichArgs,
+    },
     /// Headless deterministic extraction into graphoxide-out/
     Extract {
         #[command(flatten)]
@@ -1506,6 +1511,7 @@ fn main() -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
+        Command::Enrich { args } => write_output(&graphoxide_cli::enrich::run(args)?),
         Command::Formats { json } => write_output(&format_capability_output(json)?),
         Command::Extract {
             build,

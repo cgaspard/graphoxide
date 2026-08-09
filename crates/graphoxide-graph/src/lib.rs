@@ -9,6 +9,7 @@ pub mod build;
 pub mod cluster;
 pub mod dedup;
 pub mod diagnostics;
+pub mod enrichment;
 pub mod global_graph;
 pub mod incremental;
 pub mod labeling;
@@ -46,6 +47,13 @@ pub use diagnostics::{
     diagnose_extraction, diagnose_file, diagnose_file_with_cap, format_diagnostic_json,
     format_diagnostic_report, scan_producer_suppression_sites, DiagnosticOptions,
     MultigraphDiagnosticSummary, ProducerSuppression, SameEndpointExample, SuppressionSite,
+};
+pub use enrichment::{
+    apply_media_transcript_summaries, is_media_inventory_node, media_transcript_summary_id,
+    EnrichmentApplyError, EnrichmentApplyReport, MediaTranscriptSummaryRecord,
+    ENRICHMENT_DATA_BOUNDARY, ENRICHMENT_SCHEMA_VERSION, MAX_ENRICHMENT_MODEL_BYTES,
+    MAX_ENRICHMENT_SOURCE_BYTES, MAX_ENRICHMENT_SUMMARY_BYTES, MAX_ENRICHMENT_TOPICS,
+    MAX_ENRICHMENT_TOPIC_BYTES, MEDIA_TRANSCRIPT_SUMMARY_PROFILE, REDACTION_VERSION,
 };
 pub use global_graph::{
     prefix_graph_for_global, prune_repo_from_graph, GlobalAddResult, GlobalGraphStore,

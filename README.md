@@ -255,6 +255,7 @@ HTML outputs open directly in a browser. GraphML can be imported by graph tools,
 | `extract <path>` | Extract, build, deduplicate, cluster, and write a graph |
 | `audit [path]` | Report unresolved, malformed, merged, repaired, or dropped graph facts |
 | `update [path]` | Incrementally refresh an existing project graph |
+| `enrich [path]` | Explicitly add bounded, provider-authored facts from a named enrichment profile |
 | `cluster-only <path>` | Recompute communities without source extraction |
 | `query <question>` | Search and traverse a relevant neighborhood |
 | `path <a> <b>` | Find the shortest relationship path between two nodes |
@@ -499,6 +500,82 @@ For one-off discovery beneath several directory roots, use:
 graphoxide global-graph ~/work ~/personal \
   --output .graphoxide-global/graph.json
 ```
+
+## Explicit opt-in media transcript summaries
+
+`graphoxide enrich` is separate from deterministic indexing, updates, and watch
+mode. Those offline workflows never invoke an enrichment profile, inspect an
+enrichment sidecar, require an API key, or make a provider request. List the
+available profiles without provider configuration:
+
+```bash
+graphoxide enrich --list-profiles --json
+```
+
+The initial `media-transcript-summary-v1` profile summarizes text that the user
+has already supplied for an indexed audio or video file. For a media source such
+as `media/briefing.mp4`, place its UTF-8 transcript at:
+
+```text
+.graphoxide/enrichment-input/media/briefing.mp4.transcript.txt
+```
+
+This profile does not perform transcription, OCR, media decoding, rendering, or
+uploading. It verifies that the media path is a live regular project file and an
+existing graph inventory fact, but never reads or sends the media payload. The
+only provider data boundary is the redacted transcript text.
+
+Every outbound run requires all provider fields and the exact consent token on
+the command line. The API key remains in the named environment variable:
+
+```bash
+export GRAPHOXIDE_ENRICHMENT_KEY=...
+
+graphoxide enrich . \
+  --profile media-transcript-summary-v1 \
+  --provider openai-compatible \
+  --endpoint https://provider.example/v1 \
+  --model bounded-summary-model \
+  --api-key-env GRAPHOXIDE_ENRICHMENT_KEY \
+  --consent send-redacted-transcript-text \
+  --json
+```
+
+There is no environment-variable, persisted-setting, or auto-detection shortcut
+for profile selection or consent. Provider endpoints must use HTTPS; plain HTTP
+is permitted only for verified loopback addresses. Credentials, query strings,
+and fragments in the endpoint are rejected, redirects are not followed, and the
+isolated client does not inherit proxy settings.
+
+The command validates the complete candidate set before its first request. A run
+admits at most 32 transcripts, 64 KiB per transcript, and 1 MiB in total. It
+rejects traversal, sensitive paths, non-UTF-8 input, symlinks, hard links, and
+non-regular files. `redaction-v1` normalizes newlines and replaces the selected
+credential, recognized credential patterns, and bounded secret-like environment
+values before request construction. The validated provider output passes through
+the same redaction boundary before logs, cache records, or graph facts. Requests
+cap model output at 512 tokens; response bodies are capped at 16 KiB. Rate-limit
+responses can retry once, only with a `Retry-After` no greater than 30 seconds,
+and requests remain paced by `--requests-per-minute`. Per-request timeout and
+graceful cancellation are explicit, while the whole run is bounded to 15
+minutes.
+
+Validated results use a dedicated cache beneath
+`.graphoxide/enrichment-cache/v1/`; they never enter the structural extraction
+cache. Cache identity binds the provider, canonical endpoint, model, redacted
+input digest, and selected API credential; strict records carry a keyed integrity
+tag. Unsafe cache namespace or parent links fail closed; an unsafe final cache
+entry is an inert miss and can be replaced only after the graph commits. Graph
+nodes carry `_origin: "enrichment"`, the profile, model, redaction and
+input-digest evidence, the `redacted_transcript_text_only` boundary, and
+`verification: "unverified_model_output"`; `has_enrichment` edges retain the
+source and profile linkage. Repeating the same source/profile
+replaces that profile's prior fact rather than accumulating stale summaries.
+Publication uses a graph digest compare-and-swap and one atomic write, so a
+failure, cancellation, or concurrent graph update does not partially replace the
+accepted graph. The existing rebuild-lock marker remains coordination state and
+may be refreshed by an attempt that later fails; it contains no transcript or
+provider content.
 
 ## Optional LLM community labels
 
