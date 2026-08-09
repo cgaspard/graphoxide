@@ -1341,7 +1341,7 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         DOT_EXTENSIONS,
         &[],
         &[],
-        FormatCapability::StructuralPartial,
+        FormatCapability::SemanticFull,
         SchemaRequirement::NotRequired,
         DIAGRAM_LIMITS,
         None,
@@ -2093,7 +2093,6 @@ mod tests {
             "json5",
             "yaml",
             "yml",
-            "dot",
             "mmd",
             "drawio",
             "arrow",
@@ -2111,6 +2110,10 @@ mod tests {
                 assert_eq!(registry.classify_extension(extension), None, "{extension}");
             }
         }
+        assert_eq!(
+            registry.capability_for_extension("dot"),
+            Some(FormatCapability::SemanticFull)
+        );
         assert_eq!(
             registry.schema_requirement_for_extension("pb"),
             Some(SchemaRequirement::Required)

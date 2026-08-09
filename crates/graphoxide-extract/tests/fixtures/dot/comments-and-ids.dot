@@ -1,0 +1,8 @@
+# 1 "comments-and-ids.dot"
+digraph "quoted graph" {
+  // Comment markers inside quoted and HTML strings are data.
+  "https://example.invalid//service" [label="not /* a comment */"]
+  /* A real block comment. */
+  _worker [label=<<FONT>worker // literal</FONT>>]
+  "https://example.invalid//service" -> _worker
+}

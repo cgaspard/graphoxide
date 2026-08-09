@@ -2023,6 +2023,107 @@ fn test_save_manifest_without_filter_unchanged_for_code() {
         .as_str()
         .unwrap()
         .is_empty());
+    assert_eq!(
+        raw[&code.to_string_lossy().into_owned()]["ast_version"],
+        graphoxide_extract::cache::AST_CACHE_VERSION
+    );
+}
+
+#[test]
+fn test_ast_incremental_reextracts_missing_schema_version_once() {
+    let fixture = fixture();
+    let source = write(
+        fixture.path(),
+        "design.dot",
+        "digraph architecture { api -> database; }\n",
+    );
+    let manifest = fixture.path().join("graphoxide-out/manifest.json");
+    let options = SaveManifestOptions {
+        kind: ManifestKind::Ast,
+        ..rooted_manifest(fixture.path())
+    };
+    save_manifest(&detected_files("code", [source]), &manifest, &options).unwrap();
+
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    legacy["design.dot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ast_version");
+    graphoxide_core::write_json_atomic(&manifest, &legacy, true).unwrap();
+
+    let stale = detect_incremental(
+        fixture.path(),
+        &manifest,
+        &DetectOptions::default(),
+        ManifestKind::Ast,
+    )
+    .unwrap();
+    assert_eq!(stale.new_total, 1);
+    assert!(stale
+        .new_files
+        .values()
+        .flatten()
+        .any(|path| path.ends_with("design.dot")));
+
+    save_manifest(&stale.new_files, &manifest, &options).unwrap();
+    let current: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(
+        current["design.dot"]["ast_version"],
+        graphoxide_extract::cache::AST_CACHE_VERSION
+    );
+    let unchanged = detect_incremental(
+        fixture.path(),
+        &manifest,
+        &DetectOptions::default(),
+        ManifestKind::Ast,
+    )
+    .unwrap();
+    assert_eq!(unchanged.new_total, 0);
+    assert!(unchanged
+        .unchanged_files
+        .values()
+        .flatten()
+        .any(|path| path.ends_with("design.dot")));
+}
+
+#[test]
+fn test_semantic_only_manifest_preserves_only_matching_ast_version() {
+    let fixture = fixture();
+    let source = write(fixture.path(), "main.py", "def current(): pass\n");
+    let manifest = fixture.path().join("graphoxide-out/manifest.json");
+    let ast_options = SaveManifestOptions {
+        kind: ManifestKind::Ast,
+        ..rooted_manifest(fixture.path())
+    };
+    let semantic_options = SaveManifestOptions {
+        kind: ManifestKind::Semantic,
+        ..rooted_manifest(fixture.path())
+    };
+    let files = detected_files("code", [source.clone()]);
+    save_manifest(&files, &manifest, &ast_options).unwrap();
+    save_manifest(&files, &manifest, &semantic_options).unwrap();
+    let matching: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(
+        matching["main.py"]["ast_version"],
+        graphoxide_extract::cache::AST_CACHE_VERSION
+    );
+
+    fs::write(&source, "def changed(): pass\n").unwrap();
+    save_manifest(&files, &manifest, &semantic_options).unwrap();
+    let changed: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(changed["main.py"]["ast_version"], 0);
+    assert_eq!(
+        detect_incremental(
+            fixture.path(),
+            &manifest,
+            &DetectOptions::default(),
+            ManifestKind::Ast,
+        )
+        .unwrap()
+        .new_total,
+        1,
+        "a semantic-only pass must not make stale AST facts look current"
+    );
 }
 
 #[test]
@@ -2424,6 +2525,20 @@ fn test_detect_incremental_legacy_float_skips_when_mtime_matches() {
     assert!(result.unchanged_files["code"]
         .iter()
         .any(|path| path.ends_with("mod.py")));
+
+    let ast = detect_incremental(
+        fixture.path(),
+        &manifest,
+        &DetectOptions::default(),
+        ManifestKind::Ast,
+    )
+    .unwrap();
+    assert!(
+        ast.new_files["code"]
+            .iter()
+            .any(|path| path.ends_with("mod.py")),
+        "a legacy mtime-only row has no current AST schema marker"
+    );
 }
 
 #[test]

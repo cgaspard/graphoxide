@@ -1,0 +1,4 @@
+digraph Ports {
+  source:output:e -> transform:input:w -> sink:n [label="pipeline"]
+  { source transform } -> { audit metrics }
+}

@@ -2305,6 +2305,35 @@ fn audit_report(
                     subject: format!("{compatibility_count} known grammar ambiguity: {spans}"),
                 });
             }
+            if let Some(parse_status) = node
+                .extra
+                .get("parse_status")
+                .and_then(|value| value.as_str())
+                && !matches!(parse_status, "complete" | "parsed")
+                && graphoxide_extract::format_registry::format_registry()
+                    .find_by_path(std::path::Path::new(&node.source_file))
+                    .is_some_and(|spec| {
+                        spec.capability
+                            == graphoxide_extract::format_registry::FormatCapability::SemanticFull
+                    })
+            {
+                let diagnostic_count = node
+                    .extra
+                    .get("dot_diagnostics")
+                    .and_then(|value| value.as_array())
+                    .map_or_else(
+                        || usize::from(node.extra.contains_key("diagnostic")),
+                        Vec::len,
+                    );
+                findings.push(AuditFinding {
+                    severity: "error",
+                    code: "semantic_parse_incomplete",
+                    source_file: node.source_file.clone(),
+                    subject: format!(
+                        "semantic parser reported {parse_status} with {diagnostic_count} diagnostic(s)"
+                    ),
+                });
+            }
         }
         let only_file_anchor = extraction.nodes.len() == 1
             && extraction.edges.is_empty()
@@ -5335,6 +5364,9 @@ mod tests {
         assert!(text.contains("tar-archive\tstructural_partial"));
         assert!(text.contains("json5\tstructural_partial\tnot_required\tstructured\tjson5"));
         assert!(text.contains("json-lines\tsemantic_full\tnot_required\tstructured\tjsonl,ndjson"));
+        assert!(
+            text.contains("graphviz-dot\tsemantic_full\tnot_required\tdiagram\tdot,gv,graphviz")
+        );
         assert!(text.contains("yaml\tstructural_partial\tnot_required\tstructured\tyaml,yml"));
 
         let json = format_capability_output(true).expect("render JSON contract");
@@ -5372,6 +5404,13 @@ mod tests {
                         .is_some_and(|extensions| extensions.iter().any(|value| value == extension))
             }));
         }
+        assert!(reports.iter().any(|report| {
+            report["id"] == "graphviz-dot"
+                && report["capability"] == "semantic_full"
+                && report["limits"]["max_input_bytes"] == 8 * 1024 * 1024
+                && report["limits"]["max_nesting"] == 64
+                && report["limits"]["max_records"] == 350_000
+        }));
     }
 
     #[test]

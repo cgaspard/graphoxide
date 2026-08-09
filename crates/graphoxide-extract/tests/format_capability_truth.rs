@@ -73,7 +73,7 @@ fn assert_partial_root(name: &str, bytes: &[u8]) -> Extraction {
 }
 
 #[test]
-fn only_whole_value_structured_decoders_advertise_full_semantics() {
+fn semantic_full_registry_claims_are_backed_by_complete_adapters() {
     let registry = format_registry();
     let semantic_ids = registry
         .specs()
@@ -90,6 +90,7 @@ fn only_whole_value_structured_decoders_advertise_full_semantics() {
             "toml",
             "xml",
             "named-json-configuration",
+            "graphviz-dot",
         ]
     );
     assert!(registry.specs().iter().all(|spec| !matches!(
@@ -246,7 +247,7 @@ fn inventory_only_output_cannot_pass_the_semantic_evidence_check() {
 }
 
 #[test]
-fn diagram_adapters_publish_partial_capability_and_status() {
+fn dot_is_semantic_full_while_other_diagram_scanners_remain_partial() {
     let diagram_specs = format_registry()
         .specs()
         .iter()
@@ -254,12 +255,12 @@ fn diagram_adapters_publish_partial_capability_and_status() {
         .collect::<Vec<_>>();
     assert!(!diagram_specs.is_empty());
     for spec in diagram_specs {
-        assert_eq!(
-            spec.capability,
-            FormatCapability::StructuralPartial,
-            "{}",
-            spec.id.as_str()
-        );
+        let expected = if spec.id.as_str() == "graphviz-dot" {
+            FormatCapability::SemanticFull
+        } else {
+            FormatCapability::StructuralPartial
+        };
+        assert_eq!(spec.capability, expected, "{}", spec.id.as_str());
     }
 
     let extraction = extract_fixture("architecture.dot", b"digraph G { api -> database; }");
@@ -270,9 +271,13 @@ fn diagram_adapters_publish_partial_capability_and_status() {
         .expect("diagram root");
     assert_eq!(
         root.extra.get("parse_status").and_then(Value::as_str),
-        Some("partial")
+        Some("complete")
     );
-    assert!(!has_semantic_domain_facts(&extraction));
+    assert_eq!(
+        root.extra.get("format_capability").and_then(Value::as_str),
+        Some("semantic_full")
+    );
+    assert!(has_semantic_domain_facts(&extraction));
 }
 
 #[test]
