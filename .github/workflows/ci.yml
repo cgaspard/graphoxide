@@ -23,6 +23,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Benchmark and qualification regression tests
+        run: >-
+          node --test
+          scripts/benchmark-graph-build.test.mjs
+          scripts/qualify-universal-indexing.test.mjs
       - run: cargo build --release --locked --bin graphoxide
       - name: Stage single-link qualification binary
         id: qualification_binary
