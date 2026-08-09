@@ -1078,9 +1078,17 @@ fn run_project_build_with_cancellation(
     // manifest, coverage, and build-policy publication. A non-index extract
     // must not replace graph.json while index hashes it for association.
     let _build_lock = acquire_project_build_lock(&output_directory, &cancellation)?;
+    graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&output_directory)
+        .with_context(|| {
+            format!(
+                "prepare the managed cache schema in {}",
+                output_directory.display()
+            )
+        })?;
     if workflow.is_index() {
-        // Recheck after any lock wait so a cooperating publisher cannot leave
-        // a newly unsafe prior-state path for the baseline readers below.
+        // Recheck after any lock wait and schema retirement so a cooperating
+        // publisher cannot leave a newly unsafe prior-state path for the
+        // baseline readers below.
         graphoxide_cli::index::validate_index_prior_artifacts(&output_directory)?;
         graphoxide_cli::index::validate_index_build_config_destinations(&output_directory)?;
     }
@@ -2192,7 +2200,21 @@ fn run_coverage_audit(
 }
 
 fn run_audit(path: &std::path::Path, json: bool, strict: bool, force: bool) -> anyhow::Result<()> {
-    let extractions = graphoxide_extract::extract_project_with_options(path, force)?;
+    let output_directory = managed_output_directory(path, None);
+    let _build_lock = watch_service::RebuildLockGuard::acquire(&output_directory, true)?
+        .ok_or_else(|| anyhow::anyhow!("failed to acquire the blocking rebuild lock"))?;
+    graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&output_directory)
+        .with_context(|| {
+            format!(
+                "prepare the managed cache schema in {}",
+                output_directory.display()
+            )
+        })?;
+    let extractions = graphoxide_extract::extract_project_with_options_and_output(
+        path,
+        force,
+        &output_directory,
+    )?;
     let (_, build) = graphoxide_graph::build_graph_with_report(&extractions)?;
     let report = audit_report(path, &extractions, build);
     let output = if json {
@@ -3617,6 +3639,13 @@ fn rebuild_isolated(
     let output_directory = managed_output_directory(path, None);
     let _build_lock = watch_service::RebuildLockGuard::acquire(&output_directory, true)?
         .ok_or_else(|| anyhow::anyhow!("failed to acquire the blocking rebuild lock"))?;
+    graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&output_directory)
+        .with_context(|| {
+            format!(
+                "prepare the managed cache schema in {}",
+                output_directory.display()
+            )
+        })?;
     let mut outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
         path,
         output_directory: &output_directory,

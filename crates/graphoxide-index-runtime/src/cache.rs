@@ -46,7 +46,10 @@ pub const DEFAULT_RUNTIME_CACHE_MAX_SHARD_ENTRIES: usize = 4096;
 /// Maximum aggregate directory entries inspected across all cache shards.
 pub const DEFAULT_RUNTIME_CACHE_MAX_TOTAL_SHARD_ENTRIES: usize = 65_536;
 
-const RUNTIME_CACHE_DIRECTORY: &str = "cache/runtime-v1";
+const RUNTIME_CACHE_DIRECTORY: &str = "cache/runtime-v2";
+const RETIRED_RUNTIME_CACHE_DIRECTORY: &str = "cache/runtime-v1";
+const RETIRED_RUNTIME_CACHE_MAX_ROOT_ENTRIES: usize = 2;
+const RETIRED_RUNTIME_CACHE_MAX_SHARD_DIRECTORIES: usize = RUNTIME_CACHE_SHARDS;
 const CATALOG_FILE: &str = "catalog.gxi";
 const ACTIVE_PREFIX: &str = "active-";
 const ACTIVE_SUFFIX: &str = ".gxa";
@@ -66,6 +69,28 @@ const CATALOG_FRAME_LEN: usize = FRAME_HEADER_LEN + CATALOG_RECORD_LEN;
 #[must_use]
 pub fn runtime_cache_artifact_bytes(payload_bytes: usize) -> u64 {
     u64::try_from(FRAME_HEADER_LEN.saturating_add(payload_bytes)).unwrap_or(u64::MAX)
+}
+
+/// Remove payload-bearing files from the retired `cache/runtime-v1` layout.
+///
+/// The framed cache format and [`RuntimeCacheSource::RuntimeV1`] identity are
+/// unchanged; only the active on-disk directory moved to `cache/runtime-v2`.
+/// This I/O-plane lifecycle operation acquires the retired cache's owner lock,
+/// validates its complete bounded layout, truncates and synchronizes each exact
+/// Graphoxide catalog/artifact, and then unlinks it. The retired root and
+/// `owner.lock` remain so concurrent and interrupted calls are safe to retry.
+/// A missing retired cache is an idempotent success.
+pub fn purge_retired_runtime_v1_cache(output_dir: &Path) -> Result<(), RuntimeCacheError> {
+    let Some(root) = retired_runtime_cache_root(output_dir)? else {
+        return Ok(());
+    };
+    let _owner_lock = acquire_owner_lock(&root)?;
+    let mut files = inspect_retired_runtime_v1_files(&root)?;
+    files.sort_unstable();
+    for path in files {
+        truncate_and_remove_retired_cache_file(&path)?;
+    }
+    Ok(())
 }
 
 /// Bounded number of control-plane cache commands retained ahead of the
@@ -297,9 +322,9 @@ pub enum RuntimeCacheError {
         /// Configured aggregate bound.
         max_artifact_bytes: u64,
     },
-    /// A shard contains more directory entries than the bounded open policy
-    /// will inspect.
-    #[error("runtime cache shard {} exceeds its {max_entries}-entry scan limit", path.display())]
+    /// A cache-owned directory contains more entries than its bounded scan
+    /// policy will inspect.
+    #[error("runtime cache directory {} exceeds its {max_entries}-entry scan limit", path.display())]
     TooManyShardEntries {
         /// Shard whose enumeration was stopped.
         path: PathBuf,
@@ -317,7 +342,7 @@ pub enum RuntimeCacheError {
     #[error("runtime cache writes are disabled after an ambiguous append failure")]
     StoreDisabled,
     /// A cache-owned path was a symlink or a non-regular path type.
-    #[error("runtime cache refuses unsafe owned path {}", path.display())]
+    #[error("runtime cache refuses an unsafe or unexpected owned path")]
     UnsafePath {
         /// Path that failed containment validation.
         path: PathBuf,
@@ -1735,7 +1760,7 @@ struct ArtifactLocation {
 }
 
 impl RuntimeCache {
-    /// Open (and, if necessary, create) runtime-v1 below an output directory.
+    /// Open (and, if necessary, create) runtime-v1 frames below an output directory.
     ///
     /// This is an I/O-plane operation. It creates all 64 logical shard
     /// directories eagerly so layout and partition projection are stable even
@@ -1744,7 +1769,7 @@ impl RuntimeCache {
         Self::open_with_limits(output_dir, RuntimeCacheLimits::default())
     }
 
-    /// Open runtime-v1 with explicit test or deployment bounds.
+    /// Open runtime-v1 frames with explicit test or deployment bounds.
     pub fn open_with_limits(
         output_dir: &Path,
         limits: RuntimeCacheLimits,
@@ -1858,7 +1883,7 @@ impl RuntimeCache {
         usize::from(key.0[0] & 63)
     }
 
-    /// Return the on-disk runtime-v1 root for diagnostics and tests.
+    /// Return the active on-disk runtime cache root for diagnostics and tests.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -2311,6 +2336,196 @@ fn acquire_owner_lock(root: &Path) -> Result<File, RuntimeCacheError> {
     Ok(file)
 }
 
+fn retired_runtime_cache_root(output_dir: &Path) -> Result<Option<PathBuf>, RuntimeCacheError> {
+    match fs::symlink_metadata(output_dir) {
+        Ok(metadata) if metadata_is_reparse(&metadata) || !metadata.is_dir() => {
+            return Err(RuntimeCacheError::UnsafePath {
+                path: output_dir.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+
+    let output_dir = fs::canonicalize(output_dir)?;
+    let cache_dir = output_dir.join("cache");
+    if validate_existing_owned_directory(&output_dir, &cache_dir)?.is_none() {
+        return Ok(None);
+    }
+    let root = output_dir.join(RETIRED_RUNTIME_CACHE_DIRECTORY);
+    validate_existing_owned_directory(&cache_dir, &root)
+}
+
+fn validate_existing_owned_directory(
+    canonical_base: &Path,
+    path: &Path,
+) -> Result<Option<PathBuf>, RuntimeCacheError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata_is_reparse(&metadata) || !metadata.is_dir() {
+        return Err(RuntimeCacheError::UnsafePath {
+            path: path.to_path_buf(),
+        });
+    }
+    let canonical = fs::canonicalize(path)?;
+    if canonical != path || !canonical.starts_with(canonical_base) {
+        return Err(RuntimeCacheError::UnsafePath {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+fn inspect_retired_runtime_v1_files(root: &Path) -> Result<Vec<PathBuf>, RuntimeCacheError> {
+    let mut shards_dir = None;
+    for entry in bounded_cache_directory_entries(root, RETIRED_RUNTIME_CACHE_MAX_ROOT_ENTRIES)? {
+        let path = entry.path();
+        match entry.file_name().to_str() {
+            Some("owner.lock") => {
+                validate_retired_regular_file(&path)?;
+            }
+            Some("shards") => {
+                validate_existing_owned_directory(root, &path)?
+                    .ok_or_else(|| RuntimeCacheError::UnsafePath { path: path.clone() })?;
+                shards_dir = Some(path);
+            }
+            _ => return Err(RuntimeCacheError::UnsafePath { path }),
+        }
+    }
+
+    let Some(shards_dir) = shards_dir else {
+        return Ok(Vec::new());
+    };
+    let mut files = Vec::new();
+    let mut total_entries = 0usize;
+    for entry in
+        bounded_cache_directory_entries(&shards_dir, RETIRED_RUNTIME_CACHE_MAX_SHARD_DIRECTORIES)?
+    {
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Err(RuntimeCacheError::UnsafePath { path });
+        };
+        let Some(shard) = retired_shard_index(&name) else {
+            return Err(RuntimeCacheError::UnsafePath { path });
+        };
+        let expected = shard_directory(root, shard);
+        if path != expected {
+            return Err(RuntimeCacheError::UnsafePath { path });
+        }
+        validate_existing_owned_directory(&shards_dir, &path)?
+            .ok_or_else(|| RuntimeCacheError::UnsafePath { path: path.clone() })?;
+
+        for file_entry in
+            bounded_cache_directory_entries(&path, DEFAULT_RUNTIME_CACHE_MAX_SHARD_ENTRIES)?
+        {
+            total_entries = total_entries.saturating_add(1);
+            if total_entries > DEFAULT_RUNTIME_CACHE_MAX_TOTAL_SHARD_ENTRIES {
+                return Err(RuntimeCacheError::TooManyTotalShardEntries {
+                    max_entries: DEFAULT_RUNTIME_CACHE_MAX_TOTAL_SHARD_ENTRIES,
+                });
+            }
+
+            let file_path = file_entry.path();
+            let Some(file_name) = file_entry.file_name().to_str().map(str::to_owned) else {
+                return Err(RuntimeCacheError::UnsafePath { path: file_path });
+            };
+            if file_name != CATALOG_FILE && !retired_artifact_name_is_valid(&file_name) {
+                return Err(RuntimeCacheError::UnsafePath { path: file_path });
+            }
+            validate_retired_regular_file(&file_path)?;
+            files.push(file_path);
+        }
+    }
+    Ok(files)
+}
+
+fn bounded_cache_directory_entries(
+    path: &Path,
+    max_entries: usize,
+) -> Result<Vec<fs::DirEntry>, RuntimeCacheError> {
+    let mut entries = Vec::with_capacity(max_entries);
+    for entry in fs::read_dir(path)? {
+        if entries.len() == max_entries {
+            return Err(RuntimeCacheError::TooManyShardEntries {
+                path: path.to_path_buf(),
+                max_entries,
+            });
+        }
+        entries.push(entry?);
+    }
+    Ok(entries)
+}
+
+fn validate_retired_regular_file(path: &Path) -> Result<(), RuntimeCacheError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata_is_reparse(&metadata) || !metadata.is_file() {
+        return Err(RuntimeCacheError::UnsafePath {
+            path: path.to_path_buf(),
+        });
+    }
+    safe_regular_file_len(path)?.ok_or_else(|| RuntimeCacheError::UnsafePath {
+        path: path.to_path_buf(),
+    })?;
+    Ok(())
+}
+
+fn retired_shard_index(name: &str) -> Option<usize> {
+    let bytes = name.as_bytes();
+    if bytes.len() != 2
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return None;
+    }
+    usize::from_str_radix(name, 16)
+        .ok()
+        .filter(|index| *index < RUNTIME_CACHE_SHARDS)
+}
+
+fn retired_artifact_name_is_valid(name: &str) -> bool {
+    let generation = name
+        .strip_prefix(ACTIVE_PREFIX)
+        .or_else(|| name.strip_prefix(SEALED_PREFIX))
+        .and_then(|value| value.strip_suffix(ACTIVE_SUFFIX));
+    let Some(generation) = generation else {
+        return false;
+    };
+    !generation.is_empty()
+        && generation.bytes().all(|byte| byte.is_ascii_digit())
+        && (generation == "0" || !generation.starts_with('0'))
+        && generation.parse::<u64>().is_ok()
+}
+
+fn truncate_and_remove_retired_cache_file(path: &Path) -> Result<(), RuntimeCacheError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    apply_no_follow(&mut options);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    safe_opened_file_len(&file, path)?;
+    file.set_len(0)?;
+    file.sync_data()?;
+    if safe_opened_file_len(&file, path)? != 0 {
+        return Err(RuntimeCacheError::UnsafePath {
+            path: path.to_path_buf(),
+        });
+    }
+    drop(file);
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Validate every existing ancestor. The final no-follow open and link-count
 /// check close final-component substitution. A same-user actor that can rename
 /// already-open cache directories remains outside this library's trust model;
@@ -2696,6 +2911,14 @@ mod tests {
         PathBuf::from(format!("cache/ast/v26/{}.json", "a".repeat(64)))
     }
 
+    fn retired_cache_shard(output_dir: &Path, shard: usize) -> (PathBuf, PathBuf) {
+        let output_dir = fs::canonicalize(output_dir).expect("canonical output");
+        let root = output_dir.join(RETIRED_RUNTIME_CACHE_DIRECTORY);
+        let shard_dir = shard_directory(&root, shard);
+        fs::create_dir_all(&shard_dir).expect("retired cache shard");
+        (root, shard_dir)
+    }
+
     #[test]
     fn opens_all_64_stable_shards_and_round_trips_after_reopen() {
         let temp = tempfile::tempdir().expect("temporary output");
@@ -2725,6 +2948,200 @@ mod tests {
             RuntimeCacheKey::for_versioned_bytes("ast", 2, "src/lib.rs", b"source"),
             "schema version participates in runtime cache eligibility"
         );
+    }
+
+    #[test]
+    fn active_v2_preserves_runtime_v1_identity_and_purge_removes_only_retired_payloads() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let cache_key = key("active-v2");
+        let mut cache = RuntimeCache::open(temp.path()).expect("active cache");
+        assert!(cache.root().ends_with(RUNTIME_CACHE_DIRECTORY));
+        cache
+            .put(cache_key, b"preserved-v2-payload")
+            .expect("store active payload");
+        drop(cache);
+
+        let (retired_root, retired_shard) = retired_cache_shard(temp.path(), 0);
+        let retired_catalog = retired_shard.join(CATALOG_FILE);
+        let retired_artifact = active_artifact_path(&retired_shard, 0);
+        fs::write(&retired_catalog, b"retired-secret-catalog").expect("retired catalog");
+        fs::write(&retired_artifact, b"retired-secret-artifact").expect("retired artifact");
+        let unrelated = temp.path().join("cache/unrelated.bin");
+        fs::write(&unrelated, b"unrelated").expect("unrelated cache sibling");
+
+        purge_retired_runtime_v1_cache(temp.path()).expect("purge retired cache");
+        assert!(
+            retired_root.is_dir(),
+            "retired root remains for coordination"
+        );
+        assert!(retired_root.join("owner.lock").is_file());
+        assert!(!retired_catalog.exists());
+        assert!(!retired_artifact.exists());
+        assert_eq!(
+            fs::read(&unrelated).expect("unrelated remains"),
+            b"unrelated"
+        );
+
+        let reopened = RuntimeCache::open(temp.path()).expect("reopen active cache");
+        let hit = reopened.get(cache_key).expect("active payload remains");
+        assert_eq!(hit.payload, b"preserved-v2-payload");
+        assert_eq!(hit.source, RuntimeCacheSource::RuntimeV1);
+        drop(reopened);
+        purge_retired_runtime_v1_cache(temp.path()).expect("idempotent second purge");
+        assert!(retired_root.join("owner.lock").is_file());
+    }
+
+    #[test]
+    fn retired_purge_respects_busy_owner_lock() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let (retired_root, retired_shard) = retired_cache_shard(temp.path(), 0);
+        let artifact = active_artifact_path(&retired_shard, 0);
+        fs::write(&artifact, b"secret").expect("retired artifact");
+        let owner = acquire_owner_lock(&retired_root).expect("hold retired owner lock");
+
+        assert!(matches!(
+            purge_retired_runtime_v1_cache(temp.path()),
+            Err(RuntimeCacheError::OwnerBusy { path })
+                if path == retired_root.join("owner.lock")
+        ));
+        assert_eq!(
+            fs::read(&artifact).expect("busy artifact remains"),
+            b"secret"
+        );
+        drop(owner);
+        purge_retired_runtime_v1_cache(temp.path()).expect("purge after owner exits");
+        assert!(!artifact.exists());
+    }
+
+    #[test]
+    fn retired_purge_rejects_unexpected_paths_before_mutating_valid_files() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let (_retired_root, retired_shard) = retired_cache_shard(temp.path(), 0);
+        let artifact = active_artifact_path(&retired_shard, 0);
+        fs::write(&artifact, b"secret").expect("retired artifact");
+        let planted_name = "sk_live_RETIRED_CACHE_DIAGNOSTIC_SENTINEL_49";
+        let unexpected = retired_shard.join(planted_name);
+        fs::write(&unexpected, b"not cache data").expect("unexpected file");
+
+        let error = purge_retired_runtime_v1_cache(temp.path()).expect_err("unsafe layout");
+        assert!(matches!(
+            &error,
+            RuntimeCacheError::UnsafePath { path } if path == &unexpected
+        ));
+        assert!(
+            !format!("{error:#}").contains(planted_name),
+            "user-facing migration diagnostics exposed an attacker-controlled cache basename"
+        );
+        assert_eq!(fs::read(&artifact).expect("artifact remains"), b"secret");
+        assert_eq!(
+            fs::read(&unexpected).expect("unexpected remains"),
+            b"not cache data"
+        );
+    }
+
+    #[test]
+    fn retired_purge_stops_at_the_explicit_root_entry_bound() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let (retired_root, retired_shard) = retired_cache_shard(temp.path(), 0);
+        let artifact = active_artifact_path(&retired_shard, 0);
+        fs::write(&artifact, b"secret").expect("retired artifact");
+        fs::write(retired_root.join("unexpected-one"), b"one").expect("unexpected root file");
+        fs::write(retired_root.join("unexpected-two"), b"two").expect("unexpected root file");
+
+        assert!(matches!(
+            purge_retired_runtime_v1_cache(temp.path()),
+            Err(RuntimeCacheError::TooManyShardEntries { path, max_entries })
+                if path == retired_root
+                    && max_entries == RETIRED_RUNTIME_CACHE_MAX_ROOT_ENTRIES
+        ));
+        assert_eq!(fs::read(&artifact).expect("no partial purge"), b"secret");
+    }
+
+    #[test]
+    fn retired_purge_stops_at_the_explicit_shard_directory_bound() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let (retired_root, retired_shard) = retired_cache_shard(temp.path(), 0);
+        let artifact = active_artifact_path(&retired_shard, 0);
+        fs::write(&artifact, b"secret").expect("retired artifact");
+        for shard in 1..=RUNTIME_CACHE_SHARDS {
+            fs::create_dir(shard_directory(&retired_root, shard))
+                .expect("bounded shard-directory fixture");
+        }
+        let shards_dir = retired_root.join("shards");
+
+        assert!(matches!(
+            purge_retired_runtime_v1_cache(temp.path()),
+            Err(RuntimeCacheError::TooManyShardEntries { path, max_entries })
+                if path == shards_dir
+                    && max_entries == RETIRED_RUNTIME_CACHE_MAX_SHARD_DIRECTORIES
+        ));
+        assert_eq!(fs::read(&artifact).expect("no partial purge"), b"secret");
+    }
+
+    #[test]
+    fn retired_purge_stops_at_the_explicit_shard_entry_bound() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let (_retired_root, retired_shard) = retired_cache_shard(temp.path(), 0);
+        for generation in 0..=DEFAULT_RUNTIME_CACHE_MAX_SHARD_ENTRIES {
+            fs::write(
+                sealed_artifact_path(&retired_shard, generation as u64),
+                b"secret",
+            )
+            .expect("bounded retired fixture");
+        }
+
+        assert!(matches!(
+            purge_retired_runtime_v1_cache(temp.path()),
+            Err(RuntimeCacheError::TooManyShardEntries { path, max_entries })
+                if path == retired_shard
+                    && max_entries == DEFAULT_RUNTIME_CACHE_MAX_SHARD_ENTRIES
+        ));
+        assert_eq!(
+            fs::read(sealed_artifact_path(&retired_shard, 0)).expect("no partial purge"),
+            b"secret"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retired_purge_rejects_symlinks_hardlinks_and_special_files() {
+        use std::os::unix::fs::symlink;
+
+        let symlink_fixture = tempfile::tempdir().expect("symlink fixture");
+        let outside = symlink_fixture.path().join("outside-secret");
+        fs::write(&outside, b"outside").expect("outside fixture");
+        let (_retired_root, retired_shard) = retired_cache_shard(symlink_fixture.path(), 0);
+        let symlink_path = active_artifact_path(&retired_shard, 0);
+        symlink(&outside, &symlink_path).expect("retired artifact symlink");
+        assert!(matches!(
+            purge_retired_runtime_v1_cache(symlink_fixture.path()),
+            Err(RuntimeCacheError::UnsafePath { path }) if path == symlink_path
+        ));
+        assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
+
+        let hardlink_fixture = tempfile::tempdir().expect("hardlink fixture");
+        let (_retired_root, retired_shard) = retired_cache_shard(hardlink_fixture.path(), 0);
+        let hardlink_path = active_artifact_path(&retired_shard, 0);
+        fs::write(&hardlink_path, b"hardlinked-secret").expect("retired artifact");
+        let hardlink_alias = hardlink_fixture.path().join("outside-alias");
+        fs::hard_link(&hardlink_path, &hardlink_alias).expect("artifact hardlink");
+        assert!(matches!(
+            purge_retired_runtime_v1_cache(hardlink_fixture.path()),
+            Err(RuntimeCacheError::UnsafePath { path }) if path == hardlink_path
+        ));
+        assert_eq!(
+            fs::read(&hardlink_alias).expect("hardlink bytes remain"),
+            b"hardlinked-secret"
+        );
+
+        let fifo_fixture = tempfile::tempdir().expect("FIFO fixture");
+        let (_retired_root, retired_shard) = retired_cache_shard(fifo_fixture.path(), 0);
+        let fifo = retired_shard.join(CATALOG_FILE);
+        make_fifo(&fifo);
+        assert!(matches!(
+            purge_retired_runtime_v1_cache(fifo_fixture.path()),
+            Err(RuntimeCacheError::UnsafePath { path }) if path == fifo
+        ));
     }
 
     #[test]
@@ -2930,7 +3347,7 @@ mod tests {
         let outside = tempfile::tempdir().expect("outside directory");
         fs::create_dir(temp.path().join("cache")).expect("cache parent");
         symlink(outside.path(), temp.path().join(RUNTIME_CACHE_DIRECTORY))
-            .expect("malicious runtime-v1 symlink");
+            .expect("malicious active runtime-cache symlink");
 
         assert!(matches!(
             RuntimeCache::open(temp.path()),

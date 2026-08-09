@@ -501,22 +501,37 @@ fn extract_mcp_config_bytes(
     let python_package =
         Regex::new(r"^[a-z0-9][a-z0-9._-]*-mcp(?:-[a-z0-9._-]+)?$|^mcp-[a-z0-9][a-z0-9._-]*$")?;
 
-    for (server_name, value) in servers.iter().take(MAX_SERVERS) {
+    for (server_ordinal, (server_name, value)) in servers.iter().take(MAX_SERVERS).enumerate() {
         if server_name.is_empty() {
             continue;
         }
         let Some(spec) = value.as_object() else {
             continue;
         };
-        let server_id = make_id(&[&stem, "mcp_server", server_name]);
-        insert_mcp_node(
-            &mut nodes,
-            &mut seen_nodes,
-            server_id.clone(),
-            server_name,
-            "mcp_server",
-            source_file,
-        );
+        let server_name_redacted = crate::structured::structured_string_is_sensitive(server_name);
+        let server_id = if server_name_redacted {
+            make_id(&[&stem, "redacted_mcp_server", &server_ordinal.to_string()])
+        } else {
+            make_id(&[&stem, "mcp_server", server_name])
+        };
+        if server_name_redacted {
+            insert_mcp_redacted_node(
+                &mut nodes,
+                &mut seen_nodes,
+                server_id.clone(),
+                "mcp_server",
+                source_file,
+            );
+        } else {
+            insert_mcp_node(
+                &mut nodes,
+                &mut seen_nodes,
+                server_id.clone(),
+                server_name,
+                "mcp_server",
+                source_file,
+            );
+        }
         insert_mcp_edge(
             &mut edges,
             &mut seen_edges,
@@ -533,15 +548,30 @@ fn extract_mcp_config_bytes(
             .map(str::trim)
             .filter(|command| !command.is_empty())
         {
-            let command_id = make_id(&["mcp_command", command]);
-            insert_mcp_node(
-                &mut nodes,
-                &mut seen_nodes,
-                command_id.clone(),
-                command,
-                "mcp_command",
-                source_file,
-            );
+            let command_redacted = crate::structured::structured_string_is_sensitive(command);
+            let command_id = if command_redacted {
+                make_id(&[&server_id, "redacted_mcp_command"])
+            } else {
+                make_id(&["mcp_command", command])
+            };
+            if command_redacted {
+                insert_mcp_redacted_node(
+                    &mut nodes,
+                    &mut seen_nodes,
+                    command_id.clone(),
+                    "mcp_command",
+                    source_file,
+                );
+            } else {
+                insert_mcp_node(
+                    &mut nodes,
+                    &mut seen_nodes,
+                    command_id.clone(),
+                    command,
+                    "mcp_command",
+                    source_file,
+                );
+            }
             insert_mcp_edge(
                 &mut edges,
                 &mut seen_edges,
@@ -577,15 +607,30 @@ fn extract_mcp_config_bytes(
                     })
             })
         {
-            let package_id = make_id(&["mcp_package", &package]);
-            insert_mcp_node(
-                &mut nodes,
-                &mut seen_nodes,
-                package_id.clone(),
-                &package,
-                "mcp_package",
-                source_file,
-            );
+            let package_redacted = crate::structured::structured_string_is_sensitive(&package);
+            let package_id = if package_redacted {
+                make_id(&[&server_id, "redacted_mcp_package"])
+            } else {
+                make_id(&["mcp_package", &package])
+            };
+            if package_redacted {
+                insert_mcp_redacted_node(
+                    &mut nodes,
+                    &mut seen_nodes,
+                    package_id.clone(),
+                    "mcp_package",
+                    source_file,
+                );
+            } else {
+                insert_mcp_node(
+                    &mut nodes,
+                    &mut seen_nodes,
+                    package_id.clone(),
+                    &package,
+                    "mcp_package",
+                    source_file,
+                );
+            }
             insert_mcp_edge(
                 &mut edges,
                 &mut seen_edges,
@@ -598,16 +643,39 @@ fn extract_mcp_config_bytes(
         }
 
         if let Some(environment) = spec.get("env").and_then(serde_json::Value::as_object) {
-            for name in environment.keys().filter(|name| !name.is_empty()) {
-                let environment_id = make_id(&["env_var", name]);
-                insert_mcp_node(
-                    &mut nodes,
-                    &mut seen_nodes,
-                    environment_id.clone(),
-                    name,
-                    "env_var",
-                    source_file,
-                );
+            for (environment_ordinal, name) in environment
+                .keys()
+                .filter(|name| !name.is_empty())
+                .enumerate()
+            {
+                let name_redacted = crate::structured::structured_string_is_sensitive(name);
+                let environment_id = if name_redacted {
+                    make_id(&[
+                        &server_id,
+                        "redacted_env_var",
+                        &environment_ordinal.to_string(),
+                    ])
+                } else {
+                    make_id(&["env_var", name])
+                };
+                if name_redacted {
+                    insert_mcp_redacted_node(
+                        &mut nodes,
+                        &mut seen_nodes,
+                        environment_id.clone(),
+                        "env_var",
+                        source_file,
+                    );
+                } else {
+                    insert_mcp_node(
+                        &mut nodes,
+                        &mut seen_nodes,
+                        environment_id.clone(),
+                        name,
+                        "env_var",
+                        source_file,
+                    );
+                }
                 insert_mcp_edge(
                     &mut edges,
                     &mut seen_edges,
@@ -677,6 +745,33 @@ fn insert_mcp_node(
     if !id.is_empty() && seen.insert(id.clone()) {
         nodes.push(mcp_node(id, label, kind, source_file));
     }
+}
+
+fn insert_mcp_redacted_node(
+    nodes: &mut Vec<Node>,
+    seen: &mut HashSet<String>,
+    id: String,
+    kind: &str,
+    source_file: &str,
+) {
+    if id.is_empty() || !seen.insert(id.clone()) {
+        return;
+    }
+    let mut node = mcp_node(
+        id,
+        crate::structured::REDACTED_STRUCTURED_VALUE,
+        kind,
+        source_file,
+    );
+    node.extra
+        .insert("structured_value_redacted".into(), true.into());
+    node.extra
+        .insert("structured_label_redacted".into(), true.into());
+    node.extra
+        .insert("structured_value_type".into(), "string".into());
+    node.extra
+        .insert("structured_redaction_policy".into(), 1_u64.into());
+    nodes.push(node);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1881,10 +1976,11 @@ require('@scope/package')
 
     #[test]
     fn every_registered_mcp_filename_uses_the_redacting_fallback() {
+        let command_secret = "ghp_1234567890abcdef";
         let payload = r#"{
             "mcpServers": {
                 "private": {
-                    "command": "secret-bin",
+                    "command": "ghp_1234567890abcdef",
                     "args": ["--token", "secret-argument"],
                     "env": {"TOKEN": "secret-environment"}
                 }
@@ -1899,9 +1995,113 @@ require('@scope/package')
             let extraction = extract_text_bytes(Path::new(filename), filename, payload.as_bytes())
                 .unwrap_or_else(|error| panic!("{filename} did not use MCP extraction: {error:#}"));
             let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+            assert!(!rendered.contains(command_secret), "{filename}");
             assert!(!rendered.contains("secret-argument"), "{filename}");
             assert!(!rendered.contains("secret-environment"), "{filename}");
+            assert!(extraction.nodes.iter().any(|node| {
+                node.label == crate::structured::REDACTED_STRUCTURED_VALUE
+                    && node.extra.get("structured_value_redacted")
+                        == Some(&serde_json::Value::Bool(true))
+            }));
         }
+    }
+
+    #[test]
+    fn mcp_value_and_secret_like_name_ids_are_independent_of_raw_credentials() {
+        fn extract_private(
+            server: &str,
+            command: &str,
+            package: &str,
+            environment_name: &str,
+        ) -> Extraction {
+            let environment = serde_json::Map::from_iter([(
+                environment_name.to_owned(),
+                serde_json::Value::String("ordinary-secret-value".into()),
+            )]);
+            let servers = serde_json::Map::from_iter([(
+                server.to_owned(),
+                serde_json::json!({
+                    "command": command,
+                    "args": ["-y", package],
+                    "env": environment,
+                }),
+            )]);
+            let payload = serde_json::json!({
+                "mcpServers": servers,
+            });
+            extract_text_bytes(
+                Path::new(".mcp.json"),
+                ".mcp.json",
+                serde_json::to_vec(&payload)
+                    .expect("serialize MCP fixture")
+                    .as_slice(),
+            )
+            .expect("extract MCP fixture")
+        }
+
+        let first_values = [
+            "ghp_aaaaaaaaaaaaaaaa",
+            "sk_live_aaaaaaaaaaaaaaaa",
+            "rk_live_aaaaaaaaaaaaaaaa",
+        ];
+        let second_values = [
+            "ghp_bbbbbbbbbbbbbbbb",
+            "sk_live_bbbbbbbbbbbbbbbb",
+            "rk_live_bbbbbbbbbbbbbbbb",
+        ];
+        let safe_package = "@scope/private-mcp";
+        let first = extract_private(
+            first_values[0],
+            first_values[1],
+            safe_package,
+            first_values[2],
+        );
+        let second = extract_private(
+            second_values[0],
+            second_values[1],
+            safe_package,
+            second_values[2],
+        );
+        let first_rendered = serde_json::to_string(&first).expect("serialize first extraction");
+        let second_rendered = serde_json::to_string(&second).expect("serialize second extraction");
+        for secret in first_values {
+            assert!(!first_rendered.contains(secret), "leaked {secret}");
+        }
+        for secret in second_values {
+            assert!(!second_rendered.contains(secret), "leaked {secret}");
+        }
+        assert_eq!(first_rendered, second_rendered);
+        assert!(first_rendered.contains(safe_package));
+        assert!(
+            first
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.extra.get("structured_label_redacted")
+                        == Some(&serde_json::Value::Bool(true))
+                })
+                .count()
+                >= 3
+        );
+    }
+
+    #[test]
+    fn mcp_safe_command_and_package_remain_useful_structure() {
+        let extraction = extract_text_bytes(
+            Path::new(".mcp.json"),
+            ".mcp.json",
+            br#"{"mcpServers":{"graphoxide":{"command":"graphoxide","args":["-y","@graphoxide/mcp@1.2.3"],"env":{"SAFE_MODE":"ordinary-omitted-value"}}}}"#,
+        )
+        .expect("extract safe MCP structure");
+        let labels = extraction
+            .nodes
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect::<HashSet<_>>();
+        assert!(labels.contains("graphoxide"));
+        assert!(labels.contains("@graphoxide/mcp"));
+        let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+        assert!(!rendered.contains("ordinary-omitted-value"));
     }
 
     #[test]

@@ -2577,6 +2577,25 @@ pub fn extract_files_deferred_manifest(
     })
 }
 
+/// Extract an explicit file set without publishing its replacement manifest,
+/// storing cache and manifest state in an explicit managed output directory.
+/// `cache_root` retains its existing source-identity-anchor/fallback semantics
+/// and no longer selects the storage location.
+pub fn extract_files_deferred_manifest_with_output(
+    files: &[std::path::PathBuf],
+    cache_root: Option<&std::path::Path>,
+    managed_output_dir: &std::path::Path,
+    force: bool,
+) -> anyhow::Result<DeferredExtractFilesResult> {
+    extract_files_with_deferred_manifest_and_output(
+        files,
+        cache_root,
+        managed_output_dir,
+        force,
+        engine::extract_as,
+    )
+}
+
 /// Injectable variant used by backend adapters and failure-path tests.
 pub fn extract_files_with<F>(
     files: &[std::path::PathBuf],
@@ -2601,6 +2620,32 @@ pub fn extract_files_with_deferred_manifest<F>(
 where
     F: Fn(&std::path::Path, &str) -> anyhow::Result<graphoxide_core::Extraction>,
 {
+    let cache_base = cache_root.map(std::path::Path::to_path_buf).unwrap_or(
+        std::env::current_dir()
+            .map_err(|error| anyhow::anyhow!("resolve current directory: {error}"))?,
+    );
+    let managed_output_dir = cache_base.join("graphoxide-out");
+    extract_files_with_deferred_manifest_and_output(
+        files,
+        cache_root,
+        &managed_output_dir,
+        force,
+        extractor,
+    )
+}
+
+/// Injectable deferred-manifest variant with independent source-identity and
+/// managed-output roots.
+pub fn extract_files_with_deferred_manifest_and_output<F>(
+    files: &[std::path::PathBuf],
+    cache_root: Option<&std::path::Path>,
+    managed_output_dir: &std::path::Path,
+    force: bool,
+    extractor: F,
+) -> anyhow::Result<DeferredExtractFilesResult>
+where
+    F: Fn(&std::path::Path, &str) -> anyhow::Result<graphoxide_core::Extraction>,
+{
     use md5::Digest as _;
     let common_root = common_file_parent(files)?;
     let key_root = cache_root
@@ -2613,12 +2658,7 @@ where
             })
         })
         .unwrap_or(common_root);
-    let cache_base = cache_root.map(std::path::Path::to_path_buf).unwrap_or(
-        std::env::current_dir()
-            .map_err(|error| anyhow::anyhow!("resolve current directory: {error}"))?,
-    );
-    let managed_output_dir = cache_base.join("graphoxide-out");
-    let previous = cache::load_manifest_from_output(&managed_output_dir);
+    let previous = cache::load_manifest_from_output(managed_output_dir);
     let mut rows = Vec::with_capacity(files.len());
     let mut warnings = Vec::new();
     // A per-file fault is tolerated, but a fault on every dispatched file is
@@ -2647,7 +2687,7 @@ where
             }
         };
         let cached = (!force)
-            .then(|| cache::ast_cache_get_from_output(&managed_output_dir, &relative, &bytes))
+            .then(|| cache::ast_cache_get_from_output(managed_output_dir, &relative, &bytes))
             .flatten();
         let extraction = if let Some(cached) = cached {
             cached
@@ -2681,7 +2721,7 @@ where
                     ));
                 }
             } else if let Err(error) =
-                cache::ast_cache_put_to_output(&managed_output_dir, &relative, &bytes, &extracted)
+                cache::ast_cache_put_to_output(managed_output_dir, &relative, &bytes, &extracted)
             {
                 tracing::warn!("{relative}: caching the extraction failed: {error:#}");
             }
@@ -2758,10 +2798,10 @@ where
             warnings,
             skipped,
             key_root,
-            managed_output_dir: managed_output_dir.clone(),
+            managed_output_dir: managed_output_dir.to_path_buf(),
         },
         pending_manifest: PendingProjectManifest {
-            output_directory: managed_output_dir,
+            output_directory: managed_output_dir.to_path_buf(),
             entries: manifest,
         },
     })
@@ -4498,7 +4538,7 @@ mod tests {
         );
         assert!(result.telemetry.cache_io.peak_in_flight_transfer_bytes > 0);
         assert!(
-            output.join("cache/runtime-v1").exists(),
+            output.join("cache/runtime-v2").exists(),
             "successful extraction must be available to the runtime read-through path"
         );
         let retained_output_bytes = result.retained_output_bytes;
@@ -4749,7 +4789,7 @@ mod tests {
         .expect("cold Python scan");
         assert_eq!(cold.runtime_cache.stores, 1);
         commit_runtime_baseline(cold, &fixture.root, &output);
-        fs::remove_dir_all(output.join("cache/runtime-v1")).expect("remove runtime artifact store");
+        fs::remove_dir_all(output.join("cache/runtime-v2")).expect("remove runtime artifact store");
 
         let repaired = super::extract_project_with_runtime_scan_options_deferred_manifest(
             &fixture.root,

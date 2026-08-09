@@ -1,5 +1,6 @@
 //! Incremental manifest and content-addressed AST cache.
 
+use anyhow::Context as _;
 use graphoxide_core::Extraction;
 use graphoxide_index_runtime::cache::{
     RuntimeCache, RuntimeCacheHit, RuntimeCacheIoPersistOutcome, RuntimeCacheIoService,
@@ -11,15 +12,22 @@ use serde_json::Value;
 use sha2::Sha256;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
 // Bump whenever a built-in extractor's persisted fact schema changes. Version
-// 29 replaces OOXML, ODF, and EPUB inventory entries with bounded package-part,
-// document-structure, and internal-relationship facts. Those facts must not
-// mix with an incremental build's older cache rows.
-pub const AST_CACHE_VERSION: u32 = 29;
+// 30 redacts secret-bearing scalar values in generic structured facts and must
+// not replay version 29 rows that may retain raw credentials. Version 29
+// replaced OOXML, ODF, and EPUB inventory entries with bounded package-part,
+// document-structure, and internal-relationship facts.
+pub const AST_CACHE_VERSION: u32 = 30;
+
+const LAST_PRE_REDACTION_AST_CACHE_VERSION: u32 = 29;
+const MAX_AST_CACHE_ROOT_ENTRIES_FOR_PURGE: usize = 1_000_000;
+const MAX_PRE_REDACTION_AST_VERSION_ENTRIES_FOR_PURGE: usize = 1_000_000;
+const MAX_PRE_REDACTION_AST_ARTIFACTS_FOR_PURGE: usize = 2_000_000;
 
 /// Wire version for the extraction-owned payload stored inside runtime-v1.
 ///
@@ -816,26 +824,7 @@ pub fn cache_dir_with_ast_version(
     if kind == "ast" {
         directory.push("ast");
         fs::create_dir_all(&directory)?;
-        let current_name = format!("v{ast_version}");
-        for entry in fs::read_dir(&directory)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            let name = entry.file_name();
-            if file_type.is_dir()
-                && name.to_string_lossy().starts_with('v')
-                && name != current_name.as_str()
-            {
-                fs::remove_dir_all(entry.path())?;
-            } else if file_type.is_file()
-                && entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "json")
-            {
-                fs::remove_file(entry.path())?;
-            }
-        }
-        directory.push(current_name);
+        directory.push(format!("v{ast_version}"));
     } else {
         directory.push(kind);
         if let Some(fingerprint) = prompt_fingerprint {
@@ -844,6 +833,557 @@ pub fn cache_dir_with_ast_version(
     }
     fs::create_dir_all(&directory)?;
     Ok(directory)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreRedactionAstPurgeLimits {
+    max_root_entries: usize,
+    max_version_entries: usize,
+    max_artifacts: usize,
+}
+
+const PRE_REDACTION_AST_PURGE_LIMITS: PreRedactionAstPurgeLimits = PreRedactionAstPurgeLimits {
+    max_root_entries: MAX_AST_CACHE_ROOT_ENTRIES_FOR_PURGE,
+    max_version_entries: MAX_PRE_REDACTION_AST_VERSION_ENTRIES_FOR_PURGE,
+    max_artifacts: MAX_PRE_REDACTION_AST_ARTIFACTS_FOR_PURGE,
+};
+
+/// Prepare all persistent extraction caches for structured-value redaction.
+///
+/// Run this only while holding the project's exclusive rebuild lock and before
+/// opening an active cache or publishing any extraction output. The fixed
+/// sequence erases legacy JSON AST artifacts first, then retires runtime-v1
+/// frames that can contain the same pre-redaction facts. A failed or interrupted
+/// cleanup is safe to retry, but callers must stop publication on any error.
+pub fn prepare_structured_redaction_cache_schema(output_dir: &Path) -> anyhow::Result<()> {
+    purge_pre_redaction_ast_caches(output_dir).context("purge pre-redaction AST caches")?;
+    graphoxide_index_runtime::cache::purge_retired_runtime_v1_cache(output_dir)
+        .context("purge retired runtime-v1 cache")?;
+    Ok(())
+}
+
+/// Irrecoverably remove AST JSON artifacts written before structured-value
+/// redaction was introduced in cache schema version 30.
+///
+/// `output_dir` must be the Graphoxide output directory. The purge target is
+/// intentionally not configurable beyond that boundary: only exact legacy
+/// artifacts directly beneath `cache`, `cache/ast`, and `cache/ast/v0` through
+/// `cache/ast/v29` are eligible. Callers must hold the output directory's
+/// exclusive build lock so another process cannot replace entries between the
+/// validation and unlink steps.
+///
+/// Every targeted file is opened without following its final component,
+/// required to be a strongly identified regular file with one link, truncated,
+/// synced, identity-checked again, and only then unlinked. Unexpected content
+/// inside a targeted version directory rejects the purge instead of being
+/// traversed. Missing or already-truncated artifacts are handled idempotently.
+pub fn purge_pre_redaction_ast_caches(output_dir: &Path) -> anyhow::Result<()> {
+    purge_pre_redaction_ast_caches_with_limits(output_dir, PRE_REDACTION_AST_PURGE_LIMITS)
+        .map(|_| ())
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "pre-redaction AST cache migration rejected an unsafe, unexpected, unreadable, or over-limit managed layout"
+            )
+        })
+}
+
+fn purge_pre_redaction_ast_caches_with_limits(
+    output_dir: &Path,
+    limits: PreRedactionAstPurgeLimits,
+) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        limits.max_root_entries > 0 && limits.max_version_entries > 0 && limits.max_artifacts > 0,
+        "pre-redaction AST cache purge limits must be non-zero"
+    );
+
+    let Some(output_canonical) = validated_purge_directory(output_dir, None, "output directory")?
+    else {
+        return Ok(0);
+    };
+    let cache = output_dir.join("cache");
+    let Some(cache_canonical) = validated_purge_directory(
+        &cache,
+        Some(&output_canonical.join("cache")),
+        "cache directory",
+    )?
+    else {
+        return Ok(0);
+    };
+    let ast = cache.join("ast");
+    let ast_canonical = validated_purge_directory(
+        &ast,
+        Some(&cache_canonical.join("ast")),
+        "AST cache directory",
+    )?;
+
+    let mut artifact_count = 0;
+    inspect_pre_redaction_ast_directory(
+        &cache,
+        &cache_canonical,
+        false,
+        limits.max_root_entries,
+        limits.max_artifacts,
+        &mut artifact_count,
+    )?;
+    let mut existing_versions = [false; LAST_PRE_REDACTION_AST_CACHE_VERSION as usize + 1];
+    if let Some(ast_canonical) = ast_canonical.as_deref() {
+        inspect_pre_redaction_ast_directory(
+            &ast,
+            ast_canonical,
+            false,
+            limits.max_root_entries,
+            limits.max_artifacts,
+            &mut artifact_count,
+        )?;
+        for version in 0..=LAST_PRE_REDACTION_AST_CACHE_VERSION {
+            let name = format!("v{version}");
+            let directory = ast.join(&name);
+            if let Some(canonical) = validated_purge_directory(
+                &directory,
+                Some(&ast_canonical.join(&name)),
+                "pre-redaction AST cache version directory",
+            )? {
+                inspect_pre_redaction_ast_directory(
+                    &directory,
+                    &canonical,
+                    true,
+                    limits.max_version_entries,
+                    limits.max_artifacts,
+                    &mut artifact_count,
+                )?;
+                existing_versions[version as usize] = true;
+            }
+        }
+    }
+
+    // Preflight every targeted namespace before erasing the first byte. The
+    // second pass repeats all entry checks to fail closed if a caller did not
+    // honor the required exclusive-lock contract.
+    let mut removed = 0;
+    let mut deletion_count = 0;
+    validated_purge_directory(
+        &cache,
+        Some(&output_canonical.join("cache")),
+        "cache directory",
+    )?
+    .ok_or_else(|| anyhow::anyhow!("cache directory disappeared during purge"))?;
+    purge_pre_redaction_ast_directory(
+        &cache,
+        &cache_canonical,
+        false,
+        limits.max_root_entries,
+        limits.max_artifacts,
+        &mut deletion_count,
+        &mut removed,
+    )?;
+    if let Some(ast_canonical) = ast_canonical.as_deref() {
+        validated_purge_directory(
+            &ast,
+            Some(&cache_canonical.join("ast")),
+            "AST cache directory",
+        )?
+        .ok_or_else(|| anyhow::anyhow!("AST cache directory disappeared during purge"))?;
+        purge_pre_redaction_ast_directory(
+            &ast,
+            ast_canonical,
+            false,
+            limits.max_root_entries,
+            limits.max_artifacts,
+            &mut deletion_count,
+            &mut removed,
+        )?;
+        for version in 0..=LAST_PRE_REDACTION_AST_CACHE_VERSION {
+            if !existing_versions[version as usize] {
+                continue;
+            }
+            let name = format!("v{version}");
+            let directory = ast.join(&name);
+            let canonical = validated_purge_directory(
+                &directory,
+                Some(&ast_canonical.join(&name)),
+                "pre-redaction AST cache version directory",
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "pre-redaction AST cache version directory disappeared during purge"
+                )
+            })?;
+            purge_pre_redaction_ast_directory(
+                &directory,
+                &canonical,
+                true,
+                limits.max_version_entries,
+                limits.max_artifacts,
+                &mut deletion_count,
+                &mut removed,
+            )?;
+            validated_purge_directory(
+                &directory,
+                Some(&ast_canonical.join(&name)),
+                "pre-redaction AST cache version directory",
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "pre-redaction AST cache version directory disappeared during purge"
+                )
+            })?;
+            match fs::remove_dir(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to remove emptied pre-redaction AST cache directory {}: {error}",
+                        directory.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn validated_purge_directory(
+    path: &Path,
+    expected_canonical: Option<&Path>,
+    description: &str,
+) -> anyhow::Result<Option<PathBuf>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "failed to inspect {description} {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    anyhow::ensure!(
+        purge_directory_metadata_is_safe(&metadata),
+        "refusing unsafe {description} {}",
+        path.display()
+    );
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to resolve {description} {}: {error}",
+            path.display()
+        )
+    })?;
+    if let Some(expected) = expected_canonical {
+        anyhow::ensure!(
+            canonical == expected,
+            "refusing {description} outside its fixed cache namespace: {}",
+            path.display()
+        );
+    }
+    Ok(Some(canonical))
+}
+
+fn purge_directory_metadata_is_safe(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn inspect_pre_redaction_ast_directory(
+    directory: &Path,
+    canonical_directory: &Path,
+    reject_unexpected: bool,
+    max_entries: usize,
+    max_artifacts: usize,
+    artifact_count: &mut usize,
+) -> anyhow::Result<()> {
+    let mut entries = 0_usize;
+    for entry in fs::read_dir(directory).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to enumerate legacy AST cache directory {}: {error}",
+            directory.display()
+        )
+    })? {
+        entries = entries.saturating_add(1);
+        anyhow::ensure!(
+            entries <= max_entries,
+            "legacy AST cache directory entry cap exceeded at {}",
+            directory.display()
+        );
+        let entry = entry.map_err(|error| {
+            anyhow::anyhow!(
+                "failed to inspect a legacy AST cache entry in {}: {error}",
+                directory.display()
+            )
+        })?;
+        if legacy_ast_artifact_name_is_exact(&entry.file_name()) {
+            open_validated_legacy_ast_artifact(&entry.path(), canonical_directory)?.ok_or_else(
+                || {
+                    anyhow::anyhow!(
+                        "legacy AST cache artifact disappeared during preflight: {}",
+                        entry.path().display()
+                    )
+                },
+            )?;
+            *artifact_count = artifact_count.saturating_add(1);
+            anyhow::ensure!(
+                *artifact_count <= max_artifacts,
+                "legacy AST cache artifact cap exceeded"
+            );
+        } else if reject_unexpected {
+            anyhow::bail!(
+                "refusing unexpected content in pre-redaction AST cache directory: {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn purge_pre_redaction_ast_directory(
+    directory: &Path,
+    canonical_directory: &Path,
+    reject_unexpected: bool,
+    max_entries: usize,
+    max_artifacts: usize,
+    artifact_count: &mut usize,
+    removed: &mut usize,
+) -> anyhow::Result<()> {
+    let mut entries = 0_usize;
+    for entry in fs::read_dir(directory).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to enumerate legacy AST cache directory {}: {error}",
+            directory.display()
+        )
+    })? {
+        entries = entries.saturating_add(1);
+        anyhow::ensure!(
+            entries <= max_entries,
+            "legacy AST cache directory entry cap exceeded at {}",
+            directory.display()
+        );
+        let entry = entry.map_err(|error| {
+            anyhow::anyhow!(
+                "failed to inspect a legacy AST cache entry in {}: {error}",
+                directory.display()
+            )
+        })?;
+        if legacy_ast_artifact_name_is_exact(&entry.file_name()) {
+            *artifact_count = artifact_count.saturating_add(1);
+            anyhow::ensure!(
+                *artifact_count <= max_artifacts,
+                "legacy AST cache artifact cap exceeded"
+            );
+            if truncate_sync_unlink_legacy_ast_artifact(&entry.path(), canonical_directory)? {
+                *removed = removed.saturating_add(1);
+            }
+        } else if reject_unexpected {
+            anyhow::bail!(
+                "refusing unexpected content in pre-redaction AST cache directory: {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn legacy_ast_artifact_name_is_exact(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    if let Some(hash) = name.strip_suffix(".json") {
+        return lowercase_sha256_name_is_exact(hash);
+    }
+    // The original atomic writer used `<hash>.<pid>.tmp` before the shared
+    // writer adopted the collision-resistant form below. A crash could leave
+    // either spelling with the complete secret-bearing JSON payload.
+    if let Some(temporary) = name.strip_suffix(".tmp")
+        && let Some((hash, process)) = temporary.rsplit_once('.')
+        && lowercase_sha256_name_is_exact(hash)
+        && !process.is_empty()
+        && process.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return true;
+    }
+    let Some(temporary) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some(temporary) = temporary.strip_suffix(".tmp") else {
+        return false;
+    };
+    let Some((hash, generation)) = temporary.split_once(".json.") else {
+        return false;
+    };
+    let mut generation = generation.split('.');
+    let process = generation.next().unwrap_or_default();
+    let sequence = generation.next().unwrap_or_default();
+    lowercase_sha256_name_is_exact(hash)
+        && !process.is_empty()
+        && process.bytes().all(|byte| byte.is_ascii_digit())
+        && !sequence.is_empty()
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        && generation.next().is_none()
+}
+
+fn lowercase_sha256_name_is_exact(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn purge_artifact_metadata_is_safe(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            return false;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn open_legacy_ast_artifact_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    options.open(path)
+}
+
+fn open_validated_legacy_ast_artifact(
+    path: &Path,
+    canonical_directory: &Path,
+) -> anyhow::Result<Option<File>> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("legacy AST cache artifact has no final component"))?;
+    anyhow::ensure!(
+        legacy_ast_artifact_name_is_exact(name),
+        "refusing non-canonical legacy AST cache artifact {}",
+        path.display()
+    );
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        purge_artifact_metadata_is_safe(&metadata),
+        "refusing unsafe legacy AST cache artifact {}",
+        path.display()
+    );
+    let expected_canonical = canonical_directory.join(name);
+    anyhow::ensure!(
+        fs::canonicalize(path).ok().as_deref() == Some(expected_canonical.as_path()),
+        "refusing legacy AST cache artifact outside its fixed namespace: {}",
+        path.display()
+    );
+
+    let file = match open_legacy_ast_artifact_no_follow(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let opened_identity = graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "filesystem cannot strongly identify legacy AST cache artifact {}",
+                path.display()
+            )
+        })?;
+    let current = open_legacy_ast_artifact_no_follow(path)?;
+    let current_identity = graphoxide_index_runtime::validate_opened_regular_single_link(&current)
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "filesystem cannot strongly re-identify legacy AST cache artifact {}",
+                path.display()
+            )
+        })?;
+    anyhow::ensure!(
+        current_identity == opened_identity
+            && fs::canonicalize(path).ok().as_deref() == Some(expected_canonical.as_path()),
+        "legacy AST cache artifact changed during validation: {}",
+        path.display()
+    );
+    drop(current);
+    Ok(Some(file))
+}
+
+fn truncate_sync_unlink_legacy_ast_artifact(
+    path: &Path,
+    canonical_directory: &Path,
+) -> anyhow::Result<bool> {
+    let Some(file) = open_validated_legacy_ast_artifact(path, canonical_directory)? else {
+        return Ok(false);
+    };
+    file.set_len(0)?;
+    file.sync_all()?;
+    let after = graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "filesystem lost strong identity for legacy AST cache artifact {}",
+                path.display()
+            )
+        })?;
+    anyhow::ensure!(
+        after.length_bytes() == 0,
+        "legacy AST cache artifact did not remain truncated: {}",
+        path.display()
+    );
+    let name = path
+        .file_name()
+        .expect("validated legacy artifact has a final component");
+    let expected_canonical = canonical_directory.join(name);
+    let current = open_legacy_ast_artifact_no_follow(path)?;
+    let current_identity = graphoxide_index_runtime::validate_opened_regular_single_link(&current)
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "filesystem cannot strongly re-identify legacy AST cache artifact {}",
+                path.display()
+            )
+        })?;
+    anyhow::ensure!(
+        current_identity == after
+            && fs::canonicalize(path).ok().as_deref() == Some(expected_canonical.as_path()),
+        "legacy AST cache artifact changed during purge: {}",
+        path.display()
+    );
+    drop(current);
+    drop(file);
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 const ROOT_MARKER: &str = "$graphoxide-root$";
@@ -3098,6 +3638,484 @@ mod tests {
         assert!(
             held_before != held_after || held_before != current_identity,
             "at least one strong generation check must observe rename substitution"
+        );
+    }
+
+    fn purge_fixture_hash(byte: u8) -> String {
+        std::iter::repeat_n(char::from(byte), 64).collect()
+    }
+
+    fn write_purge_fixture(path: &Path, contents: &[u8]) {
+        fs::create_dir_all(path.parent().expect("fixture parent"))
+            .expect("create purge fixture parent");
+        fs::write(path, contents).expect("write purge fixture");
+    }
+
+    fn tree_contains_extension(directory: &Path, extension: &str) -> bool {
+        fs::read_dir(directory)
+            .expect("enumerate cache fixture")
+            .map(|entry| entry.expect("cache fixture entry").path())
+            .any(|path| {
+                if path.is_dir() {
+                    tree_contains_extension(&path, extension)
+                } else {
+                    path.extension().is_some_and(|value| value == extension)
+                }
+            })
+    }
+
+    #[test]
+    fn structured_redaction_schema_preparation_purges_json_and_runtime_v1() {
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let output = temp.path().join("graphoxide-out");
+        let legacy_json = output
+            .join("cache/ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        write_purge_fixture(&legacy_json, b"raw-json-secret");
+
+        let relative = "config/secrets.json";
+        let source = br#"{"password":"raw-runtime-secret"}"#;
+        let evidence =
+            runtime_ast_cache_evidence(relative, source, RuntimeAstCacheOptions::isolated(4096))
+                .expect("runtime cache evidence");
+        let mut runtime = RuntimeCache::open(&output).expect("active runtime cache");
+        runtime_ast_cache_put(&mut runtime, &evidence, &runtime_fixture(relative))
+            .expect("runtime cache payload");
+        let active_runtime = runtime.root().to_path_buf();
+        assert!(tree_contains_extension(&active_runtime, "gxa"));
+        drop(runtime);
+        let retired_runtime = output.join("cache/runtime-v1");
+        fs::rename(active_runtime, &retired_runtime).expect("stage retired runtime-v1 fixture");
+
+        prepare_structured_redaction_cache_schema(&output)
+            .expect("prepare structured-redaction cache schema");
+        assert!(!legacy_json.exists());
+        assert!(retired_runtime.exists(), "retired owner-lock root remains");
+        assert!(
+            !tree_contains_extension(&retired_runtime, "gxa"),
+            "retired runtime payload survived schema preparation"
+        );
+        prepare_structured_redaction_cache_schema(&output).expect("idempotent schema preparation");
+    }
+
+    #[test]
+    fn structured_redaction_schema_preparation_hides_unexpected_runtime_cache_names() {
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let output = temp.path().join("graphoxide-out");
+        let shard = output.join("cache/runtime-v1/shards/00");
+        fs::create_dir_all(&shard).expect("retired runtime shard");
+        let valid = shard.join("active-0.gxa");
+        fs::write(&valid, b"must-not-be-truncated").expect("valid retired payload");
+        let planted_name = "sk_live_RUNTIME_CACHE_CLI_DIAGNOSTIC_SENTINEL_49";
+        let unexpected = shard.join(planted_name);
+        fs::write(&unexpected, b"unexpected").expect("unexpected retired entry");
+
+        let error = prepare_structured_redaction_cache_schema(&output)
+            .expect_err("unexpected retired runtime cache content");
+        for rendered in [
+            format!("{error}"),
+            format!("{error:#}"),
+            format!("{error:?}"),
+        ] {
+            assert!(
+                !rendered.contains(planted_name),
+                "CLI-formatted migration diagnostics exposed an attacker-controlled cache basename"
+            );
+        }
+        assert_eq!(
+            fs::read(&valid).expect("preflight preserved valid retired payload"),
+            b"must-not-be-truncated"
+        );
+        assert_eq!(
+            fs::read(&unexpected).expect("preflight preserved unexpected retired entry"),
+            b"unexpected"
+        );
+    }
+
+    #[test]
+    fn opening_current_ast_cache_preserves_other_versions_and_root_entries() {
+        let temp = tempfile::tempdir().expect("temporary cache root");
+        let ast = temp.path().join("graphoxide-out/cache/ast");
+        let v29 = ast
+            .join("v29")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        let v31 = ast
+            .join("v31")
+            .join(format!("{}.json", purge_fixture_hash(b'b')));
+        let unversioned = ast.join(format!("{}.json", purge_fixture_hash(b'c')));
+        let unrelated = ast.join("operator-note.txt");
+        for path in [&v29, &v31, &unversioned, &unrelated] {
+            write_purge_fixture(path, b"preserve");
+        }
+
+        assert_eq!(
+            cache_dir_with_ast_version(temp.path(), "ast", None, AST_CACHE_VERSION)
+                .expect("open current AST cache"),
+            ast.join(format!("v{AST_CACHE_VERSION}"))
+        );
+        for path in [v29, v31, unversioned, unrelated] {
+            assert_eq!(
+                fs::read(&path).expect("preserved AST entry"),
+                b"preserve",
+                "opening the current cache erased {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn pre_redaction_ast_purge_is_exact_bounded_and_idempotent() {
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let output = temp.path().join("graphoxide-out");
+        let cache = output.join("cache");
+        let ast = cache.join("ast");
+        let semantic = cache.join("semantic");
+        let hash_a = purge_fixture_hash(b'a');
+        let hash_b = purge_fixture_hash(b'b');
+        let hash_c = purge_fixture_hash(b'c');
+        let hash_d = purge_fixture_hash(b'd');
+        let hash_e = purge_fixture_hash(b'e');
+        let hash_f = purge_fixture_hash(b'f');
+
+        let cache_unversioned = cache.join(format!("{hash_a}.json"));
+        let cache_interrupted = cache.join(format!(".{hash_b}.json.101.1.tmp"));
+        let ast_unversioned = ast.join(format!("{hash_c}.json"));
+        let ast_old_interrupted = ast.join(format!("{hash_d}.202.tmp"));
+        let v0_artifact = ast.join("v0").join(format!("{hash_e}.json"));
+        let v29_interrupted = ast.join("v29").join(format!(".{hash_f}.json.303.2.tmp"));
+        for path in [
+            &cache_unversioned,
+            &cache_interrupted,
+            &ast_unversioned,
+            &ast_old_interrupted,
+            &v0_artifact,
+            &v29_interrupted,
+        ] {
+            write_purge_fixture(path, b"raw-secret");
+        }
+        fs::create_dir_all(ast.join("v12")).expect("empty interrupted version directory");
+
+        let v30 = ast.join("v30").join(format!("{hash_a}.json"));
+        let v31 = ast.join("v31").join(format!("{hash_b}.json"));
+        let semantic_artifact = semantic.join(format!("{hash_c}.json"));
+        let unrelated_cache = cache.join("operator-note.json");
+        let unrelated_ast = ast.join("operator-note.json");
+        let uppercase_hash = ast.join(format!("{}.json", hash_d.to_ascii_uppercase()));
+        for path in [
+            &v30,
+            &v31,
+            &semantic_artifact,
+            &unrelated_cache,
+            &unrelated_ast,
+            &uppercase_hash,
+        ] {
+            write_purge_fixture(path, b"preserve");
+        }
+
+        assert_eq!(
+            purge_pre_redaction_ast_caches_with_limits(&output, PRE_REDACTION_AST_PURGE_LIMITS)
+                .expect("purge legacy AST artifacts"),
+            6
+        );
+        for path in [
+            cache_unversioned,
+            cache_interrupted,
+            ast_unversioned,
+            ast_old_interrupted,
+            v0_artifact,
+            v29_interrupted,
+        ] {
+            assert!(
+                !path.exists(),
+                "legacy artifact survived: {}",
+                path.display()
+            );
+        }
+        for version in ["v0", "v12", "v29"] {
+            assert!(
+                !ast.join(version).exists(),
+                "emptied legacy version directory survived"
+            );
+        }
+        for path in [
+            v30,
+            v31,
+            semantic_artifact,
+            unrelated_cache,
+            unrelated_ast,
+            uppercase_hash,
+        ] {
+            assert_eq!(
+                fs::read(&path).expect("preserved artifact"),
+                b"preserve",
+                "purge changed unrelated artifact {}",
+                path.display()
+            );
+        }
+        prepare_structured_redaction_cache_schema(&output)
+            .expect("idempotent full schema preparation");
+        assert_eq!(
+            purge_pre_redaction_ast_caches_with_limits(&output, PRE_REDACTION_AST_PURGE_LIMITS)
+                .expect("idempotent counted purge"),
+            0
+        );
+    }
+
+    #[test]
+    fn pre_redaction_ast_purge_preflights_unexpected_nested_content() {
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let output = temp.path().join("graphoxide-out");
+        let ast = output.join("cache/ast");
+        let first = ast
+            .join("v0")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        write_purge_fixture(&first, b"must-not-be-truncated");
+        let planted_name = "sk_live_AST_CACHE_DIAGNOSTIC_SENTINEL_49";
+        let unexpected = ast.join("v29").join(planted_name);
+        write_purge_fixture(&unexpected, b"unexpected");
+
+        let error = prepare_structured_redaction_cache_schema(&output)
+            .expect_err("unexpected pre-redaction cache content");
+        assert!(
+            !format!("{error:#}").contains(planted_name),
+            "user-facing migration diagnostics exposed an attacker-controlled cache basename"
+        );
+        assert_eq!(
+            fs::read(&first).expect("preflight preserved first artifact"),
+            b"must-not-be-truncated"
+        );
+        assert_eq!(
+            fs::read(&unexpected).expect("preflight preserved unexpected entry"),
+            b"unexpected"
+        );
+    }
+
+    #[test]
+    fn pre_redaction_ast_purge_enforces_root_version_and_total_caps() {
+        let root_cap = tempfile::tempdir().expect("root-cap output root");
+        let root_output = root_cap.path().join("graphoxide-out");
+        let root_cache = root_output.join("cache");
+        let root_artifact = root_cache.join(format!("{}.json", purge_fixture_hash(b'a')));
+        write_purge_fixture(&root_artifact, b"root-cap-secret");
+        fs::create_dir_all(root_cache.join("ast")).expect("AST root");
+        assert!(purge_pre_redaction_ast_caches_with_limits(
+            &root_output,
+            PreRedactionAstPurgeLimits {
+                max_root_entries: 1,
+                max_version_entries: 8,
+                max_artifacts: 8,
+            },
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(root_artifact).expect("root cap preserved"),
+            b"root-cap-secret"
+        );
+
+        let version_cap = tempfile::tempdir().expect("version-cap output root");
+        let version_output = version_cap.path().join("graphoxide-out");
+        let v0 = version_output.join("cache/ast/v0");
+        let version_first = v0.join(format!("{}.json", purge_fixture_hash(b'a')));
+        let version_second = v0.join(format!("{}.json", purge_fixture_hash(b'b')));
+        write_purge_fixture(&version_first, b"first");
+        write_purge_fixture(&version_second, b"second");
+        assert!(purge_pre_redaction_ast_caches_with_limits(
+            &version_output,
+            PreRedactionAstPurgeLimits {
+                max_root_entries: 8,
+                max_version_entries: 1,
+                max_artifacts: 8,
+            },
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(version_first).expect("version cap preserved"),
+            b"first"
+        );
+        assert_eq!(
+            fs::read(version_second).expect("version cap preserved"),
+            b"second"
+        );
+
+        let total_cap = tempfile::tempdir().expect("total-cap output root");
+        let total_output = total_cap.path().join("graphoxide-out");
+        let direct = total_output
+            .join("cache")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        let versioned = total_output
+            .join("cache/ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'b')));
+        write_purge_fixture(&direct, b"direct");
+        write_purge_fixture(&versioned, b"versioned");
+        assert!(purge_pre_redaction_ast_caches_with_limits(
+            &total_output,
+            PreRedactionAstPurgeLimits {
+                max_root_entries: 8,
+                max_version_entries: 8,
+                max_artifacts: 1,
+            },
+        )
+        .is_err());
+        assert_eq!(fs::read(direct).expect("total cap preserved"), b"direct");
+        assert_eq!(
+            fs::read(versioned).expect("total cap preserved"),
+            b"versioned"
+        );
+    }
+
+    #[test]
+    fn legacy_ast_purge_artifact_names_are_narrow() {
+        let hash = purge_fixture_hash(b'a');
+        for name in [
+            format!("{hash}.json"),
+            format!("{hash}.123.tmp"),
+            format!(".{hash}.json.123.456.tmp"),
+        ] {
+            assert!(legacy_ast_artifact_name_is_exact(name.as_ref()), "{name}");
+        }
+        for name in [
+            format!("{}.json", hash.to_ascii_uppercase()),
+            format!("{hash}.json.bak"),
+            format!("{hash}.tmp"),
+            format!(".{hash}.json.123.tmp"),
+            format!(".{hash}.json.123.456.789.tmp"),
+            format!("{}.json", &hash[..63]),
+        ] {
+            assert!(!legacy_ast_artifact_name_is_exact(name.as_ref()), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_redaction_ast_purge_rejects_links_and_special_files_without_following() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::symlink;
+
+        let cache_link = tempfile::tempdir().expect("cache-link output root");
+        let cache_link_output = cache_link.path().join("graphoxide-out");
+        fs::create_dir_all(&cache_link_output).expect("cache-link output");
+        let outside_cache = cache_link.path().join("outside-cache");
+        let outside_secret = outside_cache
+            .join("ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        write_purge_fixture(&outside_secret, b"outside-cache-secret");
+        symlink(&outside_cache, cache_link_output.join("cache")).expect("symlink cache root");
+        assert!(purge_pre_redaction_ast_caches(&cache_link_output).is_err());
+        assert_eq!(
+            fs::read(&outside_secret).expect("outside cache preserved"),
+            b"outside-cache-secret"
+        );
+
+        let version_link = tempfile::tempdir().expect("version-link output root");
+        let version_link_output = version_link.path().join("graphoxide-out");
+        let version_link_ast = version_link_output.join("cache/ast");
+        fs::create_dir_all(&version_link_ast).expect("version-link AST root");
+        let outside_version = version_link.path().join("outside-version");
+        let outside_version_secret =
+            outside_version.join(format!("{}.json", purge_fixture_hash(b'b')));
+        write_purge_fixture(&outside_version_secret, b"outside-version-secret");
+        symlink(&outside_version, version_link_ast.join("v29")).expect("symlink version root");
+        assert!(purge_pre_redaction_ast_caches(&version_link_output).is_err());
+        assert_eq!(
+            fs::read(&outside_version_secret).expect("outside version preserved"),
+            b"outside-version-secret"
+        );
+
+        let artifact_link = tempfile::tempdir().expect("artifact-link output root");
+        let artifact_link_output = artifact_link.path().join("graphoxide-out");
+        let artifact_link_path = artifact_link_output
+            .join("cache/ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'c')));
+        fs::create_dir_all(artifact_link_path.parent().expect("artifact-link parent"))
+            .expect("artifact-link parent");
+        let artifact_link_target = artifact_link.path().join("outside-artifact.json");
+        fs::write(&artifact_link_target, b"outside-artifact-secret").expect("outside artifact");
+        symlink(&artifact_link_target, &artifact_link_path).expect("symlink artifact");
+        assert!(purge_pre_redaction_ast_caches(&artifact_link_output).is_err());
+        assert_eq!(
+            fs::read(&artifact_link_target).expect("artifact target preserved"),
+            b"outside-artifact-secret"
+        );
+
+        let hardlink = tempfile::tempdir().expect("hardlink output root");
+        let hardlink_output = hardlink.path().join("graphoxide-out");
+        let earlier_artifact = hardlink_output
+            .join("cache/ast/v0")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        write_purge_fixture(&earlier_artifact, b"earlier-must-remain");
+        let hardlink_path = hardlink_output
+            .join("cache/ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'd')));
+        fs::create_dir_all(hardlink_path.parent().expect("hardlink parent"))
+            .expect("hardlink parent");
+        let hardlink_target = hardlink.path().join("outside-hardlink.json");
+        fs::write(&hardlink_target, b"outside-hardlink-secret").expect("hardlink target");
+        fs::hard_link(&hardlink_target, &hardlink_path).expect("hardlink artifact");
+        assert!(purge_pre_redaction_ast_caches(&hardlink_output).is_err());
+        assert_eq!(
+            fs::read(&hardlink_target).expect("hardlink target preserved"),
+            b"outside-hardlink-secret"
+        );
+        assert_eq!(
+            fs::read(&earlier_artifact).expect("earlier artifact preserved"),
+            b"earlier-must-remain",
+            "hardlink must be rejected during preflight before any truncation"
+        );
+
+        let special = tempfile::tempdir().expect("special output root");
+        let special_output = special.path().join("graphoxide-out");
+        let fifo_path = special_output
+            .join("cache/ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'e')));
+        fs::create_dir_all(fifo_path.parent().expect("FIFO parent")).expect("FIFO parent");
+        let fifo = std::ffi::CString::new(fifo_path.as_os_str().as_bytes()).expect("FIFO path");
+        // SAFETY: `fifo` is a live NUL-terminated path and mkfifo does not
+        // retain the pointer after returning.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(purge_pre_redaction_ast_caches(&special_output).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pre_redaction_ast_purge_rejects_windows_hardlinks() {
+        let temp = tempfile::tempdir().expect("hardlink output root");
+        let output = temp.path().join("graphoxide-out");
+        let earlier_artifact = output
+            .join("cache/ast/v0")
+            .join(format!("{}.json", purge_fixture_hash(b'b')));
+        write_purge_fixture(&earlier_artifact, b"earlier-must-remain");
+        let artifact = output
+            .join("cache/ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        fs::create_dir_all(artifact.parent().expect("hardlink parent")).expect("hardlink parent");
+        let target = temp.path().join("outside-hardlink.json");
+        fs::write(&target, b"outside-hardlink-secret").expect("hardlink target");
+        fs::hard_link(&target, &artifact).expect("hardlink artifact");
+        assert!(purge_pre_redaction_ast_caches(&output).is_err());
+        assert_eq!(
+            fs::read(target).expect("hardlink target preserved"),
+            b"outside-hardlink-secret"
+        );
+        assert_eq!(
+            fs::read(earlier_artifact).expect("earlier artifact preserved"),
+            b"earlier-must-remain",
+            "Windows hardlink must fail during preflight"
+        );
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn pre_redaction_ast_purge_fails_closed_without_strong_platform_identity() {
+        let temp = tempfile::tempdir().expect("temporary output root");
+        let output = temp.path().join("graphoxide-out");
+        let artifact = output
+            .join("cache/ast/v29")
+            .join(format!("{}.json", purge_fixture_hash(b'a')));
+        write_purge_fixture(&artifact, b"raw-secret");
+        assert!(purge_pre_redaction_ast_caches(&output).is_err());
+        assert_eq!(
+            fs::read(artifact).expect("artifact preserved"),
+            b"raw-secret"
         );
     }
 }

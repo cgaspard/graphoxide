@@ -1053,6 +1053,8 @@ pub struct RebuildOptions {
     pub follow_symlinks: bool,
     pub force: bool,
     pub no_cluster: bool,
+    /// Acquire the managed rebuild lock in this call. When false, the caller
+    /// must already hold exclusive ownership of the managed output protocol.
     pub acquire_lock: bool,
     pub block_on_lock: bool,
     pub invocation_cwd: Option<PathBuf>,
@@ -1391,6 +1393,7 @@ where
     }
     validate_watch_output_directory(&context.watch_root, &context.output)?;
     if !options.acquire_lock {
+        graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&context.output)?;
         let mut result = executor(&coordinated_request(
             &context,
             options,
@@ -1421,6 +1424,7 @@ where
             },
         });
     };
+    graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&context.output)?;
     let merged = if let Some(changed) = options.changed_paths.as_deref() {
         let queued = drain_pending(&context.output)?;
         Some(merge_changed_paths(&[Some(changed), Some(&queued)]))
@@ -1466,6 +1470,7 @@ where
     }
     validate_watch_output_directory(&context.watch_root, &context.output)?;
     if !options.acquire_lock {
+        graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&context.output)?;
         let mut result = rebuild_once(&context, options, options.changed_paths.as_deref(), 1)?;
         result.result.timings.total_ms = elapsed_millis(total_started);
         return Ok(result.result);
@@ -1491,6 +1496,7 @@ where
             },
         });
     };
+    graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&context.output)?;
     let merged = if let Some(changed) = options.changed_paths.as_deref() {
         let queued = drain_pending(&context.output)?;
         Some(merge_changed_paths(&[Some(changed), Some(&queued)]))
@@ -2119,9 +2125,10 @@ fn rebuild_once(
     let mut chunks = Vec::new();
     let mut skipped: Vec<PathBuf> = Vec::new();
     if !targets.is_empty() {
-        match graphoxide_extract::extract_files_deferred_manifest(
+        match graphoxide_extract::extract_files_deferred_manifest_with_output(
             &targets,
             Some(&context.watch_root),
+            &context.output,
             true,
         ) {
             Ok(prepared) => {

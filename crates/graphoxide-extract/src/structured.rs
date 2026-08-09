@@ -7,6 +7,7 @@
 //! available and otherwise produce explicitly marked structural facts rather
 //! than guessing a semantic value.
 
+use base64::Engine as _;
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use quick_xml::{events::Event, Reader};
 use regex::Regex;
@@ -25,6 +26,9 @@ const DEFAULT_MAX_FACTS: usize = crate::format_registry::STRUCTURED_TEXT_LIMITS.
 const DEFAULT_MAX_DEPTH: usize = crate::format_registry::STRUCTURED_TEXT_LIMITS.max_nesting;
 const DEFAULT_MAX_ROWS: usize = crate::format_registry::STRUCTURED_TEXT_LIMITS.max_records;
 const DEFAULT_MAX_SCALAR_BYTES: usize = 64 * 1024;
+const MAX_SENSITIVE_KEY_BYTES: usize = 256;
+const MAX_SENSITIVE_VALUE_BYTES: usize = DEFAULT_MAX_SCALAR_BYTES;
+pub(crate) const REDACTED_STRUCTURED_VALUE: &str = "<redacted>";
 
 const JSON_EXTENSIONS: &[&str] = &[
     "json",
@@ -306,6 +310,8 @@ struct ChildOptions<'a> {
     value: Option<ChildValue<'a>>,
     structural_only: bool,
     value_truncated: bool,
+    sensitive_context: bool,
+    redacted_value_type: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -319,6 +325,8 @@ impl<'a> ChildOptions<'a> {
         value: None,
         structural_only: true,
         value_truncated: false,
+        sensitive_context: false,
+        redacted_value_type: None,
     };
 
     fn string(value: &'a str) -> Self {
@@ -326,6 +334,8 @@ impl<'a> ChildOptions<'a> {
             value: Some(ChildValue::String(value)),
             structural_only: false,
             value_truncated: false,
+            sensitive_context: false,
+            redacted_value_type: None,
         }
     }
 
@@ -334,7 +344,24 @@ impl<'a> ChildOptions<'a> {
             value: None,
             structural_only: false,
             value_truncated: true,
+            sensitive_context: false,
+            redacted_value_type: None,
         }
+    }
+
+    fn truncated_sensitive_string() -> Self {
+        Self {
+            value: None,
+            structural_only: false,
+            value_truncated: true,
+            sensitive_context: true,
+            redacted_value_type: Some("string"),
+        }
+    }
+
+    const fn in_sensitive_context(mut self, sensitive_context: bool) -> Self {
+        self.sensitive_context = sensitive_context;
+        self
     }
 }
 
@@ -365,7 +392,8 @@ impl<'a> State<'a> {
                     Value::String(format.id().into()),
                 ),
             ]);
-            root_extra.insert("structured_version".into(), Value::from(1_u64));
+            root_extra.insert("structured_version".into(), Value::from(2_u64));
+            root_extra.insert("structured_redaction_policy".into(), Value::from(1_u64));
             if let Some(spec) = crate::format_registry::format_registry().find_by_path(path) {
                 root_extra.insert(
                     "format_capability".into(),
@@ -506,6 +534,19 @@ impl<'a> State<'a> {
         if self.nodes.is_empty() {
             return None;
         }
+        // A map key, XML name, heading, or reference can itself contain a
+        // credential. Decide that before the raw component participates in a
+        // published path or identifier. Callers also pass identity-safe path
+        // components so descendants cannot inherit the original spelling; this
+        // central replacement is the final guard for non-hierarchical labels.
+        let label_redacted = structured_string_is_sensitive(label);
+        let redacted_path = label_redacted.then(|| {
+            format!(
+                "$redacted/{kind}[{}]",
+                self.nodes.len().saturating_add(self.edges.len())
+            )
+        });
+        let path = redacted_path.as_deref().unwrap_or(path);
         if path.len() > self.limits.max_scalar_bytes {
             self.report_path_limit(line, "structured parser");
             return None;
@@ -546,35 +587,77 @@ impl<'a> State<'a> {
             extra.insert("structured_value_truncated".into(), Value::Bool(true));
         }
         if let Some(value) = options.value {
-            let fits = match value {
-                ChildValue::Json(value) => {
-                    serialized_len_at_most(value, self.limits.max_scalar_bytes)
-                }
-                ChildValue::String(value) => {
-                    serialized_len_at_most(value, self.limits.max_scalar_bytes)
-                }
-            };
-            if fits {
-                let value = match value {
-                    ChildValue::Json(value) => value.clone(),
-                    ChildValue::String(value) => Value::String(value.into()),
-                };
-                extra.insert("structured_value".into(), value);
-            } else {
-                extra.insert("structured_value_truncated".into(), Value::Bool(true));
-                self.diagnostic(
-                    "scalar_limit",
-                    line,
-                    format!(
-                        "structured scalar at {path:?} exceeds {} bytes",
-                        self.limits.max_scalar_bytes
-                    ),
+            if options.sensitive_context {
+                extra.insert(
+                    "structured_value".into(),
+                    Value::String(REDACTED_STRUCTURED_VALUE.into()),
                 );
+                extra.insert("structured_value_redacted".into(), Value::Bool(true));
+                extra.insert(
+                    "structured_value_type".into(),
+                    Value::String(child_value_kind(value).into()),
+                );
+            } else {
+                let fits = match value {
+                    ChildValue::Json(value) => {
+                        serialized_len_at_most(value, self.limits.max_scalar_bytes)
+                    }
+                    ChildValue::String(value) => {
+                        serialized_len_at_most(value, self.limits.max_scalar_bytes)
+                    }
+                };
+                if !fits {
+                    extra.insert("structured_value_truncated".into(), Value::Bool(true));
+                    self.diagnostic(
+                        "scalar_limit",
+                        line,
+                        format!(
+                            "structured scalar at {path:?} exceeds {} bytes",
+                            self.limits.max_scalar_bytes
+                        ),
+                    );
+                } else if child_value_is_sensitive(value) {
+                    extra.insert(
+                        "structured_value".into(),
+                        Value::String(REDACTED_STRUCTURED_VALUE.into()),
+                    );
+                    extra.insert("structured_value_redacted".into(), Value::Bool(true));
+                    extra.insert(
+                        "structured_value_type".into(),
+                        Value::String(child_value_kind(value).into()),
+                    );
+                } else {
+                    let value = match value {
+                        ChildValue::Json(value) => value.clone(),
+                        ChildValue::String(value) => Value::String(value.into()),
+                    };
+                    extra.insert("structured_value".into(), value);
+                }
             }
+        } else if let Some(value_type) = options.redacted_value_type {
+            extra.insert(
+                "structured_value".into(),
+                Value::String(REDACTED_STRUCTURED_VALUE.into()),
+            );
+            extra.insert("structured_value_redacted".into(), Value::Bool(true));
+            extra.insert(
+                "structured_value_type".into(),
+                Value::String(value_type.into()),
+            );
+        } else if options.sensitive_context {
+            extra.insert("structured_descendants_redacted".into(), Value::Bool(true));
+        }
+        if label_redacted {
+            extra.insert("structured_label_redacted".into(), Value::Bool(true));
+            extra.insert("structured_path_redacted".into(), Value::Bool(true));
         }
         self.nodes.push(Node {
             id: id.clone(),
-            label: label.into(),
+            label: if label_redacted {
+                REDACTED_STRUCTURED_VALUE.into()
+            } else {
+                label.into()
+            },
             file_type: self.format.file_type().into(),
             source_file: self.source_file.into(),
             source_location: Some(format!("L{}", line.max(1))),
@@ -621,11 +704,7 @@ impl<'a> State<'a> {
     }
 
     fn add_root_value(&mut self, value: &Value, line: usize) {
-        if serialized_len_at_most(value, self.limits.max_scalar_bytes) {
-            if let Some(root) = self.nodes.first_mut() {
-                root.extra.insert("structured_value".into(), value.clone());
-            }
-        } else {
+        if !serialized_len_at_most(value, self.limits.max_scalar_bytes) {
             self.diagnostic(
                 "scalar_limit",
                 line,
@@ -634,10 +713,29 @@ impl<'a> State<'a> {
                     self.limits.max_scalar_bytes
                 ),
             );
+            return;
+        }
+        if json_value_is_sensitive(value) {
+            if let Some(root) = self.nodes.first_mut() {
+                root.extra.insert(
+                    "structured_value".into(),
+                    Value::String(REDACTED_STRUCTURED_VALUE.into()),
+                );
+                root.extra
+                    .insert("structured_value_redacted".into(), Value::Bool(true));
+                root.extra.insert(
+                    "structured_value_type".into(),
+                    Value::String(value_kind(value).into()),
+                );
+            }
+            return;
+        }
+        if let Some(root) = self.nodes.first_mut() {
+            root.extra.insert("structured_value".into(), value.clone());
         }
     }
 
-    fn append_text(&mut self, id: &str, text: &str, line: usize) {
+    fn append_text(&mut self, id: &str, text: &str, line: usize, sensitive_context: bool) {
         if text.trim().is_empty() {
             return;
         }
@@ -645,6 +743,22 @@ impl<'a> State<'a> {
             return;
         };
         let node = &mut self.nodes[position];
+        if node.extra.get("structured_text_redacted") == Some(&Value::Bool(true)) {
+            return;
+        }
+        if sensitive_context {
+            node.extra.insert(
+                "structured_text".into(),
+                Value::String(REDACTED_STRUCTURED_VALUE.into()),
+            );
+            node.extra
+                .insert("structured_text_redacted".into(), Value::Bool(true));
+            node.extra.insert(
+                "structured_text_type".into(),
+                Value::String("string".into()),
+            );
+            return;
+        }
         let existing = node
             .extra
             .remove("structured_text")
@@ -652,10 +766,7 @@ impl<'a> State<'a> {
             .unwrap_or_default();
         let separator = if existing.is_empty() { "" } else { " " };
         let candidate = format!("{existing}{separator}{}", text.trim());
-        if candidate.len() <= self.limits.max_scalar_bytes {
-            node.extra
-                .insert("structured_text".into(), Value::String(candidate));
-        } else {
+        if candidate.len() > self.limits.max_scalar_bytes {
             node.extra
                 .insert("structured_text_truncated".into(), Value::Bool(true));
             self.diagnostic(
@@ -663,17 +774,52 @@ impl<'a> State<'a> {
                 line,
                 format!("XML text exceeds {} bytes", self.limits.max_scalar_bytes),
             );
+            return;
         }
+        // XML can split one logical scalar across Text and CDATA events. Scan
+        // the normal retained spelling and a bounded whitespace-free spelling
+        // so a provider token cannot be evaded as `ghp_<![CDATA[...]]>`.
+        let compact_candidate = candidate
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        if string_is_sensitive(&candidate)
+            || (compact_candidate.len() != candidate.len()
+                && string_is_sensitive(&compact_candidate))
+        {
+            node.extra.insert(
+                "structured_text".into(),
+                Value::String(REDACTED_STRUCTURED_VALUE.into()),
+            );
+            node.extra
+                .insert("structured_text_redacted".into(), Value::Bool(true));
+            node.extra.insert(
+                "structured_text_type".into(),
+                Value::String("string".into()),
+            );
+            return;
+        }
+        node.extra
+            .insert("structured_text".into(), Value::String(candidate));
     }
 }
 
 fn extract_json(state: &mut State<'_>, bytes: &[u8], mcp: bool) {
     match graphoxide_core::parse_jsonc_slice(bytes) {
-        Ok(mut value) => {
-            if mcp {
-                redact_mcp_value(&mut value);
-            }
-            walk_value(state, &value, &state.file_id.clone(), "$", 0, 1, false);
+        Ok(value) => {
+            debug_assert_eq!(
+                mcp,
+                matches!(state.format, StructuredFormat::Json { mcp: true })
+            );
+            walk_value(
+                state,
+                &value,
+                &state.file_id.clone(),
+                "$",
+                0,
+                1,
+                WalkPolicy::PARSED,
+            );
         }
         Err(error) => {
             let line = error.line();
@@ -689,7 +835,15 @@ fn extract_json(state: &mut State<'_>, bytes: &[u8], mcp: bool) {
 
 fn extract_json5(state: &mut State<'_>, bytes: &[u8]) {
     match graphoxide_core::parse_jsonc_slice(bytes) {
-        Ok(value) => walk_value(state, &value, &state.file_id.clone(), "$", 0, 1, false),
+        Ok(value) => walk_value(
+            state,
+            &value,
+            &state.file_id.clone(),
+            "$",
+            0,
+            1,
+            WalkPolicy::PARSED,
+        ),
         Err(error) => {
             state.diagnostic(
                 "json5_structural_only",
@@ -759,12 +913,14 @@ fn extract_json_lines(state: &mut State<'_>, bytes: &[u8]) {
                 value: scalar.map(ChildValue::Json),
                 structural_only: false,
                 value_truncated: false,
+                sensitive_context: false,
+                redacted_value_type: None,
             },
         ) else {
             return;
         };
         if !is_scalar(&value) {
-            walk_value(state, &value, &id, &path, 1, line, false);
+            walk_value(state, &value, &id, &path, 1, line, WalkPolicy::PARSED);
         }
         record_index += 1;
     }
@@ -782,10 +938,38 @@ fn extract_toml(state: &mut State<'_>, bytes: &[u8]) {
         .ok()
         .and_then(|value| serde_json::to_value(value).ok())
     {
-        Some(value) => walk_value(state, &value, &state.file_id.clone(), "$", 0, 1, false),
+        Some(value) => walk_value(
+            state,
+            &value,
+            &state.file_id.clone(),
+            "$",
+            0,
+            1,
+            WalkPolicy::PARSED,
+        ),
         None => {
             state.diagnostic("toml_parse_error", 1, "TOML parse failed");
             extract_key_value_structure(state, text, '=', "toml_structural");
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WalkPolicy {
+    structural_only: bool,
+    sensitive_context: bool,
+}
+
+impl WalkPolicy {
+    const PARSED: Self = Self {
+        structural_only: false,
+        sensitive_context: false,
+    };
+
+    const fn with_sensitive_context(self, sensitive_context: bool) -> Self {
+        Self {
+            sensitive_context,
+            ..self
         }
     }
 }
@@ -797,7 +981,7 @@ fn walk_value(
     path: &str,
     depth: usize,
     line: usize,
-    structural_only: bool,
+    policy: WalkPolicy,
 ) {
     if depth >= state.limits.max_depth {
         state.diagnostic(
@@ -812,10 +996,15 @@ fn walk_value(
     }
     match value {
         Value::Object(object) => {
-            for (key, child) in object {
+            for (ordinal, (key, child)) in object.iter().enumerate() {
                 let child_line = line;
+                let child_sensitive = policy.sensitive_context
+                    || key_is_sensitive(key)
+                    || (is_scalar(child) && key_is_sensitive_scalar(key))
+                    || mcp_key_redacts_descendants(state.format, key);
+                let path_component = identity_safe_component(key, "key", ordinal);
                 let Some(child_path) =
-                    bounded_object_path(path, key, state.limits.max_scalar_bytes)
+                    bounded_object_path(path, &path_component, state.limits.max_scalar_bytes)
                 else {
                     state.report_path_limit(child_line, "structured value traversal");
                     continue;
@@ -829,8 +1018,10 @@ fn walk_value(
                     child_line,
                     ChildOptions {
                         value: scalar.map(ChildValue::Json),
-                        structural_only,
+                        structural_only: policy.structural_only,
                         value_truncated: false,
+                        sensitive_context: child_sensitive,
+                        redacted_value_type: None,
                     },
                 ) else {
                     return;
@@ -843,7 +1034,7 @@ fn walk_value(
                         &child_path,
                         depth + 1,
                         child_line,
-                        structural_only,
+                        policy.with_sensitive_context(child_sensitive),
                     );
                 }
             }
@@ -869,22 +1060,16 @@ fn walk_value(
                     line,
                     ChildOptions {
                         value: scalar.map(ChildValue::Json),
-                        structural_only,
+                        structural_only: policy.structural_only,
                         value_truncated: false,
+                        sensitive_context: policy.sensitive_context,
+                        redacted_value_type: None,
                     },
                 ) else {
                     return;
                 };
                 if !is_scalar(child) {
-                    walk_value(
-                        state,
-                        child,
-                        &id,
-                        &child_path,
-                        depth + 1,
-                        line,
-                        structural_only,
-                    );
+                    walk_value(state, child, &id, &child_path, depth + 1, line, policy);
                 }
             }
         }
@@ -904,7 +1089,7 @@ fn extract_json_structural_fallback(state: &mut State<'_>, bytes: &[u8]) {
             return;
         }
     };
-    let mut parent_stack: Vec<(usize, String, String)> = Vec::new();
+    let mut parent_stack: Vec<(usize, String, String, bool)> = Vec::new();
     let mut blocked_indent = None;
     let mut depth_limit_reported = false;
     for (index, raw_line) in text.lines().enumerate() {
@@ -934,7 +1119,7 @@ fn extract_json_structural_fallback(state: &mut State<'_>, bytes: &[u8]) {
         }
         while parent_stack
             .last()
-            .is_some_and(|(parent_indent, _, _)| *parent_indent >= indent)
+            .is_some_and(|(parent_indent, _, _, _)| *parent_indent >= indent)
         {
             parent_stack.pop();
         }
@@ -957,11 +1142,18 @@ fn extract_json_structural_fallback(state: &mut State<'_>, bytes: &[u8]) {
             }
             continue;
         }
+        let parent_sensitive = parent_stack
+            .last()
+            .is_some_and(|(_, _, _, sensitive)| *sensitive);
         let (parent, prefix) = parent_stack
             .last()
-            .map(|(_, id, path)| (id.clone(), path.as_str()))
+            .map(|(_, id, path, _)| (id.clone(), path.as_str()))
             .unwrap_or_else(|| (state.file_id.clone(), "$"));
-        let Some(path) = bounded_object_path(prefix, key, state.limits.max_scalar_bytes) else {
+        let sensitive = parent_sensitive || key_is_sensitive(key);
+        let path_component = identity_safe_component(key, "json-key", line);
+        let Some(path) =
+            bounded_object_path(prefix, &path_component, state.limits.max_scalar_bytes)
+        else {
             state.report_path_limit(line, "JSON structural fallback");
             if opens_container {
                 blocked_indent = Some(indent);
@@ -974,12 +1166,12 @@ fn extract_json_structural_fallback(state: &mut State<'_>, bytes: &[u8]) {
             key,
             "json5_key",
             line,
-            ChildOptions::STRUCTURAL,
+            ChildOptions::STRUCTURAL.in_sensitive_context(sensitive),
         ) else {
             return;
         };
         if opens_container {
-            parent_stack.push((indent, id, path));
+            parent_stack.push((indent, id, path, sensitive));
         }
     }
 }
@@ -992,7 +1184,7 @@ fn extract_yaml_structure(state: &mut State<'_>, bytes: &[u8]) {
             return;
         }
     };
-    let mut parents: Vec<(usize, String, String)> = Vec::new();
+    let mut parents: Vec<(usize, String, String, bool)> = Vec::new();
     let mut document = 0usize;
     let mut blocked_indent = None;
     let mut depth_limit_reported = false;
@@ -1017,7 +1209,7 @@ fn extract_yaml_structure(state: &mut State<'_>, bytes: &[u8]) {
         }
         while parents
             .last()
-            .is_some_and(|(parent_indent, _, _)| *parent_indent >= indent)
+            .is_some_and(|(parent_indent, _, _, _)| *parent_indent >= indent)
         {
             parents.pop();
         }
@@ -1050,14 +1242,21 @@ fn extract_yaml_structure(state: &mut State<'_>, bytes: &[u8]) {
         }
         let item_suffix = (!is_mapping).then(|| format!("item_{line}"));
         let suffix = item_suffix.as_deref().unwrap_or(label);
+        let path_component = identity_safe_component(suffix, "yaml-key", line);
         let document_prefix;
-        let (parent, prefix) = if let Some((_, id, path)) = parents.last() {
+        let parent_sensitive = parents
+            .last()
+            .is_some_and(|(_, _, _, sensitive)| *sensitive);
+        let sensitive = parent_sensitive || (is_mapping && key_is_sensitive(label));
+        let (parent, prefix) = if let Some((_, id, path, _)) = parents.last() {
             (id.clone(), path.as_str())
         } else {
             document_prefix = format!("$doc{document}");
             (state.file_id.clone(), document_prefix.as_str())
         };
-        let Some(path) = bounded_object_path(prefix, suffix, state.limits.max_scalar_bytes) else {
+        let Some(path) =
+            bounded_object_path(prefix, &path_component, state.limits.max_scalar_bytes)
+        else {
             state.report_path_limit(line, "YAML structural fallback");
             if opens_container {
                 blocked_indent = Some(indent);
@@ -1070,26 +1269,30 @@ fn extract_yaml_structure(state: &mut State<'_>, bytes: &[u8]) {
             label,
             if is_mapping { "yaml_key" } else { "yaml_item" },
             line,
-            ChildOptions::STRUCTURAL,
+            ChildOptions::STRUCTURAL.in_sensitive_context(sensitive),
         ) else {
             return;
         };
         if opens_container {
-            parents.push((indent, id, path));
+            parents.push((indent, id, path, sensitive));
         }
     }
 }
 
 fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
+    let sibling_sensitive_elements = xml_sibling_sensitive_elements(bytes, state.limits);
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
-    let mut stack: Vec<(String, String, usize, BTreeMap<String, usize>)> = Vec::new();
+    let mut stack: Vec<XmlFrame> = Vec::new();
+    let mut element_ordinal = 0usize;
     let mut skipped_depth = 0usize;
     let mut depth_limit_reported = false;
     'xml: loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(event)) => {
+                let current_ordinal = element_ordinal;
+                element_ordinal = element_ordinal.saturating_add(1);
                 if skipped_depth > 0 {
                     skipped_depth += 1;
                 } else if stack.len() >= state.limits.max_depth {
@@ -1108,15 +1311,19 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                 } else {
                     'admit: {
                         let source_line = line_number(bytes, reader.buffer_position() as usize);
-                        let (parent, path, name) = match prepare_xml_element(
+                        let (parent, path, name, base_sensitive) = match prepare_xml_element(
                             state,
                             event.name().as_ref(),
                             &mut stack,
                             source_line,
+                            current_ordinal,
                         ) {
-                            XmlElementPreparation::Ready { parent, path, name } => {
-                                (parent, path, name)
-                            }
+                            XmlElementPreparation::Ready {
+                                parent,
+                                path,
+                                name,
+                                sensitive,
+                            } => (parent, path, name, sensitive),
                             XmlElementPreparation::PathLimited => {
                                 skipped_depth = 1;
                                 break 'admit;
@@ -1130,17 +1337,24 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                                 break 'xml;
                             }
                         };
+                        let selector_sensitive = xml_selector_is_sensitive(&event);
+                        let sensitive = base_sensitive || selector_sensitive;
+                        let sibling_sensitive =
+                            sibling_sensitive_elements.contains(&current_ordinal);
                         let Some(id) = state.child(
                             &parent,
                             &path,
                             &name,
                             "xml_element",
                             source_line,
-                            ChildOptions::default(),
+                            ChildOptions::default()
+                                .in_sensitive_context(sensitive || sibling_sensitive),
                         ) else {
                             break 'xml;
                         };
-                        for attribute in event.attributes().with_checks(false) {
+                        for (attribute_ordinal, attribute) in
+                            event.attributes().with_checks(false).enumerate()
+                        {
                             match attribute {
                                 Ok(attribute) => {
                                     let (attribute_name, attribute_path) =
@@ -1149,6 +1363,7 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                                             &path,
                                             attribute.key.as_ref(),
                                             source_line,
+                                            attribute_ordinal,
                                         ) {
                                             XmlAttributePreparation::Ready { name, path } => {
                                                 (name, path)
@@ -1183,6 +1398,13 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                                             value: value.as_deref().map(ChildValue::String),
                                             structural_only: false,
                                             value_truncated: false,
+                                            sensitive_context: base_sensitive
+                                                || key_is_sensitive_scalar(&attribute_name)
+                                                || (selector_sensitive
+                                                    && !xml_attribute_is_selector(&attribute_name))
+                                                || (sibling_sensitive
+                                                    && !xml_attribute_is_selector(&attribute_name)),
+                                            redacted_value_type: None,
                                         },
                                     );
                                 }
@@ -1193,11 +1415,20 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                                 ),
                             }
                         }
-                        stack.push((id, path, source_line, BTreeMap::new()));
+                        stack.push(XmlFrame {
+                            id,
+                            path,
+                            line: source_line,
+                            children: BTreeMap::new(),
+                            sensitive,
+                            sibling_sensitive,
+                        });
                     }
                 }
             }
             Ok(Event::Empty(event)) => {
+                let current_ordinal = element_ordinal;
+                element_ordinal = element_ordinal.saturating_add(1);
                 if skipped_depth > 0 {
                     // Empty elements do not change the depth of an already skipped subtree.
                 } else if stack.len() >= state.limits.max_depth {
@@ -1215,15 +1446,19 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                 } else {
                     'admit_empty: {
                         let line = line_number(bytes, reader.buffer_position() as usize);
-                        let (parent, path, name) = match prepare_xml_element(
+                        let (parent, path, name, base_sensitive) = match prepare_xml_element(
                             state,
                             event.name().as_ref(),
                             &mut stack,
                             line,
+                            current_ordinal,
                         ) {
-                            XmlElementPreparation::Ready { parent, path, name } => {
-                                (parent, path, name)
-                            }
+                            XmlElementPreparation::Ready {
+                                parent,
+                                path,
+                                name,
+                                sensitive,
+                            } => (parent, path, name, sensitive),
                             XmlElementPreparation::PathLimited => break 'admit_empty,
                             XmlElementPreparation::InvalidName => {
                                 state.diagnostic(
@@ -1234,22 +1469,35 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                                 break 'xml;
                             }
                         };
+                        let selector_sensitive = xml_selector_is_sensitive(&event);
+                        let sensitive = base_sensitive || selector_sensitive;
+                        let sibling_sensitive =
+                            sibling_sensitive_elements.contains(&current_ordinal);
                         let Some(id) = state.child(
                             &parent,
                             &path,
                             &name,
                             "xml_element",
                             line,
-                            ChildOptions::default(),
+                            ChildOptions::default()
+                                .in_sensitive_context(sensitive || sibling_sensitive),
                         ) else {
                             break 'xml;
                         };
-                        for attribute in event.attributes().with_checks(false).flatten() {
+                        for (attribute_ordinal, attribute) in event
+                            .attributes()
+                            .with_checks(false)
+                            .enumerate()
+                            .filter_map(|(ordinal, attribute)| {
+                                attribute.ok().map(|attribute| (ordinal, attribute))
+                            })
+                        {
                             let (attribute_name, attribute_path) = match prepare_xml_attribute(
                                 state,
                                 &path,
                                 attribute.key.as_ref(),
                                 line,
+                                attribute_ordinal,
                             ) {
                                 XmlAttributePreparation::Ready { name, path } => (name, path),
                                 XmlAttributePreparation::PathLimited => continue,
@@ -1275,6 +1523,13 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                                     value: value.as_deref().map(ChildValue::String),
                                     structural_only: false,
                                     value_truncated: false,
+                                    sensitive_context: base_sensitive
+                                        || key_is_sensitive_scalar(&attribute_name)
+                                        || (selector_sensitive
+                                            && !xml_attribute_is_selector(&attribute_name))
+                                        || (sibling_sensitive
+                                            && !xml_attribute_is_selector(&attribute_name)),
+                                    redacted_value_type: None,
                                 },
                             );
                         }
@@ -1283,19 +1538,29 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
             }
             Ok(Event::Text(event)) => {
                 if skipped_depth == 0
-                    && let Some((id, _, line, _)) = stack.last()
+                    && let Some(frame) = stack.last()
                     && let Ok(decoded) = event.decode()
                     && let Ok(text) = quick_xml::escape::unescape(&decoded)
                 {
-                    state.append_text(id, &text, *line);
+                    state.append_text(
+                        &frame.id,
+                        &text,
+                        frame.line,
+                        frame.sensitive || frame.sibling_sensitive,
+                    );
                 }
             }
             Ok(Event::CData(event)) => {
                 if skipped_depth == 0
-                    && let Some((id, _, line, _)) = stack.last()
+                    && let Some(frame) = stack.last()
                     && let Ok(text) = event.decode()
                 {
-                    state.append_text(id, &text, *line);
+                    state.append_text(
+                        &frame.id,
+                        &text,
+                        frame.line,
+                        frame.sensitive || frame.sibling_sensitive,
+                    );
                 }
             }
             Ok(Event::End(_)) => {
@@ -1314,11 +1579,11 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
                 break;
             }
             Ok(Event::Eof) => break,
-            Err(error) => {
+            Err(_) => {
                 state.diagnostic(
                     "xml_parse_error",
                     line_number(bytes, reader.buffer_position() as usize),
-                    format!("XML parse error: {error}"),
+                    "XML input is not well formed",
                 );
                 break;
             }
@@ -1334,7 +1599,7 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
     // records bounded before facts are admitted.
     let max_fields = state.limits.max_depth;
     let max_field_bytes = state.limits.max_scalar_bytes;
-    let mut headers = None;
+    let mut headers: Option<Vec<(String, bool)>> = None;
     let mut field_limit_reported = false;
     let mut scalar_limit_reported = false;
     let parse_result = parse_delimited(
@@ -1372,17 +1637,27 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
                 ) else {
                     return false;
                 };
+                let mut retained_headers = Vec::with_capacity(row.fields.len());
                 for (column, header) in row.fields.iter().enumerate() {
-                    let options = if row.truncated_fields[column] {
-                        ChildOptions::truncated_value()
+                    let header_value_sensitive =
+                        row.truncated_fields[column] || string_is_sensitive(header);
+                    let cell_values_sensitive =
+                        header_value_sensitive || key_is_sensitive_scalar(header);
+                    let label = if header.is_empty() || header_value_sensitive {
+                        format!("column {column}")
                     } else {
-                        ChildOptions::string(header)
+                        header.clone()
+                    };
+                    let options = if row.truncated_fields[column] {
+                        ChildOptions::truncated_sensitive_string()
+                    } else {
+                        ChildOptions::string(header).in_sensitive_context(header_value_sensitive)
                     };
                     if state
                         .child(
                             &headers_id,
                             &format!("$headers[{column}]"),
-                            if header.is_empty() { "column" } else { header },
+                            &label,
                             "table_column",
                             row.line,
                             options,
@@ -1391,8 +1666,9 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
                     {
                         return false;
                     }
+                    retained_headers.push((label, cell_values_sensitive));
                 }
-                headers = Some(row.fields);
+                headers = Some(retained_headers);
                 return true;
             }
 
@@ -1408,24 +1684,24 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
             };
             let headers = headers.as_ref().expect("headers initialized above");
             for (column, value) in row.fields.into_iter().enumerate() {
-                let fallback_label;
-                let label =
-                    if let Some(header) = headers.get(column).filter(|header| !header.is_empty()) {
-                        header.as_str()
-                    } else {
-                        fallback_label = format!("column {column}");
-                        &fallback_label
-                    };
+                let fallback_header = (format!("column {column}"), false);
+                let (label, cell_values_sensitive) =
+                    headers.get(column).unwrap_or(&fallback_header);
                 let options = if row.truncated_fields[column] {
-                    ChildOptions::truncated_value()
+                    if *cell_values_sensitive {
+                        ChildOptions::truncated_sensitive_string()
+                    } else {
+                        ChildOptions::truncated_value()
+                    }
                 } else {
                     ChildOptions::string(&value)
-                };
+                }
+                .in_sensitive_context(*cell_values_sensitive);
                 if state
                     .child(
                         &row_id,
                         &format!("$rows[{}][{column}]", row.index),
-                        label,
+                        label.as_str(),
                         "table_cell",
                         row.line,
                         options,
@@ -1457,6 +1733,7 @@ fn extract_ini(state: &mut State<'_>, bytes: &[u8]) {
     };
     let mut parent = state.file_id.clone();
     let mut prefix = "$".to_owned();
+    let mut parent_sensitive = false;
     for (index, raw_line) in text.lines().enumerate() {
         let line = index + 1;
         let trimmed = raw_line.trim();
@@ -1472,19 +1749,27 @@ fn extract_ini(state: &mut State<'_>, bytes: &[u8]) {
                 state.diagnostic("ini_parse_error", line, "empty INI section name");
                 continue;
             }
-            let path = object_path("$", section);
+            let path_component = identity_safe_component(section, "ini-section", line);
+            let Some(path) =
+                bounded_object_path("$", &path_component, state.limits.max_scalar_bytes)
+            else {
+                state.report_path_limit(line, "INI section");
+                continue;
+            };
+            let section_sensitive = key_is_sensitive(section);
             let Some(section_id) = state.child(
                 &state.file_id.clone(),
                 &path,
                 section,
                 "ini_section",
                 line,
-                ChildOptions::default(),
+                ChildOptions::default().in_sensitive_context(section_sensitive),
             ) else {
                 return;
             };
             parent = section_id;
             prefix = path;
+            parent_sensitive = section_sensitive;
             continue;
         }
         let content = trimmed.strip_prefix("export ").unwrap_or(trimmed);
@@ -1501,14 +1786,23 @@ fn extract_ini(state: &mut State<'_>, bytes: &[u8]) {
         }
         let raw_value = content[split + 1..].trim();
         let value = raw_value.trim_matches(['\"', '\'']);
-        let path = object_path(&prefix, key);
+        let line_sensitive = structured_string_is_sensitive(content);
+        let path_component = identity_safe_component(key, "ini-key", line);
+        let Some(path) =
+            bounded_object_path(&prefix, &path_component, state.limits.max_scalar_bytes)
+        else {
+            state.report_path_limit(line, "INI key");
+            continue;
+        };
         let _ = state.child(
             &parent,
             &path,
             key,
             "ini_key",
             line,
-            ChildOptions::string(value),
+            ChildOptions::string(value).in_sensitive_context(
+                parent_sensitive || key_is_sensitive_scalar(key) || line_sensitive,
+            ),
         );
     }
 }
@@ -1523,13 +1817,19 @@ fn extract_key_value_structure(state: &mut State<'_>, text: &str, delimiter: cha
         if key.is_empty() {
             continue;
         }
+        let path_component = identity_safe_component(key, "fallback-key", line);
+        let Some(path) = bounded_object_path("$", &path_component, state.limits.max_scalar_bytes)
+        else {
+            state.report_path_limit(line, "key-value fallback");
+            continue;
+        };
         let _ = state.child(
             &state.file_id.clone(),
-            &object_path("$", key),
+            &path,
             key,
             kind,
             line,
-            ChildOptions::STRUCTURAL,
+            ChildOptions::STRUCTURAL.in_sensitive_context(key_is_sensitive(key)),
         );
     }
 }
@@ -2096,6 +2396,273 @@ fn is_scalar(value: &Value) -> bool {
     !matches!(value, Value::Array(_) | Value::Object(_))
 }
 
+fn child_value_is_sensitive(value: ChildValue<'_>) -> bool {
+    match value {
+        ChildValue::Json(value) => json_value_is_sensitive(value),
+        ChildValue::String(value) => string_is_sensitive(value),
+    }
+}
+
+fn child_value_kind(value: ChildValue<'_>) -> &'static str {
+    match value {
+        ChildValue::Json(value) => value_kind(value),
+        ChildValue::String(_) => "string",
+    }
+}
+
+fn json_value_is_sensitive(value: &Value) -> bool {
+    value.as_str().is_some_and(string_is_sensitive)
+}
+
+/// Recognize only high-confidence secret-bearing keys. The classifier is
+/// deliberately ASCII and allocation-bounded: structured keys longer than the
+/// policy ceiling fail closed instead of forcing work proportional to a large
+/// attacker-controlled identifier.
+fn canonical_key(key: &str) -> Option<String> {
+    if key.len() > MAX_SENSITIVE_KEY_BYTES {
+        return None;
+    }
+    let mut canonical = String::with_capacity(key.len());
+    canonical.extend(
+        key.bytes()
+            .filter(u8::is_ascii_alphanumeric)
+            .map(|byte| byte.to_ascii_lowercase() as char),
+    );
+    Some(canonical)
+}
+
+fn key_is_sensitive(key: &str) -> bool {
+    let Some(canonical) = canonical_key(key) else {
+        return true;
+    };
+    if canonical.is_empty() {
+        return false;
+    }
+    if matches!(
+        canonical.as_str(),
+        "publictoken"
+            | "paginationtoken"
+            | "continuationtoken"
+            | "pagetoken"
+            | "nextpagetoken"
+            | "publickey"
+    ) {
+        return false;
+    }
+
+    matches!(
+        canonical.as_str(),
+        "authorization"
+            | "proxyauthorization"
+            | "password"
+            | "passwords"
+            | "passwd"
+            | "passphrase"
+            | "pwd"
+            | "secret"
+            | "secrets"
+            | "token"
+            | "tokens"
+            | "credential"
+            | "credentials"
+            | "cookie"
+            | "cookies"
+            | "setcookie"
+            | "connectionstring"
+            | "databaseurl"
+            | "dsn"
+            | "awssecretaccesskey"
+            | "awsaccesskeyid"
+            | "secretaccesskey"
+            | "accesskeyid"
+    ) || [
+        "password",
+        "passwd",
+        "passphrase",
+        "secret",
+        "token",
+        "apikey",
+        "privatekey",
+        "secretkey",
+        "secretaccesskey",
+        "credential",
+        "credentials",
+        "connectionstring",
+    ]
+    .iter()
+    .any(|suffix| canonical.ends_with(suffix))
+}
+
+fn key_is_sensitive_scalar(key: &str) -> bool {
+    if key_is_sensitive(key) {
+        return true;
+    }
+    canonical_key(key).is_none_or(|canonical| canonical == "auth")
+}
+
+fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))?;
+    value.get(prefix.len()..)
+}
+
+fn looks_like_jwt(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(header) = parts.next() else {
+        return false;
+    };
+    let Some(payload) = parts.next() else {
+        return false;
+    };
+    let Some(signature) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some()
+        || !header.starts_with("eyJ")
+        || payload.is_empty()
+        || signature.is_empty()
+    {
+        return false;
+    }
+    [header, payload, signature].iter().all(|part| {
+        part.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
+}
+
+fn token68(value: &str, minimum: usize) -> bool {
+    value.len() >= minimum
+        && !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/' | b'=')
+        })
+}
+
+fn basic_credentials(value: &str) -> bool {
+    const MAX_BASIC_CREDENTIAL_BYTES: usize = 8 * 1024;
+    if value.len() > MAX_BASIC_CREDENTIAL_BYTES {
+        return true;
+    }
+    // A syntactically decoded Basic credential is high-confidence even when a
+    // test account uses a short username/password or one side of the colon is
+    // empty. Requiring production-looking length here lets valid credentials
+    // through while adding no useful prose protection beyond base64 + colon.
+    if !token68(value, 4) {
+        return false;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value));
+    decoded.ok().is_some_and(|decoded| decoded.contains(&b':'))
+}
+
+fn looks_like_credentialed_url(value: &str) -> bool {
+    let Some(rest) =
+        strip_ascii_prefix(value, "https://").or_else(|| strip_ascii_prefix(value, "http://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let Some(userinfo) = authority.rsplit_once('@').map(|(userinfo, _)| userinfo) else {
+        return false;
+    };
+    userinfo
+        .split_once(':')
+        .is_some_and(|(user, password)| !user.is_empty() || !password.is_empty())
+        || sensitive_line(userinfo)
+}
+
+fn sensitive_line(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed == REDACTED_STRUCTURED_VALUE {
+        return true;
+    }
+
+    let first_line = trimmed.lines().next().unwrap_or(trimmed);
+    if first_line.starts_with("-----BEGIN ") && first_line.contains("PRIVATE KEY-----") {
+        return true;
+    }
+
+    if strip_ascii_prefix(trimmed, "bearer ").is_some_and(|credential| token68(credential, 16)) {
+        return true;
+    }
+    if strip_ascii_prefix(trimmed, "basic ").is_some_and(basic_credentials) {
+        return true;
+    }
+    if looks_like_jwt(trimmed) {
+        return true;
+    }
+
+    for prefix in [
+        "ghp_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "sk-proj-",
+        "sk-live-",
+        "sk_live_",
+        "sk_test_",
+        "rk_live_",
+        "rk_test_",
+    ] {
+        if trimmed.starts_with(prefix) && trimmed.len() >= prefix.len() + 8 {
+            return true;
+        }
+    }
+    if trimmed.len() == 20
+        && (trimmed.starts_with("AKIA") || trimmed.starts_with("ASIA"))
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return true;
+    }
+    if looks_like_credentialed_url(trimmed) {
+        return true;
+    }
+
+    let assignment = strip_ascii_prefix(trimmed, "export ").unwrap_or(trimmed);
+    let delimiter = assignment
+        .find('=')
+        .into_iter()
+        .chain(assignment.find(':'))
+        .min();
+    delimiter.is_some_and(|delimiter| {
+        key_is_sensitive_scalar(assignment[..delimiter].trim())
+            && !assignment[delimiter + 1..].trim().is_empty()
+    })
+}
+
+pub(crate) fn structured_string_is_sensitive(value: &str) -> bool {
+    if value.len() > MAX_SENSITIVE_VALUE_BYTES {
+        return true;
+    }
+    value.lines().any(sensitive_line)
+}
+
+fn string_is_sensitive(value: &str) -> bool {
+    structured_string_is_sensitive(value)
+}
+
+/// Return a deterministic structural spelling that never incorporates a
+/// credential-shaped attacker-controlled component. The ordinal is supplied by
+/// the owning parser rather than derived from the secret, so paths and IDs do
+/// not become stable hashes of credential material either.
+fn identity_safe_component(value: &str, namespace: &str, ordinal: usize) -> String {
+    if structured_string_is_sensitive(value) {
+        format!("<redacted-{namespace}-{ordinal}>")
+    } else {
+        value.to_owned()
+    }
+}
+
 fn object_path(parent: &str, key: &str) -> String {
     if parent == "$" {
         format!("$.{key}")
@@ -2165,11 +2732,190 @@ fn xml_name(raw: &[u8]) -> Option<String> {
         .map(|name| name.rsplit([':', '}']).next().unwrap_or(name).to_owned())
 }
 
+fn xml_attribute_is_selector(name: &str) -> bool {
+    name.eq_ignore_ascii_case("name")
+        || name.eq_ignore_ascii_case("key")
+        || name.eq_ignore_ascii_case("property")
+}
+
+fn xml_local_name_bytes(raw: &[u8]) -> &[u8] {
+    raw.iter()
+        .rposition(|byte| matches!(byte, b':' | b'}'))
+        .and_then(|index| raw.get(index + 1..))
+        .unwrap_or(raw)
+}
+
+fn xml_selector_attribute_name(raw: &[u8]) -> bool {
+    if raw.len() > MAX_SENSITIVE_KEY_BYTES {
+        return false;
+    }
+    let local = xml_local_name_bytes(raw);
+    local.eq_ignore_ascii_case(b"name")
+        || local.eq_ignore_ascii_case(b"key")
+        || local.eq_ignore_ascii_case(b"property")
+}
+
+fn xml_selector_is_sensitive(event: &quick_xml::events::BytesStart<'_>) -> bool {
+    event
+        .attributes()
+        .with_checks(false)
+        .flatten()
+        .any(|attribute| {
+            if !xml_selector_attribute_name(attribute.key.as_ref()) {
+                return false;
+            }
+            let raw = attribute.value.as_ref();
+            if raw.len() > MAX_SENSITIVE_KEY_BYTES {
+                return true;
+            }
+            let Ok(raw) = std::str::from_utf8(raw) else {
+                return true;
+            };
+            quick_xml::escape::unescape(raw)
+                .map(|value| key_is_sensitive_scalar(&value))
+                .unwrap_or(true)
+        })
+}
+
+fn xml_element_is_selector(raw: &[u8]) -> bool {
+    if raw.len() > MAX_SENSITIVE_KEY_BYTES {
+        return false;
+    }
+    let local = xml_local_name_bytes(raw);
+    local.eq_ignore_ascii_case(b"name")
+        || local.eq_ignore_ascii_case(b"key")
+        || local.eq_ignore_ascii_case(b"property")
+}
+
+struct XmlSelectorFrame {
+    ordinal: usize,
+    selector: bool,
+    text: String,
+    text_overflowed: bool,
+}
+
+fn append_xml_selector_text(frame: &mut XmlSelectorFrame, text: &str) {
+    if frame.text_overflowed {
+        return;
+    }
+    if text.is_empty() {
+        return;
+    }
+    let Some(next_len) = frame.text.len().checked_add(text.len()) else {
+        frame.text_overflowed = true;
+        frame.text.clear();
+        return;
+    };
+    if next_len > MAX_SENSITIVE_KEY_BYTES {
+        frame.text_overflowed = true;
+        frame.text.clear();
+        return;
+    }
+    frame.text.push_str(text);
+}
+
+/// Recognize order-independent `<entry><key>password</key><value>…</value>`
+/// layouts without retaining a decoded XML tree. The first pass keeps at most
+/// one bounded selector string per admitted nesting level and at most one
+/// parent ordinal per fact that the second pass could publish.
+fn xml_sibling_sensitive_elements(bytes: &[u8], limits: StructuredLimits) -> BTreeSet<usize> {
+    let mut reader = Reader::from_reader(bytes);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut stack = Vec::<XmlSelectorFrame>::new();
+    let mut sensitive = BTreeSet::new();
+    let mut element_ordinal = 0usize;
+    let mut skipped_depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let ordinal = element_ordinal;
+                element_ordinal = element_ordinal.saturating_add(1);
+                if skipped_depth > 0 {
+                    skipped_depth = skipped_depth.saturating_add(1);
+                } else if stack.len() >= limits.max_depth {
+                    skipped_depth = 1;
+                } else {
+                    stack.push(XmlSelectorFrame {
+                        ordinal,
+                        selector: xml_element_is_selector(event.name().as_ref()),
+                        text: String::new(),
+                        text_overflowed: false,
+                    });
+                }
+            }
+            Ok(Event::Empty(_)) => {
+                element_ordinal = element_ordinal.saturating_add(1);
+            }
+            Ok(Event::Text(event)) if skipped_depth == 0 => {
+                if let Some(frame) = stack.last_mut() {
+                    match event.decode() {
+                        Ok(decoded) => match quick_xml::escape::unescape(&decoded) {
+                            Ok(text) => append_xml_selector_text(frame, &text),
+                            Err(_) if frame.selector => frame.text_overflowed = true,
+                            Err(_) => {}
+                        },
+                        Err(_) if frame.selector => frame.text_overflowed = true,
+                        Err(_) => {}
+                    }
+                }
+            }
+            Ok(Event::CData(event)) if skipped_depth == 0 => {
+                if let Some(frame) = stack.last_mut() {
+                    match event.decode() {
+                        Ok(text) => append_xml_selector_text(frame, &text),
+                        Err(_) if frame.selector => frame.text_overflowed = true,
+                        Err(_) => {}
+                    }
+                }
+            }
+            Ok(Event::End(_)) => {
+                if skipped_depth > 0 {
+                    skipped_depth -= 1;
+                } else if let Some(frame) = stack.pop() {
+                    let selector_sensitive = frame.selector
+                        && (frame.text_overflowed || key_is_sensitive_scalar(frame.text.trim()));
+                    if selector_sensitive
+                        && sensitive.len() < limits.max_facts
+                        && let Some(parent) = stack.last()
+                    {
+                        sensitive.insert(parent.ordinal);
+                    }
+                    if let Some(parent) = stack.last_mut()
+                        && parent.selector
+                    {
+                        if frame.text_overflowed {
+                            parent.text_overflowed = true;
+                            parent.text.clear();
+                        } else {
+                            append_xml_selector_text(parent, &frame.text);
+                        }
+                    }
+                }
+            }
+            Ok(Event::DocType(_) | Event::GeneralRef(_) | Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    sensitive
+}
+
+struct XmlFrame {
+    id: String,
+    path: String,
+    line: usize,
+    children: BTreeMap<String, usize>,
+    sensitive: bool,
+    sibling_sensitive: bool,
+}
+
 enum XmlElementPreparation {
     Ready {
         parent: String,
         path: String,
         name: String,
+        sensitive: bool,
     },
     PathLimited,
     InvalidName,
@@ -2178,8 +2924,9 @@ enum XmlElementPreparation {
 fn prepare_xml_element(
     state: &mut State<'_>,
     raw_name: &[u8],
-    stack: &mut [(String, String, usize, BTreeMap<String, usize>)],
+    stack: &mut [XmlFrame],
     line: usize,
+    identity_ordinal: usize,
 ) -> XmlElementPreparation {
     if raw_name.len() > state.limits.max_scalar_bytes {
         state.report_path_limit(line, "XML");
@@ -2190,7 +2937,7 @@ fn prepare_xml_element(
     };
     let Some(occurrence) = stack
         .last()
-        .map(|(_, _, _, children)| children.get(&name).copied().unwrap_or(0))
+        .map(|frame| frame.children.get(&name).copied().unwrap_or(0))
         .unwrap_or(0)
         .checked_add(1)
     else {
@@ -2199,17 +2946,31 @@ fn prepare_xml_element(
     };
     let (parent, prefix) = stack
         .last()
-        .map(|(id, path, _, _)| (id.clone(), path.as_str()))
+        .map(|frame| (frame.id.clone(), frame.path.as_str()))
         .unwrap_or_else(|| (state.file_id.clone(), "$"));
-    let Some(path) = bounded_xml_path(prefix, &name, occurrence, state.limits.max_scalar_bytes)
-    else {
+    let path_name = identity_safe_component(&name, "xml-element", identity_ordinal);
+    let Some(path) = bounded_xml_path(
+        prefix,
+        &path_name,
+        occurrence,
+        state.limits.max_scalar_bytes,
+    ) else {
         state.report_path_limit(line, "XML");
         return XmlElementPreparation::PathLimited;
     };
-    if let Some((_, _, _, children)) = stack.last_mut() {
-        children.insert(name.clone(), occurrence);
+    if let Some(frame) = stack.last_mut() {
+        frame.children.insert(name.clone(), occurrence);
     }
-    XmlElementPreparation::Ready { parent, path, name }
+    let parent_sensitive = stack.last().is_some_and(|frame| {
+        frame.sensitive || (frame.sibling_sensitive && !xml_element_is_selector(name.as_bytes()))
+    });
+    let sensitive = parent_sensitive || key_is_sensitive(&name);
+    XmlElementPreparation::Ready {
+        parent,
+        path,
+        name,
+        sensitive,
+    }
 }
 
 enum XmlAttributePreparation {
@@ -2223,6 +2984,7 @@ fn prepare_xml_attribute(
     parent: &str,
     raw_name: &[u8],
     line: usize,
+    identity_ordinal: usize,
 ) -> XmlAttributePreparation {
     if raw_name.len() > state.limits.max_scalar_bytes {
         state.report_path_limit(line, "XML");
@@ -2231,7 +2993,8 @@ fn prepare_xml_attribute(
     let Some(name) = xml_name(raw_name) else {
         return XmlAttributePreparation::InvalidName;
     };
-    let Some(path) = bounded_xml_attribute_path(parent, &name, state.limits.max_scalar_bytes)
+    let path_name = identity_safe_component(&name, "xml-attribute", identity_ordinal);
+    let Some(path) = bounded_xml_attribute_path(parent, &path_name, state.limits.max_scalar_bytes)
     else {
         state.report_path_limit(line, "XML");
         return XmlAttributePreparation::PathLimited;
@@ -2306,20 +3069,8 @@ fn is_json5_key_char(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '$' | '-' | '.')
 }
 
-fn redact_mcp_value(value: &mut Value) {
-    match value {
-        Value::Array(array) => array.iter_mut().for_each(redact_mcp_value),
-        Value::Object(object) => {
-            for (key, value) in object {
-                if matches!(key.as_str(), "command" | "args" | "env") {
-                    *value = Value::String("<redacted>".into());
-                } else {
-                    redact_mcp_value(value);
-                }
-            }
-        }
-        _ => {}
-    }
+fn mcp_key_redacts_descendants(format: StructuredFormat, key: &str) -> bool {
+    matches!(format, StructuredFormat::Json { mcp: true }) && matches!(key, "args" | "env")
 }
 
 #[cfg(test)]
@@ -2339,6 +3090,19 @@ mod tests {
             .iter()
             .filter_map(|node| node.extra.get("structured_value").cloned())
             .collect()
+    }
+
+    fn rendered(extraction: &StructuredExtraction) -> String {
+        serde_json::to_string(&extraction.extraction).expect("serialize structured extraction")
+    }
+
+    fn node_with_path<'a>(extraction: &'a StructuredExtraction, path: &str) -> &'a Node {
+        extraction
+            .extraction
+            .nodes
+            .iter()
+            .find(|node| node.extra.get("structured_path").and_then(Value::as_str) == Some(path))
+            .unwrap_or_else(|| panic!("missing structured node at {path:?}"))
     }
 
     fn semantic_extraction(name: &str, input: &[u8]) -> Result<StructuredExtraction, String> {
@@ -2558,13 +3322,351 @@ mod tests {
     fn mcp_values_are_redacted_but_server_structure_remains() {
         let output = extract(
             ".mcp.json",
-            br#"{"mcpServers":{"private":{"command":"secret-bin","args":["--token","secret"],"env":{"TOKEN":"secret"},"url":"https://safe.example"}}}"#,
+            br#"{"mcpServers":{"private":{"command":"graphoxide","args":["--token","secret"],"env":{"TOKEN":"secret"},"url":"https://safe.example"},"credential-command":{"command":"ghp_1234567890abcdef"}}}"#,
         );
-        let rendered = serde_json::to_string(&output.extraction).expect("serialize extraction");
-        assert!(!rendered.contains("secret-bin"));
-        assert!(!rendered.contains("\"TOKEN\""));
+        let rendered = rendered(&output);
+        assert!(rendered.contains("graphoxide"));
+        assert!(!rendered.contains("ghp_1234567890abcdef"));
+        assert!(!rendered.contains("\"secret\""));
+        assert!(rendered.contains("\"TOKEN\""));
         assert!(rendered.contains("mcpServers"));
         assert!(rendered.contains("https://safe.example"));
+        let args = node_with_path(&output, "$.mcpServers.private.args");
+        assert_eq!(args.extra["type"], "array");
+        assert_eq!(args.extra["structured_descendants_redacted"], true);
+        let environment = node_with_path(&output, "$.mcpServers.private.env");
+        assert_eq!(environment.extra["type"], "object");
+        assert_eq!(environment.extra["structured_descendants_redacted"], true);
+        let token = node_with_path(&output, "$.mcpServers.private.env.TOKEN");
+        assert_eq!(token.extra["structured_value"], REDACTED_STRUCTURED_VALUE);
+        assert_eq!(token.extra["structured_value_redacted"], true);
+        assert_eq!(token.extra["structured_value_type"], "string");
+    }
+
+    #[test]
+    fn sensitive_classifier_covers_credentials_without_redacting_prose_or_safe_keys() {
+        for key in [
+            "password",
+            "api_key",
+            "AWS_SECRET_ACCESS_KEY",
+            "client-secret",
+            "databaseUrl",
+        ] {
+            assert!(key_is_sensitive(key), "expected sensitive key: {key}");
+        }
+        assert!(key_is_sensitive_scalar("_auth"));
+        for key in [
+            "authentication",
+            "public_token",
+            "pagination_token",
+            "public_key",
+            "token_count",
+        ] {
+            assert!(!key_is_sensitive(key), "unexpected sensitive key: {key}");
+        }
+
+        for value in [
+            "Bearer abcdefghijklmnop",
+            "Basic dXNlcjpwYXNzd29yZA==",
+            "Basic YTpi",
+            "Basic OnBhc3M=",
+            "ghp_1234567890abcdef",
+            "sk_live_1234567890abcdef",
+            "https://user:password@example.test/path",
+            "https://:password@example.test/path",
+            "https://ghp_1234567890abcdef@example.test/path",
+            "SAFE=visible\nTOKEN=multiline-secret",
+            "-----BEGIN PRIVATE KEY-----\nprivate-material",
+        ] {
+            assert!(
+                structured_string_is_sensitive(value),
+                "expected sensitive value: {value:?}"
+            );
+        }
+        assert!(structured_string_is_sensitive(
+            &"x".repeat(MAX_SENSITIVE_VALUE_BYTES + 1)
+        ));
+        for value in [
+            "Basic authentication settings",
+            "Bearer token documentation",
+            "https://example.test/path",
+            "https://alice@example.test/path",
+            "SAFE=visible",
+            "public-token-value",
+        ] {
+            assert!(
+                !structured_string_is_sensitive(value),
+                "unexpected sensitive value: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_shaped_keys_never_reach_paths_or_secret_derived_ids() {
+        let first_secret = "ghp_aaaaaaaaaaaaaaaa";
+        let second_secret = "ghp_bbbbbbbbbbbbbbbb";
+        let first = extract(
+            "settings.json",
+            format!(r#"{{"{first_secret}":{{"child":"visible"}}}}"#).as_bytes(),
+        );
+        let second = extract(
+            "settings.json",
+            format!(r#"{{"{second_secret}":{{"child":"visible"}}}}"#).as_bytes(),
+        );
+        let first_rendered = rendered(&first);
+        let second_rendered = rendered(&second);
+        assert!(!first_rendered.contains(first_secret));
+        assert!(!second_rendered.contains(second_secret));
+        assert_eq!(
+            first
+                .extraction
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            second
+                .extraction
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(first.extraction.nodes.iter().any(|node| {
+            node.extra.get("structured_path_redacted") == Some(&Value::Bool(true))
+                && node.label == REDACTED_STRUCTURED_VALUE
+        }));
+        assert!(first_rendered.contains("visible"));
+    }
+
+    #[test]
+    fn xml_errors_and_split_events_cannot_publish_secret_material() {
+        let diagnostic_secret = "ghp_diagnosticsecret1";
+        let malformed = extract(
+            "settings.xml",
+            format!("<root></{diagnostic_secret}>").as_bytes(),
+        );
+        let malformed_rendered = rendered(&malformed);
+        assert!(!malformed_rendered.contains(diagnostic_secret));
+        assert!(malformed_rendered.contains("XML input is not well formed"));
+
+        let split = extract(
+            "settings.xml",
+            br#"<root>
+                <entry><key>pass<![CDATA[word]]></key><value>XML_SPLIT_SELECTOR_SECRET</value></entry>
+                <value>ghp_<![CDATA[1234567890abcdef]]></value>
+            </root>"#,
+        );
+        let split_rendered = rendered(&split);
+        assert!(!split_rendered.contains("XML_SPLIT_SELECTOR_SECRET"));
+        assert!(!split_rendered.contains("1234567890abcdef"));
+        assert!(split.extraction.nodes.iter().any(|node| {
+            node.extra.get("structured_text_redacted") == Some(&Value::Bool(true))
+        }));
+    }
+
+    #[test]
+    fn ini_bare_credentialed_urls_are_redacted_before_colon_splitting() {
+        for credentialed in [
+            "https://user:password@example.test/path",
+            "https://:password@example.test/path",
+            "https://ghp_1234567890abcdef@example.test/path",
+        ] {
+            let output = extract(
+                "settings.ini",
+                format!("{credentialed}\nmode=visible-mode\n").as_bytes(),
+            );
+            let output_rendered = rendered(&output);
+            assert!(!output_rendered.contains(credentialed));
+            assert!(!output_rendered.contains("user:password"));
+            assert!(!output_rendered.contains("1234567890abcdef"));
+            assert!(output_rendered.contains("visible-mode"));
+            assert!(output.extraction.nodes.iter().any(|node| {
+                node.extra.get("structured_value_redacted") == Some(&Value::Bool(true))
+            }));
+        }
+    }
+
+    #[test]
+    fn secret_like_document_labels_are_redacted_centrally() {
+        let heading_secret = "ghp_1234567890abcdef";
+        let link_secret = "https://user:password@example.test/path";
+        let output = extract(
+            "README.md",
+            format!("# {heading_secret}\n\n[private]({link_secret})\n").as_bytes(),
+        );
+        let rendered = rendered(&output);
+        assert!(!rendered.contains(heading_secret));
+        assert!(!rendered.contains(link_secret));
+        assert!(output.extraction.nodes.iter().any(|node| {
+            node.label == REDACTED_STRUCTURED_VALUE
+                && node.extra.get("structured_label_redacted") == Some(&Value::Bool(true))
+        }));
+    }
+
+    #[test]
+    fn malformed_and_limit_diagnostics_never_echo_secret_values() {
+        let malformed = [
+            (
+                "settings.json",
+                br#"{"password":"MALFORMED_JSON_SECRET""#.as_slice(),
+                "MALFORMED_JSON_SECRET",
+            ),
+            (
+                "settings.toml",
+                br#"password = "MALFORMED_TOML_SECRET"#.as_slice(),
+                "MALFORMED_TOML_SECRET",
+            ),
+            (
+                "settings.xml",
+                br#"<entry name="password">MALFORMED_XML_SECRET"#.as_slice(),
+                "MALFORMED_XML_SECRET",
+            ),
+            (
+                "accounts.csv",
+                b"password\n\"MALFORMED_CSV_SECRET".as_slice(),
+                "MALFORMED_CSV_SECRET",
+            ),
+        ];
+        for (name, input, secret) in malformed {
+            let output = extract(name, input);
+            assert!(
+                !rendered(&output).contains(secret),
+                "{name} diagnostic retained {secret}"
+            );
+        }
+
+        let oversized_secret = format!(
+            "prefix-LIMIT_SECRET_SENTINEL-{}",
+            "x".repeat(DEFAULT_MAX_SCALAR_BYTES)
+        );
+        let output = extract(
+            "settings.json",
+            serde_json::to_string(&serde_json::json!({"description": oversized_secret}))
+                .expect("serialize oversized fixture")
+                .as_bytes(),
+        );
+        let rendered = rendered(&output);
+        assert!(!rendered.contains("LIMIT_SECRET_SENTINEL"));
+        assert!(rendered.contains("structured_value_truncated"));
+    }
+
+    #[test]
+    fn json_toml_ini_and_tables_redact_values_but_preserve_safe_structure() {
+        type RedactionFixture<'a> = (&'a str, &'a [u8], &'a [&'a str], &'a [&'a str]);
+        let fixtures: [RedactionFixture<'_>; 5] = [
+            (
+                "settings.json",
+                br#"{"password":"JSON_SECRET_SENTINEL","authentication":{"type":"oauth2"},"public_token":"visible-cursor","script":"SAFE=ok\nTOKEN=MULTILINE_SECRET_SENTINEL"}"#,
+                &["JSON_SECRET_SENTINEL", "MULTILINE_SECRET_SENTINEL"],
+                &["oauth2", "visible-cursor"],
+            ),
+            (
+                "settings.toml",
+                b"api_key = \"TOML_SECRET_SENTINEL\"\nmode = \"visible-mode\"\n",
+                &["TOML_SECRET_SENTINEL"],
+                &["visible-mode"],
+            ),
+            (
+                ".env",
+                b"AWS_SECRET_ACCESS_KEY=ENV_SECRET_SENTINEL\nMODE=visible-env\n",
+                &["ENV_SECRET_SENTINEL"],
+                &["visible-env"],
+            ),
+            (
+                "service.properties",
+                b"db.password=PROPERTY_SECRET_SENTINEL\ndb.mode=visible-property\n",
+                &["PROPERTY_SECRET_SENTINEL"],
+                &["visible-property"],
+            ),
+            (
+                "accounts.csv",
+                b"name,password,public_token\napi,CSV_SECRET_SENTINEL,visible-page-token\n",
+                &["CSV_SECRET_SENTINEL"],
+                &["api", "visible-page-token"],
+            ),
+        ];
+        for (name, input, secrets, visible) in fixtures {
+            let output = extract(name, input);
+            let rendered = rendered(&output);
+            for secret in secrets {
+                assert!(!rendered.contains(secret), "{name} leaked {secret}");
+            }
+            for expected in visible {
+                assert!(
+                    rendered.contains(expected),
+                    "{name} dropped safe value {expected}"
+                );
+            }
+            assert!(
+                output.extraction.nodes.iter().any(|node| {
+                    node.extra.get("structured_value_redacted") == Some(&Value::Bool(true))
+                }),
+                "{name} did not retain an explicit scalar redaction marker"
+            );
+        }
+    }
+
+    #[test]
+    fn xml_redacts_direct_attribute_and_order_independent_sibling_values() {
+        let output = extract(
+            "settings.xml",
+            br#"<root>
+                <password>XML_DIRECT_SECRET</password>
+                <property name="password" value="XML_ATTRIBUTE_SECRET">XML_PROPERTY_SECRET</property>
+                <entry><value>XML_BEFORE_SECRET</value><key>password</key></entry>
+                <entry><key>password</key><value>XML_AFTER_SECRET</value></entry>
+                <property name="theme" value="visible-theme">visible-text</property>
+            </root>"#,
+        );
+        let rendered = rendered(&output);
+        for secret in [
+            "XML_DIRECT_SECRET",
+            "XML_ATTRIBUTE_SECRET",
+            "XML_PROPERTY_SECRET",
+            "XML_BEFORE_SECRET",
+            "XML_AFTER_SECRET",
+        ] {
+            assert!(!rendered.contains(secret), "XML leaked {secret}");
+        }
+        assert!(rendered.contains("visible-theme"));
+        assert!(rendered.contains("visible-text"));
+        assert!(output.extraction.nodes.iter().any(|node| {
+            node.extra.get("structured_text_redacted") == Some(&Value::Bool(true))
+        }));
+    }
+
+    #[test]
+    fn secret_like_or_truncated_table_headers_never_become_labels() {
+        let secret_header = "ghp_1234567890abcdef";
+        let output = extract(
+            "headers.csv",
+            format!("{secret_header},name\nvalue,alice\n").as_bytes(),
+        );
+        let serialized = rendered(&output);
+        assert!(!serialized.contains(secret_header));
+        assert!(output
+            .extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "column 0"));
+
+        let limited = extract_structured_bytes_with_limits(
+            Path::new("headers.csv"),
+            "headers.csv",
+            b"password-too-long,name\nTRUNCATED_CELL_SECRET,alice\n",
+            StructuredLimits {
+                max_scalar_bytes: 16,
+                ..StructuredLimits::default()
+            },
+        )
+        .expect("registered CSV");
+        let rendered = rendered(&limited);
+        assert!(!rendered.contains("password"));
+        assert!(!rendered.contains("TRUNCATED_CELL_SECRET"));
+        let cell = node_with_path(&limited, "$rows[1][0]");
+        assert_eq!(cell.extra["structured_value_truncated"], true);
+        assert_eq!(cell.extra["structured_value_redacted"], true);
+        assert_eq!(cell.extra["structured_value_type"], "string");
     }
 
     #[test]

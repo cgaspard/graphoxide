@@ -262,16 +262,6 @@
       ]
     },
     {
-      "upstream": "tests/test_cache.py::test_ast_cache_version_bump_cleans_stale_entries",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_ast_cache_version_bump_cleans_stale_entries"
-        }
-      ]
-    },
-    {
       "upstream": "tests/test_cache.py::test_legacy_unversioned_ast_entries_not_served",
       "targets": [
         {
