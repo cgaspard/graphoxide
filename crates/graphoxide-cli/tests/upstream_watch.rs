@@ -49,6 +49,14 @@ fn write(path: impl AsRef<Path>, text: &str) {
     fs::write(path, text).unwrap();
 }
 
+fn retired_ast_artifact(output: &Path, hash_byte: char, contents: &str) -> PathBuf {
+    let artifact = output
+        .join("cache/ast/v29")
+        .join(format!("{}.json", hash_byte.to_string().repeat(64)));
+    write(&artifact, contents);
+    artifact
+}
+
 fn rewrite_with_new_mtime(path: impl AsRef<Path>, text: &str) {
     let path = path.as_ref();
     let previous = FileTime::from_last_modification_time(&fs::metadata(path).unwrap());
@@ -1227,6 +1235,152 @@ fn test_rebuild_rejects_output_at_or_above_the_watch_root() {
     }
     assert!(!root.join("graph.json").exists());
     assert!(!temp.path().join("graph.json").exists());
+}
+
+#[test]
+fn test_legacy_update_keeps_cache_manifest_and_migration_in_custom_output() {
+    const SOURCE_SECRET: &str = "LEGACY_UPDATE_SOURCE_SECRET_49";
+    const CUSTOM_RETIRED_SECRET: &str = "LEGACY_UPDATE_CUSTOM_RETIRED_SECRET_49";
+    const DEFAULT_RETIRED_SECRET: &str = "LEGACY_UPDATE_DEFAULT_RETIRED_SECRET_49";
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    let output = temp.path().join("custom-output");
+    let default_output = root.join(OUTPUT_DIRECTORY);
+    write(
+        root.join("settings.json"),
+        &format!(r#"{{"password":"{SOURCE_SECRET}","mode":"visible-update"}}"#),
+    );
+    let custom_retired = retired_ast_artifact(&output, 'a', CUSTOM_RETIRED_SECRET);
+    let default_retired = retired_ast_artifact(&default_output, 'b', DEFAULT_RETIRED_SECRET);
+
+    let updated = Command::new(env!("CARGO_BIN_EXE_graphoxide"))
+        .current_dir(&root)
+        .args([
+            "update",
+            ".",
+            "--legacy-executor",
+            "--force",
+            "--no-cluster",
+            "--json",
+        ])
+        .env("GRAPHOXIDE_OUT", &output)
+        .env_remove("GRAPHIFY_OUT")
+        .output()
+        .unwrap();
+
+    assert!(
+        updated.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&updated.stdout),
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    assert!(!custom_retired.exists());
+    assert_eq!(
+        fs::read(&default_retired).unwrap(),
+        DEFAULT_RETIRED_SECRET.as_bytes(),
+        "custom-output migration touched the default output tree"
+    );
+    assert!(output.join("graph.json").is_file());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["settings.json"]["ast_version"], 30);
+    assert!(output
+        .join("cache/ast/v30")
+        .read_dir()
+        .unwrap()
+        .next()
+        .is_some());
+    assert!(!default_output.join("graph.json").exists());
+    assert!(!default_output.join("manifest.json").exists());
+    assert!(!default_output.join("cache/ast/v30").exists());
+
+    let graph_bytes = fs::read(output.join("graph.json")).unwrap();
+    let graph: Value = serde_json::from_slice(&graph_bytes).unwrap();
+    assert!(!graph_bytes
+        .windows(SOURCE_SECRET.len())
+        .any(|window| window == SOURCE_SECRET.as_bytes()));
+    assert!(graph_bytes
+        .windows(b"<redacted>".len())
+        .any(|window| window == b"<redacted>"));
+    assert!(graph["nodes"].as_array().is_some_and(|nodes| {
+        nodes.iter().any(|node| {
+            node["source_file"] == "settings.json" && node["structured_value"] == "visible-update"
+        })
+    }));
+}
+
+#[test]
+fn test_caller_owned_no_lock_rebuilds_prepare_cache_schema_in_both_entrypoints() {
+    const EXECUTOR_SECRET: &str = "NO_LOCK_EXECUTOR_RETIRED_SECRET_49";
+    const OBSERVER_SECRET: &str = "NO_LOCK_OBSERVER_RETIRED_SECRET_49";
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    write(root.join("app.py"), "def app():\n    return 1\n");
+
+    let executor_output = temp.path().join("executor-output");
+    let executor_retired = retired_ast_artifact(&executor_output, 'c', EXECUTOR_SECRET);
+    let _executor_owner = RebuildLockGuard::acquire(&executor_output, false)
+        .unwrap()
+        .unwrap();
+    let canonical_executor_output = fs::canonicalize(&executor_output).unwrap();
+    let mut executor_options = options(&root, true);
+    executor_options.output_directory = Some(executor_output.clone());
+    let executor = rebuild_project_with_executor(&root, &executor_options, |request| {
+        assert_eq!(request.output_directory, canonical_executor_output);
+        assert!(
+            !executor_retired.exists(),
+            "no-lock executor ran before schema preparation"
+        );
+        Ok(RebuildResult {
+            status: RebuildStatus::Rebuilt,
+            scope: request.scope,
+            graph_path: request.output_directory.join("graph.json"),
+            manifest_path: request.output_directory.join("manifest.json"),
+            passes: request.pass,
+            clustered: false,
+            warnings: Vec::new(),
+            stats: RebuildStats::default(),
+            timings: RebuildTimings::default(),
+        })
+    })
+    .unwrap();
+    assert_eq!(
+        executor.graph_path,
+        canonical_executor_output.join("graph.json")
+    );
+
+    let observer_output = temp.path().join("observer-output");
+    let observer_retired = retired_ast_artifact(&observer_output, 'd', OBSERVER_SECRET);
+    let _observer_owner = RebuildLockGuard::acquire(&observer_output, false)
+        .unwrap()
+        .unwrap();
+    let canonical_observer_output = fs::canonicalize(&observer_output).unwrap();
+    let mut observer_options = options(&root, true);
+    observer_options.output_directory = Some(observer_output.clone());
+    let observer = rebuild_project_with_observer(&root, &observer_options, |pass, output| {
+        assert_eq!(pass, 1);
+        assert_eq!(output, canonical_observer_output);
+        assert!(
+            !observer_retired.exists(),
+            "no-lock observer ran before schema preparation"
+        );
+    })
+    .unwrap();
+    assert!(observer.succeeded());
+    assert_eq!(
+        observer.graph_path,
+        canonical_observer_output.join("graph.json")
+    );
+    assert!(observer_output.join("manifest.json").is_file());
+    assert!(observer_output
+        .join("cache/ast/v30")
+        .read_dir()
+        .unwrap()
+        .next()
+        .is_some());
+    assert!(!root.join(OUTPUT_DIRECTORY).exists());
 }
 
 #[test]

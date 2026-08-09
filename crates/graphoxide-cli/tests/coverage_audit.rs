@@ -15,6 +15,20 @@ fn stderr(output: &std::process::Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("UTF-8 stderr")
 }
 
+fn tree_contains_bytes(root: &Path, needle: &[u8]) -> bool {
+    fs::read_dir(root)
+        .expect("read output tree")
+        .map(|entry| entry.expect("output tree entry").path())
+        .any(|path| {
+            if path.is_dir() {
+                tree_contains_bytes(&path, needle)
+            } else {
+                fs::read(path)
+                    .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+            }
+        })
+}
+
 #[test]
 fn coverage_audit_is_deterministic_and_strict_allows_unsupported_files() {
     let project = tempfile::tempdir().expect("temporary project");
@@ -110,6 +124,61 @@ fn dot_coverage_still_selects_the_legacy_graph_audit() {
     assert!(report.get("input").is_some(), "{report:#}");
     assert!(report.get("build").is_some(), "{report:#}");
     assert!(report.get("files").is_none(), "{report:#}");
+}
+
+#[test]
+fn graph_audit_uses_the_configured_output_for_cache_and_schema_migration() {
+    const SOURCE_SECRET: &str = "AUDIT_CUSTOM_OUTPUT_SECRET_49";
+    const RETIRED_SECRET: &str = "AUDIT_RETIRED_CACHE_SECRET_49";
+
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output = fixture.path().join("custom-output");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(
+        project.join("settings.json"),
+        format!(r#"{{"password":"{SOURCE_SECRET}","mode":"visible-audit"}}"#),
+    )
+    .expect("structured audit fixture");
+    let retired = output
+        .join("cache/ast/v29")
+        .join(format!("{}.json", "a".repeat(64)));
+    fs::create_dir_all(retired.parent().expect("retired cache parent"))
+        .expect("retired cache directory");
+    fs::write(&retired, RETIRED_SECRET).expect("retired cache artifact");
+
+    let audit = graphoxide(&project)
+        .args(["audit", ".", "--json", "--force"])
+        .env("GRAPHOXIDE_OUT", &output)
+        .env_remove("GRAPHIFY_OUT")
+        .output()
+        .expect("run graph audit with custom output");
+
+    assert!(audit.status.success(), "{}", stderr(&audit));
+    let _: Value = serde_json::from_slice(&audit.stdout).expect("graph audit JSON");
+    assert!(!retired.exists(), "pre-redaction cache was not retired");
+    assert!(output.join("manifest.json").is_file());
+    let current = output.join("cache/ast/v30");
+    assert!(
+        current
+            .read_dir()
+            .expect("current AST cache")
+            .next()
+            .is_some(),
+        "audit did not populate the configured current cache"
+    );
+    assert!(
+        !project.join("graphoxide-out").exists(),
+        "audit created a cache below the source root instead of GRAPHOXIDE_OUT"
+    );
+    for secret in [SOURCE_SECRET, RETIRED_SECRET] {
+        assert!(!stdout(&audit).contains(secret));
+        assert!(!stderr(&audit).contains(secret));
+        assert!(
+            !tree_contains_bytes(&output, secret.as_bytes()),
+            "configured output retained {secret}"
+        );
+    }
 }
 
 #[test]

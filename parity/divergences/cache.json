@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "divergences": [
+    {
+      "upstream": "tests/test_cache.py::test_ast_cache_version_bump_cleans_stale_entries",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_ast_cache_schema_preparation_retires_only_pre_redaction_versions"
+        }
+      ],
+      "reason": "Graphoxide retires only pre-redaction cache schemas under the managed rebuild lock instead of recursively deleting every older directory during an uncoordinated cache open."
+    }
+  ]
+}

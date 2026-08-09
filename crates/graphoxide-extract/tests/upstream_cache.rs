@@ -1,8 +1,9 @@
 use graphoxide_extract::cache::{
     body_content, cache_dir, cache_dir_with_ast_version, cached_files, check_semantic_cache,
     clear_cache, file_hash, load_cached_value, load_cached_value_with_version,
-    prompt_file_fingerprint, prompt_fingerprint, prune_semantic_cache, save_cached_value,
-    save_cached_value_with_version, save_semantic_cache, SemanticCacheOptions,
+    prepare_structured_redaction_cache_schema, prompt_file_fingerprint, prompt_fingerprint,
+    prune_semantic_cache, save_cached_value, save_cached_value_with_version, save_semantic_cache,
+    SemanticCacheOptions,
 };
 use serde_json::json;
 use std::{
@@ -434,22 +435,25 @@ fn test_ast_cache_invalidated_on_version_bump() {
 }
 
 #[test]
-fn test_ast_cache_version_bump_cleans_stale_entries() {
+fn test_ast_cache_schema_preparation_retires_only_pre_redaction_versions() {
     let temp = TempDir::new().unwrap();
     let source = write(temp.path(), "mod.py", b"def f(): pass\n");
-    save_cached_value_with_version(
-        &source,
-        &json!({"nodes": [{"id": "n1"}], "edges": []}),
-        temp.path(),
-        "ast",
-        None,
-        800,
-    )
-    .unwrap();
-    let old = temp.path().join("graphoxide-out/cache/ast/v800");
-    assert!(old.read_dir().unwrap().next().is_some());
-    cache_dir_with_ast_version(temp.path(), "ast", None, 801).unwrap();
-    assert!(!old.exists());
+    let value = json!({"nodes": [{"id": "n1"}], "edges": []});
+    save_cached_value_with_version(&source, &value, temp.path(), "ast", None, 29).unwrap();
+    save_cached_value_with_version(&source, &value, temp.path(), "ast", None, 31).unwrap();
+    let retired = temp.path().join("graphoxide-out/cache/ast/v29");
+    let future = temp.path().join("graphoxide-out/cache/ast/v31");
+    assert!(retired.read_dir().unwrap().next().is_some());
+    assert!(future.read_dir().unwrap().next().is_some());
+
+    let current = cache_dir(temp.path(), "ast", None).unwrap();
+    assert!(retired.exists(), "opening a schema must not erase another");
+    assert!(future.exists(), "opening v30 must preserve a future schema");
+
+    prepare_structured_redaction_cache_schema(&temp.path().join("graphoxide-out")).unwrap();
+    assert!(!retired.exists());
+    assert!(current.exists());
+    assert!(future.exists(), "schema preparation only retires v0..v29");
 }
 
 #[test]

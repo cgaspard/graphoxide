@@ -124,7 +124,7 @@ bounded queues and a resolved managed-memory budget. `--memory-budget-bytes`,
 `--io-workers`, `--compute-workers`, `--read-batch-bytes`, and `--io-backend`
 provide explicit overrides; unsupported `io-uring` requests fall back to the
 portable threaded backend and record that decision in the optional runtime
-report. It persists validated parser results under `cache/runtime-v1`; exact
+report. It persists validated parser results under `cache/runtime-v2`; exact
 path, content, extractor-version, and runtime-option evidence can avoid parsing
 on a later build, while strong source-generation evidence can also avoid a
 payload read. Unsafe, stale, incomplete, or corrupt entries are treated as
@@ -297,6 +297,32 @@ Go, Rust, Java, C, C++, Ruby, and C#. Bash and JSON currently use the
 deterministic fallback tier while their grammar-backed adapters are hardened.
 
 Deterministic structured/regex extraction covers the remaining offline matrix, including Kotlin, Scala, PHP, Swift, Lua, Groovy, Elixir, Zig, Julia, Fortran, Verilog/SystemVerilog, Objective-C, PowerShell, Terraform/HCL, SQL, Apex, Dart, Pascal, Blade/Razor, Visual Studio solutions/projects, XAML, Delphi/Lazarus forms, Vue/Svelte/Astro containers, and package manifests. Header routing distinguishes C++, C, and Objective-C markers.
+
+Generic structured extraction applies a bounded, deterministic redaction policy
+before retained facts enter the graph or extraction caches. JSON/JSONC/JSON
+Lines, TOML, XML, delimited tables, INI/properties/environment-style files,
+named JSON configuration references, and MCP configuration facts recognize a
+narrow set of credential-bearing keys and high-confidence value signatures.
+Redacted scalars keep their key, location, container shape, original scalar
+type, and an explicit `<redacted>` marker; secret-like labels and references use
+safe labels and identifiers. YAML and JSON5 structural fallbacks retain keys,
+not decoded scalar values. Literal sensitive paths such as `.env` remain
+excluded before open, while an ordinary selected path such as `app.env` uses
+the same bounded key/value policy.
+
+The policy covers common password, authorization, token, API-key, private-key,
+credential, connection-string, secret-assignment, credentialed-URL, JWT,
+Basic/Bearer, and recognized provider-token forms. It deliberately has no
+entropy heuristic and is not general-purpose secret discovery; unrecognized
+values under ordinary keys can remain visible. Source files are never modified.
+Cache schema 30 invalidates pre-redaction AST facts, moves current framed cache
+storage to `cache/runtime-v2`, and, under the exclusive rebuild lock, erases
+exact legacy AST artifacts and retired `cache/runtime-v1` payloads before any
+new build can publish. Unsafe or busy legacy cache layouts stop the build rather
+than being followed or ignored. A failed migration leaves the previously
+accepted graph untouched; the first successful rebuild replaces it with the
+redacted graph. Remove `graphoxide-out` manually when immediate removal of all
+previously published local output is required.
 
 ZIP, TAR, and single-member GZIP inputs recursively index supported member
 formats in the default isolated runtime. Members stay in memory, receive stable

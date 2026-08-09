@@ -706,7 +706,7 @@ fn prior_schema_migrates_and_two_sections_shrink_to_one_with_clean_parity() {
         .values()
         .all(|entry| entry["ast_version"].as_u64()
             == Some(u64::from(graphoxide_extract::cache::AST_CACHE_VERSION))));
-    assert_eq!(graphoxide_extract::cache::AST_CACHE_VERSION, 29);
+    assert_eq!(graphoxide_extract::cache::AST_CACHE_VERSION, 30);
 
     let current = docx_with_sections(&["Survivor moves to ordinal one"]);
     fs::write(project.join("handbook.docx"), &current).expect("replace DOCX fixture");

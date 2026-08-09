@@ -13,7 +13,7 @@ node-ID stream has SHA-256
 `f4abbb1c5f690e04d5a8bdaef643b372eb56ca7416fa7260c39b1bb52f69e975`.
 
 Passing the inventory check alone does not claim behavioral parity. The ledger
-currently records **3,966 executable parity mappings**, **12 reviewed expected
+currently records **3,965 executable parity mappings**, **13 reviewed expected
 divergences**, and **0 unaccounted cases**. Every overlay points to an exact
 executable Rust, VS Code, or differential test ID. Expected divergences are
 visible release debt and are never counted as mapped parity.
