@@ -1,0 +1,2 @@
+pub const QUALIFICATION_FILE_0000: u32 = 0x00000000;
+pub fn stable_anchor() -> &'static str { "graphoxide" }

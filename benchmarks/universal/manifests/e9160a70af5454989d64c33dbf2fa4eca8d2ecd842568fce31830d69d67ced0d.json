@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profile": "ci-mixed-v1",
+  "description": "Small deterministic mixed-format correctness corpus; timings are observations only.",
+  "fixed_mtime_epoch_seconds": 946684800,
+  "entries": [
+    { "path": ".env", "size": 43, "sha256": "d02f2cddbff360dc2c0bdb5dd20dfd3bbcbee276fb317fbc37c44e0f054e02df", "expected_coverage": "excluded_sensitive" },
+    { "path": "README.md", "size": 60, "sha256": "8e2a55bb632f91b0a5b34e7a52ec5557b77f69fd8f5e86066321d1a8aae3c3d0", "expected_coverage": "covered" },
+    { "path": "api/service.proto", "size": 74, "sha256": "eb0c406cbcb06932b56bc5e634e7b7b0fdea2a7ffbfeb56d02f30cbe06232cdd", "expected_coverage": "covered" },
+    { "path": "app/main.py", "size": 53, "sha256": "b37648de6841a11bcdcfb47ae640bb473470a4b6ef1323aaac9246f63b262405", "expected_coverage": "covered" },
+    { "path": "config/pipeline.yaml", "size": 48, "sha256": "44df100840660123686cfcbf7effd810c5364d54c7f1237d9d7a43a1e918c88d", "expected_coverage": "covered" },
+    { "path": "config/settings.json", "size": 53, "sha256": "34c7dbbe1c9f627ada84ba6fdc85d6e1e5057bfc87e055b2c164ae4522d7ebcf", "expected_coverage": "covered" },
+    { "path": "data/table.csv", "size": 26, "sha256": "e7a3929e0913e80f475f937db1615bfa29484299e93ea55d8c87e92770c8078d", "expected_coverage": "covered" },
+    { "path": "docs/diagram.svg", "size": 89, "sha256": "958e42487c1bcaa19e8832b4b89f25d5dc1650fa854cf6d4901b0cf3f5cbc3a0", "expected_coverage": "covered" },
+    { "path": "package.json", "size": 48, "sha256": "701d82cdf418ed8338156f48decc66c3032177e76a6f48068614e3a7485003b2", "expected_coverage": "inventory_only" },
+    { "path": "payload.unknown", "size": 45, "sha256": "d483ad5d00cee70cfb8adbe9e4646498dbc72cd31b5421e86c62ffba165e88b1", "expected_coverage": "unsupported" },
+    { "path": "src/lib.rs", "size": 109, "sha256": "5f58f2e97dc89e6c4e0c5422d2253954843f9a888874cfa5a2be581c91c5038d", "expected_coverage": "covered" }
+  ],
+  "mutation": {
+    "path": "src/lib.rs",
+    "before_sha256": "5f58f2e97dc89e6c4e0c5422d2253954843f9a888874cfa5a2be581c91c5038d",
+    "after_sha256": "042341584ea74c3df58704c4b8e3623cd316e25dfb0d2978b3948fc2c82726f5",
+    "size": 109
+  }
+}

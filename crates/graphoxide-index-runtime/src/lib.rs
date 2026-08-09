@@ -467,6 +467,58 @@ pub struct RuntimeExecutionEvidence {
     pub emergency_reserve_bytes: usize,
 }
 
+/// Bounded, aggregate evidence from one fixed-owner source-read run.
+///
+/// These counters contain no source labels. Totals are accumulated by each
+/// fixed I/O owner and merged after the workers join, while the two peaks come
+/// from the shared ready-input credit ledger. `source_bytes_read` includes
+/// bytes from discarded identity-race retries; `sources_read` counts only a
+/// source whose complete bytes passed the final identity checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeIoTelemetry {
+    /// Source tickets selected by the control plane for this run.
+    pub sources_selected: u64,
+    /// Selected source bytes captured by verified request identities.
+    pub source_bytes_selected: u64,
+    /// Sources completely read and verified by an I/O owner.
+    pub sources_read: u64,
+    /// Source bytes returned by the backend, including discarded retries.
+    pub source_bytes_read: u64,
+    /// Ready inputs delivered once to a compute callback.
+    pub sources_delivered: u64,
+    /// Logical source bytes delivered once to compute callbacks.
+    pub source_bytes_delivered: u64,
+    /// Accepted metadata-only cache hits that avoided a source payload read.
+    pub source_bytes_avoided: u64,
+    /// Selected sources that ended in one terminal read failure.
+    pub read_failures: u64,
+    /// Peak live ready-input admission credit, including pre-open tickets.
+    pub peak_ready_bytes: u64,
+    /// Peak number of live ready-input admission leases.
+    pub peak_ready_items: u64,
+}
+
+impl RuntimeIoTelemetry {
+    /// Merge independent bounded worker totals without wraparound.
+    pub fn merge(&mut self, other: Self) {
+        macro_rules! merge_counter {
+            ($field:ident) => {
+                self.$field = self.$field.saturating_add(other.$field);
+            };
+        }
+        merge_counter!(sources_selected);
+        merge_counter!(source_bytes_selected);
+        merge_counter!(sources_read);
+        merge_counter!(source_bytes_read);
+        merge_counter!(sources_delivered);
+        merge_counter!(source_bytes_delivered);
+        merge_counter!(source_bytes_avoided);
+        merge_counter!(read_failures);
+        self.peak_ready_bytes = self.peak_ready_bytes.max(other.peak_ready_bytes);
+        self.peak_ready_items = self.peak_ready_items.max(other.peak_ready_items);
+    }
+}
+
 /// Allocation class used by [`BufferLease`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferClass {
@@ -835,6 +887,19 @@ impl FileReadRequest {
             expected_identity: None,
             verified_root: None,
             verified_root_identity: None,
+        }
+    }
+
+    /// Length captured by the control plane for this verified source.
+    ///
+    /// Production indexing uses verified requests, so this is the exact byte
+    /// value selected before cache decisions. Synthetic/unverified requests
+    /// deliberately return `None` rather than probing from a CPU caller.
+    #[must_use]
+    pub const fn selected_source_bytes(&self) -> Option<u64> {
+        match self.expected_identity {
+            Some(identity) => Some(identity.file_identity.length_bytes),
+            None => None,
         }
     }
 
@@ -1741,6 +1806,26 @@ pub struct ConcurrentReadResult<T> {
     pub failures: Vec<FileReadFailure>,
 }
 
+/// Completion report from the additive telemetry-aware read entry points.
+///
+/// The original [`ConcurrentReadResult`] remains unchanged so downstream
+/// callers that construct or destructure it retain source compatibility.
+#[derive(Debug)]
+pub struct ConcurrentReadResultWithTelemetry<T> {
+    /// The original fixed-owner completion report.
+    pub result: ConcurrentReadResult<T>,
+    /// Aggregate, label-free I/O evidence for the completed run.
+    pub telemetry: RuntimeIoTelemetry,
+}
+
+impl<T> std::ops::Deref for ConcurrentReadResultWithTelemetry<T> {
+    type Target = ConcurrentReadResult<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
 /// Fatal infrastructure failure from [`read_files_concurrently`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConcurrentReadError {
@@ -1912,7 +1997,27 @@ where
     T: Send + 'static,
     F: Fn(ReadyInput) -> T + Send + Sync + 'static,
 {
-    read_files_concurrently_with_backend(config, requests, Arc::new(FileSystemIoBackend), compute)
+    read_files_concurrently_with_telemetry(config, requests, compute)
+        .map(|completed| completed.result)
+}
+
+/// Run the fixed-owner I/O/CPU pipeline and return additive aggregate I/O
+/// telemetry without changing the original completion DTO.
+pub fn read_files_concurrently_with_telemetry<T, F>(
+    config: IndexRuntimeConfig,
+    requests: impl IntoIterator<Item = FileReadRequest>,
+    compute: F,
+) -> Result<ConcurrentReadResultWithTelemetry<T>, ConcurrentReadError>
+where
+    T: Send + 'static,
+    F: Fn(ReadyInput) -> T + Send + Sync + 'static,
+{
+    read_files_concurrently_with_backend_and_telemetry(
+        config,
+        requests,
+        Arc::new(FileSystemIoBackend),
+        compute,
+    )
 }
 
 /// Run the fixed-owner I/O/CPU pipeline with cooperative cancellation.
@@ -1930,7 +2035,23 @@ where
     T: Send + 'static,
     F: Fn(ReadyInput) -> T + Send + Sync + 'static,
 {
-    read_files_concurrently_with_backend_and_cancellation(
+    read_files_concurrently_with_cancellation_and_telemetry(config, requests, cancellation, compute)
+        .map(|completed| completed.result)
+}
+
+/// Cancellation-aware fixed-owner pipeline with additive aggregate I/O
+/// telemetry.
+pub fn read_files_concurrently_with_cancellation_and_telemetry<T, F>(
+    config: IndexRuntimeConfig,
+    requests: impl IntoIterator<Item = FileReadRequest>,
+    cancellation: RuntimeCancellation,
+    compute: F,
+) -> Result<ConcurrentReadResultWithTelemetry<T>, ConcurrentReadError>
+where
+    T: Send + 'static,
+    F: Fn(ReadyInput) -> T + Send + Sync + 'static,
+{
+    read_files_concurrently_with_backend_and_cancellation_and_telemetry(
         config,
         requests,
         Arc::new(FileSystemIoBackend),
@@ -1955,7 +2076,23 @@ where
     T: Send + 'static,
     F: Fn(ReadyInput) -> T + Send + Sync + 'static,
 {
-    read_files_concurrently_with_backend_and_cancellation(
+    read_files_concurrently_with_backend_and_telemetry(config, requests, backend, compute)
+        .map(|completed| completed.result)
+}
+
+/// Run the fixed-owner pipeline with an injected I/O backend and additive
+/// aggregate I/O telemetry.
+pub fn read_files_concurrently_with_backend_and_telemetry<T, F>(
+    config: IndexRuntimeConfig,
+    requests: impl IntoIterator<Item = FileReadRequest>,
+    backend: Arc<dyn IoReadBackend>,
+    compute: F,
+) -> Result<ConcurrentReadResultWithTelemetry<T>, ConcurrentReadError>
+where
+    T: Send + 'static,
+    F: Fn(ReadyInput) -> T + Send + Sync + 'static,
+{
+    read_files_concurrently_with_backend_and_cancellation_and_telemetry(
         config,
         requests,
         backend,
@@ -1980,6 +2117,29 @@ where
     T: Send + 'static,
     F: Fn(ReadyInput) -> T + Send + Sync + 'static,
 {
+    read_files_concurrently_with_backend_and_cancellation_and_telemetry(
+        config,
+        requests,
+        backend,
+        cancellation,
+        compute,
+    )
+    .map(|completed| completed.result)
+}
+
+/// Run the fixed-owner pipeline with injected I/O, cancellation, and additive
+/// aggregate I/O telemetry.
+pub fn read_files_concurrently_with_backend_and_cancellation_and_telemetry<T, F>(
+    config: IndexRuntimeConfig,
+    requests: impl IntoIterator<Item = FileReadRequest>,
+    backend: Arc<dyn IoReadBackend>,
+    cancellation: RuntimeCancellation,
+    compute: F,
+) -> Result<ConcurrentReadResultWithTelemetry<T>, ConcurrentReadError>
+where
+    T: Send + 'static,
+    F: Fn(ReadyInput) -> T + Send + Sync + 'static,
+{
     config
         .validate()
         .map_err(ConcurrentReadError::InvalidConfig)?;
@@ -1987,9 +2147,12 @@ where
     let mut requests: Vec<_> = requests.into_iter().collect();
     requests.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
     if requests.is_empty() {
-        return Ok(ConcurrentReadResult {
-            completed: Vec::new(),
-            failures: Vec::new(),
+        return Ok(ConcurrentReadResultWithTelemetry {
+            result: ConcurrentReadResult {
+                completed: Vec::new(),
+                failures: Vec::new(),
+            },
+            telemetry: RuntimeIoTelemetry::default(),
         });
     }
 
@@ -2019,6 +2182,13 @@ where
         }
     }
 
+    let mut telemetry = RuntimeIoTelemetry {
+        sources_selected: u64::try_from(requests.len()).unwrap_or(u64::MAX),
+        source_bytes_selected: requests.iter().fold(0_u64, |total, request| {
+            total.saturating_add(request.selected_source_bytes().unwrap_or(0))
+        }),
+        ..RuntimeIoTelemetry::default()
+    };
     let layout = config.bounded_layout(requests.len());
     let io_workers = layout.io_workers;
     let compute_workers = layout.compute_workers;
@@ -2089,11 +2259,12 @@ where
                 run_io_worker(runtime, requests, senders)
             }));
             match result {
-                Ok(failures) => IoWorkerOutcome { failures },
+                Ok(outcome) => outcome,
                 Err(_) => {
                     control_for_panic.fail(TerminalState::IoWorkerPanicked);
                     IoWorkerOutcome {
                         failures: Vec::new(),
+                        telemetry: RuntimeIoTelemetry::default(),
                     }
                 }
             }
@@ -2103,7 +2274,10 @@ where
     let mut failures = Vec::new();
     for io_thread in io_threads {
         match io_thread.join() {
-            Ok(mut worker) => failures.append(&mut worker.failures),
+            Ok(mut worker) => {
+                failures.append(&mut worker.failures);
+                telemetry.merge(worker.telemetry);
+            }
             Err(_) => cancellation.control.fail(TerminalState::IoWorkerPanicked),
         }
     }
@@ -2120,11 +2294,24 @@ where
     if let Some(error) = cancellation.control.error() {
         return Err(error);
     }
-    completed.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
+    completed.sort_unstable_by(|left, right| left.result.identity.cmp(&right.result.identity));
     failures.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
-    Ok(ConcurrentReadResult {
-        completed,
-        failures,
+    telemetry.sources_delivered = u64::try_from(completed.len()).unwrap_or(u64::MAX);
+    telemetry.source_bytes_delivered = completed.iter().fold(0_u64, |total, completed| {
+        total.saturating_add(completed.source_bytes)
+    });
+    telemetry.read_failures = u64::try_from(failures.len()).unwrap_or(u64::MAX);
+    telemetry.peak_ready_bytes = u64::try_from(credits.peak_reserved_bytes()).unwrap_or(u64::MAX);
+    telemetry.peak_ready_items = u64::try_from(credits.peak_reserved_items()).unwrap_or(u64::MAX);
+    Ok(ConcurrentReadResultWithTelemetry {
+        result: ConcurrentReadResult {
+            completed: completed
+                .into_iter()
+                .map(|completed| completed.result)
+                .collect(),
+            failures,
+        },
+        telemetry,
     })
 }
 
@@ -2139,10 +2326,16 @@ enum ComputeWork {
 
 struct IoWorkerOutcome {
     failures: Vec<FileReadFailure>,
+    telemetry: RuntimeIoTelemetry,
 }
 
 struct ComputeWorkerOutcome<T> {
-    completed: Vec<ComputedInput<T>>,
+    completed: Vec<ComputedInputWithTelemetry<T>>,
+}
+
+struct ComputedInputWithTelemetry<T> {
+    result: ComputedInput<T>,
+    source_bytes: u64,
 }
 
 struct IoWorkerRuntime {
@@ -2159,8 +2352,10 @@ fn run_io_worker(
     runtime: IoWorkerRuntime,
     requests: Vec<FileReadRequest>,
     mut senders: Vec<SpscProducer<ComputeWork>>,
-) -> Vec<FileReadFailure> {
+) -> IoWorkerOutcome {
     let mut failures = Vec::new();
+    let observer = CountingReadObserver::default();
+    let mut telemetry = RuntimeIoTelemetry::default();
     let mut buffers = IoBufferPool::new(runtime.io_pool_bytes);
     for request in requests {
         if runtime.control.is_terminal() {
@@ -2180,9 +2375,10 @@ fn run_io_worker(
             &mut buffers,
             &runtime.control,
             runtime.backend.as_ref(),
-            &NoopReadObserver,
+            &observer,
         ) {
             Ok((input, credit)) => {
+                telemetry.sources_read = telemetry.sources_read.saturating_add(1);
                 if !send_reserved_work(
                     &mut senders[owner],
                     ComputeWork::Ready {
@@ -2209,7 +2405,11 @@ fn run_io_worker(
         }
     }
     let _ = runtime.worker_index; // Retained for fixed-owner telemetry integration.
-    failures
+    telemetry.source_bytes_read = observer.bytes_read();
+    IoWorkerOutcome {
+        failures,
+        telemetry,
+    }
 }
 
 fn reserve_ready_slot(sender: &SpscProducer<ComputeWork>, control: &RunControl) -> bool {
@@ -2255,7 +2455,7 @@ fn run_compute_worker<T, F>(
     mut receivers: Vec<SpscConsumer<ComputeWork>>,
     compute: Arc<F>,
     control: &RunControl,
-) -> Vec<ComputedInput<T>>
+) -> Vec<ComputedInputWithTelemetry<T>>
 where
     T: Send + 'static,
     F: Fn(ReadyInput) -> T + Send + Sync + 'static,
@@ -2277,6 +2477,7 @@ where
             match receivers[index].try_recv() {
                 Some(ComputeWork::Ready { input, _credit }) => {
                     let identity = input.identity.clone();
+                    let source_bytes = u64::try_from(input.bytes().len()).unwrap_or(u64::MAX);
                     // Hashing is an explicit CPU preflight stage: I/O workers
                     // only materialize bytes, and extractors receive a ready
                     // immutable source plus its content identity. `blake3`
@@ -2291,7 +2492,10 @@ where
                             return completed;
                         }
                     };
-                    completed.push(ComputedInput { identity, value });
+                    completed.push(ComputedInputWithTelemetry {
+                        result: ComputedInput { identity, value },
+                        source_bytes,
+                    });
                     drop(_credit);
                     made_progress = true;
                 }
@@ -2419,6 +2623,7 @@ fn read_ready_input(
             if read == 0 {
                 break;
             }
+            observer.after_source_read(read);
             offset += read;
         }
         buffer.truncate(offset);
@@ -2475,9 +2680,12 @@ fn reserve_input_credit(
                 FileReadFailureKind::Cancelled,
             ));
         }
-        match credits.try_reserve(allocation_len) {
+        match credits.try_reserve_tracked(allocation_len) {
             Ok(credit) => return Ok(credit),
-            Err(CreditReservationError::TooLarge { capacity, .. }) => {
+            Err(TrackedCreditReservationError::Public(CreditReservationError::TooLarge {
+                capacity,
+                ..
+            })) => {
                 return Err(FileReadFailure::new(
                     request,
                     FileReadFailureKind::ExceedsReadyBudget {
@@ -2486,18 +2694,54 @@ fn reserve_input_credit(
                     },
                 ));
             }
-            Err(CreditReservationError::Insufficient { .. }) => thread::yield_now(),
+            Err(TrackedCreditReservationError::Public(CreditReservationError::Insufficient {
+                ..
+            })) => thread::yield_now(),
+            Err(TrackedCreditReservationError::ReservationCountOverflow) => {
+                return Err(FileReadFailure::new(
+                    request,
+                    // Preserve the original exhaustive failure enum while
+                    // still terminating safely on an impossible-to-represent
+                    // live-lease count.
+                    FileReadFailureKind::Io(io::ErrorKind::Other),
+                ));
+            }
         }
     }
 }
 
 trait ReadObserver {
     fn after_before_identity(&self, _request: &FileReadRequest) {}
+
+    fn after_source_read(&self, _bytes: usize) {}
 }
 
+#[cfg(test)]
 struct NoopReadObserver;
 
+#[cfg(test)]
 impl ReadObserver for NoopReadObserver {}
+
+#[derive(Default)]
+struct CountingReadObserver {
+    bytes_read: Cell<u64>,
+}
+
+impl CountingReadObserver {
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read.get()
+    }
+}
+
+impl ReadObserver for CountingReadObserver {
+    fn after_source_read(&self, bytes: usize) {
+        self.bytes_read.set(
+            self.bytes_read
+                .get()
+                .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX)),
+        );
+    }
+}
 
 /// A nonblocking, byte-counted capacity ledger.
 #[derive(Debug, Clone)]
@@ -2509,6 +2753,9 @@ pub struct ByteCreditLedger {
 struct CreditInner {
     capacity: usize,
     reserved: AtomicUsize,
+    reserved_items: AtomicUsize,
+    peak_reserved: AtomicUsize,
+    peak_reserved_items: AtomicUsize,
 }
 
 impl ByteCreditLedger {
@@ -2519,6 +2766,9 @@ impl ByteCreditLedger {
             inner: Arc::new(CreditInner {
                 capacity,
                 reserved: AtomicUsize::new(0),
+                reserved_items: AtomicUsize::new(0),
+                peak_reserved: AtomicUsize::new(0),
+                peak_reserved_items: AtomicUsize::new(0),
             }),
         }
     }
@@ -2537,25 +2787,61 @@ impl ByteCreditLedger {
             .saturating_sub(self.inner.reserved.load(Ordering::Acquire))
     }
 
+    /// Maximum live byte credit observed after a complete reservation.
+    #[must_use]
+    pub fn peak_reserved_bytes(&self) -> usize {
+        self.inner.peak_reserved.load(Ordering::Acquire)
+    }
+
+    /// Maximum number of live leases observed after a complete reservation.
+    #[must_use]
+    pub fn peak_reserved_items(&self) -> usize {
+        self.inner.peak_reserved_items.load(Ordering::Acquire)
+    }
+
     /// Reserve `bytes` without waiting. The returned lease automatically
     /// returns capacity when dropped.
     pub fn try_reserve(&self, bytes: usize) -> Result<ByteCreditLease, CreditReservationError> {
+        match self.try_reserve_tracked(bytes) {
+            Ok(credit) => Ok(credit),
+            Err(TrackedCreditReservationError::Public(error)) => Err(error),
+            Err(TrackedCreditReservationError::ReservationCountOverflow) => {
+                // `CreditReservationError` predates telemetry and is
+                // exhaustive. Preserve that source-compatible shape while
+                // representing a counter overflow as a failed reservation.
+                Err(CreditReservationError::Insufficient {
+                    requested: bytes,
+                    available: self.available(),
+                    capacity: self.inner.capacity,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn try_reserve_tracked(
+        &self,
+        bytes: usize,
+    ) -> Result<ByteCreditLease, TrackedCreditReservationError> {
         if bytes > self.inner.capacity {
-            return Err(CreditReservationError::TooLarge {
-                requested: bytes,
-                capacity: self.inner.capacity,
-            });
+            return Err(TrackedCreditReservationError::Public(
+                CreditReservationError::TooLarge {
+                    requested: bytes,
+                    capacity: self.inner.capacity,
+                },
+            ));
         }
 
         let mut observed = self.inner.reserved.load(Ordering::Acquire);
         loop {
             let available = self.inner.capacity.saturating_sub(observed);
             if bytes > available {
-                return Err(CreditReservationError::Insufficient {
-                    requested: bytes,
-                    available,
-                    capacity: self.inner.capacity,
-                });
+                return Err(TrackedCreditReservationError::Public(
+                    CreditReservationError::Insufficient {
+                        requested: bytes,
+                        available,
+                        capacity: self.inner.capacity,
+                    },
+                ));
             }
             let next = observed + bytes;
             match self.inner.reserved.compare_exchange_weak(
@@ -2565,6 +2851,27 @@ impl ByteCreditLedger {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
+                    let mut observed_items = self.inner.reserved_items.load(Ordering::Acquire);
+                    let reserved_items = loop {
+                        let Some(next_items) = observed_items.checked_add(1) else {
+                            let previous = self.inner.reserved.fetch_sub(bytes, Ordering::AcqRel);
+                            debug_assert!(previous >= bytes, "credit ledger rollback underflow");
+                            return Err(TrackedCreditReservationError::ReservationCountOverflow);
+                        };
+                        match self.inner.reserved_items.compare_exchange_weak(
+                            observed_items,
+                            next_items,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => break next_items,
+                            Err(actual) => observed_items = actual,
+                        }
+                    };
+                    self.inner.peak_reserved.fetch_max(next, Ordering::AcqRel);
+                    self.inner
+                        .peak_reserved_items
+                        .fetch_max(reserved_items, Ordering::AcqRel);
                     return Ok(ByteCreditLease {
                         inner: Arc::clone(&self.inner),
                         bytes,
@@ -2598,6 +2905,12 @@ pub enum CreditReservationError {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackedCreditReservationError {
+    Public(CreditReservationError),
+    ReservationCountOverflow,
+}
+
 /// RAII byte-credit reservation returned by [`ByteCreditLedger::try_reserve`].
 #[derive(Debug)]
 pub struct ByteCreditLease {
@@ -2620,6 +2933,8 @@ impl ByteCreditLease {
 
     fn release_inner(&mut self) {
         if self.active {
+            let previous_items = self.inner.reserved_items.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous_items > 0, "credit ledger item underflow");
             let previous = self.inner.reserved.fetch_sub(self.bytes, Ordering::AcqRel);
             debug_assert!(previous >= self.bytes, "credit ledger underflow");
             self.active = false;
@@ -3323,6 +3638,8 @@ mod tests {
         let ledger = ByteCreditLedger::new(10);
         let first = ledger.try_reserve(6).expect("first reservation");
         assert_eq!(ledger.available(), 4);
+        assert_eq!(ledger.peak_reserved_bytes(), 6);
+        assert_eq!(ledger.peak_reserved_items(), 1);
         assert!(matches!(
             ledger.try_reserve(5),
             Err(CreditReservationError::Insufficient {
@@ -3331,6 +3648,11 @@ mod tests {
                 capacity: 10,
             })
         ));
+        let second = ledger.try_reserve(4).expect("second reservation");
+        assert_eq!(ledger.available(), 0);
+        assert_eq!(ledger.peak_reserved_bytes(), 10);
+        assert_eq!(ledger.peak_reserved_items(), 2);
+        drop(second);
         assert_eq!(first.bytes(), 6);
         drop(first);
         assert_eq!(ledger.available(), 10);
@@ -3338,6 +3660,45 @@ mod tests {
             ledger.try_reserve(11),
             Err(CreditReservationError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn original_public_result_and_error_shapes_remain_exhaustive() {
+        let completed = ComputedInput {
+            identity: InputIdentity::new("source.rs", 0),
+            value: 7_u8,
+        };
+        let result = ConcurrentReadResult {
+            completed: vec![completed],
+            failures: Vec::new(),
+        };
+        assert_eq!(result.completed[0].value, 7);
+
+        fn classify_credit(error: CreditReservationError) -> u8 {
+            match error {
+                CreditReservationError::TooLarge { .. } => 1,
+                CreditReservationError::Insufficient { .. } => 2,
+            }
+        }
+        fn classify_read(error: FileReadFailureKind) -> u8 {
+            match error {
+                FileReadFailureKind::Io(_) => 1,
+                FileReadFailureKind::TooLarge { .. } => 2,
+                FileReadFailureKind::ExceedsReadyBudget { .. } => 3,
+                FileReadFailureKind::ChangedDuringRead => 4,
+                FileReadFailureKind::Cancelled => 5,
+            }
+        }
+
+        assert_eq!(
+            classify_credit(CreditReservationError::Insufficient {
+                requested: 1,
+                available: 0,
+                capacity: 1,
+            }),
+            2
+        );
+        assert_eq!(classify_read(FileReadFailureKind::Cancelled), 5);
     }
 
     #[test]
@@ -3471,7 +3832,7 @@ mod tests {
         let bytes = b"hash only after I/O admission";
         fs::write(&path, bytes).expect("write source");
 
-        let result = read_files_concurrently(
+        let result = read_files_concurrently_with_telemetry(
             IndexRuntimeConfig {
                 memory_budget_bytes: 128 * 1024,
                 io_workers: 1,
@@ -3479,10 +3840,10 @@ mod tests {
                 io_backend: IoBackendSelection::Threaded,
                 read_batch_bytes: 7,
             },
-            vec![FileReadRequest::new(
-                InputIdentity::new("source.txt", 0),
-                path,
-            )],
+            vec![
+                FileReadRequest::new_verified(InputIdentity::new("source.txt", 0), path)
+                    .expect("bind source identity"),
+            ],
             |input| input.content_digest,
         )
         .expect("runtime succeeds");
@@ -3492,6 +3853,15 @@ mod tests {
             result.completed[0].value,
             Some(*blake3::hash(bytes).as_bytes())
         );
+        assert_eq!(result.telemetry.sources_selected, 1);
+        assert_eq!(result.telemetry.source_bytes_selected, bytes.len() as u64);
+        assert_eq!(result.telemetry.sources_read, 1);
+        assert_eq!(result.telemetry.source_bytes_read, bytes.len() as u64);
+        assert_eq!(result.telemetry.sources_delivered, 1);
+        assert_eq!(result.telemetry.source_bytes_delivered, bytes.len() as u64);
+        assert_eq!(result.telemetry.read_failures, 0);
+        assert_eq!(result.telemetry.peak_ready_bytes, 4 * 1024);
+        assert_eq!(result.telemetry.peak_ready_items, 1);
         fs::remove_dir_all(&directory).expect("remove test directory");
     }
 
@@ -3507,7 +3877,7 @@ mod tests {
         let path: PathBuf = directory.join("large.txt");
         fs::write(&path, b"larger than eight bytes").expect("write source");
 
-        let result = read_files_concurrently(
+        let result = read_files_concurrently_with_telemetry(
             IndexRuntimeConfig {
                 memory_budget_bytes: 128 * 1024,
                 io_workers: 1,
@@ -3528,6 +3898,11 @@ mod tests {
                 ..
             }]
         ));
+        assert_eq!(result.telemetry.sources_selected, 1);
+        assert_eq!(result.telemetry.sources_read, 0);
+        assert_eq!(result.telemetry.sources_delivered, 0);
+        assert_eq!(result.telemetry.source_bytes_read, 0);
+        assert_eq!(result.telemetry.read_failures, 1);
         fs::remove_dir_all(&directory).expect("remove test directory");
     }
 
@@ -3780,7 +4155,7 @@ mod tests {
         let backend = Arc::new(FakeReadBackend::new([(path.clone(), source)]));
         let computed = Arc::new(AtomicUsize::new(0));
         let computed_in_callback = Arc::clone(&computed);
-        let result = read_files_concurrently_with_backend(
+        let result = read_files_concurrently_with_backend_and_telemetry(
             runtime_config(1, 1),
             vec![FileReadRequest::new(
                 InputIdentity::new("changing.txt", 0),
@@ -3815,6 +4190,11 @@ mod tests {
             backend.call_count(BackendCall::Probe(path)),
             FILE_READ_ATTEMPTS * 2
         );
+        assert_eq!(result.telemetry.sources_selected, 1);
+        assert_eq!(result.telemetry.sources_read, 0);
+        assert_eq!(result.telemetry.sources_delivered, 0);
+        assert_eq!(result.telemetry.source_bytes_read, 18);
+        assert_eq!(result.telemetry.read_failures, 1);
     }
 
     #[test]
