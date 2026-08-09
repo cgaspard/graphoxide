@@ -118,6 +118,15 @@ fn is_file_node(node: &Node, degree: usize) -> bool {
     if node.label.is_empty() {
         return false;
     }
+    if node
+        .extra
+        .get("_origin")
+        .and_then(serde_json::Value::as_str)
+        == Some("document_package")
+        && (node.extra.contains_key("unit_ordinal") || node.extra.contains_key("internal_part"))
+    {
+        return false;
+    }
     if !node.source_file.is_empty() {
         let source = node.source_file.replace('\\', "/");
         let basename = source.rsplit('/').next().unwrap_or(&source);
@@ -962,5 +971,29 @@ mod tests {
         assert_eq!(file_category("app.swift"), "code");
         assert_eq!(file_category("plugin.lua"), "code");
         assert_eq!(file_category("paper.pdf"), "paper");
+    }
+
+    #[test]
+    fn declared_document_package_unit_is_not_mistaken_for_its_source_file() {
+        let node = Node {
+            id: "unit_1".into(),
+            label: "report.docx".into(),
+            file_type: "document".into(),
+            source_file: "docs/report.docx".into(),
+            source_location: None,
+            community: None,
+            extra: BTreeMap::from([
+                ("_origin".into(), "document_package".into()),
+                ("unit_ordinal".into(), 1.into()),
+            ]),
+        };
+        assert!(!is_file_node(&node, 1));
+
+        let mut part = node;
+        part.id = "part_1".into();
+        part.extra.remove("unit_ordinal");
+        part.extra
+            .insert("internal_part".into(), "parts/report.docx".into());
+        assert!(!is_file_node(&part, 1));
     }
 }

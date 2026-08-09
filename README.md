@@ -306,6 +306,18 @@ inventory without being decompressed. BZIP2, XZ, Zstandard, 7z, and RAR remain
 inventory-only. Encrypted members, links, special entries, and unsupported ZIP
 compression reject that archive before any child dispatch.
 
+DOCX, XLSX, PPTX, ODT, ODS, ODP, and EPUB packages use a dedicated byte-only
+ZIP route before generic archive recursion. The bounded parser emits ordered
+sections, sheets, slides, or publication spine entries together with their
+backing package parts and contained internal relationships. It enforces
+independent package, member, XML nesting/event, decoded-byte, retained-model,
+relationship, text, string, and fact ceilings and returns one stable rejection
+diagnostic on malformed or hostile input. External relationships, formulas,
+signatures, fonts, media, and unreferenced opaque members remain inert and are
+never fetched, evaluated, rendered, or dispatched as source files. Recognized
+macro, script, OLE/ActiveX, and encrypted package structures reject the package
+before semantic publication.
+
 PDF inputs use an in-process, byte-only parser for bounded classic-xref
 documents. It supports raw or single-Flate page streams and a conservative
 Type 1 Standard-14/WinAnsi text subset, emitting deterministic document and

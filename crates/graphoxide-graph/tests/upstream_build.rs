@@ -847,6 +847,39 @@ fn test_build_from_json_ambiguous_old_stem_alias_stays_dangling() {
 }
 
 #[test]
+fn test_document_package_child_does_not_claim_a_legacy_repair_alias() {
+    let graph = build_value(json!({
+        "nodes": [
+            {
+                "id": "caller",
+                "label": "caller",
+                "file_type": "code",
+                "source_file": "src/main.rs"
+            },
+            {
+                "id": "book_part_f9c2",
+                "label": "Chapter",
+                "file_type": "document",
+                "source_file": "book.epub",
+                "_origin": "document_package",
+                "internal_part": "EPUB/chapter.xhtml",
+                "unit_ordinal": 1
+            }
+        ],
+        "edges": [{
+            "source": "caller",
+            "target": "book_chapter",
+            "relation": "references",
+            "confidence": "EXTRACTED",
+            "source_file": "src/main.rs"
+        }]
+    }));
+
+    assert!(!has_edge(&graph, "caller", "book_part_f9c2"));
+    assert!(graph.links.is_empty());
+}
+
+#[test]
 fn test_build_from_json_ambiguous_alias_detected_despite_header_impl_salting() {
     let temp = TempDir::new().unwrap();
     let graph = build_value_at(
@@ -1964,6 +1997,42 @@ fn test_doc_twin_merge_preserves_declared_graphviz_ids() {
         "architecture_diagram_graphviz_service",
         "architecture_diagram_graphviz_service_doc"
     ));
+}
+
+#[test]
+fn test_doc_twin_merge_preserves_document_package_entities() {
+    let graph = build_value(json!({
+        "nodes": [
+            {
+                "id": "report",
+                "label": "report.docx",
+                "file_type": "document",
+                "source_file": "report.docx",
+                "_origin": "document_package",
+                "type": "docx_document"
+            },
+            {
+                "id": "report_doc",
+                "label": "Section 1",
+                "file_type": "document",
+                "source_file": "report.docx",
+                "_origin": "document_package",
+                "type": "document_section",
+                "unit_ordinal": 1
+            }
+        ],
+        "edges": [{
+            "source": "report",
+            "target": "report_doc",
+            "relation": "contains",
+            "source_file": "report.docx",
+            "confidence": "EXTRACTED",
+            "_origin": "document_package"
+        }]
+    }));
+    assert!(has_node(&graph, "report"));
+    assert!(has_node(&graph, "report_doc"));
+    assert!(has_edge(&graph, "report", "report_doc"));
 }
 
 #[test]

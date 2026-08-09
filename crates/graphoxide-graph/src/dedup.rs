@@ -573,13 +573,18 @@ fn deduplicate_engine(
         if edge.extra.contains_key("_tgt") {
             edge.extra.insert("_tgt".into(), target.into());
         }
-        let declared_graphviz_self_loop = original.true_source() == original.true_target()
-            && original
+        let declared_structural_self_loop = original.true_source() == original.true_target()
+            && (original
                 .extra
                 .get("diagram_format")
                 .and_then(serde_json::Value::as_str)
-                == Some("graphviz");
-        if edge.source == edge.target && !declared_graphviz_self_loop {
+                == Some("graphviz")
+                || original
+                    .extra
+                    .get("_origin")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("document_package"));
+        if edge.source == edge.target && !declared_structural_self_loop {
             report.self_loops_dropped += 1;
         } else {
             deduped_edges.push(edge);
@@ -624,6 +629,11 @@ fn crossfile_file_anchored(left: &Node, right: &Node) -> bool {
 /// label, including within the same source graph, without denoting one entity.
 fn preserves_declared_identity(node: &Node) -> bool {
     node.file_type == "code"
+        || node
+            .extra
+            .get("_origin")
+            .and_then(serde_json::Value::as_str)
+            == Some("document_package")
         || (node
             .extra
             .get("diagram_format")
@@ -779,5 +789,41 @@ mod tests {
         assert_eq!(graph.links.len(), 1);
         assert_eq!(graph.links[0].source, graph.links[0].target);
         assert_eq!(graph.links[0].relation, "flows_to");
+    }
+
+    #[test]
+    fn document_package_units_and_declared_self_loops_survive_deduplication() {
+        let unit = |id: &str, ordinal: u64| Node {
+            id: id.into(),
+            label: "Repeated chapter".into(),
+            file_type: "document".into(),
+            source_file: "book.epub".into(),
+            source_location: None,
+            community: None,
+            extra: BTreeMap::from([
+                ("_origin".into(), json!("document_package")),
+                ("type".into(), json!("publication_section")),
+                ("unit_ordinal".into(), json!(ordinal)),
+            ]),
+        };
+        let mut graph = KnowledgeGraph {
+            nodes: vec![unit("chapter_1", 1), unit("chapter_2", 2)],
+            links: vec![Edge {
+                source: "chapter_1".into(),
+                target: "chapter_1".into(),
+                relation: "references".into(),
+                confidence: Confidence::Extracted,
+                source_file: "book.epub".into(),
+                extra: BTreeMap::from([("_origin".into(), json!("document_package"))]),
+            }],
+            ..KnowledgeGraph::default()
+        };
+
+        let report = deduplicate_with_report(&mut graph);
+        assert_eq!(report.same_label_nodes_merged, 0);
+        assert_eq!(report.self_loops_dropped, 0);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.links.len(), 1);
+        assert_eq!(graph.links[0].source, graph.links[0].target);
     }
 }

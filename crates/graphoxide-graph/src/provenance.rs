@@ -9,9 +9,8 @@ pub fn origin_is_structural(origin: &str) -> Option<bool> {
         // Some deterministic extractors are tree-sitter based; others are
         // specialized parsers or conservative fallback scanners. They retain
         // distinct origins for diagnostics but share build/replacement policy.
-        "ast" | "fallback" | "terraform" | "sql" | "dotnet" | "scip" | "diagram" | "pdf" => {
-            Some(true)
-        }
+        "ast" | "fallback" | "terraform" | "sql" | "dotnet" | "scip" | "diagram" | "pdf"
+        | "document_package" => Some(true),
         _ => None,
     }
 }
@@ -23,6 +22,7 @@ mod tests {
     #[test]
     fn pdf_is_deterministic_structural_provenance() {
         assert_eq!(origin_is_structural("pdf"), Some(true));
+        assert_eq!(origin_is_structural("document_package"), Some(true));
         assert_eq!(origin_is_structural("semantic"), Some(false));
         assert_eq!(origin_is_structural("future-origin"), None);
     }
