@@ -94,12 +94,22 @@ test('security scans locked dependencies and source with least privilege', () =>
   assert.equal(codeql['timeout-minutes'], 30);
   assert.equal(codeql.strategy['fail-fast'], false);
   assert.deepEqual(codeql.strategy.matrix.language, ['actions', 'javascript-typescript', 'rust']);
+  const rustSetup = codeql.steps.find((step) => step.name === 'Set up Rust');
+  assert.ok(rustSetup?.uses?.startsWith('dtolnay/rust-toolchain@'));
+  assert.equal(rustSetup.if, "matrix.language == 'rust'");
+  assert.equal(rustSetup.with?.toolchain, '1.97.1');
+  assert.equal(rustSetup.with?.components, 'rust-src');
+  const rustFetch = codeql.steps.find((step) => step.name === 'Fetch locked Rust dependencies');
+  assert.equal(rustFetch?.if, "matrix.language == 'rust'");
+  assert.equal(rustFetch?.run, 'cargo fetch --locked');
   const init = codeql.steps.find((step) => step.uses?.startsWith('github/codeql-action/init@'));
   assert.ok(init);
   assert.equal(init.with.languages, '${{ matrix.language }}');
   assert.equal(init.with['build-mode'], 'none');
   assert.equal(init.with.queries, 'security-extended');
   assert.equal(init.with['config-file'], './.github/codeql/codeql-config.yml');
+  assert.ok(codeql.steps.indexOf(rustSetup) < codeql.steps.indexOf(rustFetch));
+  assert.ok(codeql.steps.indexOf(rustFetch) < codeql.steps.indexOf(init));
   assert.ok(codeql.steps.some((step) => step.uses?.startsWith('github/codeql-action/analyze@')));
 
   for (const job of Object.values(workflow.jobs)) {

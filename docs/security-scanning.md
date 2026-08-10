@@ -6,6 +6,12 @@ JavaScript/TypeScript, and GitHub Actions. The workflow has read-only repository
 access except for the CodeQL analysis step's narrowly scoped permission to
 upload security results.
 
+Rust analysis uses CodeQL's supported no-build Rust extractor after installing
+the project's pinned toolchain and `rust-src` component and fetching every
+locked dependency. This gives its Rust analyzer the same standard-library and
+dependency sources as the tested workspace. Exact-head scan diagnostics are
+reviewed because Rust macro extraction still has upstream limitations.
+
 Repository-level Dependabot vulnerability alerts are enabled. Automated
 security fixes remain disabled, and the weekly GitHub Actions and npm update
 pull requests are review-only: no dependency update is merged automatically.
