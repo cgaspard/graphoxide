@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Graphoxide · Investigation Lens</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#graphSurface">Skip to dependency flow</a>
+
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand" aria-label="Graphoxide Investigation Lens">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M7 9.5 16 4l9 5.5v11L16 26l-9-5.5z"/>
+          <circle cx="7" cy="9.5" r="2.5"/>
+          <circle cx="25" cy="9.5" r="2.5"/>
+          <circle cx="16" cy="26" r="2.5"/>
+          <circle cx="16" cy="15" r="3"/>
+          <path d="m8.8 10.6 4.7 2.8m5 0 4.7-2.8M16 18v5"/>
+        </svg>
+        <div>
+          <span class="eyebrow">Graphoxide</span>
+          <strong>Investigation Lens</strong>
+        </div>
+      </div>
+
+      <label class="search-box" for="searchInput">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m12.5 12.5 4 4"/></svg>
+        <input id="searchInput" type="search" autocomplete="off" placeholder="Jump to a symbol, file, or service…" aria-controls="searchResults" aria-expanded="false">
+        <kbd>/</kbd>
+        <div id="searchResults" class="search-results" role="listbox" aria-label="Symbol results"></div>
+      </label>
+
+      <div class="top-actions">
+        <span class="freshness" title="Fixture commit 8f2c6f1"><span class="live-dot"></span> Index ready</span>
+        <button id="shortcutButton" class="icon-button" type="button" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
+      </div>
+    </header>
+
+    <nav class="trailbar" aria-label="Investigation history">
+      <span class="trail-label">History</span>
+      <div id="historyTrail" class="history-trail"></div>
+      <div class="trail-actions">
+        <button id="backButton" class="quiet-button" type="button" title="Previous focus (Backspace)">
+          <span aria-hidden="true">←</span> Back
+        </button>
+        <button id="forwardButton" class="quiet-button" type="button" title="Next focus (Shift+Backspace)">
+          Forward <span aria-hidden="true">→</span>
+        </button>
+      </div>
+    </nav>
+
+    <div class="controlbar">
+      <div class="focus-context">
+        <span class="focus-glyph" aria-hidden="true">ƒ</span>
+        <div>
+          <span class="eyebrow">Investigating</span>
+          <strong id="focusTitle">Checkout Service</strong>
+        </div>
+        <span id="focusLocation" class="focus-location">cartograph/checkout.py · L42</span>
+      </div>
+
+      <div class="control-groups">
+        <fieldset class="segmented" aria-label="Neighborhood depth">
+          <legend>Depth</legend>
+          <button type="button" data-depth="1">1</button>
+          <button type="button" data-depth="2" aria-pressed="true">2</button>
+          <button type="button" data-depth="3">3</button>
+        </fieldset>
+        <button id="traceButton" class="trace-button" type="button" aria-pressed="false">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 15c4 0 3-10 7-10s3 10 7 10"/><circle cx="3" cy="15" r="1.5"/><circle cx="10" cy="5" r="1.5"/><circle cx="17" cy="15" r="1.5"/></svg>
+          <span id="traceLabel">Trace impact</span> <kbd>T</kbd>
+        </button>
+        <label class="scenario-control" for="scenarioSelect">
+          <span>Preview</span>
+          <select id="scenarioSelect">
+            <option value="typical">Typical graph</option>
+            <option value="dense">Dense neighborhood</option>
+            <option value="loading">Loading</option>
+            <option value="empty">No relationships</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <main class="workspace">
+      <section class="lens-panel" aria-labelledby="focusTitle">
+        <div id="pathBar" class="path-bar" aria-live="polite">
+          <span class="path-icon" aria-hidden="true">↳</span>
+          <span id="pathSummary">Select a node to inspect its evidence. Press Enter to make it the new focus.</span>
+          <button id="clearTraceButton" class="text-button" type="button" hidden>Clear trace</button>
+        </div>
+
+        <div id="stateHost" class="state-host">
+          <div id="graphViewport" class="graph-viewport">
+            <div id="graphSurface" class="graph-surface" tabindex="-1" aria-label="Directed dependency neighborhood"></div>
+          </div>
+
+          <div id="loadingState" class="loading-state" hidden aria-live="polite" aria-label="Loading graph neighborhood">
+            <div class="loading-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+            <strong>Resolving neighborhood</strong>
+            <p>Following calls, reads, writes, and event flow…</p>
+            <div class="skeleton-flow" aria-hidden="true">
+              <i></i><i></i><i class="large"></i><i></i><i></i>
+            </div>
+          </div>
+
+          <div id="emptyState" class="empty-state" hidden>
+            <svg viewBox="0 0 120 90" aria-hidden="true">
+              <circle cx="60" cy="45" r="16"/>
+              <circle cx="15" cy="18" r="7"/><circle cx="105" cy="18" r="7"/>
+              <circle cx="15" cy="72" r="7"/><circle cx="105" cy="72" r="7"/>
+              <path d="M22 21 45 37M22 69l23-16m30-16 23-16M75 53l23 16"/>
+            </svg>
+            <span class="empty-kicker">A quiet corner</span>
+            <h2>No relationships in this scope</h2>
+            <p>The symbol is indexed, but no incoming or outgoing relationships match the current graph.</p>
+            <button id="emptySearchButton" class="primary-button" type="button">Search another symbol</button>
+          </div>
+        </div>
+
+        <footer class="lens-footer">
+          <div id="graphStats" class="graph-stats" aria-live="polite"></div>
+          <div class="relation-key" aria-label="Relationship line styles">
+            <span><i class="edge-sample calls"></i> Calls</span>
+            <span><i class="edge-sample reads"></i> Reads</span>
+            <span><i class="edge-sample writes"></i> Writes</span>
+            <span><i class="edge-sample events"></i> Events</span>
+          </div>
+          <span class="footer-hint"><kbd>←</kbd><kbd>→</kbd> flow <kbd>↑</kbd><kbd>↓</kbd> lane <kbd>Enter</kbd> focus</span>
+        </footer>
+      </section>
+
+      <aside id="inspector" class="inspector" aria-label="Selection inspector">
+        <div class="inspector-rail" aria-hidden="true"></div>
+        <div id="inspectorContent"></div>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="shortcutDialog" class="shortcut-dialog" aria-labelledby="shortcutTitle">
+    <form method="dialog">
+      <header>
+        <div><span class="eyebrow">Investigation Lens</span><h2 id="shortcutTitle">Keyboard shortcuts</h2></div>
+        <button class="icon-button" value="close" aria-label="Close shortcuts">×</button>
+      </header>
+      <div class="shortcut-grid">
+        <span><kbd>/</kbd><b>Search symbols</b></span>
+        <span><kbd>←</kbd> <kbd>→</kbd><b>Move with the flow</b></span>
+        <span><kbd>↑</kbd> <kbd>↓</kbd><b>Move within a lane</b></span>
+        <span><kbd>Enter</kbd><b>Set selection as focus</b></span>
+        <span><kbd>T</kbd><b>Trace impact or path</b></span>
+        <span><kbd>[</kbd> <kbd>]</kbd><b>Change depth</b></span>
+        <span><kbd>Backspace</kbd><b>Previous focus</b></span>
+        <span><kbd>Esc</kbd><b>Clear trace or search</b></span>
+      </div>
+      <p>Tip: every graph card is a real button, so Tab navigation works everywhere too.</p>
+    </form>
+  </dialog>
+
+  <div id="announcer" class="sr-only" aria-live="assertive"></div>
+
+  <script src="../shared/fixture.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
