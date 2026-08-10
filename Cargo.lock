@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-cli"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-export"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-extract"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-graph"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-index-runtime"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-mcp"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-query"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "graphoxide-core",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "graphoxide-skillgen"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "tempfile",
 ]

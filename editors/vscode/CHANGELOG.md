@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.1 — 2026-08-10
+
+- Redacted high-confidence credential-bearing values before generic structured
+  facts enter bundled graph or reusable cache output, while retaining safe
+  structure and explicit redaction markers.
+- Retired exact pre-redaction AST and runtime cache payloads under the managed
+  rebuild lock and stopped publication when the bounded migration is unsafe or
+  incomplete.
+- Upgraded `quick-xml` to 0.41.0 to remediate RUSTSEC-2026-0194 and
+  RUSTSEC-2026-0195 while preserving bounded XML parsing behavior.
+- Released bundled runtime-cache payload and non-returned transfer credits
+  before signaling persist or non-hit completion while retaining returned-hit
+  accounting until the caller drops the hit.
+- Added locked dependency-advisory gates and least-privilege CodeQL analysis;
+  issue #59 tracks the remaining Rust macro and data-flow coverage gap.
+
 ## 0.10.0 — 2026-08-09
 
 - Bundled semantic Graphviz DOT extraction, recursive ZIP/TAR/GZIP indexing, and
