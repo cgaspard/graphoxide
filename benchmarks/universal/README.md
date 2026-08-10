@@ -131,7 +131,9 @@ Controlled OS-cold mode additionally requires
 Graphoxide never supplies or elevates to a privileged helper itself.
 The manual qualification workflow is restricted to this repository's `main`
 branch on the dedicated self-hosted runner and has an explicit 12-hour job
-timeout. It exposes both the small controlled run and a combined
+timeout. Its Node 24-based actions require GitHub Actions Runner 2.327.1 or
+newer on that self-hosted runner. It exposes both the small controlled run and
+a combined
 controlled-OS-cold 70 GiB operation; the combined operation requires all four
 acknowledgements plus the large root and pinned helper inputs. Its canonical
 report directory must be owned by the runner and not group/world writable. Both

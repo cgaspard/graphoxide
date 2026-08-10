@@ -15,10 +15,12 @@
     "qualification:ci": "node scripts/qualify-universal-indexing.mjs --profile ci-mixed-v1",
     "test:qualification": "node --test scripts/qualify-universal-indexing.test.mjs",
     "test:benchmark": "node --test scripts/benchmark-graph-build.test.mjs scripts/qualify-universal-indexing.test.mjs",
+    "test:workflows": "node --test scripts/workflow-dependencies.test.mjs",
     "verify:pre-push": "node scripts/verify.mjs --pre-push",
     "verify:release": "node scripts/verify.mjs --release"
   },
   "devDependencies": {
-    "husky": "^9.1.7"
+    "husky": "^9.1.7",
+    "yaml": "^2.9.0"
   }
 }
