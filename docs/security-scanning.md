@@ -7,11 +7,11 @@ access except for the CodeQL analysis step's narrowly scoped permission to
 upload security results.
 
 Rust analysis uses CodeQL's supported no-build extractor. CodeQL currently
-indexes every repository Rust file, but unresolved live macro expansions can
-reduce its data-flow coverage without failing the upload. Exact-head extraction
-diagnostics are therefore reviewed separately, and measurable macro-aware
-coverage improvements are tracked in issue #59. A successful Rust upload is not
-treated as proof of complete macro coverage.
+indexes every in-scope repository Rust file, but unresolved live macro
+expansions can reduce its data-flow coverage without failing the upload.
+Exact-head extraction diagnostics are therefore reviewed separately, and
+measurable macro-aware coverage improvements are tracked in issue #59. A
+successful Rust upload is not treated as proof of complete macro coverage.
 
 Repository-level Dependabot vulnerability alerts are enabled. Automated
 security fixes remain disabled, and the weekly GitHub Actions and npm update
