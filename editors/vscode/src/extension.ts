@@ -35,12 +35,30 @@ export interface GraphoxideExtensionStatus {
   readonly mcp?: { readonly command: string; readonly args: readonly string[]; readonly cwd: string };
 }
 
+export interface GraphoxideWatchLifecycleStatus {
+  readonly phase: 'stopped' | 'starting' | 'ready' | 'stopping';
+  readonly generation: number;
+  readonly activeGeneration?: number;
+  readonly lastExitedGeneration: number;
+  readonly processTarget: 'expected' | 'different' | 'none';
+  readonly graphTarget: 'expected' | 'different' | 'none';
+}
+
+export interface GraphoxideWatchRestartBarrier {
+  waitUntilReached(): Promise<GraphoxideWatchLifecycleStatus>;
+  release(): void;
+}
+
 export interface GraphoxideExtensionApi {
   readonly version: 1;
   readonly test?: {
     configureAi(input: AiLabelingTestConfiguration): Promise<readonly string[]>;
     improveCommunityLabels(): Promise<void>;
     clearAi(): Promise<void>;
+    watchLifecycle(): GraphoxideWatchLifecycleStatus;
+    holdNextGraphPathRestart(): GraphoxideWatchRestartBarrier;
+    waitForWatchRestart(previousGeneration: number): Promise<GraphoxideWatchLifecycleStatus>;
+    restartWatchConcurrently(): Promise<GraphoxideWatchLifecycleStatus>;
   };
   enableWorkspace(freshness?: 'watch' | 'save' | 'manual'): Promise<void>;
   configureFreshness(freshness: 'watch' | 'save' | 'manual'): Promise<void>;
@@ -66,6 +84,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   const services: ExtensionServices = { store, cli, explorer, results, visualizer, statusBar, managed, aiLabeling };
   const codeLens = new GraphCodeLensProvider(store);
   let graphPathReload = Promise.resolve();
+  let graphPathRestartBarrier: TestGraphPathRestartBarrier | undefined;
 
   context.subscriptions.push(
     store,
@@ -90,8 +109,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
       const folder = store.state?.folder;
       if (event.affectsConfiguration('graphoxide.graphPath')
         && (!folder || event.affectsConfiguration('graphoxide.graphPath', folder.uri))) {
+        const restartBarrier = graphPathRestartBarrier;
+        graphPathRestartBarrier = undefined;
         graphPathReload = graphPathReload
-          .then(() => reloadGraphPathConfiguration(store, cli))
+          .then(() => reloadGraphPathConfiguration(store, cli, restartBarrier))
           .catch((error: unknown) => handleError(error));
       }
       if (event.affectsConfiguration('graphoxide.codeLens.enabled')) codeLens.refresh();
@@ -119,6 +140,48 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
         configureAi: (input: AiLabelingTestConfiguration) => aiLabeling.configureForTest(input),
         improveCommunityLabels: () => aiLabeling.improveCommunityLabelsForTest(),
         clearAi: () => aiLabeling.clearTestConfiguration(),
+        watchLifecycle: () => observeWatchLifecycle(store, cli),
+        holdNextGraphPathRestart: () => {
+          if (graphPathRestartBarrier) throw new Error('A graph-path restart barrier is already armed.');
+          const barrier = new TestGraphPathRestartBarrier();
+          graphPathRestartBarrier = barrier;
+          return {
+            waitUntilReached: async () => {
+              await withDeadline(
+                barrier.waitUntilReached(),
+                10000,
+                () => `Timed out after 10000 ms waiting for the graph-path restart barrier; observed ${describeWatchObservation(observeWatchLifecycle(store, cli))}.`,
+              );
+              return observeWatchLifecycle(store, cli);
+            },
+            release: () => barrier.release(),
+          };
+        },
+        waitForWatchRestart: async (previousGeneration: number) => {
+          // Configuration events are serialized through this promise. Waiting
+          // for the current tail prevents a rapid second graph-path change from
+          // making an otherwise-ready intermediate generation look final.
+          await withDeadline(
+            graphPathReload,
+            30000,
+            () => `Timed out after 30000 ms waiting for graph-path configuration reloads; observed ${describeWatchObservation(observeWatchLifecycle(store, cli))}.`,
+          );
+          return waitForWatchRestart(store, cli, previousGeneration);
+        },
+        restartWatchConcurrently: async () => {
+          const folder = store.state?.folder ?? await store.preferredFolder(false);
+          if (!folder) throw new Error('Cannot restart watch mode without a workspace folder.');
+          const output = store.managedOutput(folder);
+          const before = observeWatchLifecycle(store, cli, output);
+          if (before.phase !== 'ready' || before.activeGeneration === undefined) {
+            throw new Error(`Cannot exercise a concurrent restart unless watch mode is ready; observed ${describeWatchObservation(before)}.`);
+          }
+          cli.stopWatch();
+          const first = cli.startWatch(folder, output.environment);
+          const second = cli.startWatch(folder, output.environment);
+          await Promise.all([first, second]);
+          return observeWatchLifecycle(store, cli, output);
+        },
       },
     } : {}),
     enableWorkspace: (freshness = 'manual') => managed.enable(undefined, freshness, false),
@@ -142,13 +205,130 @@ export function deactivate(): void {
   // VS Code disposes everything registered in the extension context.
 }
 
-async function reloadGraphPathConfiguration(store: GraphStore, cli: GraphoxideCli): Promise<void> {
+async function reloadGraphPathConfiguration(
+  store: GraphStore,
+  cli: GraphoxideCli,
+  restartBarrier?: TestGraphPathRestartBarrier,
+): Promise<void> {
   const previousFolder = store.state?.folder ?? await store.preferredFolder(false);
   const restartWatch = cli.watchActive;
-  if (restartWatch) await cli.stopWatchAndWait();
+  if (restartWatch) {
+    await cli.stopWatchAndWait();
+    await restartBarrier?.pause();
+  }
   await store.initialize();
   const folder = store.state?.folder ?? previousFolder;
   if (restartWatch && folder) await cli.startWatch(folder, store.managedOutput(folder).environment);
+}
+
+async function waitForWatchRestart(
+  store: GraphStore,
+  cli: GraphoxideCli,
+  previousGeneration: number,
+): Promise<GraphoxideWatchLifecycleStatus> {
+  const folder = store.state?.folder ?? await store.preferredFolder(false);
+  if (!folder) throw new Error('Cannot observe a watch restart without a workspace folder.');
+  const expectedOutput = store.managedOutput(folder);
+  await cli.waitForWatchLifecycle(
+    expectedOutput.outputDirectory,
+    (snapshot) => {
+      const observation = observeWatchLifecycle(store, cli, expectedOutput);
+      return snapshot.phase === 'ready'
+        && (snapshot.activeGeneration ?? 0) > previousGeneration
+        && snapshot.lastExitedGeneration >= previousGeneration
+        && observation.processTarget === 'expected'
+        && observation.graphTarget === 'expected';
+    },
+    {
+      description: `watch generation after ${previousGeneration} to own the configured graph target`,
+      timeoutMs: 10000,
+      diagnostics: () => describeWatchObservation(observeWatchLifecycle(store, cli, expectedOutput)),
+    },
+  );
+  return observeWatchLifecycle(store, cli, expectedOutput);
+}
+
+function observeWatchLifecycle(
+  store: GraphStore,
+  cli: GraphoxideCli,
+  expectedOutput = (() => {
+    const folder = store.state?.folder;
+    return folder ? store.managedOutput(folder) : undefined;
+  })(),
+): GraphoxideWatchLifecycleStatus {
+  const lifecycle = cli.watchLifecycle(expectedOutput?.outputDirectory);
+  const processTarget = lifecycle.activeGeneration === undefined
+    ? 'none'
+    : lifecycle.targetMatchesExpected ? 'expected' : 'different';
+  const graphTarget = !store.state || !expectedOutput
+    ? 'none'
+    : store.state.graphUri.fsPath === expectedOutput.graphUri.fsPath ? 'expected' : 'different';
+  return {
+    phase: lifecycle.phase,
+    generation: lifecycle.generation,
+    ...(lifecycle.activeGeneration === undefined ? {} : { activeGeneration: lifecycle.activeGeneration }),
+    lastExitedGeneration: lifecycle.lastExitedGeneration,
+    processTarget,
+    graphTarget,
+  };
+}
+
+function describeWatchObservation(observation: GraphoxideWatchLifecycleStatus): string {
+  const active = observation.activeGeneration === undefined ? 'none' : String(observation.activeGeneration);
+  return `phase=${observation.phase}, generation=${observation.generation}, active=${active}, lastExited=${observation.lastExitedGeneration}, processTarget=${observation.processTarget}, graphTarget=${observation.graphTarget}`;
+}
+
+class TestGraphPathRestartBarrier {
+  private reached = false;
+  private released = false;
+  private readonly reachedPromise: Promise<void>;
+  private readonly releasePromise: Promise<void>;
+  private markReached!: () => void;
+  private markReleased!: () => void;
+
+  constructor() {
+    this.reachedPromise = new Promise<void>((resolve) => {
+      this.markReached = resolve;
+    });
+    this.releasePromise = new Promise<void>((resolve) => {
+      this.markReleased = resolve;
+    });
+  }
+
+  async pause(): Promise<void> {
+    if (!this.reached) {
+      this.reached = true;
+      this.markReached();
+    }
+    await this.releasePromise;
+  }
+
+  waitUntilReached(): Promise<void> {
+    return this.reachedPromise;
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    this.markReleased();
+  }
+}
+
+function withDeadline(promise: Promise<void>, timeoutMs: number, message: () => string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => finish(new Error(message())), timeoutMs);
+    void promise.then(() => finish(), (error: unknown) => {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    });
+  });
 }
 
 /**
