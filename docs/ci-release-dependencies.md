@@ -41,9 +41,14 @@ sources remain owned upstream as of this update:
   `@actions/artifact` extraction dependency. The action is already on its
   current Node 24 release, and the remaining warning is tracked in
   [actions/download-artifact#484](https://github.com/actions/download-artifact/issues/484).
+- `actions/deploy-pages` 5.0.0 can emit Node `DEP0040` from its bundled
+  `@actions/artifact` dependency during a successful deployment. No newer
+  supported release removes it; the upstream fix is tracked in
+  [actions/deploy-pages#434](https://github.com/actions/deploy-pages/issues/434)
+  and [actions/deploy-pages#413](https://github.com/actions/deploy-pages/issues/413).
 
 Action-owned Node 20, `punycode`, `Buffer()`, and `url.parse()` warnings other
-than the exact upstream-owned exception above are not accepted; update or
+than the exact upstream-owned exceptions above are not accepted; update or
 replace the responsible action instead.
 
 ## Verification
