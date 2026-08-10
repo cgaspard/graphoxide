@@ -909,8 +909,7 @@ fn xml_attributes(
     for attribute in event.attributes().with_checks(false) {
         let attribute = attribute.context("malformed XML attribute")?;
         let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
-        let value = attribute
-            .unescape_value()
+        let value = crate::decode_xml_attribute(attribute.value.as_ref())
             .context("decode XML attribute")?
             .into_owned();
         attrs.insert(key, value);

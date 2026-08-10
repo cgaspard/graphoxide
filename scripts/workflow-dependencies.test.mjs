@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import test from 'node:test';
+import { parse } from 'yaml';
 
 import { inspectRepositoryWorkflows, inspectWorkflowActionPins } from './workflow-dependencies.mjs';
 
@@ -10,7 +11,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 test('all repository workflow actions use immutable reviewed revisions', () => {
   const result = inspectRepositoryWorkflows();
-  assert.deepEqual(result.files, ['ci.yml', 'deploy-pages.yml', 'qualification.yml', 'release.yml']);
+  assert.deepEqual(result.files, [
+    'ci.yml',
+    'deploy-pages.yml',
+    'qualification.yml',
+    'release.yml',
+    'security.yml',
+  ]);
   assert.ok(result.actions > 0);
   assert.deepEqual(result.errors, []);
 });
@@ -58,4 +65,55 @@ test('Dependabot provides review-only visibility for workflow and Node dependenc
   assert.match(config, /directory:\s*\/editors\/vscode/u);
   assert.equal([...config.matchAll(/interval:\s*weekly/gu)].length, 3);
   assert.doesNotMatch(config, /auto-merge|automerge/iu);
+});
+
+test('security scans locked dependencies and source with least privilege', () => {
+  const workflowText = readFileSync(path.join(root, '.github', 'workflows', 'security.yml'), 'utf8');
+  const workflow = parse(workflowText, { maxAliasCount: 0, uniqueKeys: true });
+
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(workflow.on.push.branches, ['main']);
+  assert.ok(Object.hasOwn(workflow.on, 'pull_request'));
+  assert.equal(workflow.on.schedule.length, 1);
+  assert.match(workflow.on.schedule[0].cron, /^\d+ \d+ \* \* \d+$/u);
+  assert.equal(workflow.concurrency['cancel-in-progress'], true);
+
+  const advisorySteps = workflow.jobs.advisories.steps;
+  assert.equal(workflow.jobs.advisories['timeout-minutes'], 15);
+  assert.ok(
+    advisorySteps.some(
+      (step) => step.with?.tool === 'cargo-audit@0.22.2' &&
+        step.uses?.startsWith('taiki-e/install-action@'),
+    ),
+  );
+  assert.equal(advisorySteps.some((step) => step.run?.startsWith('npm ci')), false);
+  assert.ok(advisorySteps.some((step) => step.run === 'npm run audit:security'));
+
+  const codeql = workflow.jobs.codeql;
+  assert.deepEqual(codeql.permissions, { contents: 'read', 'security-events': 'write' });
+  assert.equal(codeql['timeout-minutes'], 30);
+  assert.equal(codeql.strategy['fail-fast'], false);
+  assert.deepEqual(codeql.strategy.matrix.language, ['actions', 'javascript-typescript', 'rust']);
+  const init = codeql.steps.find((step) => step.uses?.startsWith('github/codeql-action/init@'));
+  assert.ok(init);
+  assert.equal(init.with.languages, '${{ matrix.language }}');
+  assert.equal(init.with['build-mode'], 'none');
+  assert.equal(init.with.queries, 'security-extended');
+  assert.equal(init.with['config-file'], './.github/codeql/codeql-config.yml');
+  assert.ok(codeql.steps.some((step) => step.uses?.startsWith('github/codeql-action/analyze@')));
+
+  for (const job of Object.values(workflow.jobs)) {
+    const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+    assert.equal(checkout?.with?.['persist-credentials'], false);
+  }
+  assert.doesNotMatch(workflowText, /pull_request_target|secrets\.|upload-artifact/iu);
+});
+
+test('CodeQL excludes only inert parity corpora', () => {
+  const config = parse(
+    readFileSync(path.join(root, '.github', 'codeql', 'codeql-config.yml'), 'utf8'),
+    { maxAliasCount: 0, uniqueKeys: true },
+  );
+  assert.deepEqual(config['paths-ignore'], ['parity/corpora/**']);
+  assert.equal(Object.hasOwn(config, 'paths'), false);
 });

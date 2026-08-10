@@ -1054,8 +1054,7 @@ fn attributes(
     for attribute in event.attributes().with_checks(false).take(128) {
         let attribute = attribute.context("parse simulation XML attribute")?;
         let key = local_name(attribute.key.as_ref());
-        let value = attribute
-            .unescape_value()
+        let value = crate::decode_xml_attribute(attribute.value.as_ref())
             .context("decode simulation XML attribute")?
             .into_owned();
         values.insert(key, truncate(&value, MAX_ATTRIBUTE_VALUE_BYTES));

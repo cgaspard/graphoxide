@@ -20,6 +20,7 @@ run('node', [
   '--test',
   'scripts/benchmark-graph-build.test.mjs',
   'scripts/qualify-universal-indexing.test.mjs',
+  'scripts/security-audit.test.mjs',
   'scripts/workflow-dependencies.test.mjs',
 ]);
 run('npm', ['run', 'check'], vscode);

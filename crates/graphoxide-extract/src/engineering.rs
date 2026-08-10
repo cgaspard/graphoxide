@@ -1092,7 +1092,7 @@ fn xml_attributes(
     for attribute in event.attributes().with_checks(false) {
         let attribute = attribute?;
         let key = xml_name(attribute.key.as_ref());
-        let value = attribute.unescape_value()?.into_owned();
+        let value = crate::decode_xml_attribute(attribute.value.as_ref())?.into_owned();
         if !value.is_empty() && value.len() <= 512 {
             result.insert(key, value);
         }
