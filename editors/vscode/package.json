@@ -59,7 +59,7 @@
     "@vscode/vsce": "^3.9.2",
     "eslint": "^10.8.1",
     "globals": "^17.9.0",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   },
   "contributes": {
     "commands": [
