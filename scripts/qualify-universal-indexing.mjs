@@ -2368,27 +2368,19 @@ export function writeReportAtomic(report, value, hooks = {}) {
     const reportAfterLink = lstatSync(report);
     validateReportInode(temporaryAfterLink, descriptorAfterLink, bytes.length, 2, 'linked temporary report');
     validateReportInode(reportAfterLink, descriptorAfterLink, bytes.length, 2, 'published report');
-    const publishedDescriptor = openSync(
-      report,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    // The hard link names this already-open inode. Hashing the held descriptor
+    // avoids a pathname stat/open interval during publication verification.
+    const publishedDigest = hashOpenDescriptor(
+      descriptor,
+      descriptorAfterLink,
+      RETAINED_EVIDENCE_MAX_BYTES,
+      'published report',
+      2,
     );
-    try {
-      const publishedOpened = fstatSync(publishedDescriptor);
-      validateReportInode(publishedOpened, descriptorAfterLink, bytes.length, 2, 'published report');
-      const publishedDigest = hashOpenDescriptor(
-        publishedDescriptor,
-        publishedOpened,
-        RETAINED_EVIDENCE_MAX_BYTES,
-        'published report',
-        2,
-      );
-      if (publishedDigest.sha256 !== initialDigest.sha256) {
-        throw new Error('published report bytes differ from the verified temporary report');
-      }
-      publishedSha256 = publishedDigest.sha256;
-    } finally {
-      closeSync(publishedDescriptor);
+    if (publishedDigest.sha256 !== initialDigest.sha256) {
+      throw new Error('published report bytes differ from the verified temporary report');
     }
+    publishedSha256 = publishedDigest.sha256;
     try {
       const temporaryBeforeCleanup = lstatSync(temporary);
       validateReportInode(

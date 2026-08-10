@@ -27,6 +27,7 @@ jobs:
       - name: Repository regression tests
         run: >-
           node --test
+          scripts/agent-artifacts.test.mjs
           scripts/benchmark-graph-build.test.mjs
           scripts/qualify-universal-indexing.test.mjs
           scripts/workflow-dependencies.test.mjs

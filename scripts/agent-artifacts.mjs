@@ -9,13 +9,15 @@
  * the same canonical Markdown sources.
  */
 
-import { readFileSync } from 'node:fs';
-import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants as fsConstants, readFileSync } from 'node:fs';
+import { lstat, mkdir, open, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const canonicalAssetRoot = path.join(repositoryRoot, 'crates', 'graphoxide-cli', 'assets');
+export const AGENT_ARTIFACT_MAX_BYTES = 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
 
 const SKILL_FILES = Object.freeze([
   'skill-agents.md',
@@ -102,11 +104,11 @@ export async function stageAgentArtifacts(outputDirectory) {
   const output = path.resolve(outputDirectory);
   let created = false;
   try {
-    await mkdir(output);
+    await mkdir(output, { mode: 0o700 });
     created = true;
     for (const relativePath of artifactPaths) {
       const destination = path.join(output, ...relativePath.split('/'));
-      await mkdir(path.dirname(destination), { recursive: true });
+      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
       await writeFile(destination, renderArtifact(relativePath), { encoding: 'utf8', flag: 'wx' });
     }
     await verifyAgentArtifacts(output);
@@ -120,9 +122,9 @@ export async function stageAgentArtifacts(outputDirectory) {
   return output;
 }
 
-export async function verifyAgentArtifacts(rootDirectory) {
+export async function verifyAgentArtifacts(rootDirectory, hooks = {}) {
   validateManifest();
-  const root = path.resolve(rootDirectory);
+  const root = await realpath(path.resolve(rootDirectory));
   const actual = await filesBelow(root);
   const expected = [...artifactPaths].sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -130,15 +132,122 @@ export async function verifyAgentArtifacts(rootDirectory) {
   }
   for (const relativePath of expected) {
     const file = path.join(root, ...relativePath.split('/'));
-    const info = await lstat(file);
-    if (!info.isFile() || info.isSymbolicLink()) {
-      throw new Error(`Agent artifact is not a regular file: ${relativePath}`);
-    }
-    const content = await readFile(file, 'utf8');
+    const content = await readVerifiedArtifact(
+      root,
+      file,
+      relativePath,
+      hooks,
+    );
     if (content.length < 120 || !content.toLowerCase().includes('graphoxide')) {
       throw new Error(`Agent artifact is empty or malformed: ${relativePath}`);
     }
   }
+  if (await realpath(root) !== root) {
+    throw new Error(`Agent artifact root changed during verification: ${root}`);
+  }
+}
+
+async function readVerifiedArtifact(root, file, relativePath, hooks) {
+  await hooks.beforeArtifactOpen?.(file, relativePath);
+  // Open before consulting path metadata so validation and reading stay bound
+  // to one inode even if the pathname is replaced.
+  const descriptor = await open(
+    file,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const opened = await descriptor.stat({ bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size < 0n) {
+      throw new Error(`Agent artifact is not a single-link regular file: ${relativePath}`);
+    }
+    if (opened.size > BigInt(AGENT_ARTIFACT_MAX_BYTES)) {
+      throw new Error(
+        `Agent artifact exceeds its ${AGENT_ARTIFACT_MAX_BYTES}-byte ceiling: ${relativePath}`,
+      );
+    }
+
+    await hooks.afterArtifactOpen?.(file, relativePath);
+
+    const descriptorBeforePathCheck = await descriptor.stat({ bigint: true });
+    const canonicalFile = await realpath(file);
+    const pathBeforeRead = await lstat(file, { bigint: true });
+    const descriptorAfterPathCheck = await descriptor.stat({ bigint: true });
+    if (
+      canonicalFile !== file ||
+      !isPathBelow(root, canonicalFile) ||
+      pathBeforeRead.isSymbolicLink() ||
+      !pathBeforeRead.isFile() ||
+      pathBeforeRead.nlink !== 1n ||
+      !sameSnapshot(opened, pathBeforeRead) ||
+      !sameSnapshot(opened, descriptorBeforePathCheck) ||
+      !sameSnapshot(descriptorBeforePathCheck, descriptorAfterPathCheck)
+    ) {
+      throw new Error(`Agent artifact escaped its verified root before reading: ${relativePath}`);
+    }
+
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const buffer = Buffer.allocUnsafe(
+        Math.min(READ_CHUNK_BYTES, AGENT_ARTIFACT_MAX_BYTES + 1 - total),
+      );
+      const { bytesRead } = await descriptor.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > AGENT_ARTIFACT_MAX_BYTES) {
+        throw new Error(
+          `Agent artifact exceeds its ${AGENT_ARTIFACT_MAX_BYTES}-byte ceiling: ${relativePath}`,
+        );
+      }
+      chunks.push(buffer.subarray(0, bytesRead));
+    }
+
+    const after = await descriptor.stat({ bigint: true });
+    const canonicalAfter = await realpath(file);
+    const pathAfter = await lstat(file, { bigint: true });
+    const descriptorFinal = await descriptor.stat({ bigint: true });
+    if (
+      canonicalAfter !== file ||
+      !isPathBelow(root, canonicalAfter) ||
+      pathAfter.isSymbolicLink() ||
+      !pathAfter.isFile() ||
+      pathAfter.nlink !== 1n ||
+      !sameSnapshot(opened, after) ||
+      !sameSnapshot(opened, pathAfter) ||
+      !sameSnapshot(after, descriptorFinal) ||
+      after.size !== BigInt(total) ||
+      descriptorFinal.size !== BigInt(total)
+    ) {
+      throw new Error(`Agent artifact changed while being verified: ${relativePath}`);
+    }
+    return Buffer.concat(chunks, total).toString('utf8');
+  } finally {
+    await descriptor.close();
+  }
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameSnapshot(left, right) {
+  return (
+    sameIdentity(left, right) &&
+    left.size === right.size &&
+    left.nlink === right.nlink &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function isPathBelow(directory, candidate) {
+  const relative = path.relative(directory, candidate);
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 function validateManifest() {

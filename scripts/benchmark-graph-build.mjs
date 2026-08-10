@@ -3,16 +3,23 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  appendFileSync,
+  closeSync,
+  constants as fsConstants,
   cpSync,
+  fstatSync,
+  fsyncSync,
+  futimesSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
-  utimesSync,
+  writeSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -1053,21 +1060,33 @@ export function runCliJson(binary, args, cwd, expected, clock = () => performanc
   };
 }
 
-function findMutationTarget(project) {
+function openMutationTarget(project, hooks) {
   const preferred = path.join(project, ...MUTATION_TARGET.split('/'));
+  hooks.beforeOpen?.(preferred);
   try {
-    if (statSync(preferred).isFile()) return preferred;
+    return { descriptor: openMutationCandidate(preferred), target: preferred };
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
-  const fallback = collectCorpusEntries(project).find(
+  const entries = collectCorpusEntries(project);
+  if (entries.some(({ relative }) => relative === MUTATION_TARGET)) {
+    throw new Error(`preferred benchmark mutation target could not be opened safely: ${MUTATION_TARGET}`);
+  }
+  const fallback = entries.find(
     ({ absolute, entry }) =>
       entry.isFile() && SOURCE_EXTENSIONS.has(path.extname(absolute).toLowerCase()),
   );
   if (!fallback) {
     throw new Error('fixture contains no source file with a built-in deterministic mutation strategy');
   }
-  return fallback.absolute;
+  hooks.beforeOpen?.(fallback.absolute);
+  return { descriptor: openMutationCandidate(fallback.absolute), target: fallback.absolute };
+}
+
+function openMutationCandidate(target) {
+  // A pre-open stat would recreate the check/use gap this helper is meant to
+  // close. The descriptor metadata and canonical path checks are authoritative.
+  return openSync(target, fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0));
 }
 
 function mutationText(file) {
@@ -1098,22 +1117,180 @@ function mutationText(file) {
   }
 }
 
-export function mutateCopiedFixture(project) {
-  const target = findMutationTarget(project);
-  const metadata = statSync(target);
-  const before = sha256File(target);
-  appendFileSync(target, mutationText(target), 'utf8');
-  // Some filesystems expose coarse timestamp precision. Move mtime far enough
-  // forward that the incremental detector must observe the content change.
-  const changedMtime = new Date(Math.max(Date.now(), metadata.mtimeMs + 2_000));
-  utimesSync(target, metadata.atime, changedMtime);
-  const after = sha256File(target);
-  if (before === after) throw new Error('benchmark fixture mutation did not change the source file');
-  return {
-    path: path.relative(project, target).split(path.sep).join('/'),
-    sha256_before: before,
-    sha256_after: after,
-  };
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function validateMutationDescriptor(metadata, opened, label) {
+  if (
+    !opened.isFile() ||
+    opened.nlink !== 1 ||
+    !Number.isSafeInteger(opened.size) ||
+    opened.size < 0 ||
+    !sameIdentity(metadata, opened)
+  ) {
+    throw new Error(`benchmark mutation target ${label}`);
+  }
+}
+
+function sameMutationSnapshot(left, right) {
+  return (
+    sameIdentity(left, right) &&
+    left.size === right.size &&
+    left.nlink === right.nlink &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+function isPathBelow(directory, candidate) {
+  const relative = path.relative(directory, candidate);
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function validateMutationPath(
+  project,
+  projectIdentity,
+  target,
+  descriptor,
+  expected,
+  label,
+) {
+  const descriptorBefore = fstatSync(descriptor);
+  validateMutationDescriptor(expected, descriptorBefore, `${label} through its descriptor`);
+  const targetCanonical = realpathSync(target);
+  const pathMetadata = lstatSync(target);
+  const projectAfter = lstatSync(project);
+  const descriptorAfter = fstatSync(descriptor);
+  if (
+    targetCanonical !== target ||
+    !isPathBelow(project, targetCanonical) ||
+    projectAfter.isSymbolicLink() ||
+    !projectAfter.isDirectory() ||
+    !sameIdentity(projectIdentity, projectAfter) ||
+    pathMetadata.isSymbolicLink() ||
+    !pathMetadata.isFile() ||
+    pathMetadata.nlink !== 1 ||
+    !sameMutationSnapshot(expected, pathMetadata) ||
+    !sameMutationSnapshot(expected, descriptorBefore) ||
+    !sameMutationSnapshot(descriptorBefore, descriptorAfter)
+  ) {
+    throw new Error(`benchmark mutation target ${label}`);
+  }
+}
+
+function hashMutationDescriptor(descriptor, metadata, label) {
+  const digest = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let position = 0;
+  while (position < metadata.size) {
+    const count = readSync(
+      descriptor,
+      buffer,
+      0,
+      Math.min(buffer.length, metadata.size - position),
+      position,
+    );
+    if (count === 0) throw new Error(`benchmark mutation target ended while ${label}`);
+    digest.update(buffer.subarray(0, count));
+    position += count;
+  }
+  const after = fstatSync(descriptor);
+  validateMutationDescriptor(metadata, after, `changed while ${label}`);
+  if (after.size !== position || !sameMutationSnapshot(metadata, after)) {
+    throw new Error(`benchmark mutation target changed while ${label}`);
+  }
+  return digest.digest('hex');
+}
+
+export function mutateCopiedFixture(project, hooks = {}) {
+  const canonicalProject = realpathSync(path.resolve(project));
+  const { descriptor, target } = openMutationTarget(canonicalProject, hooks);
+  try {
+    const opened = fstatSync(descriptor);
+    const projectIdentity = lstatSync(canonicalProject);
+    if (projectIdentity.isSymbolicLink() || !projectIdentity.isDirectory()) {
+      throw new Error('benchmark fixture project must be a canonical directory');
+    }
+    validateMutationDescriptor(
+      opened,
+      opened,
+      'must be a single-link regular file with a supported size',
+    );
+    validateMutationPath(
+      canonicalProject,
+      projectIdentity,
+      target,
+      descriptor,
+      opened,
+      'escaped its canonical project before mutation',
+    );
+    const before = hashMutationDescriptor(descriptor, opened, 'hashing its original bytes');
+
+    hooks.beforeMutation?.(target);
+    const beforeMutation = fstatSync(descriptor);
+    validateMutationDescriptor(opened, beforeMutation, 'changed before mutation');
+    validateMutationPath(
+      canonicalProject,
+      projectIdentity,
+      target,
+      descriptor,
+      opened,
+      'path changed before mutation',
+    );
+
+    const mutation = Buffer.from(mutationText(target), 'utf8');
+    if (!Number.isSafeInteger(opened.size + mutation.length)) {
+      throw new Error('benchmark mutation target would exceed the supported file size');
+    }
+    let offset = 0;
+    while (offset < mutation.length) {
+      const written = writeSync(
+        descriptor,
+        mutation,
+        offset,
+        mutation.length - offset,
+        opened.size + offset,
+      );
+      if (written === 0) throw new Error('benchmark fixture mutation write made no progress');
+      offset += written;
+    }
+    fsyncSync(descriptor);
+    // Some filesystems expose coarse timestamp precision. Move mtime far enough
+    // forward that the incremental detector must observe the content change.
+    const changedMtime = new Date(Math.max(Date.now(), opened.mtimeMs + 2_000));
+    futimesSync(descriptor, opened.atime, changedMtime);
+    fsyncSync(descriptor);
+
+    const mutated = fstatSync(descriptor);
+    validateMutationDescriptor(opened, mutated, 'changed identity during mutation');
+    if (mutated.size !== opened.size + mutation.length) {
+      throw new Error('benchmark fixture mutation produced an unexpected file size');
+    }
+    const after = hashMutationDescriptor(descriptor, mutated, 'hashing its mutated bytes');
+    hooks.afterMutation?.(target);
+    validateMutationPath(
+      canonicalProject,
+      projectIdentity,
+      target,
+      descriptor,
+      mutated,
+      'path changed during mutation',
+    );
+    if (before === after) throw new Error('benchmark fixture mutation did not change the source file');
+    return {
+      path: path.relative(canonicalProject, target).split(path.sep).join('/'),
+      sha256_before: before,
+      sha256_after: after,
+    };
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function cleanupRunDirectory(runDirectory) {
