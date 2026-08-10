@@ -1,5 +1,21 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  cpSync,
+  fstatSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -26,6 +42,33 @@ import {
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const baselineFixture = path.join(repositoryRoot, 'parity', 'corpora', 'language-matrix');
+const TEST_FILE_MAX_BYTES = 64 * 1024 * 1024;
+
+function snapshotDescriptor(descriptor, label) {
+  const opened = fstatSync(descriptor);
+  assert.ok(opened.isFile(), `${label} must be a regular file`);
+  assert.equal(opened.nlink, 1, `${label} must be single-link`);
+  assert.ok(Number.isSafeInteger(opened.size) && opened.size <= TEST_FILE_MAX_BYTES);
+  const bytes = Buffer.alloc(opened.size);
+  let position = 0;
+  while (position < bytes.length) {
+    const count = readSync(descriptor, bytes, position, bytes.length - position, position);
+    assert.notEqual(count, 0, `${label} ended before its descriptor size`);
+    position += count;
+  }
+  const after = fstatSync(descriptor);
+  assert.deepEqual([after.dev, after.ino, after.size, after.nlink], [
+    opened.dev,
+    opened.ino,
+    opened.size,
+    opened.nlink,
+  ]);
+  return { bytes, metadata: after };
+}
+
+function openReadDescriptor(file) {
+  return openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+}
 
 test('parseArguments supplies the reproducible baseline defaults', () => {
   const options = parseArguments([], repositoryRoot);
@@ -228,23 +271,159 @@ test('buildBenchmarkReport preserves a generated profile, fixture digest, runtim
 });
 
 test('mutateCopiedFixture changes only the deterministic source in a copy', () => {
-  const temporary = mkdtempSync(path.join(os.tmpdir(), 'graphoxide-benchmark-test-'));
+  const temporary = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), 'graphoxide-benchmark-test-')),
+  );
   const copy = path.join(temporary, 'fixture');
   const originalTarget = path.join(baselineFixture, 'jvm', 'app', 'Runner.java');
-  const original = readFileSync(originalTarget, 'utf8');
+  let originalDescriptor;
+  let copiedDescriptor;
   try {
+    originalDescriptor = openReadDescriptor(originalTarget);
+    const original = snapshotDescriptor(originalDescriptor, originalTarget).bytes.toString('utf8');
     cpSync(baselineFixture, copy, { recursive: true });
     const copiedTarget = path.join(copy, 'jvm', 'app', 'Runner.java');
-    const mtimeBefore = statSync(copiedTarget).mtimeMs;
+    copiedDescriptor = openReadDescriptor(copiedTarget);
+    const before = snapshotDescriptor(copiedDescriptor, copiedTarget);
     const mutation = mutateCopiedFixture(copy);
+    const after = snapshotDescriptor(copiedDescriptor, copiedTarget);
     assert.equal(mutation.path, 'jvm/app/Runner.java');
     assert.notEqual(mutation.sha256_before, mutation.sha256_after);
     assert.match(
-      readFileSync(copiedTarget, 'utf8'),
+      after.bytes.toString('utf8'),
       /GraphoxideBenchmarkMutation/,
     );
-    assert.ok(statSync(copiedTarget).mtimeMs > mtimeBefore);
-    assert.equal(readFileSync(originalTarget, 'utf8'), original);
+    assert.ok(after.metadata.mtimeMs > before.metadata.mtimeMs);
+    assert.equal(
+      snapshotDescriptor(originalDescriptor, originalTarget).bytes.toString('utf8'),
+      original,
+    );
+  } finally {
+    if (copiedDescriptor !== undefined) closeSync(copiedDescriptor);
+    if (originalDescriptor !== undefined) closeSync(originalDescriptor);
+    rmSync(temporary, { recursive: true, force: false });
+  }
+});
+
+test('mutateCopiedFixture opens the deterministic source fallback when the preferred path is absent', () => {
+  const fixture = materializeGeneratedScenario('many-small');
+  try {
+    const mutation = mutateCopiedFixture(fixture);
+    assert.equal(mutation.path, 'src/benchmark.rs');
+    assert.notEqual(mutation.sha256_before, mutation.sha256_after);
+  } finally {
+    rmSync(fixture, { recursive: true, force: false });
+  }
+});
+
+test('mutateCopiedFixture rejects hard-linked mutation targets', () => {
+  const temporary = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), 'graphoxide-benchmark-hardlink-')),
+  );
+  const project = path.join(temporary, 'fixture');
+  const target = path.join(project, 'jvm', 'app', 'Runner.java');
+  const sentinel = path.join(temporary, 'sentinel.java');
+  const original = 'final class ExternalSentinel {}\n';
+  try {
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(sentinel, original);
+    linkSync(sentinel, target);
+    assert.throws(() => mutateCopiedFixture(project), /single-link regular file/);
+    assert.equal(readFileSync(sentinel, 'utf8'), original);
+  } finally {
+    rmSync(temporary, { recursive: true, force: false });
+  }
+});
+
+test('mutateCopiedFixture rejects symlink mutation targets without changing the referent', {
+  skip: process.platform === 'win32' && 'ordinary Windows users cannot create test symlinks',
+}, () => {
+  const temporary = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), 'graphoxide-benchmark-symlink-')),
+  );
+  const project = path.join(temporary, 'fixture');
+  const target = path.join(project, 'jvm', 'app', 'Runner.java');
+  const sentinel = path.join(temporary, 'sentinel.java');
+  const original = 'final class ExternalSentinel {}\n';
+  try {
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(sentinel, original);
+    symlinkSync(sentinel, target);
+    assert.throws(
+      () => mutateCopiedFixture(project),
+      /ELOOP|escaped its canonical project|single-link regular file/,
+    );
+    assert.equal(readFileSync(sentinel, 'utf8'), original);
+  } finally {
+    rmSync(temporary, { recursive: true, force: false });
+  }
+});
+
+test('mutateCopiedFixture fails closed when its pathname is replaced after opening', {
+  skip: process.platform === 'win32' && 'Windows does not permit replacing this open test file',
+}, () => {
+  const temporary = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), 'graphoxide-benchmark-swap-')),
+  );
+  const project = path.join(temporary, 'fixture');
+  const target = path.join(project, 'jvm', 'app', 'Runner.java');
+  const displaced = path.join(temporary, 'displaced.java');
+  const attacker = path.join(temporary, 'attacker.java');
+  const original = 'final class IntendedTarget {}\n';
+  const attackerBytes = 'final class ReplacementTarget {}\n';
+  try {
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, original);
+    writeFileSync(attacker, attackerBytes);
+    assert.throws(
+      () => mutateCopiedFixture(project, {
+        beforeMutation(openedPath) {
+          assert.equal(openedPath, target);
+          renameSync(target, displaced);
+          renameSync(attacker, target);
+        },
+      }),
+      /path changed before mutation/,
+    );
+    assert.equal(readFileSync(displaced, 'utf8'), original);
+    assert.equal(readFileSync(target, 'utf8'), attackerBytes);
+  } finally {
+    rmSync(temporary, { recursive: true, force: false });
+  }
+});
+
+test('mutateCopiedFixture rejects an ancestor redirected between selection and opening', {
+  skip: process.platform === 'win32' && 'ordinary Windows users cannot create test symlinks',
+}, () => {
+  const temporary = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), 'graphoxide-benchmark-ancestor-')),
+  );
+  const project = path.join(temporary, 'fixture');
+  const targetParent = path.join(project, 'jvm', 'app');
+  const target = path.join(targetParent, 'Runner.java');
+  const displacedParent = path.join(temporary, 'displaced-app');
+  const externalParent = path.join(temporary, 'external-app');
+  const externalTarget = path.join(externalParent, 'Runner.java');
+  const original = 'final class IntendedTarget {}\n';
+  const attackerBytes = 'final class ExternalSentinel {}\n';
+  try {
+    mkdirSync(targetParent, { recursive: true });
+    mkdirSync(externalParent);
+    writeFileSync(target, original);
+    writeFileSync(externalTarget, attackerBytes);
+    assert.throws(
+      () => mutateCopiedFixture(project, {
+        beforeOpen(openedPath) {
+          assert.equal(path.basename(openedPath), 'Runner.java');
+          const openedParent = path.dirname(openedPath);
+          renameSync(openedParent, displacedParent);
+          symlinkSync(externalParent, openedParent, 'dir');
+        },
+      }),
+      /benchmark mutation target/,
+    );
+    assert.equal(readFileSync(path.join(displacedParent, 'Runner.java'), 'utf8'), original);
+    assert.equal(readFileSync(externalTarget, 'utf8'), attackerBytes);
   } finally {
     rmSync(temporary, { recursive: true, force: false });
   }

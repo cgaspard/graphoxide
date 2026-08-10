@@ -4,7 +4,9 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
+  constants as fsConstants,
   cpSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -48,6 +50,7 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const catalog = path.join(root, 'benchmarks', 'universal', 'catalog.json');
+const TEST_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024;
 
 function temporary(name) {
   return realpathSync(mkdtempSync(path.join(os.tmpdir(), `graphoxide-qualification-${name}-`)));
@@ -55,6 +58,42 @@ function temporary(name) {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function snapshotDescriptor(
+  descriptor,
+  label,
+  { maximum = TEST_SNAPSHOT_MAX_BYTES, length = null } = {},
+) {
+  const opened = fstatSync(descriptor);
+  assert.ok(opened.isFile(), `${label} must be a regular file`);
+  assert.ok(Number.isSafeInteger(opened.size) && opened.size >= 0 && opened.size <= maximum);
+  const byteCount = length ?? opened.size;
+  assert.ok(Number.isSafeInteger(byteCount) && byteCount >= 0 && byteCount <= opened.size);
+  const bytes = Buffer.alloc(byteCount);
+  let position = 0;
+  while (position < bytes.length) {
+    const count = readSync(descriptor, bytes, position, bytes.length - position, position);
+    assert.notEqual(count, 0, `${label} ended before its descriptor size`);
+    position += count;
+  }
+  const after = fstatSync(descriptor);
+  assert.deepEqual([after.dev, after.ino, after.size, after.nlink], [
+    opened.dev,
+    opened.ino,
+    opened.size,
+    opened.nlink,
+  ]);
+  return { bytes, metadata: after };
+}
+
+function descriptorSnapshot(file, options) {
+  const descriptor = openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    return snapshotDescriptor(descriptor, file, options);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function validRuntime(overrides = {}) {
@@ -286,6 +325,7 @@ test('large generator is exact, deterministic, readable through its held descrip
   const firstProject = path.join(parent, 'first');
   const secondProject = path.join(parent, 'second');
   const relative = 'generated/00/source-0000.rs';
+  let firstDescriptor;
   try {
     const first = path.join(firstProject, ...relative.split('/'));
     const second = path.join(secondProject, ...relative.split('/'));
@@ -293,18 +333,17 @@ test('large generator is exact, deterministic, readable through its held descrip
     mkdirSync(path.dirname(second), { recursive: true });
     const firstEvidence = generateLargeFile(first, 0);
     const secondEvidence = generateLargeFile(second, 0);
-    assert.equal(lstatSync(first).size, LARGE_FILE_BYTES);
+    firstDescriptor = openSync(first, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const firstSnapshot = snapshotDescriptor(firstDescriptor, first, {
+      maximum: LARGE_FILE_BYTES,
+      length: 128,
+    });
+    assert.equal(firstSnapshot.metadata.size, LARGE_FILE_BYTES);
     assert.deepEqual(firstEvidence, secondEvidence);
     assert.match(firstEvidence.sha256, /^[a-f0-9]{64}$/);
     assert.match(firstEvidence.mutation_sha256, /^[a-f0-9]{64}$/);
     assert.notEqual(firstEvidence.sha256, firstEvidence.mutation_sha256);
-    const descriptor = openSync(first, 'r');
-    const header = Buffer.alloc(128);
-    try {
-      assert.equal(readSync(descriptor, header, 0, header.length, 0), header.length);
-    } finally {
-      closeSync(descriptor);
-    }
+    const header = firstSnapshot.bytes;
     assert.match(header.toString('ascii'), /pub const QUALIFICATION_FILE_0000:/);
     const mutation = mutateCorpus(firstProject, {
       kind: 'generated_large',
@@ -318,15 +357,14 @@ test('large generator is exact, deterministic, readable through its held descrip
     assert.equal(mutation.size_before, LARGE_FILE_BYTES);
     assert.equal(mutation.size_after, LARGE_FILE_BYTES);
     assert.equal(mutation.sha256_after, firstEvidence.mutation_sha256);
-    const mutatedDescriptor = openSync(first, 'r');
-    try {
-      assert.equal(readSync(mutatedDescriptor, header, 0, header.length, 0), header.length);
-    } finally {
-      closeSync(mutatedDescriptor);
-    }
-    assert.match(header.toString('ascii'), /pub const QUALIFICATION_FILE_9000:/);
-    assert.doesNotMatch(header.toString('ascii'), /pub const QUALIFICATION_FILE_0000:/);
+    const mutatedHeader = snapshotDescriptor(firstDescriptor, first, {
+      maximum: LARGE_FILE_BYTES,
+      length: 128,
+    }).bytes;
+    assert.match(mutatedHeader.toString('ascii'), /pub const QUALIFICATION_FILE_9000:/);
+    assert.doesNotMatch(mutatedHeader.toString('ascii'), /pub const QUALIFICATION_FILE_0000:/);
   } finally {
+    if (firstDescriptor !== undefined) closeSync(firstDescriptor);
     rmSync(parent, { recursive: true, force: false });
   }
 });
@@ -465,6 +503,31 @@ test('atomic report publication rejects a swapped temporary pathname', {
       /verified report inode|retained for inspection/,
     );
     assert.throws(() => lstatSync(report), /ENOENT/);
+  } finally {
+    rmSync(parent, { recursive: true, force: false });
+  }
+});
+
+test('atomic report publication rejects a replaced published pathname', {
+  skip: process.platform === 'win32' && 'Windows does not permit replacing this open test file',
+}, () => {
+  const parent = temporary('report-published-swap');
+  const report = path.join(parent, 'report.json');
+  const attacker = path.join(parent, 'attacker.json');
+  const attackerBytes = '{"status":"attacker"}\n';
+  try {
+    writeFileSync(attacker, attackerBytes);
+    assert.throws(
+      () => writeReportAtomic(report, { status: 'passed' }, {
+        afterLink(_temporaryReport, publishedReport) {
+          unlinkSync(publishedReport);
+          linkSync(attacker, publishedReport);
+        },
+      }),
+      /verified report inode|could not be verified/,
+    );
+    assert.equal(readFileSync(attacker, 'utf8'), attackerBytes);
+    assert.equal(readFileSync(report, 'utf8'), attackerBytes);
   } finally {
     rmSync(parent, { recursive: true, force: false });
   }
@@ -678,13 +741,16 @@ test('staging primitives refuse an existing parent and de-alias a hardlinked bin
       encoding: 'utf8',
     });
     assert.equal(installed.status, 0, installed.stderr);
-    const source = lstatSync(cargoBinary);
-    const destination = lstatSync(stagedBinary);
-    assert.equal(source.nlink, 2, 'fixture source must simulate Cargo hard links');
-    assert.equal(destination.nlink, 1);
-    assert.notDeepEqual([destination.dev, destination.ino], [source.dev, source.ino]);
-    assert.equal(destination.mode & 0o777, 0o700);
-    assert.deepEqual(readFileSync(stagedBinary), readFileSync(cargoBinary));
+    const source = descriptorSnapshot(cargoBinary);
+    const destination = descriptorSnapshot(stagedBinary);
+    assert.equal(source.metadata.nlink, 2, 'fixture source must simulate Cargo hard links');
+    assert.equal(destination.metadata.nlink, 1);
+    assert.notDeepEqual(
+      [destination.metadata.dev, destination.metadata.ino],
+      [source.metadata.dev, source.metadata.ino],
+    );
+    assert.equal(destination.metadata.mode & 0o777, 0o700);
+    assert.deepEqual(destination.bytes, source.bytes);
   } finally {
     rmSync(fixture, { recursive: true, force: false });
   }

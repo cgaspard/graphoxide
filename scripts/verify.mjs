@@ -18,6 +18,7 @@ run('cargo', ['clippy', '--workspace', '--all-targets', '--', '-D', 'warnings'])
 run('cargo', ['test', '--workspace', '--no-fail-fast', '--locked']);
 run('node', [
   '--test',
+  'scripts/agent-artifacts.test.mjs',
   'scripts/benchmark-graph-build.test.mjs',
   'scripts/qualify-universal-indexing.test.mjs',
   'scripts/security-audit.test.mjs',
