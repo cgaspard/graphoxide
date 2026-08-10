@@ -365,6 +365,8 @@ async function verifySaveAndWatchUpdates(api: GraphoxideExtensionApi, folder: vs
 }
 
 async function verifyCustomOutputMaintenance(api: GraphoxideExtensionApi, folder: vscode.WorkspaceFolder): Promise<void> {
+  const testApi = api.test;
+  assert.ok(testApi, 'Watch lifecycle controls must be available in Extension Development mode.');
   const configuration = vscode.workspace.getConfiguration('graphoxide', folder.uri);
   const defaultGraph = path.join(folder.uri.fsPath, 'graphoxide-out', 'graph.json');
   await configuration.update('graphPath', 'custom-output/graph.json', vscode.ConfigurationTarget.WorkspaceFolder);
@@ -381,7 +383,11 @@ async function verifyCustomOutputMaintenance(api: GraphoxideExtensionApi, folder
   await poll(() => graphContains(graphPath, 'e2e_custom_save_marker'), 'custom-output save update', 30000);
 
   await api.configureFreshness('watch');
-  await poll(async () => (await api.status()).watching, 'custom-output watch process to start');
+  const customWatch = testApi.watchLifecycle();
+  assert.equal(customWatch.phase, 'ready');
+  assert.equal(customWatch.processTarget, 'expected');
+  assert.equal(customWatch.graphTarget, 'expected');
+  assert.ok(customWatch.activeGeneration, 'The custom-output watch process has no generation.');
   await appendAndSave(
     vscode.Uri.joinPath(folder.uri, 'cartograph', 'payments.py'),
     '\n\ndef e2e_custom_watch_marker() -> str:\n    return "custom-watch"\n',
@@ -391,22 +397,70 @@ async function verifyCustomOutputMaintenance(api: GraphoxideExtensionApi, folder
   assert.equal(await graphContains(defaultGraph, 'e2e_custom_save_marker'), false);
   assert.equal(await graphContains(defaultGraph, 'e2e_custom_watch_marker'), false);
 
-  await configuration.update('graphPath', 'graphoxide-out/graph.json', vscode.ConfigurationTarget.WorkspaceFolder);
-  let observedStoppedWatch = false;
-  await poll(async () => {
-    const status = await api.status();
-    if (!status.watching) observedStoppedWatch = true;
-    return observedStoppedWatch && status.watching && status.graphPath === defaultGraph;
-  }, 'watch process to restart with the changed graph path', 30000, 10);
+  const restartBarrier = testApi.holdNextGraphPathRestart();
+  let staleGraphAfterExit: Buffer | undefined;
+  try {
+    await configuration.update('graphPath', 'intermediate-output/graph.json', vscode.ConfigurationTarget.WorkspaceFolder);
+    const stopped = await restartBarrier.waitUntilReached();
+    assert.equal(stopped.phase, 'stopped');
+    assert.equal(stopped.activeGeneration, undefined);
+    assert.equal(stopped.lastExitedGeneration, customWatch.activeGeneration);
+    assert.equal(stopped.processTarget, 'none');
+    assert.equal(stopped.graphTarget, 'different', 'The new graph path was published before the old process exited.');
+    staleGraphAfterExit = await fs.readFile(graphPath);
+    // Queue the final project-scoped path while the first reload is paused.
+    // The waiter below must observe the tail of both configuration events, not
+    // an intermediate replacement that happens to report readiness first.
+    await configuration.update('graphPath', 'graphoxide-out/graph.json', vscode.ConfigurationTarget.WorkspaceFolder);
+  } finally {
+    restartBarrier.release();
+  }
+
+  assert.ok(staleGraphAfterExit, 'The stale graph was not captured after the old watch process exited.');
+  const replacement = await testApi.waitForWatchRestart(customWatch.activeGeneration);
+  assert.equal(replacement.phase, 'ready');
+  assert.ok((replacement.activeGeneration ?? 0) > customWatch.activeGeneration);
+  assert.ok(replacement.lastExitedGeneration >= customWatch.activeGeneration);
+  assert.equal(replacement.processTarget, 'expected');
+  assert.equal(replacement.graphTarget, 'expected');
+  assert.equal((await api.status()).graphPath, defaultGraph);
+
+  const replacementPublication = waitForGraphMarker(
+    defaultGraph,
+    'e2e_changed_graph_path_marker',
+    'the replacement watch process to publish to the configured graph',
+    30000,
+  );
   await appendAndSave(
     vscode.Uri.joinPath(folder.uri, 'cartograph', 'audit.py'),
     '\n\ndef e2e_changed_graph_path_marker() -> str:\n    return "changed-graph-path"\n',
   );
-  await poll(() => graphContains(defaultGraph, 'e2e_changed_graph_path_marker'), 'restarted watch update', 30000);
-  assert.equal(await graphContains(graphPath, 'e2e_changed_graph_path_marker'), false);
+  await replacementPublication;
+  assert.deepEqual(
+    await fs.readFile(graphPath),
+    staleGraphAfterExit,
+    'The exited watch process mutated its stale output after replacement publication.',
+  );
+
+  const replacementGeneration = replacement.activeGeneration;
+  assert.ok(replacementGeneration, 'The replacement watch process has no generation.');
+  const concurrentRestart = await testApi.restartWatchConcurrently();
+  assert.equal(concurrentRestart.phase, 'ready');
+  const concurrentGeneration = concurrentRestart.activeGeneration;
+  assert.ok(concurrentGeneration, 'The concurrent replacement watch process has no generation.');
+  assert.equal(
+    concurrentGeneration,
+    replacementGeneration + 1,
+    'Concurrent direct callers did not converge on exactly one replacement generation.',
+  );
+  assert.equal(concurrentRestart.lastExitedGeneration, replacementGeneration);
+  assert.equal(concurrentRestart.processTarget, 'expected');
+  assert.equal(concurrentRestart.graphTarget, 'expected');
 
   await api.configureFreshness('manual');
-  await poll(async () => !(await api.status()).watching, 'restarted watch process to stop');
+  const finalWatch = testApi.watchLifecycle();
+  assert.equal(finalWatch.phase, 'stopped');
+  assert.ok(finalWatch.lastExitedGeneration >= concurrentGeneration);
 }
 
 async function appendAndSave(uri: vscode.Uri, text: string): Promise<void> {
@@ -424,6 +478,49 @@ async function graphContains(graphPath: string, marker: string): Promise<boolean
   } catch {
     return false;
   }
+}
+
+async function waitForGraphMarker(
+  graphPath: string,
+  marker: string,
+  description: string,
+  timeoutMs: number,
+): Promise<void> {
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(path.dirname(graphPath), path.basename(graphPath)),
+  );
+  let observation = 'graph not inspected';
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      watcher.dispose();
+      if (error) reject(error);
+      else resolve();
+    };
+    const inspect = async (): Promise<void> => {
+      try {
+        const graph = JSON.parse(await fs.readFile(graphPath, 'utf8')) as { nodes?: Array<{ label?: string; id?: string }> };
+        const containsMarker = graph.nodes?.some((node) => node.label?.includes(marker) || node.id?.includes(marker)) ?? false;
+        observation = containsMarker ? 'readable graph with marker' : 'readable graph without marker';
+        if (containsMarker) finish();
+      } catch {
+        observation = 'graph missing or unreadable';
+      }
+    };
+    const inspectAfterChange = (): void => {
+      void inspect();
+    };
+    watcher.onDidCreate(inspectAfterChange);
+    watcher.onDidChange(inspectAfterChange);
+    const timeout = setTimeout(
+      () => finish(new Error(`Timed out after ${timeoutMs} ms waiting for ${description}; observed ${observation}.`)),
+      timeoutMs,
+    );
+    void inspect();
+  });
 }
 
 async function poll(check: () => boolean | Promise<boolean>, description: string, timeout = 10000, interval = 100): Promise<void> {
