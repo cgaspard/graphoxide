@@ -1,0 +1,14 @@
+version: 0.10.1
+date: 2026-08-10
+highlights:
+  - Bundle structured-value redaction, pre-redaction cache retirement, and the quick-xml security remediation in every platform-specific Graphoxide executable.
+added:
+  - Qualify release inputs with locked Cargo and npm advisory gates and least-privilege CodeQL analysis for GitHub Actions, JavaScript/TypeScript, and Rust. Unresolved live Rust macro expansion can still reduce data-flow coverage and remains tracked in issue #59.
+changed:
+  - Redact high-confidence credential-bearing values in generic structured sources before bundled graph or reusable cache publication while retaining safe keys, locations, container shape, scalar type, and explicit `<redacted>` markers.
+  - Keep literal `.env` paths excluded before open and YAML and JSON5 fallbacks key-only; redaction is deterministic and bounded but does not claim general-purpose secret discovery.
+fixed:
+  - Upgrade the bundled parser to quick-xml 0.41.0 for RUSTSEC-2026-0194 and RUSTSEC-2026-0195 while preserving bounded XML behavior.
+  - Make the bundled runtime cache release payload and non-returned transfer credits before signaling persist or non-hit completion, while preserving returned-hit accounting.
+  - Retire exact legacy AST v0 through v29 and `cache/runtime-v1` payloads under the managed rebuild lock before publishing. Unsafe or incomplete bounded migrations stop the refresh without claiming forensic secure erasure.
+removed: []

@@ -1,0 +1,16 @@
+version: 0.10.1
+date: 2026-08-10
+highlights:
+  - Redact high-confidence credential-bearing structured values before graph or reusable cache publication, retire exact pre-redaction cache payloads, and remediate two reachable quick-xml advisories.
+added:
+  - Add locked advisory gates for Cargo, root npm, and VS Code npm dependencies with five-minute and 4 MiB per-scope report bounds and exact reviewed exceptions limited to 30 days.
+  - Add least-privilege CodeQL analysis for GitHub Actions, JavaScript/TypeScript, and Rust. The supported Rust no-build scan covers every in-scope repository Rust file, but unresolved live macro expansion can reduce data-flow coverage; issue #59 tracks that remaining gap.
+changed:
+  - Apply deterministic redaction across generic JSON, JSONC, JSON Lines, TOML, XML, delimited, INI, properties, and environment-style extraction, named JSON references, MCP fallbacks, and supported structured archive members while preserving safe keys, locations, container shape, scalar type, and an explicit `<redacted>` marker.
+  - Bound sensitive-key inspection to 256 bytes and value inspection to 64 KiB. Literal `.env` paths remain excluded before open, YAML and JSON5 fallbacks remain key-only, and the policy does not use entropy heuristics or claim general-purpose secret discovery.
+  - Enable repository vulnerability alerts while keeping automated security fixes, automatic dependency merging, and unreviewed dependency upgrades disabled.
+fixed:
+  - Upgrade quick-xml from 0.38.4 to 0.41.0 to address RUSTSEC-2026-0194 and RUSTSEC-2026-0195, enforce per-element ceilings of 256 attributes and 256 namespace declarations, and preserve the existing unescape-only XML value semantics.
+  - Release runtime-cache payload and non-returned transfer credits before completing persist, miss, cancellation, and error responses; returned hits remain charged until the caller drops the hit.
+  - Retire exact legacy AST v0 through v29 and `cache/runtime-v1` payloads under the exclusive rebuild lock before publishing. Unsafe, busy, or over-limit layouts fail closed; this bounded managed-artifact removal is not forensic secure erasure.
+removed: []
