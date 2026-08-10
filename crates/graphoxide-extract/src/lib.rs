@@ -14,6 +14,17 @@
 
 use anyhow::Context as _;
 
+/// Decode and unescape an XML attribute without changing its literal
+/// whitespace. `quick-xml` 0.40 made its replacement attribute helpers apply
+/// XML attribute normalization; retaining the prior unescape-only contract
+/// keeps existing graph labels and identities stable across the security
+/// upgrade.
+fn decode_xml_attribute(value: &[u8]) -> quick_xml::Result<std::borrow::Cow<'_, str>> {
+    let value =
+        std::str::from_utf8(value).map_err(|error| quick_xml::Error::Encoding(error.into()))?;
+    quick_xml::escape::unescape(value).map_err(quick_xml::Error::Escape)
+}
+
 mod bash;
 mod bytes;
 pub mod cache;
@@ -2815,6 +2826,19 @@ mod tests {
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
+
+    #[test]
+    fn xml_attribute_decode_preserves_whitespace_and_entities() {
+        let decoded = super::decode_xml_attribute(b"literal\tline\ncarriage\r &amp; &#x2026;")
+            .expect("decode safe XML attribute");
+        assert_eq!(decoded, "literal\tline\ncarriage\r & …");
+        assert!(matches!(
+            super::decode_xml_attribute(b"&custom;"),
+            Err(quick_xml::Error::Escape(
+                quick_xml::escape::EscapeError::UnrecognizedEntity(_, _)
+            ))
+        ));
+    }
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 

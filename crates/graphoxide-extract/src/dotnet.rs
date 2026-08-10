@@ -482,7 +482,7 @@ fn event_attributes(
     for attribute in event.attributes() {
         let attribute = attribute?;
         let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
-        let value = attribute.unescape_value()?.into_owned();
+        let value = crate::decode_xml_attribute(attribute.value.as_ref())?.into_owned();
         values.insert(key, value);
     }
     Ok(values)

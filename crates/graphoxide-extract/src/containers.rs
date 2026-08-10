@@ -2995,8 +2995,7 @@ fn push_svg_element(
     for attribute in event.attributes().with_checks(true) {
         let attribute = attribute.map_err(|_| InspectionDiagnostic::InvalidSvg)?;
         let key = xml_local_name(attribute.key.as_ref());
-        let value = attribute
-            .unescape_value()
+        let value = crate::decode_xml_attribute(attribute.value.as_ref())
             .map_err(|_| InspectionDiagnostic::InvalidSvg)?;
         if key == b"id" {
             id = Some(bounded_svg_string(&value, limits.max_svg_string_bytes)?);

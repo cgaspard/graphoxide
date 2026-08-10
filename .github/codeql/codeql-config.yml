@@ -1,0 +1,4 @@
+name: Graphoxide security analysis
+
+paths-ignore:
+  - "parity/corpora/**"

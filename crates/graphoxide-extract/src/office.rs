@@ -13,7 +13,7 @@ use crate::containers::{
 use graphoxide_core::{make_id, Confidence, Edge, Extraction, Node};
 use quick_xml::{
     events::{BytesCData, BytesRef, BytesStart, BytesText, Event},
-    name::ResolveResult,
+    name::{ResolveResult, DEFAULT_MAX_DECLARATIONS_PER_ELEMENT},
     NsReader,
 };
 use std::{
@@ -492,11 +492,12 @@ impl<'a> ParseBudget<'a> {
             let mut attributes = 0_usize;
             for attribute in element.attributes().with_checks(true) {
                 let attribute = attribute.map_err(|_| OfficeError::MalformedXml)?;
-                if namespace_tag(reader.resolve_attribute(attribute.key).0) == NamespaceTag::Unknown
+                if namespace_tag(reader.resolver().resolve_attribute(attribute.key).0)
+                    == NamespaceTag::Unknown
                 {
                     return Err(OfficeError::UnsupportedNamespace);
                 }
-                match attribute.decode_and_unescape_value(reader.decoder()) {
+                match crate::decode_xml_attribute(attribute.value.as_ref()) {
                     Ok(value) if value.chars().all(is_legal_xml10_character) => {}
                     Err(quick_xml::Error::Escape(
                         quick_xml::escape::EscapeError::UnrecognizedEntity(_, _),
@@ -689,6 +690,17 @@ fn namespace_tag(resolved: ResolveResult<'_>) -> NamespaceTag {
     }
 }
 
+fn bounded_xml_reader(bytes: &[u8], limits: OfficeLimits) -> NsReader<&[u8]> {
+    let mut reader = NsReader::from_reader(bytes);
+    reader.config_mut().trim_text(false);
+    reader.resolver_mut().set_max_declarations_per_element(
+        limits
+            .max_attributes_per_element
+            .min(DEFAULT_MAX_DECLARATIONS_PER_ELEMENT),
+    );
+    reader
+}
+
 fn event_bytes(event: &Event<'_>) -> usize {
     match event {
         Event::Start(value) | Event::Empty(value) => value.len(),
@@ -789,7 +801,7 @@ fn decoded_attribute(
     let mut found = None;
     for attribute in event.attributes().with_checks(true) {
         let attribute = attribute.map_err(|_| OfficeError::MalformedXml)?;
-        let tag = namespace_tag(reader.resolve_attribute(attribute.key).0);
+        let tag = namespace_tag(reader.resolver().resolve_attribute(attribute.key).0);
         if tag == NamespaceTag::Unknown {
             return Err(OfficeError::UnsupportedNamespace);
         }
@@ -799,8 +811,7 @@ fn decoded_attribute(
         if found.is_some() {
             return Err(OfficeError::MalformedXml);
         }
-        let value = attribute
-            .decode_and_unescape_value(reader.decoder())
+        let value = crate::decode_xml_attribute(attribute.value.as_ref())
             .map_err(|_| OfficeError::MalformedXml)?;
         let value = bounded_clean_string(&value, max_bytes)?;
         found = Some(value);
@@ -1655,8 +1666,7 @@ fn validate_single_xml_document(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut root_closed = false;
@@ -1747,8 +1757,7 @@ fn parse_content_types(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<ContentTypesDraft, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut draft = ContentTypesDraft::default();
@@ -1893,8 +1902,7 @@ fn parse_relationships(
     budget: &mut ParseBudget<'_>,
 ) -> Result<(Vec<RelationshipDraft>, usize), OfficeError> {
     let source_part = relationship_source_part(rels_path)?;
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut relationships = Vec::new();
@@ -2297,8 +2305,7 @@ fn parse_docx(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Vec<UnitDraft>, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut body_seen = false;
@@ -2711,8 +2718,7 @@ fn parse_xlsx_workbook(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<Vec<PendingUnit>, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut sheets_seen = false;
@@ -2857,8 +2863,7 @@ fn parse_xlsx_shared_strings(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<Vec<String>, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut text_depth = 0_usize;
@@ -3033,8 +3038,7 @@ fn parse_xlsx_worksheet(
     shared_strings: &[String],
     budget: &mut ParseBudget<'_>,
 ) -> Result<String, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut sheet_data_seen = false;
@@ -3322,8 +3326,7 @@ fn parse_pptx_presentation(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<Vec<PendingSlide>, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut list_seen = false;
@@ -3459,8 +3462,7 @@ fn push_pptx_slide_id(
 }
 
 fn parse_pptx_slide(bytes: &[u8], budget: &mut ParseBudget<'_>) -> Result<String, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut content_seen = false;
@@ -3699,8 +3701,7 @@ fn parse_odf_manifest(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<OdfManifestDraft, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut file_entry_depth = 0_usize;
@@ -3897,8 +3898,7 @@ fn parse_odf_content(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Vec<UnitDraft>, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut body_depth = 0_usize;
@@ -4525,8 +4525,7 @@ fn parse_epub_container(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<Vec<String>, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut rootfiles_seen = false;
@@ -4675,8 +4674,7 @@ fn parse_opf(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<OpfDraft, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut metadata_depth = 0_usize;
@@ -5014,8 +5012,7 @@ fn parse_xhtml(
     bytes: &[u8],
     budget: &mut ParseBudget<'_>,
 ) -> Result<XhtmlDraft, OfficeError> {
-    let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(false);
+    let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
     let mut head_seen = false;
@@ -5932,7 +5929,7 @@ fn push_edge(
 mod tests {
     use super::*;
     use crate::parser_budget::{with_plan, ParserPlan};
-    use std::{cell::Cell, io::Write as _, path::Path};
+    use std::{cell::Cell, fmt::Write as _, io::Write as _, path::Path};
     use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
     const CONTENT_TYPES: &str = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
@@ -6095,6 +6092,63 @@ mod tests {
                 OfficeError::MalformedXml
             );
         }
+    }
+
+    #[test]
+    fn quick_xml_attribute_and_namespace_advisory_bounds_are_deterministic() {
+        let mut duplicate = String::from(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+        );
+        for index in 0..40 {
+            write!(duplicate, r#" a{index}="{index}""#).expect("append unique attribute");
+        }
+        duplicate.push_str(r#" a0="duplicate"/>"#);
+        assert_office_error!(
+            validate_single_xml_document(
+                duplicate.as_bytes(),
+                &mut parse_budget(OfficeLimits::default()),
+            ),
+            OfficeError::MalformedXml
+        );
+
+        let mut ordinary_overflow = String::from(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+        );
+        for index in 0..DEFAULT_MAX_DECLARATIONS_PER_ELEMENT {
+            write!(ordinary_overflow, r#" a{index}="{index}""#).expect("append bounded attribute");
+        }
+        ordinary_overflow.push_str("/>");
+        assert_office_error!(
+            validate_single_xml_document(
+                ordinary_overflow.as_bytes(),
+                &mut parse_budget(OfficeLimits::default()),
+            ),
+            OfficeError::XmlAttributeLimit
+        );
+
+        let namespace_document = |extra_declarations: usize| {
+            let mut xml = String::from(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+            );
+            for index in 0..extra_declarations {
+                write!(xml, r#" xmlns:n{index}="urn:graphoxide:test:{index}""#)
+                    .expect("append namespace declaration");
+            }
+            xml.push_str("/>");
+            xml
+        };
+        let at_limit = namespace_document(DEFAULT_MAX_DECLARATIONS_PER_ELEMENT - 1);
+        assert!(validate_single_xml_document(
+            at_limit.as_bytes(),
+            &mut parse_budget(OfficeLimits::default()),
+        )
+        .is_ok());
+
+        let over_limit = namespace_document(DEFAULT_MAX_DECLARATIONS_PER_ELEMENT);
+        assert_office_error!(
+            extract_docx(&docx(&over_limit), OfficeLimits::default(), None),
+            OfficeError::MalformedXml
+        );
     }
 
     #[test]

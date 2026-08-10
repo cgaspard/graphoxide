@@ -25,7 +25,7 @@ sha1 = "0.10"
 hex.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
-quick-xml = "0.38"
+quick-xml = "0.41"
 zip = { version = "8.2", default-features = false, features = ["deflate"] }
 reqwest.workspace = true
 base64.workspace = true

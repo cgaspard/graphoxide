@@ -1044,7 +1044,9 @@ fn xml_value(event: &quick_xml::events::BytesStart<'_>) -> anyhow::Result<Option
     for attribute in event.attributes() {
         let attribute = attribute?;
         if xml_local_name(attribute.key.as_ref()).eq_ignore_ascii_case(b"Value") {
-            return Ok(Some(attribute.unescape_value()?.into_owned()));
+            return Ok(Some(
+                crate::decode_xml_attribute(attribute.value.as_ref())?.into_owned(),
+            ));
         }
     }
     Ok(None)
