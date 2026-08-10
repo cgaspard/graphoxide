@@ -688,6 +688,22 @@ impl Write for RuntimeCacheEncodeBuffer {
     }
 }
 
+#[cfg(test)]
+struct RuntimeCacheResponseTestHook {
+    // The worker reaches this rendezvous only after disposing of every
+    // resource that the response does not transfer back to the caller.
+    resources_released: SyncSender<()>,
+    release_response: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+fn hold_cache_response_for_test(hook: Option<RuntimeCacheResponseTestHook>) {
+    if let Some(hook) = hook {
+        let _ = hook.resources_released.send(());
+        let _ = hook.release_response.recv();
+    }
+}
+
 // Keeping the metadata request inline makes the bounded channel's
 // `size_of::<RuntimeCacheIoCommand>()` accounting complete. Boxing the large
 // variant would hide a per-command heap allocation from that fixed charge.
@@ -698,6 +714,8 @@ enum RuntimeCacheIoCommand {
         cancellation: RuntimeCancellation,
         credit: ByteCreditLease,
         response: SyncSender<Result<RuntimeCacheIoProbe, RuntimeCacheIoServiceError>>,
+        #[cfg(test)]
+        test_hook: Option<RuntimeCacheResponseTestHook>,
     },
     ProbeMetadataOnly {
         request: RuntimeCacheMetadataProbeRequest,
@@ -710,14 +728,18 @@ enum RuntimeCacheIoCommand {
         cancellation: RuntimeCancellation,
         credit: ByteCreditLease,
         response: SyncSender<Result<RuntimeCacheIoProbe, RuntimeCacheIoServiceError>>,
+        #[cfg(test)]
+        test_hook: Option<RuntimeCacheResponseTestHook>,
     },
     PersistIfAbsent {
         key: RuntimeCacheKey,
         payload: Vec<u8>,
         replace_existing: bool,
         cancellation: RuntimeCancellation,
-        _credit: ByteCreditLease,
+        credit: ByteCreditLease,
         response: SyncSender<Result<RuntimeCacheIoPersistOutcome, RuntimeCacheIoServiceError>>,
+        #[cfg(test)]
+        test_hook: Option<RuntimeCacheResponseTestHook>,
     },
     SnapshotTelemetry {
         transfer_credits: ByteCreditLedger,
@@ -778,6 +800,8 @@ impl RuntimeCacheIoClient {
                 cancellation: cancellation.clone(),
                 credit,
                 response,
+                #[cfg(test)]
+                test_hook: None,
             },
             cancellation,
         )?;
@@ -849,6 +873,8 @@ impl RuntimeCacheIoClient {
                 cancellation: cancellation.clone(),
                 credit,
                 response,
+                #[cfg(test)]
+                test_hook: None,
             },
             cancellation,
         )?;
@@ -1038,8 +1064,10 @@ impl RuntimeCacheIoClient {
                 payload,
                 replace_existing,
                 cancellation: cancellation.clone(),
-                _credit: credit,
+                credit,
                 response,
+                #[cfg(test)]
+                test_hook: None,
             },
             cancellation,
         )?;
@@ -1148,6 +1176,8 @@ fn record_completed_cache_read(
 fn attach_transfer_credit(outcome: &mut RuntimeCacheProbeOutcome, credit: ByteCreditLease) {
     if let RuntimeCacheProbeOutcome::Hit(hit) = outcome {
         hit.transfer_credit = Some(credit);
+    } else {
+        credit.release();
     }
 }
 
@@ -1320,8 +1350,11 @@ impl RuntimeCacheIoService {
                             cancellation,
                             credit,
                             response,
+                            #[cfg(test)]
+                            test_hook,
                         } => {
                             let outcome = if cancellation.is_cancelled() {
+                                credit.release();
                                 Err(RuntimeCacheIoServiceError::Cancelled)
                             } else {
                                 let cache_outcome = cache.probe(key);
@@ -1331,6 +1364,8 @@ impl RuntimeCacheIoService {
                                 );
                                 Ok(cache_io_probe(cache_outcome, false, io_thread_id, credit))
                             };
+                            #[cfg(test)]
+                            hold_cache_response_for_test(test_hook);
                             let _ = response.send(outcome);
                         }
                         RuntimeCacheIoCommand::ProbeMetadataOnly {
@@ -1354,29 +1389,35 @@ impl RuntimeCacheIoService {
                             cancellation,
                             credit,
                             response,
+                            #[cfg(test)]
+                            test_hook,
                         } => {
                             let outcome = if cancellation.is_cancelled() {
+                                credit.release();
                                 Err(RuntimeCacheIoServiceError::Cancelled)
                             } else {
-                                cache
-                                    .probe_or_legacy_file(&request)
-                                    .map(|(outcome, runtime_rejected_before_legacy)| {
+                                match cache.probe_or_legacy_file(&request) {
+                                    Ok((outcome, runtime_rejected_before_legacy)) => {
                                         record_completed_cache_read(
                                             &mut telemetry_for_worker,
                                             &outcome,
                                         );
-                                        RuntimeCacheIoProbe {
+                                        let mut probe = RuntimeCacheIoProbe {
                                             outcome,
                                             runtime_rejected_before_legacy,
                                             io_thread_id,
-                                        }
-                                    })
-                                    .map(|mut probe| {
+                                        };
                                         attach_transfer_credit(&mut probe.outcome, credit);
-                                        probe
-                                    })
-                                    .map_err(RuntimeCacheIoServiceError::Cache)
+                                        Ok(probe)
+                                    }
+                                    Err(error) => {
+                                        credit.release();
+                                        Err(RuntimeCacheIoServiceError::Cache(error))
+                                    }
+                                }
                             };
+                            #[cfg(test)]
+                            hold_cache_response_for_test(test_hook);
                             let _ = response.send(outcome);
                         }
                         RuntimeCacheIoCommand::PersistIfAbsent {
@@ -1384,8 +1425,10 @@ impl RuntimeCacheIoService {
                             payload,
                             replace_existing,
                             cancellation,
-                            _credit,
+                            credit,
                             response,
+                            #[cfg(test)]
+                            test_hook,
                         } => {
                             let outcome = if cancellation.is_cancelled() {
                                 Err(RuntimeCacheIoServiceError::Cancelled)
@@ -1434,6 +1477,14 @@ impl RuntimeCacheIoService {
                                 }
                                 cache_outcome.map_err(RuntimeCacheIoServiceError::Cache)
                             };
+                            // A zero-capacity response can wake its receiver
+                            // before this sender resumes. Dispose of the bytes
+                            // before returning their accounting lease, then
+                            // publish completion only after both are gone.
+                            drop(payload);
+                            credit.release();
+                            #[cfg(test)]
+                            hold_cache_response_for_test(test_hook);
                             let _ = response.send(outcome);
                         }
                         RuntimeCacheIoCommand::SnapshotTelemetry {
@@ -2896,6 +2947,122 @@ mod tests {
         RuntimeCacheKey::for_bytes("test", label, label.as_bytes())
     }
 
+    fn cache_response_test_hook() -> (
+        RuntimeCacheResponseTestHook,
+        mpsc::Receiver<()>,
+        SyncSender<()>,
+    ) {
+        let (resources_released, resources_released_receiver) = mpsc::sync_channel(0);
+        let (release_response, release_response_receiver) = mpsc::sync_channel(0);
+        (
+            RuntimeCacheResponseTestHook {
+                resources_released,
+                release_response: release_response_receiver,
+            },
+            resources_released_receiver,
+            release_response,
+        )
+    }
+
+    fn receive_gated_cache_response<T>(
+        client: &RuntimeCacheIoClient,
+        expected_in_flight_transfer_bytes: usize,
+        resources_released: mpsc::Receiver<()>,
+        release_response: SyncSender<()>,
+        response: mpsc::Receiver<Result<T, RuntimeCacheIoServiceError>>,
+    ) -> Result<T, RuntimeCacheIoServiceError> {
+        resources_released
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker reached the pre-response resource boundary");
+        assert_eq!(
+            client.memory_usage().in_flight_transfer_bytes,
+            expected_in_flight_transfer_bytes
+        );
+        assert!(
+            matches!(response.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "the worker must not publish the response before the test gate"
+        );
+        release_response
+            .send(())
+            .expect("release the worker response");
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker published the gated response")
+    }
+
+    fn send_gated_persist(
+        client: &RuntimeCacheIoClient,
+        cache_key: RuntimeCacheKey,
+        payload: Vec<u8>,
+        replace_existing: bool,
+        cancellation: RuntimeCancellation,
+    ) -> Result<RuntimeCacheIoPersistOutcome, RuntimeCacheIoServiceError> {
+        let charged_bytes = payload.capacity();
+        let credit = client
+            .transfer_credits
+            .try_reserve(charged_bytes)
+            .expect("reserve test payload credit");
+        let (response, receiver) = mpsc::sync_channel(0);
+        let (test_hook, resources_released, release_response) = cache_response_test_hook();
+        client
+            .sender
+            .send(RuntimeCacheIoCommand::PersistIfAbsent {
+                key: cache_key,
+                payload,
+                replace_existing,
+                cancellation,
+                credit,
+                response,
+                test_hook: Some(test_hook),
+            })
+            .expect("submit gated persistence");
+        receive_gated_cache_response(client, 0, resources_released, release_response, receiver)
+    }
+
+    enum GatedProbeRequest {
+        Runtime(RuntimeCacheKey),
+        Legacy(RuntimeCacheLegacyFileRequest),
+    }
+
+    fn send_gated_probe(
+        client: &RuntimeCacheIoClient,
+        request: GatedProbeRequest,
+        cancellation: RuntimeCancellation,
+        expected_in_flight_transfer_bytes: usize,
+    ) -> Result<RuntimeCacheIoProbe, RuntimeCacheIoServiceError> {
+        let transfer_bytes = client.accounting.max_in_flight_transfer_bytes;
+        let credit = client
+            .transfer_credits
+            .try_reserve(transfer_bytes)
+            .expect("reserve probe credit");
+        let (response, receiver) = mpsc::sync_channel(0);
+        let (test_hook, resources_released, release_response) = cache_response_test_hook();
+        let command = match request {
+            GatedProbeRequest::Runtime(key) => RuntimeCacheIoCommand::Probe {
+                key,
+                cancellation,
+                credit,
+                response,
+                test_hook: Some(test_hook),
+            },
+            GatedProbeRequest::Legacy(request) => RuntimeCacheIoCommand::ProbeOrLegacyFile {
+                request,
+                cancellation,
+                credit,
+                response,
+                test_hook: Some(test_hook),
+            },
+        };
+        client.sender.send(command).expect("submit gated probe");
+        receive_gated_cache_response(
+            client,
+            expected_in_flight_transfer_bytes,
+            resources_released,
+            release_response,
+            receiver,
+        )
+    }
+
     #[cfg(unix)]
     fn make_fifo(path: &Path) {
         use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
@@ -3447,6 +3614,226 @@ mod tests {
             .into_hit()
             .expect("hit");
         assert_eq!(hit.payload, b"correct envelope");
+    }
+
+    #[test]
+    fn persist_responses_release_payload_credit_before_handoff() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let service = RuntimeCacheIoService::start(temp.path().to_path_buf(), 8).expect("service");
+        let client = service.client();
+        let cache_key = key("gated-persist");
+
+        assert!(matches!(
+            send_gated_persist(
+                &client,
+                cache_key,
+                b"initial".to_vec(),
+                false,
+                RuntimeCancellation::new(),
+            ),
+            Ok(RuntimeCacheIoPersistOutcome::Stored { .. })
+        ));
+
+        let artifact = active_artifact_path(
+            &shard_directory(
+                &temp.path().join(RUNTIME_CACHE_DIRECTORY),
+                RuntimeCache::shard_for_key(cache_key),
+            ),
+            0,
+        );
+        let mut corrupt = fs::read(&artifact).expect("stored artifact");
+        *corrupt.last_mut().expect("non-empty artifact") ^= 1;
+        fs::write(&artifact, corrupt).expect("corrupt the first payload in place");
+        assert!(matches!(
+            send_gated_persist(
+                &client,
+                cache_key,
+                b"repaired".to_vec(),
+                false,
+                RuntimeCancellation::new(),
+            ),
+            Ok(RuntimeCacheIoPersistOutcome::RepairedRejected { .. })
+        ));
+        assert!(matches!(
+            send_gated_persist(
+                &client,
+                cache_key,
+                b"ignored".to_vec(),
+                false,
+                RuntimeCancellation::new(),
+            ),
+            Ok(RuntimeCacheIoPersistOutcome::AlreadyPresent { .. })
+        ));
+        assert!(matches!(
+            send_gated_persist(
+                &client,
+                cache_key,
+                b"replacement".to_vec(),
+                true,
+                RuntimeCancellation::new(),
+            ),
+            Ok(RuntimeCacheIoPersistOutcome::ReplacedExisting { .. })
+        ));
+
+        let cancelled = RuntimeCancellation::new();
+        cancelled.cancel();
+        assert!(matches!(
+            send_gated_persist(
+                &client,
+                key("cancelled-persist"),
+                b"cancelled".to_vec(),
+                false,
+                cancelled,
+            ),
+            Err(RuntimeCacheIoServiceError::Cancelled)
+        ));
+
+        let limited_temp = tempfile::tempdir().expect("limited output");
+        let limits = RuntimeCacheLimits {
+            max_artifact_bytes: 1,
+            max_segment_bytes: FRAME_HEADER_LEN + 1,
+            max_total_artifact_bytes: (FRAME_HEADER_LEN + 1) as u64,
+            ..RuntimeCacheLimits::default()
+        };
+        let limited_service =
+            RuntimeCacheIoService::start_with_limits(limited_temp.path().to_path_buf(), 1, limits)
+                .expect("limited service");
+        let limited_client = limited_service.client();
+        assert!(matches!(
+            send_gated_persist(
+                &limited_client,
+                key("quota-first"),
+                vec![1],
+                false,
+                RuntimeCancellation::new(),
+            ),
+            Ok(RuntimeCacheIoPersistOutcome::Stored { .. })
+        ));
+        assert!(matches!(
+            send_gated_persist(
+                &limited_client,
+                key("quota-second"),
+                vec![2],
+                false,
+                RuntimeCancellation::new(),
+            ),
+            Err(RuntimeCacheIoServiceError::Cache(
+                RuntimeCacheError::AggregateArtifactsTooLarge { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn non_hit_probe_responses_release_credit_before_handoff() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let relative_legacy = legacy_path();
+        let legacy = temp.path().join(&relative_legacy);
+        fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy directory");
+        let service = RuntimeCacheIoService::start(temp.path().to_path_buf(), 1).expect("service");
+        let client = service.client();
+
+        let probe = send_gated_probe(
+            &client,
+            GatedProbeRequest::Runtime(key("missing-probe")),
+            RuntimeCancellation::new(),
+            0,
+        )
+        .expect("missing probe response");
+        assert!(matches!(probe.outcome, RuntimeCacheProbeOutcome::Missing));
+
+        let cancellation = RuntimeCancellation::new();
+        cancellation.cancel();
+        assert!(matches!(
+            send_gated_probe(
+                &client,
+                GatedProbeRequest::Runtime(key("cancelled-probe")),
+                cancellation,
+                0,
+            ),
+            Err(RuntimeCacheIoServiceError::Cancelled)
+        ));
+
+        let legacy_request = RuntimeCacheLegacyFileRequest::new(
+            key("missing-legacy-probe"),
+            relative_legacy.clone(),
+            32,
+        )
+        .expect("legacy request");
+        let probe = send_gated_probe(
+            &client,
+            GatedProbeRequest::Legacy(legacy_request),
+            RuntimeCancellation::new(),
+            0,
+        )
+        .expect("missing legacy probe response");
+        assert!(matches!(probe.outcome, RuntimeCacheProbeOutcome::Missing));
+
+        let cancellation = RuntimeCancellation::new();
+        cancellation.cancel();
+        let request =
+            RuntimeCacheLegacyFileRequest::new(key("cancelled-legacy-probe"), relative_legacy, 32)
+                .expect("legacy request");
+        assert!(matches!(
+            send_gated_probe(&client, GatedProbeRequest::Legacy(request), cancellation, 0,),
+            Err(RuntimeCacheIoServiceError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn returned_probe_hits_retain_credit_across_response_handoff() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let relative_legacy = legacy_path();
+        let legacy = temp.path().join(&relative_legacy);
+        fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy directory");
+        fs::write(&legacy, b"legacy").expect("legacy payload");
+        let service = RuntimeCacheIoService::start(temp.path().to_path_buf(), 1).expect("service");
+        let client = service.client();
+        let cache_key = key("gated-hit");
+        send_gated_persist(
+            &client,
+            cache_key,
+            b"payload".to_vec(),
+            false,
+            RuntimeCancellation::new(),
+        )
+        .expect("stored payload");
+        let transfer_bytes = service.memory_accounting().max_in_flight_transfer_bytes;
+
+        let probe = send_gated_probe(
+            &client,
+            GatedProbeRequest::Runtime(cache_key),
+            RuntimeCancellation::new(),
+            transfer_bytes,
+        )
+        .expect("runtime hit response");
+        assert_eq!(
+            client.memory_usage().in_flight_transfer_bytes,
+            transfer_bytes
+        );
+        let hit = probe.outcome.into_hit().expect("runtime hit");
+        assert_eq!(hit.payload, b"payload");
+        drop(hit);
+        assert_eq!(client.memory_usage().in_flight_transfer_bytes, 0);
+
+        let request =
+            RuntimeCacheLegacyFileRequest::new(key("gated-legacy-hit"), relative_legacy, 32)
+                .expect("legacy request");
+        let probe = send_gated_probe(
+            &client,
+            GatedProbeRequest::Legacy(request),
+            RuntimeCancellation::new(),
+            transfer_bytes,
+        )
+        .expect("legacy hit response");
+        assert_eq!(
+            client.memory_usage().in_flight_transfer_bytes,
+            transfer_bytes
+        );
+        let hit = probe.outcome.into_hit().expect("legacy hit");
+        assert_eq!(hit.source, RuntimeCacheSource::Legacy);
+        assert_eq!(hit.payload, b"legacy");
+        drop(hit);
+        assert_eq!(client.memory_usage().in_flight_transfer_bytes, 0);
     }
 
     #[test]
