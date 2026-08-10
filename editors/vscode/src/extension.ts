@@ -492,7 +492,7 @@ async function revealNode(store: GraphStore, node: GraphNode): Promise<void> {
     editor.selection = new vscode.Selection(range.start, range.start);
     editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
   } catch (error) {
-    throw new Error(`Could not open ${node.sourceFile}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Could not open ${node.sourceFile}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 

@@ -724,6 +724,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Benchmark methodology and the raw observation schema are in [BENCHMARKS.md](BENCHMARKS.md). Porting decisions and the compatibility contract are documented in [HANDOFF.md](HANDOFF.md).
+The immutable GitHub Actions, update, runner, and known-upstream-warning policy
+is documented in [docs/ci-release-dependencies.md](docs/ci-release-dependencies.md).
 
 ## License
 

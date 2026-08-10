@@ -86,7 +86,7 @@ export function parseGraphJson(text: string): GraphSnapshot {
     raw = JSON.parse(text) as unknown;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`graph.json is not valid JSON: ${message}`);
+    throw new Error(`graph.json is not valid JSON: ${message}`, { cause: error });
   }
   if (!isRecord(raw)) {
     throw new Error('graph.json must contain a JSON object');
