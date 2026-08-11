@@ -1460,6 +1460,90 @@ fn stable_mpeg_scan_preserves_same_source_semantic_overlay_in_all_modes() {
 }
 
 #[test]
+fn code_only_preserves_trusted_mpeg_inventory_manifest_and_semantic_overlay_in_all_modes() {
+    for (no_cluster, legacy_executor) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(
+            &project.join("main.ts"),
+            "import './segment';\nexport const main = true;\n",
+        );
+        let segment = project.join("segment.ts");
+        write_mpeg_transport_stream(&segment);
+        let mut arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        if legacy_executor {
+            arguments.push("--legacy-executor");
+        }
+        assert_success(&run(fixture.path(), &arguments));
+        seed_stale_segment_semantic_facts(&output_root);
+        let manifest_path = manifest_path(&output_root);
+        let stable_manifest_entry = manifest_value(&manifest_path)["segment.ts"].clone();
+        let mut code_only_arguments = arguments.clone();
+        code_only_arguments.push("--code-only");
+
+        for changed_media in [false, true] {
+            if changed_media {
+                let mut bytes = fs::read(&segment).expect("read stable MPEG generation");
+                *bytes.last_mut().expect("non-empty MPEG fixture") ^= 0x01;
+                fs::write(&segment, bytes).expect("write changed same-kind MPEG generation");
+            }
+            assert_success(&run(fixture.path(), &code_only_arguments));
+            let preserved = graph(&output_root);
+            assert!(preserved.nodes.iter().any(|node| {
+                node.source_file == "segment.ts"
+                    && node.extra.get("format").and_then(Value::as_str)
+                        == Some("mpeg_transport_stream")
+            }));
+            assert!(preserved
+                .nodes
+                .iter()
+                .any(|node| node.id == "segment_semantic_ghost"));
+            assert!(preserved.links.iter().any(|edge| {
+                edge.source_file == "segment.ts"
+                    && (edge.true_source() == "segment_semantic_ghost"
+                        || edge.true_target() == "segment_semantic_ghost")
+            }));
+            for id in [
+                "segment_owned_semantic_flow",
+                "segment_foreign_multi_flow",
+                "segment_foreign_unary_flow",
+                "segment_foreign_empty_flow",
+            ] {
+                assert!(
+                    preserved
+                        .hyperedges
+                        .iter()
+                        .any(|hyperedge| hyperedge["id"] == id),
+                    "legacy_executor={legacy_executor}, no_cluster={no_cluster}, changed_media={changed_media}, missing={id}"
+                );
+            }
+            assert_eq!(
+                manifest_value(&manifest_path)["segment.ts"],
+                stable_manifest_entry,
+                "code-only must carry trusted non-code ownership; legacy_executor={legacy_executor}, no_cluster={no_cluster}, changed_media={changed_media}"
+            );
+        }
+
+        assert_success(&run(fixture.path(), &arguments));
+        let refreshed_manifest_entry = manifest_value(&manifest_path)["segment.ts"].clone();
+        assert_ne!(
+            refreshed_manifest_entry, stable_manifest_entry,
+            "a later full scan must observe the media fingerprint left stale by code-only"
+        );
+        assert_eq!(refreshed_manifest_entry["source_kind"], "video");
+        let refreshed = graph(&output_root);
+        assert!(refreshed.nodes.iter().any(|node| {
+            node.source_file == "segment.ts"
+                && node.extra.get("format").and_then(Value::as_str) == Some("mpeg_transport_stream")
+        }));
+        assert_stale_segment_semantic_facts_removed(&refreshed);
+    }
+}
+
+#[test]
 fn semantic_only_mpeg_baseline_repairs_inventory_without_wiping_overlay() {
     for (no_cluster, legacy_executor) in
         [(false, false), (true, false), (false, true), (true, true)]
@@ -1743,7 +1827,16 @@ fn code_only_mpeg_prunes_stale_graph_ownership_despite_valid_stale_manifest() {
                 );
             }
         }
-        assert!(manifest_value(&manifest_path).get("segment.ts").is_none());
+        let updated_manifest = manifest_value(&manifest_path);
+        if stale_video_row {
+            assert_eq!(
+                updated_manifest.get("segment.ts"),
+                stale_manifest.get("segment.ts"),
+                "a verified Video row remains truthful code-only exclusion evidence"
+            );
+        } else {
+            assert!(updated_manifest.get("segment.ts").is_none());
+        }
     }
 }
 

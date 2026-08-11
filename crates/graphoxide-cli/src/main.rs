@@ -961,6 +961,7 @@ fn ensure_incremental_baseline_representation_is_verified(
     detection: &graphoxide_extract::detect::DetectResult,
     ownership_reset_sources: &[PathBuf],
     rebuilt_sources: &[PathBuf],
+    verified_representation_sources: &[PathBuf],
     root: &Path,
 ) -> anyhow::Result<()> {
     let verified_resets = ownership_reset_sources
@@ -971,9 +972,14 @@ fn ensure_incremental_baseline_representation_is_verified(
         .iter()
         .filter_map(|path| normalized_local_source_identity(root, path))
         .collect::<std::collections::BTreeSet<_>>();
+    let verified_representations = verified_representation_sources
+        .iter()
+        .filter_map(|path| normalized_local_source_identity(root, path))
+        .collect::<std::collections::BTreeSet<_>>();
     let verified_rebuild_or_exclusion = rebuilt
         .union(&verified_resets)
         .cloned()
+        .chain(verified_representations)
         .collect::<std::collections::BTreeSet<_>>();
     let (needs_rebuild, ownership_conflicts) =
         baseline_ambiguous_representation_evidence(baseline, detection, root);
@@ -1005,23 +1011,28 @@ fn gate_baseline_representation_resets(
     detection: &graphoxide_extract::detect::DetectResult,
     reset_candidates: &[PathBuf],
     rebuilt_sources: &[PathBuf],
+    verified_representation_sources: &[PathBuf],
     root: &Path,
-    preserve_all_candidates: bool,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    let mut authorized = reset_candidates
+    let authoritative = reset_candidates
+        .iter()
+        .filter_map(|source| normalized_local_source_identity(root, source))
+        .collect::<std::collections::BTreeSet<_>>();
+    let verified = verified_representation_sources
         .iter()
         .chain(rebuilt_sources)
         .filter_map(|source| normalized_local_source_identity(root, source))
         .collect::<std::collections::BTreeSet<_>>();
     let (needs_rebuild, ownership_conflicts) =
         baseline_ambiguous_representation_evidence(baseline, detection, root);
-    authorized.retain(|identity| ownership_conflicts.contains(identity));
-    let mut resets = if preserve_all_candidates {
-        reset_candidates.to_vec()
-    } else {
-        Vec::new()
-    };
-    resets.extend(authorized);
+    let conflict_resets = ownership_conflicts
+        .intersection(&verified)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut resets = authoritative
+        .union(&conflict_resets)
+        .cloned()
+        .collect::<Vec<_>>();
     resets.sort();
     resets.dedup();
     let detected_kinds = detection
@@ -1047,8 +1058,19 @@ fn gate_baseline_representation_resets(
         .filter_map(|source| normalized_local_source_identity(root, source))
         .filter(|identity| needs_rebuild.contains(identity))
         .collect::<std::collections::BTreeSet<_>>();
+    let verified_exclusions = verified_representation_sources
+        .iter()
+        .filter_map(|source| normalized_local_source_identity(root, source))
+        .filter(|identity| needs_rebuild.contains(identity))
+        .collect::<std::collections::BTreeSet<_>>();
     let mut failed_rechecks = std::collections::BTreeSet::new();
-    for identity in resets.iter().chain(&verified_rebuilds) {
+    let checked_identities = resets
+        .iter()
+        .chain(&verified_rebuilds)
+        .chain(&verified_exclusions)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for identity in &checked_identities {
         let Some(expected) = detected_kinds.get(identity) else {
             continue;
         };
@@ -1561,6 +1583,7 @@ fn run_project_build_with_cancellation(
     }
     let mut extractions = scan.extractions;
     let rebuilt_sources = scan.rebuilt_sources;
+    let verified_representation_sources = scan.verified_representation_sources;
     let mut ownership_prune_sources = scan.ownership_prune_sources;
     let pending_manifest = scan.pending_manifest;
     let mut rebuilt_provider_sources = Vec::new();
@@ -1623,14 +1646,15 @@ fn run_project_build_with_cancellation(
             &scan.detection,
             &ownership_prune_sources,
             &rebuilt_sources,
+            &verified_representation_sources,
             &path,
-            code_only,
         )?;
         ensure_incremental_baseline_representation_is_verified(
             baseline,
             &scan.detection,
             &ownership_prune_sources,
             &rebuilt_sources,
+            &verified_representation_sources,
             &path,
         )?;
     }
@@ -4308,6 +4332,7 @@ fn rebuild_isolated_pass(
     let pending_manifest_retained_bytes = scan.pending_manifest_retained_bytes;
     let extractions = scan.extractions;
     let rebuilt_sources = scan.rebuilt_sources;
+    let verified_representation_sources = scan.verified_representation_sources;
     let mut ownership_prune_sources = scan.ownership_prune_sources;
     let pending_manifest = scan.pending_manifest;
     let mut result = watch_service::RebuildResult {
@@ -4402,14 +4427,15 @@ fn rebuild_isolated_pass(
             &scan_detection,
             &ownership_prune_sources,
             &rebuilt_sources,
+            &verified_representation_sources,
             path,
-            false,
         )?;
         ensure_incremental_baseline_representation_is_verified(
             baseline,
             &scan_detection,
             &ownership_prune_sources,
             &rebuilt_sources,
+            &verified_representation_sources,
             path,
         )?;
         unchanged_candidate = telemetry.files.changed == 0
@@ -6244,8 +6270,8 @@ mod tests {
             &detection,
             &reset_candidates,
             &[],
+            &[],
             &root,
-            false,
         )
         .expect_err("both final generation rechecks must fail as one bounded diagnostic");
         let diagnostic = error.to_string();

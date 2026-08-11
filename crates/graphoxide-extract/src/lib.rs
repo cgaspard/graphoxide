@@ -480,19 +480,22 @@ pub struct DeferredProjectExtractionResult {
     /// reads/extractions are deliberately absent so their committed facts can
     /// survive a retry.
     pub rebuilt_sources: Vec<std::path::PathBuf>,
-    /// Successfully verified candidates whose current generation may need to
-    /// supersede a committed representation across graph tiers.
+    /// Successfully generation-verified ambiguous representation sources.
     ///
-    /// This includes code-affecting classification transitions and every
-    /// extension-ambiguous MPEG transport stream. Entries may overlap
-    /// `rebuilt_sources`. A caller with a committed graph must intersect these
-    /// candidates with structural representation mismatches (or an explicit
-    /// code-only exclusion policy) before passing them through an unsuppressed
-    /// baseline ownership-reset channel. It must never fold them into ordinary
-    /// deletion prunes: a byte-identical MPEG inventory can own valid semantic
-    /// enrichment that an ordinary structural refresh preserves. A confirmed
-    /// reset applies only to carried baseline facts, so fresh facts for the
-    /// same source remain intact.
+    /// A caller with a committed graph may use this non-destructive evidence
+    /// to authorize repair of an actual structural Code/MPEG conflict, or to
+    /// prove that a code-only policy exclusion was checked. Verification alone
+    /// is not permission to erase a byte-identical media inventory or its
+    /// semantic enrichment.
+    pub verified_representation_sources: Vec<std::path::PathBuf>,
+    /// Authoritative cross-tier ownership resets for the current generation.
+    ///
+    /// These are narrower than `verified_representation_sources`: they cover
+    /// proven source-kind transitions and changed media only when the scan
+    /// produced replacement inventory. Callers must pass them through the
+    /// unsuppressed baseline ownership-reset channel, never ordinary deletion
+    /// prunes. The reset applies only to carried baseline facts, so fresh facts
+    /// for the same source remain intact.
     pub ownership_prune_sources: Vec<std::path::PathBuf>,
     /// Sources whose bytes differed from the previously committed manifest.
     ///
@@ -1873,11 +1876,10 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         })
         .collect::<std::collections::BTreeSet<_>>();
     // A syntactically valid manifest can still predate the committed graph
-    // because graph publication precedes manifest publication. Even a previous
-    // Video row therefore cannot prove that the baseline owns no stale
-    // TypeScript facts. Reverify every extension-ambiguous media path and
-    // authorize an exact source-ownership prune; this is a harmless no-op for a
-    // genuinely new HLS segment.
+    // because graph publication precedes manifest publication. Reverify every
+    // extension-ambiguous media path so callers can prove a policy exclusion or
+    // repair an actual structural representation conflict. Verification alone
+    // is deliberately not authority to erase stable media ownership.
     let ambiguous_media_sources = detected_kinds
         .iter()
         .filter(|(relative, current_kind)| {
@@ -2577,10 +2579,17 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     rows.sort_by(|left, right| left.relative.cmp(&right.relative));
     let mut runtime_media_generation_mismatches = std::collections::BTreeSet::new();
     for relative in &ambiguous_media_sources {
-        let Some(row) = rows.iter().find(|row| row.relative == *relative) else {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
+        let Ok(row_index) =
+            rows.binary_search_by(|row| row.relative.as_str().cmp(relative.as_str()))
+        else {
             runtime_media_generation_mismatches.insert(relative.clone());
             continue;
         };
+        let row = &rows[row_index];
         let logical = resolved_root.join(relative);
         let physical = detection.physical_source(&logical);
         let verified = detect::checked_mpeg_transport_stream_evidence_with_cancellation(
@@ -2619,15 +2628,49 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         })
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    let verified_ownership_prune_keys = ownership_prune_verification_candidates
+    let verified_representation_keys = ownership_prune_verification_candidates
         .iter()
         .filter(|relative| successfully_admitted_sources.contains(relative.as_str()))
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    // Discovery nominates an ownership transition, but only a successful
-    // identity-verified runtime delivery whose held bytes reconfirmed that
-    // classification may authorize a prune.
-    let mut ownership_prune_sources = verified_ownership_prune_keys
+    let mut changed_media_keys = std::collections::BTreeSet::new();
+    if !code_only {
+        for relative in &ambiguous_media_sources {
+            anyhow::ensure!(
+                !cancellation.is_cancelled(),
+                "isolated extraction cancelled"
+            );
+            let Ok(row_index) =
+                rows.binary_search_by(|row| row.relative.as_str().cmp(relative.as_str()))
+            else {
+                continue;
+            };
+            let row = &rows[row_index];
+            if previous.get(relative).is_none_or(|entry| {
+                entry.ast_version != cache::AST_CACHE_VERSION
+                    || entry.ast_hash != row.hash
+                    || entry.source_kind.as_deref() != Some(detect::FileType::Video.as_str())
+            }) {
+                changed_media_keys.insert(relative.clone());
+            }
+        }
+    }
+    let authoritative_ownership_prune_keys = source_kind_transitions
+        .iter()
+        .chain(changed_media_keys.iter())
+        .filter(|relative| verified_representation_keys.contains(*relative))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    // Verification and destructive authority are intentionally distinct. A
+    // byte-identical media row is valid evidence for baseline conflict repair,
+    // but must not erase stable inventory or semantic enrichment by itself.
+    let mut verified_representation_sources = verified_representation_keys
+        .iter()
+        .map(|relative| detection.physical_source(&resolved_root.join(relative)))
+        .collect::<Vec<_>>();
+    verified_representation_sources.sort();
+    verified_representation_sources.dedup();
+    let mut ownership_prune_sources = authoritative_ownership_prune_keys
         .iter()
         .map(|relative| detection.physical_source(&resolved_root.join(relative)))
         .collect::<Vec<_>>();
@@ -2766,7 +2809,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                 let key = normalized_project_key(std::path::Path::new(path), &resolved_root, root);
                 if let Some(entry) = previous
                     .get(&key)
-                    .filter(|_| !verified_ownership_prune_keys.contains(&key))
+                    .filter(|_| !authoritative_ownership_prune_keys.contains(&key))
                 {
                     // Over-counting a normalization collision is intentional:
                     // this is a pre-allocation proof, not a usage statistic.
@@ -2832,7 +2875,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                 let key = normalized_project_key(path, &resolved_root, root);
                 if let Some(entry) = previous
                     .get(&key)
-                    .filter(|_| !verified_ownership_prune_keys.contains(&key))
+                    .filter(|_| !authoritative_ownership_prune_keys.contains(&key))
                 {
                     manifest.entry(key).or_insert_with(|| {
                         let mut carried = entry.clone();
@@ -2984,6 +3027,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             },
             warnings,
             rebuilt_sources,
+            verified_representation_sources,
             ownership_prune_sources,
             changed_sources,
             unchanged_sources,
@@ -3198,6 +3242,7 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
         .collect::<std::collections::BTreeSet<_>>();
     let mut verified_mpeg_keys = std::collections::BTreeSet::new();
     let mut verified_transition_keys = std::collections::BTreeSet::new();
+    let mut verified_ambiguous_evidence = std::collections::BTreeMap::new();
     let mut unverified_media_generations = std::collections::BTreeSet::new();
     let extracted_row_evidence = rows
         .iter()
@@ -3216,8 +3261,11 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
         // checked final reopen remains its explicit verification path.
         let row_is_verified =
             row_evidence.is_some() || code_only && current_kind != detect::FileType::Code.as_str();
+        let ambiguous_evidence = is_ambiguous_typescript_extension(key)
+            .then(|| detect::checked_ambiguous_source_evidence(&logical, &physical).ok())
+            .flatten();
         let verified = if is_ambiguous_typescript_extension(key) {
-            detect::checked_ambiguous_source_evidence(&logical, &physical).is_ok_and(|evidence| {
+            ambiguous_evidence.as_ref().is_some_and(|evidence| {
                 evidence.kind.as_str() == current_kind
                     && row_is_verified
                     && row_evidence.is_none_or(|(mtime, hash)| {
@@ -3232,6 +3280,9 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
         if !verified {
             unverified_media_generations.insert(key.clone());
             continue;
+        }
+        if let Some(evidence) = ambiguous_evidence {
+            verified_ambiguous_evidence.insert(key.clone(), evidence);
         }
         if current_mpeg_keys.contains(key) {
             verified_mpeg_keys.insert(key.clone());
@@ -3277,8 +3328,30 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
         .iter()
         .map(|(relative, _, _, _)| relative.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    let ownership_prune_keys = verified_mpeg_keys
+    let changed_mpeg_keys = if code_only {
+        std::collections::BTreeSet::new()
+    } else {
+        verified_mpeg_keys
+            .iter()
+            .filter(|key| {
+                let evidence = verified_ambiguous_evidence
+                    .get(*key)
+                    .expect("verified MPEG key has exact evidence");
+                previous.get(*key).is_none_or(|entry| {
+                    entry.ast_version != cache::AST_CACHE_VERSION
+                        || entry.ast_hash != evidence.ast_hash
+                        || entry.source_kind.as_deref() != Some(detect::FileType::Video.as_str())
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    let verified_representation_keys = verified_mpeg_keys
         .union(&verified_transition_keys)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let ownership_prune_keys = verified_transition_keys
+        .union(&changed_mpeg_keys)
         .filter(|key| {
             code_only
                 && detected_kinds
@@ -3288,6 +3361,12 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
         })
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    let mut verified_representation_sources = verified_representation_keys
+        .iter()
+        .map(|key| detection.physical_source(&resolved_root.join(key)))
+        .collect::<Vec<_>>();
+    verified_representation_sources.sort();
+    verified_representation_sources.dedup();
     let mut ownership_prune_sources = ownership_prune_keys
         .iter()
         .map(|key| detection.physical_source(&resolved_root.join(key)))
@@ -3361,6 +3440,7 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
         },
         warnings,
         rebuilt_sources,
+        verified_representation_sources,
         ownership_prune_sources,
         changed_sources: succeeded,
         unchanged_sources: 0,
@@ -6820,10 +6900,11 @@ mod tests {
                     runtime,
                 )
             }
-            .expect("verified media can authorize a harmless exact ownership prune");
-            assert_eq!(result.ownership_prune_sources.len(), 1);
+            .expect("verified media can authorize a safe code-only exclusion");
+            assert!(result.ownership_prune_sources.is_empty());
+            assert_eq!(result.verified_representation_sources.len(), 1);
             assert_eq!(
-                result.ownership_prune_sources[0],
+                result.verified_representation_sources[0],
                 fs::canonicalize(fixture.root.join("new-segment.ts"))
                     .expect("canonical new media path")
             );
