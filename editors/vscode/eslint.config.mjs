@@ -9,7 +9,7 @@ export default [
   },
   eslint.configs.recommended,
   {
-    files: ['**/*.ts'],
+    files: ['src/**/*.ts', 'test/**/*.ts'],
     languageOptions: {
       globals: {
         ...globals.browser,
@@ -20,6 +20,28 @@ export default [
         ecmaVersion: 2022,
         project: './tsconfig.json',
         sourceType: 'module',
+      },
+    },
+    plugins: {
+      '@typescript-eslint': typescriptEslint,
+    },
+    rules: {
+      ...typescriptEslint.configs['eslint-recommended'].overrides[0].rules,
+      ...typescriptEslint.configs.recommended.rules,
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      eqeqeq: 'error',
+    },
+  },
+  {
+    files: ['webview/**/*.ts'],
+    languageOptions: {
+      globals: globals.browser,
+      parser: typescriptParser,
+      parserOptions: {
+        ecmaVersion: 2022,
+        project: './tsconfig.webview.json',
+        sourceType: 'script',
       },
     },
     plugins: {

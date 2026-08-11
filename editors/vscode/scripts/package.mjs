@@ -133,8 +133,14 @@ async function verifyVsix(vsixPath, expectedExecutable) {
   if (!executableSize || executableSize < 1_000_000) {
     throw new Error(`${vsixPath} is missing ${executable} or it is unexpectedly small (${executableSize ?? 0} bytes)`);
   }
-  for (const required of ['extension/bin/graphoxide.version', 'extension/THIRD_PARTY_LICENSES.html']) {
-    if (!entries.has(required)) throw new Error(`${vsixPath} is missing ${required}`);
+  for (const required of [
+    'extension/bin/graphoxide.version',
+    'extension/THIRD_PARTY_LICENSES.html',
+    'extension/dist/webview/graph-visualizer.js',
+    'extension/media/graph-visualizer.css',
+  ]) {
+    const requiredSize = entries.get(required);
+    if (!requiredSize) throw new Error(`${vsixPath} is missing ${required} or it is empty`);
   }
   for (const artifact of artifactPaths) {
     const required = `extension/agent-assets/${artifact}`;

@@ -6,6 +6,7 @@ import type { AddressInfo, Socket } from 'node:net';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { GraphoxideExtensionApi } from '../../src/extension';
+import { parseGraphJson, sourceLine } from '../../src/graph';
 import { installerById } from '../../src/mcp/installers';
 
 interface JsonRpcResponse {
@@ -38,7 +39,7 @@ export async function run(): Promise<void> {
   assert.equal(enabled.mcp?.cwd, folder.uri.fsPath);
 
   await verifyMcpProtocol(enabled.mcp!);
-  await verifyGraphPlacement(folder);
+  await verifyGraphPlacement(api, folder, enabled.graphPath!);
   await verifyProjectInstallers(folder, enabled.mcp!);
   await verifySaveAndWatchUpdates(api, folder, enabled.graphPath!);
   await verifyAiProviders(api, enabled.graphPath!);
@@ -294,7 +295,13 @@ async function verifyMcpProtocol(invocation: NonNullable<Awaited<ReturnType<Grap
   }
 }
 
-async function verifyGraphPlacement(folder: vscode.WorkspaceFolder): Promise<void> {
+async function verifyGraphPlacement(
+  api: GraphoxideExtensionApi,
+  folder: vscode.WorkspaceFolder,
+  graphPath: string,
+): Promise<void> {
+  const testApi = api.test;
+  assert.ok(testApi, 'The Extension Development Host did not expose graph renderer controls.');
   const source = vscode.Uri.joinPath(folder.uri, 'cartograph', 'domain.py');
   const document = await vscode.workspace.openTextDocument(source);
   await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One, preview: false });
@@ -302,7 +309,62 @@ async function verifyGraphPlacement(folder: vscode.WorkspaceFolder): Promise<voi
   await vscode.commands.executeCommand('graphoxide.openGraph');
   await poll(() => vscode.window.tabGroups.activeTabGroup.activeTab?.label === 'Graphoxide Graph', 'graph webview to open');
   assert.equal(vscode.window.tabGroups.all.length, initialGroups, 'Default graph command unexpectedly created a split editor group.');
-  await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+
+  const initialRenderer = await testApi.visualizerState();
+  assert.equal(initialRenderer.mode, 'global');
+  assert.ok(initialRenderer.visibleNodes > 0, 'The production renderer received no graph nodes.');
+  assert.ok(initialRenderer.visibleEdges > 0, 'The production renderer received no graph relationships.');
+
+  await testApi.visualizerAction('set-query', 'checkout');
+  await poll(
+    async () => (await testApi.visualizerState()).query === 'checkout',
+    'renderer search state to update',
+  );
+  await testApi.visualizerAction('select-first');
+  let selectedId: string | null = null;
+  await poll(async () => {
+    selectedId = (await testApi.visualizerState()).selectedId;
+    return selectedId !== null;
+  }, 'renderer node selection');
+  assert.ok(selectedId);
+
+  await testApi.visualizerAction('enter-focus');
+  await poll(async () => {
+    const state = await testApi.visualizerState();
+    return state.mode === 'focus' && state.focusId === selectedId && state.query === 'checkout';
+  }, 'Investigation Lens to retain selection and query');
+  await testApi.visualizerAction('return-global');
+  await poll(async () => {
+    const state = await testApi.visualizerState();
+    return state.mode === 'global' && state.selectedId === selectedId && state.query === 'checkout';
+  }, 'Constellation view to restore investigation context');
+  await testApi.visualizerAction('toggle-trace');
+  await poll(async () => (await testApi.visualizerState()).traceActive, 'recorded-source trace to activate');
+
+  await vscode.commands.executeCommand('graphoxide.refresh');
+  await poll(async () => {
+    const state = await testApi.visualizerState();
+    return state.mode === 'global' && state.selectedId === selectedId && state.query === 'checkout';
+  }, 'renderer state to survive graph refresh');
+
+  const graph = parseGraphJson(await fs.readFile(graphPath, 'utf8'));
+  const selected = graph.nodes.find((node) => node.id === selectedId);
+  assert.ok(selected?.sourceFile, `Selected renderer node ${selectedId} has no source file.`);
+  const selectedSource = vscode.Uri.joinPath(folder.uri, ...selected.sourceFile.replace(/\\/gu, '/').split('/'));
+  await testApi.visualizerAction('reveal-selected');
+  await poll(
+    () => vscode.window.activeTextEditor?.document.uri.toString() === selectedSource.toString(),
+    'renderer source action to open the selected node file',
+  );
+  const revealedEditor = vscode.window.activeTextEditor;
+  assert.ok(revealedEditor, 'The selected renderer source did not have an active editor.');
+  assert.equal(revealedEditor.selection.active.line + 1, sourceLine(selected));
+
+  const activeGraphTab = vscode.window.tabGroups.all
+    .flatMap((group) => group.tabs)
+    .find((tab) => tab.label === 'Graphoxide Graph');
+  assert.ok(activeGraphTab, 'The default graph tab was not present after source navigation.');
+  await vscode.window.tabGroups.close(activeGraphTab);
 
   await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One, preview: false });
   await vscode.commands.executeCommand('graphoxide.openGraphBeside');
