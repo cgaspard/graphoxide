@@ -103,6 +103,8 @@ test('gates the bounded Extension Host bridge and clears stale graphs on status 
   const source = await readFile(visualizerPath, 'utf8');
   const host = await readFile(hostPath, 'utf8');
   assert.match(source, /const testMode = root\.dataset\.testMode === 'true';/u);
+  assert.match(source, /addEventListener\('message', handleHostMessageEvent\);/u);
+  assert.match(source, /function handleHostMessageEvent\(event: MessageEvent<unknown>\): void \{\s*[\s\S]*?if \(event\.origin !== globalThis\.origin\) return;\s*handleHostMessage\(event\.data\);\s*\}/u);
   assert.match(source, /value\.type === 'testAction' && testMode && isTestAction\(value\.action\)/u);
   for (const action of ['select-first', 'enter-focus', 'toggle-trace', 'return-global', 'set-query', 'reveal-selected']) {
     assert.match(source, new RegExp(`'${action}'`, 'u'));

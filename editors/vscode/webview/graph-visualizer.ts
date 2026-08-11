@@ -553,7 +553,7 @@ function renderFixedLegend(container: HTMLElement): void {
 }
 
 function bindEvents(): void {
-  globalThis.addEventListener('message', (event: MessageEvent<unknown>) => handleHostMessage(event.data));
+  globalThis.addEventListener('message', handleHostMessageEvent);
   globalThis.addEventListener('resize', resizeCanvas);
   const motionQuery = globalThis.matchMedia('(prefers-reduced-motion: reduce)');
   motionQuery.addEventListener('change', (event) => {
@@ -660,6 +660,13 @@ function bindEvents(): void {
   ui.canvas.addEventListener('keydown', handleCanvasKeydown);
   const resizeObserver = new ResizeObserver(resizeCanvas);
   resizeObserver.observe(ui.canvas);
+}
+
+function handleHostMessageEvent(event: MessageEvent<unknown>): void {
+  // VS Code forwards extension messages from its same-origin outer webview.
+  // Require the sender origin to match this webview document.
+  if (event.origin !== globalThis.origin) return;
+  handleHostMessage(event.data);
 }
 
 function handleHostMessage(value: unknown): void {
