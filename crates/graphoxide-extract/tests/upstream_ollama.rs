@@ -1,6 +1,6 @@
 use graphoxide_extract::llm::{
     build_direct_extraction_plan_paths, builtin_provider_configs, detect_backend,
-    validate_ollama_base_url_with_resolver,
+    plan_ollama_connection_with_resolver, validate_ollama_base_url_with_resolver,
 };
 use std::{collections::BTreeMap, fs, net::IpAddr};
 use tempfile::TempDir;
@@ -16,15 +16,34 @@ fn env(values: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn test_ollama_blocks_link_local_and_metadata() {
     for url in [
         "http://169.254.169.254/v1",
+        "http://2852039166:11434/v1",
+        "http://0xa9fea9fe:11434/v1",
         "http://169.254.1.5:11434/v1",
         "http://metadata.google.internal/v1",
+        "http://metadata.google.internal./v1",
+        "http://metadata.google.internal../v1",
         "http://0.0.0.0:11434/v1",
+        "http://[::ffff:169.254.169.254]:11434/v1",
+        "http://[::ffff:0.0.0.0]:11434/v1",
+        "http://[::169.254.169.254]:11434/v1",
+        "http://[64:ff9b::169.254.169.254]:11434/v1",
+        "http://[fd00:ec2::254]:11434/v1",
+        "ftp://192.168.1.50/ollama",
+        "http://secret@192.168.1.50:11434/v1",
+        "http://@192.168.1.50:11434/v1",
+        "http://:@192.168.1.50:11434/v1",
+        "http:@192.168.1.50:11434/v1",
+        r"http:\@192.168.1.50:11434/v1",
+        "http://192.168.1.50:11434/v1?key=secret",
+        "http://192.168.1.50:11434/v1#secret",
     ] {
         assert!(
             validate_ollama_base_url_with_resolver(url, true, |_, _| Vec::new()).is_err(),
             "{url}"
         );
     }
+    let oversized = format!("http://192.168.1.50:11434/{}", "x".repeat(2048));
+    assert!(validate_ollama_base_url_with_resolver(&oversized, true, |_, _| Vec::new()).is_err());
 }
 
 #[test]
@@ -44,12 +63,60 @@ fn test_ollama_loopback_and_lan_do_not_raise() {
 }
 
 #[test]
+fn test_ollama_dns_resolution_is_fail_closed_and_canonicalized() {
+    assert!(
+        validate_ollama_base_url_with_resolver("http://ollama.lan:11434/v1", true, |_, _| {
+            Vec::new()
+        })
+        .is_err()
+    );
+    let validated =
+        plan_ollama_connection_with_resolver("http://OLLAMA.LAN..:11434/v1", true, |host, port| {
+            assert_eq!(host, "ollama.lan");
+            assert_eq!(port, 11434);
+            vec![
+                "192.168.10.11".parse().unwrap(),
+                "192.168.10.10".parse().unwrap(),
+                "192.168.10.11".parse().unwrap(),
+            ]
+        })
+        .unwrap();
+    assert_eq!(validated.canonical_host, "ollama.lan");
+    assert_eq!(
+        validated.resolved_addresses,
+        vec![
+            "192.168.10.11".parse::<IpAddr>().unwrap(),
+            "192.168.10.10".parse::<IpAddr>().unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn test_ollama_userinfo_check_does_not_reject_path_at_signs() {
+    let validated = plan_ollama_connection_with_resolver(
+        "http://192.168.10.10:11434/api/@scope",
+        false,
+        |_, _| Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(validated.canonical_host, "192.168.10.10");
+}
+
+#[test]
 fn test_ollama_alias_resolving_to_link_local_blocked() {
     let error =
         validate_ollama_base_url_with_resolver("http://innocent-looking-host/v1", true, |_, _| {
             vec![IpAddr::V4("169.254.169.254".parse().unwrap())]
         });
     assert!(error.is_err());
+    let mixed =
+        plan_ollama_connection_with_resolver("http://mixed-answer-host/v1", true, |_, _| {
+            vec![
+                "192.168.10.10".parse().unwrap(),
+                "169.254.169.254".parse().unwrap(),
+            ]
+        });
+    assert!(mixed.is_err());
 }
 
 #[test]

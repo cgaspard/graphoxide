@@ -5,11 +5,14 @@ import {
   AI_PROVIDER_PROFILES,
   AiLabelingConfiguration,
   aiSecretKey,
+  apiKeyRequired,
   credentialForEndpoint,
   encodeStoredCredential,
   isLoopbackUrl,
+  labelingConfirmationDetail,
   labelingArguments,
   labelingEnvironment,
+  labelingTransportWarning,
   modelDiscoveryUrl,
   normalizeProviderBaseUrl,
   overlayEnvironment,
@@ -33,7 +36,7 @@ test('normalizes local provider URLs and pins official OpenAI', () => {
   );
 });
 
-test('rejects unsafe endpoint forms and non-loopback plaintext HTTP', () => {
+test('allows explicit Ollama LAN HTTP while rejecting other unsafe endpoint forms', () => {
   assert.throws(
     () => normalizeProviderBaseUrl(profile('openai-compatible'), 'ftp://example.test/v1'),
     /http or https/u,
@@ -50,7 +53,70 @@ test('rejects unsafe endpoint forms and non-loopback plaintext HTTP', () => {
     () => normalizeProviderBaseUrl(profile('openai-compatible'), 'http://192.0.2.10/v1'),
     /must use https/u,
   );
+  assert.equal(
+    normalizeProviderBaseUrl(profile('ollama'), 'http://192.168.10.10:11434/'),
+    'http://192.168.10.10:11434/v1',
+  );
+  assert.equal(apiKeyRequired(profile('ollama'), 'http://192.168.10.10:11434/v1'), false);
+  assert.equal(apiKeyRequired(profile('openai-compatible'), 'https://example.test/v1'), true);
+  assert.match(
+    labelingTransportWarning(profile('ollama'), 'http://192.168.10.10:11434/v1') ?? '',
+    /without TLS encryption/u,
+  );
+  assert.equal(labelingTransportWarning(profile('ollama'), 'https://ollama.example.test/v1'), undefined);
+  assert.equal(labelingTransportWarning(profile('openai-compatible'), 'http://192.168.10.10/v1'), undefined);
   assert.equal(normalizeProviderBaseUrl(profile('openai-compatible'), 'https://example.test/v1/'), 'https://example.test/v1');
+  assert.equal(
+    normalizeProviderBaseUrl(profile('openai-compatible'), 'https://example.test/api/@scope'),
+    'https://example.test/api/@scope',
+  );
+});
+
+test('rejects obvious Ollama metadata, link-local, and unspecified endpoints', () => {
+  for (const endpoint of [
+    'http://169.254.169.254:11434/v1',
+    'http://2852039166:11434/v1',
+    'http://0xa9fea9fe:11434/v1',
+    'http://metadata.google.internal:11434/v1',
+    'http://metadata.google.internal.:11434/v1',
+    'http://metadata.google.internal..:11434/v1',
+    'http://0.0.0.0:11434/v1',
+    'http://[::]:11434/v1',
+    'http://[fe80::1]:11434/v1',
+    'http://[::ffff:169.254.169.254]:11434/v1',
+    'http://[::ffff:0.0.0.0]:11434/v1',
+    'http://[::169.254.169.254]:11434/v1',
+    'http://[64:ff9b::169.254.169.254]:11434/v1',
+    'http://[fd00:ec2::254]:11434/v1',
+  ]) {
+    assert.throws(() => normalizeProviderBaseUrl(profile('ollama'), endpoint), /may not target/u, endpoint);
+  }
+  for (const endpoint of [
+    'ftp://192.168.10.10/ollama',
+    'http://secret@192.168.10.10:11434/v1',
+    'http://@192.168.10.10:11434/v1',
+    'http://:@192.168.10.10:11434/v1',
+    'http:@192.168.10.10:11434/v1',
+    String.raw`http:\@192.168.10.10:11434/v1`,
+    'http://192.168.10.10:11434/v1?key=secret',
+    'http://192.168.10.10:11434/v1#secret',
+    `http://192.168.10.10/${'x'.repeat(2048)}`,
+  ]) {
+    assert.throws(() => normalizeProviderBaseUrl(profile('ollama'), endpoint), endpoint);
+  }
+});
+
+test('discloses plaintext Ollama transport in the exact labeling confirmation', () => {
+  const detail = labelingConfirmationDetail({
+    profile: profile('ollama'),
+    baseUrl: 'http://192.168.10.10:11434/v1',
+    model: 'qwen:latest',
+    timeoutSeconds: 600,
+  }, '/workspace/graphoxide-out/graph.json', '/trusted/bin/graphoxide');
+  assert.match(detail, /Endpoint: http:\/\/192\.168\.10\.10:11434\/v1/u);
+  assert.match(detail, /without TLS encryption/u);
+  assert.match(detail, /Graphoxide sends up to 12 graph node labels/u);
+  assert.match(detail, /Full files and source_file metadata are not included/u);
 });
 
 test('recognizes loopback hosts without accepting lookalike DNS names', () => {
@@ -142,6 +208,7 @@ test('labels the actual graph path and replaces community labels', () => {
 test('discovers LM Studio and Ollama models from their native endpoints', () => {
   assert.equal(modelDiscoveryUrl(profile('lm-studio'), 'http://127.0.0.1:1234/v1'), 'http://127.0.0.1:1234/v1/models');
   assert.equal(modelDiscoveryUrl(profile('ollama'), 'http://127.0.0.1:11434/v1'), 'http://127.0.0.1:11434/api/tags');
+  assert.equal(modelDiscoveryUrl(profile('ollama'), 'http://192.168.10.10:11434/v1'), undefined);
   assert.deepEqual(
     parseDiscoveredModels(profile('lm-studio'), { data: [{ id: 'qwen' }, { id: 'llama' }, { id: 'qwen' }] }),
     ['llama', 'qwen'],
