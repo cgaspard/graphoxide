@@ -12,7 +12,7 @@ import { GraphoxideMcpProvider } from './mcp/provider';
 import { resolvedInvocation } from './mcp/runtime';
 import { GraphStore } from './store';
 import { communityFromArgument, GraphExplorerProvider, nodeFromArgument, ResultsProvider } from './tree';
-import { GraphVisualizer } from './visualizer';
+import { GraphVisualizer, GraphVisualizerRendererState, GraphVisualizerTestAction } from './visualizer';
 
 interface ExtensionServices {
   readonly store: GraphStore;
@@ -59,6 +59,8 @@ export interface GraphoxideExtensionApi {
     holdNextGraphPathRestart(): GraphoxideWatchRestartBarrier;
     waitForWatchRestart(previousGeneration: number): Promise<GraphoxideWatchLifecycleStatus>;
     restartWatchConcurrently(): Promise<GraphoxideWatchLifecycleStatus>;
+    visualizerState(): Promise<GraphVisualizerRendererState>;
+    visualizerAction(action: GraphVisualizerTestAction, value?: string): Promise<void>;
   };
   enableWorkspace(freshness?: 'watch' | 'save' | 'manual'): Promise<void>;
   configureFreshness(freshness: 'watch' | 'save' | 'manual'): Promise<void>;
@@ -76,7 +78,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   const visualizer = new GraphVisualizer(
     context.extensionUri,
     (id) => void revealNodeById(store, id),
-    (id) => void vscode.commands.executeCommand('graphoxide.explain', store.state?.model?.getNode(id)),
+    (id) => {
+      const node = store.state?.model?.getNode(id);
+      if (node) void vscode.commands.executeCommand('graphoxide.explain', node);
+    },
+    context.extensionMode,
   );
   const managed = new ManagedWorkspaceService(context, store, cli);
   const aiLabeling = new AiLabelingService(context, cli, store);
@@ -101,7 +107,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, codeLens),
     store.onDidChange((state) => {
       updateStatusBar(statusBar, state?.model?.snapshot.nodes.length, state?.model?.snapshot.edges.length, state?.error, cli.watching);
-      if (state?.model) visualizer.refresh(state.model);
+      visualizer.refresh(state?.model, state?.error);
     }),
     cli.onDidChangeWatch(() => updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, cli.watching)),
     managed.onDidChangeEnablement(() => mcpProvider.refresh()),
@@ -182,6 +188,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
           await Promise.all([first, second]);
           return observeWatchLifecycle(store, cli, output);
         },
+        visualizerState: () => visualizer.visualizerState(),
+        visualizerAction: (action: GraphVisualizerTestAction, value?: string) => visualizer.visualizerAction(action, value),
       },
     } : {}),
     enableWorkspace: (freshness = 'manual') => managed.enable(undefined, freshness, false),

@@ -69,10 +69,15 @@ test('stages all 133 agent artifacts for distribution', async () => {
       await readFile(path.join(process.cwd(), 'package.json'), 'utf8'),
     ) as { files?: string[] };
     assert.ok(packageJson.files?.includes('agent-assets/**'));
+    assert.ok(packageJson.files?.includes('dist/webview/**'));
+    assert.ok(packageJson.files?.includes('media/graph-visualizer.css'));
 
     const packageScript = await readFile(path.join(process.cwd(), 'scripts', 'package.mjs'), 'utf8');
     assert.match(packageScript, /stageAgentArtifacts\(agentAssetsDestination\)/u);
     assert.match(packageScript, /extension\/agent-assets/u);
+    assert.match(packageScript, /extension\/dist\/webview\/graph-visualizer\.js/u);
+    assert.match(packageScript, /extension\/media\/graph-visualizer\.css/u);
+    assert.match(packageScript, /is missing \$\{required\} or it is empty/u);
 
     const releaseWorkflow = await readFile(
       path.join(repositoryRoot, '.github', 'workflows', 'release.yml'),

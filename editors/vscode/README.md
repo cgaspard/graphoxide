@@ -90,11 +90,14 @@ The Graph Explorer groups indexed code by community, architectural importance, a
 
 The interactive graph supports:
 
-- Community-aware layout and coloring
+- A purple-first cinematic Constellation view with deterministic community territories
+- A focused Investigation Lens with truthful incoming and outgoing relationships
+- Recorded source-to-target arrows and confidence labels, glyphs, and line patterns that do not rely on color alone
 - Pan and zoom
 - Node search
 - Community and relationship filters
 - Node details, source navigation, and explanations
+- Keyboard navigation, reduced motion, forced colors, and screen-reader status updates
 - Automatic refresh when `graph.json` changes
 - Configurable display limits for very large repositories
 
@@ -102,7 +105,27 @@ The graph opens in the active editor group by default, using the available edito
 space. Run **Graphoxide: Open Interactive Graph Beside** only when you explicitly
 want the source and graph side by side.
 
-Only the highest-degree nodes are initially drawn when a graph exceeds **Graphoxide: Visualization Max Nodes**. The full graph remains available to sidebar and CLI commands.
+Only a deterministic, degree-ranked subset is drawn when a graph exceeds
+**Graphoxide: Visualization Max Nodes**; the configured value is clamped between
+25 and 5,000. The host also bounds the relationship payload sent to the webview,
+and the renderer applies additional level-of-detail limits while preserving the
+selected node and its immediate context. Omitted node and relationship counts are
+shown rather than presented as an empty result. The full graph remains available
+to sidebar and CLI commands.
+
+The focused Lens describes generic graph direction precisely without assigning
+unsupported caller, dependency, or effect semantics. It does not infer a risk
+score or reconstruct source code. Relationship provenance is shown only when the
+graph records it; known extracted, inferred, and ambiguous confidence values use
+distinct encodings, with an explicit Unspecified fallback for any other value.
+Arrows follow each relationship's recorded source and target facts, which
+Graphoxide preserves even when the graph container uses undirected compatibility
+semantics.
+
+The visual hierarchy is anchored in Graphoxide purple for selection, focus,
+active modes, and primary actions. Lavender supplies high-contrast highlights;
+cyan and teal remain secondary signals for relationship direction and recorded
+confidence, with matching arrows, patterns, glyphs, and text labels.
 
 ## Understand code in context
 
