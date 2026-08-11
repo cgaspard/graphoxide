@@ -8,7 +8,13 @@ mod site;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use graphoxide_cli::watch as watch_service;
-use std::{fs, io::Write, path::PathBuf, thread, time::Duration};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 #[derive(Parser)]
 #[command(
@@ -661,30 +667,49 @@ fn flatten_extractions(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct IncrementalGraphBudget {
     max_baseline_file_bytes: u64,
+    max_graph_materialized_bytes: usize,
+}
+
+fn graph_budget_after_pending_manifest(
+    cache_and_runs_bytes: usize,
+    pending_manifest_retained_bytes: usize,
+) -> anyhow::Result<usize> {
+    cache_and_runs_bytes
+        .checked_sub(pending_manifest_retained_bytes)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "pending manifest retains {pending_manifest_retained_bytes} bytes, exhausting the {cache_and_runs_bytes}-byte cache/run memory budget; increase --memory-budget-bytes or request a full rebuild"
+            )
+        })
 }
 
 /// Reserve baseline headroom while the fresh extraction vector is still live.
 /// The merged-graph limit is derived from the exact byte slice admitted by the
 /// capped reader, so unused baseline headroom remains available to materialization.
-fn incremental_graph_budget_after_retained_output(
+fn incremental_graph_budget_after_retained_scan(
     cache_and_runs_bytes: usize,
     retained_output_bytes: usize,
+    pending_manifest_retained_bytes: usize,
 ) -> anyhow::Result<IncrementalGraphBudget> {
-    let remaining = cache_and_runs_bytes
+    let max_graph_materialized_bytes =
+        graph_budget_after_pending_manifest(cache_and_runs_bytes, pending_manifest_retained_bytes)?;
+    let remaining = max_graph_materialized_bytes
         .checked_sub(retained_output_bytes)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "fresh extraction output retains {retained_output_bytes} bytes, exceeding the {cache_and_runs_bytes}-byte cache/run memory budget"
+                "fresh extraction output retains {retained_output_bytes} bytes and its pending manifest retains {pending_manifest_retained_bytes} bytes, exceeding the {cache_and_runs_bytes}-byte cache/run memory budget; increase --memory-budget-bytes or request a full rebuild"
             )
         })?;
     let max_baseline_file_bytes =
         remaining / graphoxide_graph::incremental::INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER;
     anyhow::ensure!(
         max_baseline_file_bytes > 0,
-        "fresh extraction output retains {retained_output_bytes} bytes of the {cache_and_runs_bytes}-byte cache/run memory budget, leaving insufficient incremental graph headroom"
+        "fresh extraction output retains {retained_output_bytes} bytes and its pending manifest retains {pending_manifest_retained_bytes} bytes of the {cache_and_runs_bytes}-byte cache/run memory budget, leaving insufficient incremental graph headroom; increase --memory-budget-bytes or request a full rebuild"
     );
     Ok(IncrementalGraphBudget {
         max_baseline_file_bytes: u64::try_from(max_baseline_file_bytes).unwrap_or(u64::MAX),
+        max_graph_materialized_bytes,
     })
 }
 
@@ -707,13 +732,14 @@ fn read_incremental_baseline(
     // loads. Do not subtract them a second time here: the graph-stage 8x
     // multiplier already includes its source-fact representation alongside
     // normalized facts, graph objects, and indexes.
-    let max_merged_materialized_bytes = cache_and_runs_bytes
+    let max_merged_materialized_bytes = budget
+        .max_graph_materialized_bytes
         .checked_sub(baseline_working_set)
         .filter(|remaining| *remaining > 0)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "incremental baseline {} requires an estimated {baseline_working_set}-byte working set, exhausting the {cache_and_runs_bytes}-byte cache/run memory budget",
-                path.display()
+                "incremental baseline {} requires an estimated {baseline_working_set}-byte working set while the pending manifest is live, exhausting the {cache_and_runs_bytes}-byte cache/run memory budget; increase --memory-budget-bytes or request a full rebuild",
+                path.display(),
             )
         })?;
     Ok((admitted.graph, max_merged_materialized_bytes))
@@ -791,6 +817,258 @@ fn stale_local_sources(
         stale.insert(source_candidate);
     }
     stale.into_iter().collect()
+}
+
+fn normalized_local_source_identity(root: &Path, source: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let candidate = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        if source
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return None;
+        }
+        root.join(source)
+    };
+    let candidate = fs::canonicalize(&candidate).unwrap_or(candidate);
+    candidate.starts_with(&root).then_some(candidate)
+}
+
+const BASELINE_REPRESENTATION_DIAGNOSTIC_PATH_MAX_BYTES: usize = 256;
+
+fn bounded_baseline_representation_source(source: &str) -> String {
+    let mut end = source
+        .len()
+        .min(BASELINE_REPRESENTATION_DIAGNOSTIC_PATH_MAX_BYTES);
+    while !source.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let sample = if end < source.len() {
+        format!("{}…", &source[..end])
+    } else {
+        source.to_owned()
+    };
+    format!("{sample:?}")
+}
+
+fn baseline_node_is_structural(node: &graphoxide_core::Node) -> bool {
+    node.extra
+        .get("_origin")
+        .and_then(serde_json::Value::as_str)
+        .and_then(graphoxide_graph::origin_is_structural)
+        .unwrap_or_else(|| {
+            node.source_location.as_deref().is_some_and(|location| {
+                let mut chars = location.chars();
+                chars.next() == Some('L') && chars.next().is_some_and(|ch| ch.is_ascii_digit())
+            })
+        })
+}
+
+fn baseline_ambiguous_representation_evidence(
+    baseline: &graphoxide_core::KnowledgeGraph,
+    detection: &graphoxide_extract::detect::DetectResult,
+    root: &Path,
+) -> (
+    std::collections::BTreeSet<PathBuf>,
+    std::collections::BTreeSet<PathBuf>,
+) {
+    let current_code_ts = detection
+        .files
+        .get(graphoxide_extract::detect::FileType::Code.as_str())
+        .into_iter()
+        .flatten()
+        .map(Path::new)
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+        })
+        .filter_map(|path| normalized_local_source_identity(root, path))
+        .collect::<std::collections::BTreeSet<_>>();
+    let current_mpeg_ts = detection
+        .files
+        .get(graphoxide_extract::detect::FileType::Video.as_str())
+        .into_iter()
+        .flatten()
+        .map(Path::new)
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+        })
+        .filter_map(|path| normalized_local_source_identity(root, path))
+        .collect::<std::collections::BTreeSet<_>>();
+    if current_code_ts.is_empty() && current_mpeg_ts.is_empty() {
+        return (
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        );
+    }
+    let mut representations = std::collections::BTreeMap::<PathBuf, (bool, bool)>::new();
+    for node in &baseline.nodes {
+        let Some(identity) = normalized_local_source_identity(root, Path::new(&node.source_file))
+        else {
+            continue;
+        };
+        if !current_code_ts.contains(&identity) && !current_mpeg_ts.contains(&identity) {
+            continue;
+        }
+        let representation = representations.entry(identity).or_default();
+        if node.extra.get("type").and_then(serde_json::Value::as_str) == Some("format_inventory")
+            && node.extra.get("format").and_then(serde_json::Value::as_str)
+                == Some("mpeg_transport_stream")
+        {
+            representation.0 = true;
+        } else if baseline_node_is_structural(node) {
+            representation.1 = true;
+        }
+    }
+    let needs_rebuild = current_code_ts
+        .iter()
+        .filter(|identity| {
+            let (has_mpeg, has_code) = representations.get(*identity).copied().unwrap_or_default();
+            has_mpeg || !has_code
+        })
+        .chain(current_mpeg_ts.iter().filter(|identity| {
+            let (has_mpeg, has_code) = representations.get(*identity).copied().unwrap_or_default();
+            !has_mpeg || has_code
+        }))
+        .cloned()
+        .collect();
+    let ownership_conflicts = current_code_ts
+        .iter()
+        .filter(|identity| {
+            representations
+                .get(*identity)
+                .is_some_and(|(has_mpeg, _)| *has_mpeg)
+        })
+        .chain(current_mpeg_ts.iter().filter(|identity| {
+            representations
+                .get(*identity)
+                .is_some_and(|(_, has_code)| *has_code)
+        }))
+        .cloned()
+        .collect();
+    (needs_rebuild, ownership_conflicts)
+}
+
+fn ensure_incremental_baseline_representation_is_verified(
+    baseline: &graphoxide_core::KnowledgeGraph,
+    detection: &graphoxide_extract::detect::DetectResult,
+    ownership_reset_sources: &[PathBuf],
+    rebuilt_sources: &[PathBuf],
+    root: &Path,
+) -> anyhow::Result<()> {
+    let verified_resets = ownership_reset_sources
+        .iter()
+        .filter_map(|path| normalized_local_source_identity(root, path))
+        .collect::<std::collections::BTreeSet<_>>();
+    let rebuilt = rebuilt_sources
+        .iter()
+        .filter_map(|path| normalized_local_source_identity(root, path))
+        .collect::<std::collections::BTreeSet<_>>();
+    let verified_rebuild_or_exclusion = rebuilt
+        .union(&verified_resets)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let (needs_rebuild, ownership_conflicts) =
+        baseline_ambiguous_representation_evidence(baseline, detection, root);
+    let unverified_rebuild = needs_rebuild
+        .difference(&verified_rebuild_or_exclusion)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let unverified_reset = ownership_conflicts
+        .difference(&verified_resets)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let unverified = unverified_rebuild
+        .union(&unverified_reset)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(first) = unverified.first() {
+        let first = first.strip_prefix(root).unwrap_or(first).to_string_lossy();
+        anyhow::bail!(
+            "committed graph disagrees with the current TypeScript/MPEG representation for {} source(s) without a verified structural rebuild or ownership reset; first source: {}; refusing incremental publication; rerun with --force for a Full Rebuild",
+            unverified.len(),
+            bounded_baseline_representation_source(&first)
+        );
+    }
+    Ok(())
+}
+
+fn gate_baseline_representation_resets(
+    baseline: &graphoxide_core::KnowledgeGraph,
+    detection: &graphoxide_extract::detect::DetectResult,
+    reset_candidates: &[PathBuf],
+    rebuilt_sources: &[PathBuf],
+    root: &Path,
+    preserve_all_candidates: bool,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut authorized = reset_candidates
+        .iter()
+        .chain(rebuilt_sources)
+        .filter_map(|source| normalized_local_source_identity(root, source))
+        .collect::<std::collections::BTreeSet<_>>();
+    let (needs_rebuild, ownership_conflicts) =
+        baseline_ambiguous_representation_evidence(baseline, detection, root);
+    authorized.retain(|identity| ownership_conflicts.contains(identity));
+    let mut resets = if preserve_all_candidates {
+        reset_candidates.to_vec()
+    } else {
+        Vec::new()
+    };
+    resets.extend(authorized);
+    resets.sort();
+    resets.dedup();
+    let detected_kinds = detection
+        .files
+        .iter()
+        .filter(|(kind, _)| matches!(kind.as_str(), "code" | "video"))
+        .flat_map(|(kind, paths)| {
+            paths.iter().filter_map(|path| {
+                let path = Path::new(path);
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+                    .then(|| {
+                        normalized_local_source_identity(root, path)
+                            .map(|identity| (identity, kind.as_str()))
+                    })
+                    .flatten()
+            })
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let verified_rebuilds = rebuilt_sources
+        .iter()
+        .filter_map(|source| normalized_local_source_identity(root, source))
+        .filter(|identity| needs_rebuild.contains(identity))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut failed_rechecks = std::collections::BTreeSet::new();
+    for identity in resets.iter().chain(&verified_rebuilds) {
+        let Some(expected) = detected_kinds.get(identity) else {
+            continue;
+        };
+        let verified = graphoxide_extract::detect::classify_ambiguous_typescript_file_checked(
+            identity, identity,
+        )
+        .is_ok_and(|actual| actual.as_str() == *expected);
+        if !verified {
+            failed_rechecks.insert(identity.clone());
+        }
+    }
+    if let Some(first) = failed_rechecks.first() {
+        let source = first.strip_prefix(root).unwrap_or(first).to_string_lossy();
+        anyhow::bail!(
+            "extension-ambiguous TypeScript/MPEG representation changed after extraction for {} source(s); first source: {}; graph and manifest were not changed; retry the operation or rerun with --force for a Full Rebuild",
+            failed_rechecks.len(),
+            bounded_baseline_representation_source(&source)
+        );
+    }
+    Ok(resets)
 }
 
 fn emit_build_timing(
@@ -1283,6 +1561,7 @@ fn run_project_build_with_cancellation(
     }
     let mut extractions = scan.extractions;
     let rebuilt_sources = scan.rebuilt_sources;
+    let mut ownership_prune_sources = scan.ownership_prune_sources;
     let pending_manifest = scan.pending_manifest;
     let mut rebuilt_provider_sources = Vec::new();
     if let Some(dsn) = postgres.as_deref() {
@@ -1302,10 +1581,14 @@ fn run_project_build_with_cancellation(
     rebuilt_provider_sources.dedup();
     let retained_output_bytes = graphoxide_extract::extractions_retained_bytes(&extractions)?;
     debug_assert!(retained_output_bytes >= scan.retained_output_bytes);
+    let pending_manifest_retained_bytes = scan.pending_manifest_retained_bytes;
+    let graph_budget_without_baseline =
+        graph_budget_after_pending_manifest(graph_memory_budget, pending_manifest_retained_bytes)?;
     let (previous, graph_materialization_budget) = if incremental_mode {
-        let budget = incremental_graph_budget_after_retained_output(
+        let budget = incremental_graph_budget_after_retained_scan(
             graph_memory_budget,
             retained_output_bytes,
+            pending_manifest_retained_bytes,
         )?;
         let (previous, materialization_budget) =
             read_incremental_baseline(&output, graph_memory_budget, budget)?;
@@ -1314,32 +1597,56 @@ fn run_project_build_with_cancellation(
         // A forced/full rebuild may recover from an unreadable or
         // over-budget baseline; community remapping is best-effort in
         // that mode and never weakens the new build's own bound.
-        incremental_graph_budget_after_retained_output(graph_memory_budget, retained_output_bytes)
-            .ok()
-            .and_then(|budget| read_incremental_baseline(&output, graph_memory_budget, budget).ok())
-            .filter(|(_, materialization_budget)| {
-                optional_baseline_leaves_full_graph_headroom(
-                    retained_output_bytes,
-                    *materialization_budget,
-                )
-            })
-            .map_or((None, graph_memory_budget), |(previous, budget)| {
-                (Some(previous), budget)
-            })
+        incremental_graph_budget_after_retained_scan(
+            graph_memory_budget,
+            retained_output_bytes,
+            pending_manifest_retained_bytes,
+        )
+        .ok()
+        .and_then(|budget| read_incremental_baseline(&output, graph_memory_budget, budget).ok())
+        .filter(|(_, materialization_budget)| {
+            optional_baseline_leaves_full_graph_headroom(
+                retained_output_bytes,
+                *materialization_budget,
+            )
+        })
+        .map_or(
+            (None, graph_budget_without_baseline),
+            |(previous, budget)| (Some(previous), budget),
+        )
     } else {
-        (None, graph_memory_budget)
+        (None, graph_budget_without_baseline)
     };
-    let live_sources = scan
-        .detection
+    if incremental_mode && let Some(baseline) = previous.as_ref() {
+        ownership_prune_sources = gate_baseline_representation_resets(
+            baseline,
+            &scan.detection,
+            &ownership_prune_sources,
+            &rebuilt_sources,
+            &path,
+            code_only,
+        )?;
+        ensure_incremental_baseline_representation_is_verified(
+            baseline,
+            &scan.detection,
+            &ownership_prune_sources,
+            &rebuilt_sources,
+            &path,
+        )?;
+    }
+    let scan_detection = scan.detection;
+    let live_sources = scan_detection
         .files
         .values()
         .flatten()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let prune_sources = previous
+    let mut prune_sources = previous
         .as_ref()
         .map(|graph| stale_local_sources(graph, &path, &live_sources))
         .unwrap_or_default();
+    prune_sources.sort();
+    prune_sources.dedup();
     let build_started = std::time::Instant::now();
     if no_cluster {
         graphoxide_graph::disambiguate_file_labels_in_extractions(&mut extractions);
@@ -1348,12 +1655,15 @@ fn run_project_build_with_cancellation(
             let baseline = previous
                 .as_ref()
                 .expect("incremental mode loads a required baseline");
-            extractions = vec![graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            extractions = vec![graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_ownership_resets_and_materialization_limit(
                         fresh,
                         baseline,
                         &rebuilt_sources,
                         &rebuilt_provider_sources,
-                        &prune_sources,
+                        graphoxide_graph::incremental::IncrementalBaselinePrunes {
+                            deletion_sources: &prune_sources,
+                            ownership_reset_sources: &ownership_prune_sources,
+                        },
                         Some(&path),
                         graph_materialization_budget,
                     )?];
@@ -1446,12 +1756,15 @@ fn run_project_build_with_cancellation(
         let baseline = previous
             .as_ref()
             .expect("incremental mode loads a required baseline");
-        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_ownership_resets_and_materialization_limit(
                     fresh,
                     baseline,
                     &rebuilt_sources,
                     &rebuilt_provider_sources,
-                    &prune_sources,
+                    graphoxide_graph::incremental::IncrementalBaselinePrunes {
+                        deletion_sources: &prune_sources,
+                        ownership_reset_sources: &ownership_prune_sources,
+                    },
                     Some(&path),
                     graph_materialization_budget,
                 )?;
@@ -2705,17 +3018,18 @@ fn watch(
         }
         changed.sort();
         changed.dedup();
-        let code_changes = changed
-            .iter()
-            .filter(|changed| {
-                graphoxide_extract::detect::classify_file(changed)
-                    == Some(graphoxide_extract::detect::FileType::Code)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if !code_changes.is_empty() {
+        let mut structural_changes = Vec::new();
+        let mut has_notify_only_change = false;
+        for changed in &changed {
+            if watch_change_requires_structural_rebuild(changed) {
+                structural_changes.push(changed.clone());
+            } else {
+                has_notify_only_change = true;
+            }
+        }
+        if !structural_changes.is_empty() {
             let options = watch_service::RebuildOptions {
-                changed_paths: Some(code_changes),
+                changed_paths: Some(structural_changes),
                 output_directory: Some(output_directory.clone()),
                 force,
                 no_cluster,
@@ -2736,13 +3050,22 @@ fn watch(
                 Err(error) => eprintln!("[graphoxide] rebuild failed: {error}"),
             }
         }
-        if changed.iter().any(|changed| {
-            graphoxide_extract::detect::classify_file(changed)
-                != Some(graphoxide_extract::detect::FileType::Code)
-        }) {
+        if has_notify_only_change {
             watch_service::notify_only_in(&output_directory)?;
         }
     }
+}
+
+fn watch_change_requires_structural_rebuild(path: &std::path::Path) -> bool {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+    {
+        return true;
+    }
+    graphoxide_extract::detect::classify_file(path)
+        == Some(graphoxide_extract::detect::FileType::Code)
 }
 
 /// Execute one admitted watch rebuild. The filesystem-notification loop above
@@ -3974,16 +4297,18 @@ fn rebuild_isolated_pass(
         .warnings
         .extend(scan.runtime_cache_diagnostics.iter().cloned());
     telemetry.warnings.extend(scan.warnings.iter().cloned());
-    let live_sources = scan
-        .detection
+    let scan_detection = scan.detection;
+    let live_sources = scan_detection
         .files
         .values()
         .flatten()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     let scan_retained_output_bytes = scan.retained_output_bytes;
+    let pending_manifest_retained_bytes = scan.pending_manifest_retained_bytes;
     let extractions = scan.extractions;
     let rebuilt_sources = scan.rebuilt_sources;
+    let mut ownership_prune_sources = scan.ownership_prune_sources;
     let pending_manifest = scan.pending_manifest;
     let mut result = watch_service::RebuildResult {
         status: watch_service::RebuildStatus::Rebuilt,
@@ -4023,7 +4348,22 @@ fn rebuild_isolated_pass(
             runtime_work,
         }
     };
-    if telemetry.files.changed == 0 && telemetry.files.deleted == 0 && output.is_file() {
+    let mut unchanged_candidate = telemetry.files.changed == 0
+        && telemetry.files.deleted == 0
+        && ownership_prune_sources.is_empty()
+        && output.is_file();
+    let needs_ambiguous_baseline_audit = scan_detection
+        .files
+        .iter()
+        .filter(|(kind, _)| matches!(kind.as_str(), "code" | "video"))
+        .flat_map(|(_, paths)| paths)
+        .map(Path::new)
+        .any(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+        });
+    if unchanged_candidate && !needs_ambiguous_baseline_audit {
         pending_manifest.commit()?;
         watch_service::clear_needs_update(output_directory)?;
         result.status = watch_service::RebuildStatus::Unchanged;
@@ -4042,31 +4382,66 @@ fn rebuild_isolated_pass(
     let graph_memory_budget = runtime_config.memory_budget().cache_and_runs_bytes;
     let retained_output_bytes = graphoxide_extract::extractions_retained_bytes(&extractions)?;
     debug_assert_eq!(retained_output_bytes, scan_retained_output_bytes);
+    let graph_budget_without_baseline =
+        graph_budget_after_pending_manifest(graph_memory_budget, pending_manifest_retained_bytes)?;
     let (previous, graph_materialization_budget) = if output.is_file() {
-        let budget = incremental_graph_budget_after_retained_output(
+        let budget = incremental_graph_budget_after_retained_scan(
             graph_memory_budget,
             retained_output_bytes,
+            pending_manifest_retained_bytes,
         )?;
         let (previous, materialization_budget) =
             read_incremental_baseline(&output, graph_memory_budget, budget)?;
         (Some(previous), materialization_budget)
     } else {
-        (None, graph_memory_budget)
+        (None, graph_budget_without_baseline)
     };
-    let prune_sources = previous
+    if let Some(baseline) = previous.as_ref() {
+        ownership_prune_sources = gate_baseline_representation_resets(
+            baseline,
+            &scan_detection,
+            &ownership_prune_sources,
+            &rebuilt_sources,
+            path,
+            false,
+        )?;
+        ensure_incremental_baseline_representation_is_verified(
+            baseline,
+            &scan_detection,
+            &ownership_prune_sources,
+            &rebuilt_sources,
+            path,
+        )?;
+        unchanged_candidate = telemetry.files.changed == 0
+            && telemetry.files.deleted == 0
+            && ownership_prune_sources.is_empty()
+            && output.is_file();
+    }
+    if unchanged_candidate {
+        pending_manifest.commit()?;
+        watch_service::clear_needs_update(output_directory)?;
+        result.status = watch_service::RebuildStatus::Unchanged;
+        return Ok(finish(result, telemetry, runtime_telemetry));
+    }
+    let mut prune_sources = previous
         .as_ref()
         .map(|graph| stale_local_sources(graph, path, &live_sources))
         .unwrap_or_default();
+    prune_sources.sort();
+    prune_sources.dedup();
     let build_started = std::time::Instant::now();
     let (staged_extractions, build_options, normalization_root) = if let Some(baseline) = &previous
     {
         let fresh = flatten_extractions(extractions);
-        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_ownership_resets_and_materialization_limit(
             fresh,
             baseline,
             &rebuilt_sources,
             &[],
-            &prune_sources,
+            graphoxide_graph::incremental::IncrementalBaselinePrunes {
+                deletion_sources: &prune_sources,
+                ownership_reset_sources: &ownership_prune_sources,
+            },
             Some(path),
             graph_materialization_budget,
         )?;
@@ -4897,11 +5272,11 @@ fn load_learning_overlay(
 mod tests {
     use super::{
         annotate_query_context, audit_report, format_capability_output, format_god_nodes,
-        incremental_graph_budget_after_retained_output, load_learning_overlay,
+        incremental_graph_budget_after_retained_scan, load_learning_overlay,
         optional_baseline_leaves_full_graph_headroom, read_incremental_baseline,
-        relevant_watch_paths, run_project_build_with_cancellation, stale_local_sources, Cli,
-        Command, IncrementalGraphBudget, ProjectBuildOptions, ProjectBuildWorkflow,
-        RuntimeIoBackendArg, RuntimeOptions,
+        relevant_watch_paths, run_project_build_with_cancellation, stale_local_sources,
+        watch_change_requires_structural_rebuild, Cli, Command, IncrementalGraphBudget,
+        ProjectBuildOptions, ProjectBuildWorkflow, RuntimeIoBackendArg, RuntimeOptions,
     };
     use clap::Parser;
     use std::path::{Path, PathBuf};
@@ -4963,6 +5338,27 @@ mod tests {
             relevant_watch_paths(root, paths),
             vec![root.join("src/main.rs"), root.join("docs/guide.md")]
         );
+    }
+
+    #[test]
+    fn watch_dispatches_confirmed_mpeg_ts_as_a_structural_change() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let media = temp.path().join("segment.ts");
+        let mut packet = [0xff; 188];
+        packet[..4].copy_from_slice(&[0x47, 0x40, 0x00, 0x10]);
+        std::fs::write(&media, packet.repeat(5)).expect("write MPEG transport stream");
+        assert!(watch_change_requires_structural_rebuild(&media));
+
+        let code = temp.path().join("main.ts");
+        std::fs::write(&code, b"export const answer = 42;\n").expect("write TypeScript");
+        assert!(watch_change_requires_structural_rebuild(&code));
+        assert!(watch_change_requires_structural_rebuild(
+            &temp.path().join("deleted.ts")
+        ));
+
+        let video = temp.path().join("clip.mp4");
+        std::fs::write(&video, b"not relevant to structural extraction").expect("write video");
+        assert!(!watch_change_requires_structural_rebuild(&video));
     }
 
     #[test]
@@ -5387,14 +5783,15 @@ mod tests {
 
     #[test]
     fn incremental_budget_charges_fresh_output_before_baseline_admission() {
-        let after_fresh = incremental_graph_budget_after_retained_output(2_000, 400)
+        let after_fresh = incremental_graph_budget_after_retained_scan(2_000, 400, 600)
             .expect("fresh output leaves graph headroom");
-        assert_eq!(after_fresh.max_baseline_file_bytes, 200);
-        let error = incremental_graph_budget_after_retained_output(2_000, 1_999)
+        assert_eq!(after_fresh.max_baseline_file_bytes, 125);
+        assert_eq!(after_fresh.max_graph_materialized_bytes, 1_400);
+        let error = incremental_graph_budget_after_retained_scan(2_000, 400, 1_599)
             .expect_err("one byte cannot hold the baseline and merged graph");
-        assert!(error
-            .to_string()
-            .contains("insufficient incremental graph headroom"));
+        let error = error.to_string();
+        assert!(error.contains("insufficient incremental graph headroom"));
+        assert!(error.contains("pending manifest retains 1599 bytes"));
 
         assert!(
             optional_baseline_leaves_full_graph_headroom(1_000, 8_000),
@@ -5404,6 +5801,27 @@ mod tests {
             !optional_baseline_leaves_full_graph_headroom(1_000, 7_999),
             "an otherwise in-budget full graph must skip optional remapping when the loaded baseline removes required headroom"
         );
+
+        let directory = tempfile::tempdir().expect("temporary baseline directory");
+        let graph_path = directory.path().join("graph.json");
+        graphoxide_core::write_json_atomic(
+            &graph_path,
+            &serde_json::json!({"nodes": [], "links": [], "hyperedges": []}),
+            true,
+        )
+        .expect("write tiny baseline");
+        let error = read_incremental_baseline(
+            &graph_path,
+            2_000,
+            IncrementalGraphBudget {
+                max_baseline_file_bytes: 2_000,
+                max_graph_materialized_bytes: 1,
+            },
+        )
+        .expect_err("post-read baseline working set must fit");
+        let error = error.to_string();
+        assert!(error.contains("increase --memory-budget-bytes"), "{error}");
+        assert!(error.contains("request a full rebuild"), "{error}");
     }
 
     #[test]
@@ -5539,6 +5957,307 @@ mod tests {
     }
 
     #[test]
+    fn isolated_reverse_aba_aborts_then_force_repairs_without_losing_unrelated_semantics() {
+        for no_cluster in [false, true] {
+            let project = tempfile::tempdir().expect("temporary project");
+            let main = project.path().join("main.ts");
+            let segment = project.path().join("segment.ts");
+            let code = b"export const phantom = 42;\n";
+            std::fs::write(
+                &main,
+                b"import { phantom } from './segment';\nexport const main = phantom;\n",
+            )
+            .expect("write importer");
+            std::fs::write(&segment, code).expect("write initial TypeScript");
+            let output = project.path().join("graphoxide-out");
+            let request = |force| super::IsolatedRebuildRequest {
+                path: project.path(),
+                output_directory: &output,
+                marker_value: ".",
+                no_cluster,
+                force,
+                scope: graphoxide_cli::watch::RebuildScope::Incremental,
+                pass: 1,
+                runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+                collect_runtime_telemetry: false,
+            };
+            super::rebuild_isolated_pass(request(false)).expect("initial Code baseline");
+            let manifest_path = output.join("manifest.json");
+            let graph_path = output.join("graph.json");
+            let stale_code_manifest = std::fs::read(&manifest_path).expect("Code manifest");
+
+            let mut media = vec![0xff; 5 * 188];
+            for packet in 0..5 {
+                let offset = packet * 188;
+                media[offset..offset + 4].copy_from_slice(&[0x47, 0x40, packet as u8, 0x10]);
+            }
+            std::fs::write(&segment, media).expect("publish MPEG generation");
+            super::rebuild_isolated_pass(request(true)).expect("publish MPEG graph generation");
+
+            let media_id =
+                graphoxide_core::make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+            let mut seeded = graphoxide_core::read_graph(&graph_path).expect("read MPEG graph");
+            assert!(seeded.nodes.iter().any(|node| node.id == media_id));
+            seeded.nodes.extend([
+                graphoxide_core::Node {
+                    id: "stale_media_semantic".into(),
+                    label: "stale media semantic".into(),
+                    file_type: "concept".into(),
+                    source_file: "segment.ts".into(),
+                    source_location: None,
+                    community: None,
+                    extra: std::collections::BTreeMap::from([(
+                        "_origin".into(),
+                        serde_json::json!("semantic"),
+                    )]),
+                },
+                graphoxide_core::Node {
+                    id: "unrelated_semantic_overlay".into(),
+                    label: "unrelated semantic overlay".into(),
+                    file_type: "concept".into(),
+                    source_file: "main.ts".into(),
+                    source_location: None,
+                    community: None,
+                    extra: std::collections::BTreeMap::from([(
+                        "_origin".into(),
+                        serde_json::json!("semantic"),
+                    )]),
+                },
+            ]);
+            seeded.links.push(graphoxide_core::Edge {
+                source: "unrelated_semantic_overlay".into(),
+                target: media_id.clone(),
+                relation: "semantic_dependency".into(),
+                confidence: graphoxide_core::Confidence::Inferred,
+                source_file: "main.ts".into(),
+                extra: std::collections::BTreeMap::from([(
+                    "_origin".into(),
+                    serde_json::json!("semantic"),
+                )]),
+            });
+            seeded.hyperedges.extend([
+                serde_json::json!({
+                    "id": "foreign_media_flow",
+                    "nodes": ["unrelated_semantic_overlay", media_id],
+                    "source_file": "main.ts",
+                    "_origin": "semantic",
+                }),
+                serde_json::json!({
+                    "id": "unrelated_overlay_flow",
+                    "nodes": ["unrelated_semantic_overlay"],
+                    "source_file": "main.ts",
+                    "_origin": "semantic",
+                }),
+            ]);
+            graphoxide_core::write_graph_atomic(&graph_path, &seeded, true)
+                .expect("seed graph-ahead semantic facts");
+            std::fs::write(&manifest_path, &stale_code_manifest)
+                .expect("restore graph-behind Code manifest");
+            std::fs::write(&segment, code).expect("restore byte-identical TypeScript");
+            let graph_before = std::fs::read(&graph_path).expect("seeded graph bytes");
+            let manifest_before = std::fs::read(&manifest_path).expect("stale manifest bytes");
+
+            let error = match super::rebuild_isolated_pass(request(false)) {
+                Ok(_) => panic!("normal reverse-ABA update must fail closed"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("committed graph disagrees"),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read(&graph_path).unwrap(), graph_before);
+            assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+
+            super::rebuild_isolated_pass(request(true)).expect("forced update repairs reverse ABA");
+            let repaired = graphoxide_core::read_graph(&graph_path).expect("read repaired graph");
+            assert!(repaired
+                .nodes
+                .iter()
+                .all(|node| { node.id != media_id && node.id != "stale_media_semantic" }));
+            assert!(repaired.nodes.iter().any(|node| {
+                node.source_file == "segment.ts"
+                    && node.extra.get("type").and_then(serde_json::Value::as_str) == Some("file")
+            }));
+            assert!(repaired
+                .nodes
+                .iter()
+                .any(|node| node.id == "unrelated_semantic_overlay"));
+            assert!(repaired
+                .links
+                .iter()
+                .all(|edge| { edge.true_source() != media_id && edge.true_target() != media_id }));
+            assert!(repaired.hyperedges.iter().all(|hyperedge| {
+                hyperedge["nodes"]
+                    .as_array()
+                    .is_none_or(|members| members.iter().all(|member| member != &media_id))
+            }));
+            assert!(repaired
+                .hyperedges
+                .iter()
+                .any(|hyperedge| hyperedge["id"] == "unrelated_overlay_flow"));
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&manifest_path).expect("read repaired manifest"),
+            )
+            .expect("decode repaired manifest");
+            assert_eq!(manifest["segment.ts"]["source_kind"], "code");
+        }
+    }
+
+    #[test]
+    fn isolated_semantic_only_code_baseline_fails_closed_then_force_repairs_structural_facts() {
+        for no_cluster in [false, true] {
+            let project = tempfile::tempdir().expect("temporary project");
+            std::fs::write(
+                project.path().join("main.ts"),
+                b"export const main = true;\n",
+            )
+            .expect("write main");
+            std::fs::write(
+                project.path().join("segment.ts"),
+                b"export const phantom = 42;\n",
+            )
+            .expect("write segment");
+            let output = project.path().join("graphoxide-out");
+            let request = |force| super::IsolatedRebuildRequest {
+                path: project.path(),
+                output_directory: &output,
+                marker_value: ".",
+                no_cluster,
+                force,
+                scope: graphoxide_cli::watch::RebuildScope::Incremental,
+                pass: 1,
+                runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
+                collect_runtime_telemetry: false,
+            };
+            super::rebuild_isolated_pass(request(false)).expect("initial Code baseline");
+            let graph_path = output.join("graph.json");
+            let manifest_path = output.join("manifest.json");
+            let mut baseline =
+                graphoxide_core::read_graph(&graph_path).expect("read initial graph");
+            let removed = baseline
+                .nodes
+                .iter()
+                .filter(|node| node.source_file == "segment.ts")
+                .map(|node| node.id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            baseline
+                .nodes
+                .retain(|node| node.source_file != "segment.ts");
+            baseline.links.retain(|edge| {
+                edge.source_file != "segment.ts"
+                    && !removed.contains(edge.true_source())
+                    && !removed.contains(edge.true_target())
+            });
+            baseline.hyperedges.retain_mut(|hyperedge| {
+                let Some(members) = hyperedge
+                    .get_mut("nodes")
+                    .and_then(serde_json::Value::as_array_mut)
+                else {
+                    return false;
+                };
+                members.retain(|member| {
+                    member
+                        .as_str()
+                        .is_none_or(|member| !removed.contains(member))
+                });
+                !members.is_empty()
+            });
+            baseline.nodes.push(graphoxide_core::Node {
+                id: "semantic_only_segment".into(),
+                label: "semantic only segment".into(),
+                file_type: "concept".into(),
+                source_file: "segment.ts".into(),
+                source_location: None,
+                community: None,
+                extra: std::collections::BTreeMap::from([(
+                    "_origin".into(),
+                    serde_json::json!("semantic"),
+                )]),
+            });
+            graphoxide_core::write_graph_atomic(&graph_path, &baseline, true)
+                .expect("write semantic-only graph");
+            let graph_before = std::fs::read(&graph_path).expect("semantic-only graph bytes");
+            let manifest_before = std::fs::read(&manifest_path).expect("Code manifest bytes");
+
+            let error = match super::rebuild_isolated_pass(request(false)) {
+                Ok(_) => panic!("unchanged Code without structural marker must fail closed"),
+                Err(error) => error,
+            };
+            let diagnostic = format!("{error:#}");
+            assert!(
+                diagnostic.contains("verified structural rebuild or ownership reset")
+                    && diagnostic.contains("rerun with --force"),
+                "{diagnostic}"
+            );
+            assert_eq!(std::fs::read(&graph_path).unwrap(), graph_before);
+            assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+
+            super::rebuild_isolated_pass(request(true))
+                .expect("force repairs missing structural representation");
+            let repaired = graphoxide_core::read_graph(&graph_path).expect("read repaired graph");
+            assert!(repaired
+                .nodes
+                .iter()
+                .any(|node| node.id == "semantic_only_segment"));
+            assert!(repaired.nodes.iter().any(|node| {
+                node.source_file == "segment.ts"
+                    && node.extra.get("type").and_then(serde_json::Value::as_str) == Some("file")
+            }));
+        }
+    }
+
+    #[test]
+    fn baseline_representation_recheck_diagnostic_is_counted_sorted_and_bounded() {
+        let project = tempfile::tempdir().expect("temporary representation project");
+        let root = std::fs::canonicalize(project.path()).expect("canonical project root");
+        for source in ["a.ts", "b.ts"] {
+            std::fs::write(root.join(source), b"export const value = true;\n")
+                .expect("write TypeScript source");
+        }
+        let detection = graphoxide_extract::detect::detect(
+            &root,
+            &graphoxide_extract::detect::DetectOptions::default(),
+        )
+        .expect("detect both TypeScript sources");
+        let inventory = |source: &str| graphoxide_core::Node {
+            id: format!("media_{source}"),
+            label: source.into(),
+            file_type: "document".into(),
+            source_file: source.into(),
+            source_location: None,
+            community: None,
+            extra: std::collections::BTreeMap::from([
+                ("type".into(), serde_json::json!("format_inventory")),
+                ("format".into(), serde_json::json!("mpeg_transport_stream")),
+            ]),
+        };
+        let baseline = graphoxide_core::KnowledgeGraph {
+            nodes: vec![inventory("a.ts"), inventory("b.ts")],
+            ..Default::default()
+        };
+        let reset_candidates = [root.join("b.ts"), root.join("a.ts")];
+        std::fs::remove_file(root.join("a.ts")).expect("remove first source after detection");
+        std::fs::remove_file(root.join("b.ts")).expect("remove second source after detection");
+
+        let error = super::gate_baseline_representation_resets(
+            &baseline,
+            &detection,
+            &reset_candidates,
+            &[],
+            &root,
+            false,
+        )
+        .expect_err("both final generation rechecks must fail as one bounded diagnostic");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("for 2 source(s)"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("first source: \"a.ts\""),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("b.ts"), "{diagnostic}");
+    }
+
+    #[test]
     fn incremental_baseline_charges_exact_admitted_generation_bytes() {
         let project = tempfile::tempdir().expect("temporary project");
         let graph_path = project.path().join("graph.json");
@@ -5547,8 +6266,10 @@ mod tests {
         bytes.extend(std::iter::repeat_n(b' ', 257));
         std::fs::write(&graph_path, &bytes).expect("write padded graph generation");
         let multiplier = graphoxide_graph::incremental::INCREMENTAL_GRAPH_WORKING_SET_MULTIPLIER;
+        let pending_manifest_retained_bytes = 333;
         let expected_remaining = 997;
-        let cache_and_runs_bytes = bytes.len() * multiplier + expected_remaining;
+        let cache_and_runs_bytes =
+            bytes.len() * multiplier + pending_manifest_retained_bytes + expected_remaining;
 
         let (graph, remaining) = read_incremental_baseline(
             &graph_path,
@@ -5556,6 +6277,8 @@ mod tests {
             IncrementalGraphBudget {
                 max_baseline_file_bytes: u64::try_from(bytes.len())
                     .expect("fixture length fits in u64"),
+                max_graph_materialized_bytes: cache_and_runs_bytes
+                    - pending_manifest_retained_bytes,
             },
         )
         .expect("load baseline within exact accounting budget");

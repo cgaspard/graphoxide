@@ -3,10 +3,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  automaticGraphUpdateArguments,
   graphBuildDecision,
   graphBuildOutputDirectory,
   workspaceGraphMutationAllowed,
 } from '../src/build';
+
+test('automatic updates retain shrink authorization until the CLI splits force semantics', () => {
+  assert.deepEqual(automaticGraphUpdateArguments('/workspace'), ['update', '/workspace', '--force']);
+});
 
 test('requires workspace trust for graph artifact mutations', () => {
   assert.equal(workspaceGraphMutationAllowed(false), false);

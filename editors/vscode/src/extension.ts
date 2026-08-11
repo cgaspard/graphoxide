@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { graphBuildDecision, GraphBuildOperation, workspaceGraphMutationAllowed } from './build';
+import { automaticGraphUpdateArguments, graphBuildDecision, GraphBuildOperation, workspaceGraphMutationAllowed } from './build';
 import { GraphoxideCli } from './cli';
 import { GraphCodeLensProvider } from './codelens';
 import { ControlCenterPanel } from './control-center';
@@ -10,6 +10,7 @@ import { ManagedWorkspaceService } from './managed';
 import { repairAbandonedRegistrations } from './mcp/installers';
 import { GraphoxideMcpProvider } from './mcp/provider';
 import { resolvedInvocation } from './mcp/runtime';
+import { GraphMutationSnapshot } from './mutation-coordinator';
 import { GraphStore } from './store';
 import { communityFromArgument, GraphExplorerProvider, nodeFromArgument, ResultsProvider } from './tree';
 import { GraphVisualizer, GraphVisualizerRendererState, GraphVisualizerTestAction } from './visualizer';
@@ -59,6 +60,19 @@ export interface GraphoxideExtensionApi {
     holdNextGraphPathRestart(): GraphoxideWatchRestartBarrier;
     waitForWatchRestart(previousGeneration: number): Promise<GraphoxideWatchLifecycleStatus>;
     restartWatchConcurrently(): Promise<GraphoxideWatchLifecycleStatus>;
+    mutationLifecycle(): GraphMutationSnapshot;
+    runUpdateConcurrently(): Promise<GraphMutationSnapshot>;
+    staleEnableFailurePreservesDisable(): Promise<boolean>;
+    resumeManagedBehindMutation(): Promise<{
+      readonly mutationBefore: GraphMutationSnapshot;
+      readonly mutationAfter: GraphMutationSnapshot;
+      readonly watch: GraphoxideWatchLifecycleStatus;
+    }>;
+    resumeManagedAcrossWatchRace(): Promise<{
+      readonly mutationBefore: GraphMutationSnapshot;
+      readonly mutationAfter: GraphMutationSnapshot;
+      readonly watch: GraphoxideWatchLifecycleStatus;
+    }>;
     visualizerState(): Promise<GraphVisualizerRendererState>;
     visualizerAction(action: GraphVisualizerTestAction, value?: string): Promise<void>;
   };
@@ -187,6 +201,123 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
           const second = cli.startWatch(folder, output.environment);
           await Promise.all([first, second]);
           return observeWatchLifecycle(store, cli, output);
+        },
+        mutationLifecycle: () => cli.mutationLifecycle(),
+        runUpdateConcurrently: async () => {
+          const before = cli.mutationLifecycle();
+          if (before.phase !== 'idle') throw new Error(`Cannot exercise concurrent updates while mutation phase is ${before.phase}.`);
+          const barrier = cli.holdNextMutationStart();
+          const first = runGraphBuild('update', services);
+          try {
+            await withDeadline(
+              barrier.waitUntilReached(),
+              10000,
+              () => `Timed out waiting for the mutation barrier; observed ${JSON.stringify(cli.mutationLifecycle())}.`,
+            );
+            await runGraphBuild('update', services);
+          } finally {
+            barrier.release();
+          }
+          await first;
+          return cli.mutationLifecycle();
+        },
+        staleEnableFailurePreservesDisable: async () => {
+          const folder = store.state?.folder ?? await store.preferredFolder(false);
+          if (!folder) throw new Error('Cannot exercise managed enablement without a workspace folder.');
+          if (managed.isEnabled(folder)) {
+            throw new Error('Stale enablement regression requires a disabled managed workspace.');
+          }
+          const barrier = cli.holdNextMutationStart();
+          const enabling = managed.enable(folder, 'manual', false);
+          try {
+            await withDeadline(
+              barrier.waitUntilReached(),
+              10000,
+              () => `Timed out waiting for the stale enablement mutation barrier; observed ${JSON.stringify(cli.mutationLifecycle())}.`,
+            );
+            await managed.disable(folder);
+            barrier.release(new Error('injected stale managed enablement failure'));
+          } finally {
+            barrier.release();
+          }
+          await enabling;
+          return managed.isEnabled(folder);
+        },
+        resumeManagedBehindMutation: async () => {
+          const folder = store.state?.folder ?? await store.preferredFolder(false);
+          if (!folder) throw new Error('Cannot exercise managed resume without a workspace folder.');
+          if (!managed.isEnabled(folder) || managed.freshness(folder) !== 'watch') {
+            throw new Error('Managed resume regression requires an enabled workspace configured for watch mode.');
+          }
+          await cli.stopWatchAndWait();
+          const mutationBefore = cli.mutationLifecycle();
+          if (mutationBefore.phase !== 'idle') {
+            throw new Error(`Cannot exercise managed resume while mutation phase is ${mutationBefore.phase}.`);
+          }
+          const barrier = cli.holdNextMutationStart();
+          const manual = runGraphBuild('update', services);
+          let resume: Promise<void> | undefined;
+          try {
+            await withDeadline(
+              barrier.waitUntilReached(),
+              10000,
+              () => `Timed out waiting for the manual-first mutation barrier; observed ${JSON.stringify(cli.mutationLifecycle())}.`,
+            );
+            resume = managed.start();
+          } finally {
+            barrier.release();
+          }
+          await Promise.all([manual, resume ?? Promise.resolve()]);
+          return {
+            mutationBefore,
+            mutationAfter: cli.mutationLifecycle(),
+            watch: observeWatchLifecycle(store, cli),
+          };
+        },
+        resumeManagedAcrossWatchRace: async () => {
+          const folder = store.state?.folder ?? await store.preferredFolder(false);
+          if (!folder) throw new Error('Cannot exercise managed resume without a workspace folder.');
+          if (!managed.isEnabled(folder) || managed.freshness(folder) !== 'watch') {
+            throw new Error('Managed resume race regression requires an enabled workspace configured for watch mode.');
+          }
+          await cli.stopWatchAndWait();
+          const mutationBefore = cli.mutationLifecycle();
+          if (mutationBefore.phase !== 'idle') {
+            throw new Error(`Cannot exercise managed resume race while mutation phase is ${mutationBefore.phase}.`);
+          }
+          const watchBarrier = managed.holdNextResumeWatchStart();
+          const resume = managed.start();
+          let mutationBarrier: ReturnType<GraphoxideCli['holdNextMutationStart']> | undefined;
+          let competing: Promise<void> | undefined;
+          try {
+            await withDeadline(
+              watchBarrier.waitUntilReached(),
+              10000,
+              () => `Timed out waiting for managed resume to reload before watch start; observed ${JSON.stringify(cli.mutationLifecycle())}.`,
+            );
+            mutationBarrier = cli.holdNextMutationStart();
+            competing = runGraphBuild('update', services);
+            await withDeadline(
+              mutationBarrier.waitUntilReached(),
+              10000,
+              () => `Timed out waiting for the competing mutation barrier; observed ${JSON.stringify(cli.mutationLifecycle())}.`,
+            );
+            watchBarrier.release();
+            await withDeadline(
+              watchBarrier.waitUntilBusyJoined(),
+              10000,
+              () => `Managed resume did not join the mutation admitted between reload and watch start; observed ${JSON.stringify(cli.mutationLifecycle())}.`,
+            );
+          } finally {
+            watchBarrier.release();
+            mutationBarrier?.release();
+          }
+          await Promise.all([resume, competing ?? Promise.resolve()]);
+          return {
+            mutationBefore,
+            mutationAfter: cli.mutationLifecycle(),
+            watch: observeWatchLifecycle(store, cli),
+          };
         },
         visualizerState: () => visualizer.visualizerState(),
         visualizerAction: (action: GraphVisualizerTestAction, value?: string) => visualizer.visualizerAction(action, value),
@@ -577,12 +708,17 @@ async function runGraphBuild(operation: GraphBuildOperation, services: Extension
     }
   }
 
-  await services.cli.run({
+  const outcome = await services.cli.runMutation({
     title: decision.progressTitle,
     folder,
     args: decision.args,
     environment,
+    mutationTarget: environment.GRAPHOXIDE_OUT,
+    mutationOrigin: 'interactive',
+    mutationLabel: operation === 'rebuild' ? 'performing a full rebuild' : `running an interactive ${operation}`,
+    suppressAutomaticOnFailure: true,
   });
+  if (outcome.kind !== 'completed') return;
   await services.store.load(folder);
   void vscode.window.showInformationMessage(decision.completionMessage);
 }
@@ -591,8 +727,12 @@ function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
   let timer: NodeJS.Timeout | undefined;
   let running = false;
   let pending = false;
+  let disposed = false;
   const update = async (): Promise<void> => {
-    if (!workspaceGraphMutationAllowed(vscode.workspace.isTrusted)) return;
+    if (disposed || !workspaceGraphMutationAllowed(vscode.workspace.isTrusted) || services.cli.watchMutationActive) {
+      pending = false;
+      return;
+    }
     if (running) {
       pending = true;
       return;
@@ -601,27 +741,45 @@ function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
     if (!folder) return;
     running = true;
     try {
-      await services.cli.run({
+      const output = services.store.managedOutput(folder);
+      // `--force` also authorizes legitimate shrink after source deletion in
+      // the current CLI. Removing it here would allow stale deleted facts.
+      const outcome = await services.cli.runMutation({
         title: 'Graphoxide: updating after save…',
         folder,
-        args: ['update', folder.uri.fsPath, '--force'],
+        args: automaticGraphUpdateArguments(folder.uri.fsPath),
         showProgress: false,
         cancellable: false,
-        environment: services.store.managedOutput(folder).environment,
+        environment: output.environment,
+        mutationTarget: output.outputDirectory,
+        mutationOrigin: 'automatic',
+        mutationLabel: 'updating the graph after save',
+        suppressAutomaticOnFailure: true,
       });
-      await services.store.load(folder);
+      if (outcome.kind === 'completed') {
+        await services.store.load(folder);
+      } else if (outcome.kind === 'busy') {
+        pending = true;
+        await services.cli.waitForMutationIdle();
+      } else {
+        pending = false;
+      }
     } catch (error) {
-      handleError(error);
+      pending = false;
+      if (!disposed && !(error instanceof vscode.CancellationError)) handleError(error);
     } finally {
       running = false;
-      if (pending) {
+      if (disposed || services.cli.watchMutationActive) {
+        pending = false;
+      } else if (pending) {
         pending = false;
         void update();
       }
     }
   };
-  return vscode.workspace.onDidSaveTextDocument((document) => {
+  const subscription = vscode.workspace.onDidSaveTextDocument((document) => {
     if (!workspaceGraphMutationAllowed(vscode.workspace.isTrusted)) return;
+    if (disposed || services.cli.watchMutationActive) return;
     const state = services.store.state;
     const configured = vscode.workspace.getConfiguration('graphoxide', document.uri).get<boolean>('updateOnSave', false);
     const managed = state ? services.managed.freshness(state.folder) === 'save' : false;
@@ -637,8 +795,21 @@ function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
     }
     if (timer) clearTimeout(timer);
     const delay = vscode.workspace.getConfiguration('graphoxide', document.uri).get<number>('updateOnSaveDelay', 1200);
-    timer = setTimeout(() => void update(), delay);
+    timer = setTimeout(() => {
+      timer = undefined;
+      void update();
+    }, delay);
   });
+  return {
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      pending = false;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      subscription.dispose();
+    },
+  };
 }
 
 async function requireFolder(store: GraphStore): Promise<vscode.WorkspaceFolder | undefined> {

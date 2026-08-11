@@ -23,6 +23,15 @@ export interface GraphBuildBlocked {
 
 export type GraphBuildDecision = GraphBuildRun | GraphBuildBlocked;
 
+/**
+ * Automatic updates must currently authorize a legitimate graph reduction
+ * after source deletion. The CLI's `--force` flag also bypasses extraction
+ * caches; keep this policy centralized until those controls are separated.
+ */
+export function automaticGraphUpdateArguments(workspacePath: string): readonly string[] {
+  return ['update', workspacePath, '--force'];
+}
+
 /** Central policy for commands and background jobs that can mutate graph artifacts. */
 export function workspaceGraphMutationAllowed(workspaceTrusted: boolean): boolean {
   return workspaceTrusted;

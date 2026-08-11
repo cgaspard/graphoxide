@@ -18,11 +18,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
 // Bump whenever a built-in extractor's persisted fact schema changes. Version
-// 30 redacts secret-bearing scalar values in generic structured facts and must
-// not replay version 29 rows that may retain raw credentials. Version 29
-// replaced OOXML, ODF, and EPUB inventory entries with bounded package-part,
-// document-structure, and internal-relationship facts.
-pub const AST_CACHE_VERSION: u32 = 30;
+// 31 distinguishes MPEG transport-stream `.ts` media from TypeScript before
+// producing facts. Version 30 redacts secret-bearing scalar values in generic
+// structured facts and must not replay version 29 rows that may retain raw
+// credentials. Version 29 replaced OOXML, ODF, and EPUB inventory entries with
+// bounded package-part, document-structure, and internal-relationship facts.
+pub const AST_CACHE_VERSION: u32 = 31;
 
 const LAST_PRE_REDACTION_AST_CACHE_VERSION: u32 = 29;
 const MAX_AST_CACHE_ROOT_ENTRIES_FOR_PURGE: usize = 1_000_000;
@@ -410,6 +411,15 @@ pub struct ManifestEntry {
     pub ast_hash: String,
     #[serde(default)]
     pub semantic_hash: String,
+    /// Discovery classification that owned the committed facts.
+    ///
+    /// This is intentionally optional for compatibility with manifests
+    /// written before classification transitions became incremental cache
+    /// evidence. A current row must match this value before it can authorize
+    /// reuse; policy-excluded legacy rows remain preservable except for the
+    /// extension-ambiguous MPEG transport-stream case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
     /// Strong generation evidence plus the raw BLAKE3 digest observed during
     /// the committed scan. This authorizes a metadata-only runtime-cache probe
     /// only while a no-follow runtime guard proves the same source generation.
@@ -2284,11 +2294,21 @@ pub fn load_manifest(root: &Path) -> Manifest {
     load_manifest_from_output(&root.join("graphoxide-out"))
 }
 pub fn load_manifest_from_output(output_dir: &Path) -> Manifest {
+    load_manifest_from_output_with_trust(output_dir).0
+}
+
+/// Legacy manifest load plus an explicit indication that the committed bytes
+/// decoded as a manifest. Callers that carry forward a graph need to
+/// distinguish a trustworthy empty manifest from missing or corrupt state.
+pub(crate) fn load_manifest_from_output_with_trust(output_dir: &Path) -> (Manifest, bool) {
     let path = output_dir.join("manifest.json");
-    fs::read(path)
+    let Some(manifest) = fs::read(path)
         .ok()
-        .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or_default()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    else {
+        return (Manifest::new(), false);
+    };
+    (manifest, true)
 }
 
 /// Result of the bounded, no-follow manifest reader used by the isolated
@@ -2306,6 +2326,10 @@ pub enum RuntimeManifestLoadStatus {
 pub struct RuntimeManifestLoad {
     pub manifest: Manifest,
     pub status: RuntimeManifestLoadStatus,
+    /// Exact wire bytes whose successfully decoded manifest remains live.
+    /// Rejected states report zero because their temporary read buffer is
+    /// dropped before this value returns to the caller.
+    pub admitted_bytes: usize,
 }
 
 /// Load the committed manifest without following a final-component link and
@@ -2320,6 +2344,7 @@ pub fn load_manifest_from_output_bounded(
     let reject = |status| RuntimeManifestLoad {
         manifest: Manifest::new(),
         status,
+        admitted_bytes: 0,
     };
     if max_bytes == 0 {
         return reject(RuntimeManifestLoadStatus::UnsafeOrUnreadable);
@@ -2421,10 +2446,12 @@ pub fn load_manifest_from_output_bounded(
         Ok(manifest) => RuntimeManifestLoad {
             manifest,
             status: RuntimeManifestLoadStatus::Loaded,
+            admitted_bytes: bytes.len(),
         },
         Err(_) => RuntimeManifestLoad {
             manifest: Manifest::new(),
             status: RuntimeManifestLoadStatus::Corrupt,
+            admitted_bytes: 0,
         },
     }
 }
@@ -3064,6 +3091,7 @@ mod tests {
         }))
         .expect("deserialize legacy manifest entry");
         assert_eq!(entry.ast_version, 0);
+        assert_eq!(entry.source_kind, None);
 
         let files = vec![("design.dot".to_owned(), source)];
         let mut manifest = Manifest::from([("design.dot".to_owned(), entry.clone())]);
@@ -3512,12 +3540,17 @@ mod tests {
                 ast_version: AST_CACHE_VERSION,
                 ast_hash: "content".into(),
                 semantic_hash: String::new(),
+                source_kind: Some("code".into()),
                 runtime_cache: None,
             },
         )]);
         save_manifest_to_output(&output, &manifest).expect("write valid manifest");
+        let valid_bytes = fs::metadata(output.join("manifest.json"))
+            .expect("valid manifest metadata")
+            .len() as usize;
         let loaded = load_manifest_from_output_bounded(&output, 16 * 1024);
         assert_eq!(loaded.status, RuntimeManifestLoadStatus::Loaded);
+        assert_eq!(loaded.admitted_bytes, valid_bytes);
         assert_eq!(
             serde_json::to_value(loaded.manifest).expect("loaded manifest JSON"),
             serde_json::to_value(manifest).expect("expected manifest JSON")
@@ -3527,6 +3560,7 @@ mod tests {
         let corrupt = load_manifest_from_output_bounded(&output, 16 * 1024);
         assert_eq!(corrupt.status, RuntimeManifestLoadStatus::Corrupt);
         assert!(corrupt.manifest.is_empty());
+        assert_eq!(corrupt.admitted_bytes, 0);
 
         let sparse = fs::OpenOptions::new()
             .write(true)
@@ -3537,6 +3571,12 @@ mod tests {
         let oversize = load_manifest_from_output_bounded(&output, 4096);
         assert_eq!(oversize.status, RuntimeManifestLoadStatus::Oversize);
         assert!(oversize.manifest.is_empty());
+        assert_eq!(oversize.admitted_bytes, 0);
+
+        fs::remove_file(output.join("manifest.json")).expect("remove sparse manifest");
+        let missing = load_manifest_from_output_bounded(&output, 4096);
+        assert_eq!(missing.status, RuntimeManifestLoadStatus::Missing);
+        assert_eq!(missing.admitted_bytes, 0);
     }
 
     #[cfg(unix)]

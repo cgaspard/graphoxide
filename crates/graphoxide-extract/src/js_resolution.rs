@@ -188,6 +188,15 @@ impl ProjectSnapshot {
         )
     }
 
+    /// Return whether already-admitted bytes belong in the JavaScript project
+    /// snapshot. MPEG transport streams share `.ts` with TypeScript, but must
+    /// never be retained as resolver source text.
+    #[must_use]
+    pub(crate) fn needs_admitted_file(path: &str, source: &[u8]) -> bool {
+        Self::needs_file(path)
+            && !crate::detect::is_mpeg_transport_stream_bytes(Path::new(path), source)
+    }
+
     /// Move a source allocation read by an I/O owner into this snapshot.
     ///
     /// An over-budget snapshot is an explicit resource error rather than a
@@ -1602,6 +1611,91 @@ pub(crate) fn is_javascript_source(source: &str) -> bool {
     ]
     .iter()
     .any(|suffix| lower.ends_with(suffix))
+}
+
+/// Remove legacy path-probe resolutions into sources whose committed code
+/// ownership was invalidated by a verified classification transition.
+/// File-level module evidence remains as an explicitly unresolved reference;
+/// symbol-level bindings are dropped because the non-code replacement cannot
+/// own exported declarations.
+pub(crate) fn invalidate_resolved_targets_for_sources(
+    extractions: &mut [Extraction],
+    invalidated_sources: &BTreeSet<String>,
+) {
+    if invalidated_sources.is_empty() {
+        return;
+    }
+    let mut sources_by_path = BTreeMap::<String, String>::new();
+    let mut sources_by_stem = BTreeMap::<String, String>::new();
+    let mut sources_by_anchor = BTreeMap::<String, String>::new();
+    for source in invalidated_sources {
+        let normalized = normalize_slashes(source);
+        let stem = normalize_slashes(
+            Path::new(&normalized)
+                .with_extension("")
+                .to_string_lossy()
+                .as_ref(),
+        );
+        sources_by_path
+            .entry(normalized.clone())
+            .or_insert_with(|| source.clone());
+        sources_by_stem
+            .entry(stem.clone())
+            .or_insert_with(|| source.clone());
+        sources_by_anchor
+            .entry(make_id(&[&stem]))
+            .or_insert_with(|| source.clone());
+    }
+    for extraction in extractions {
+        extraction.edges.retain_mut(|edge| {
+            let target_file = edge
+                .extra
+                .get("target_file")
+                .and_then(Value::as_str)
+                .map(normalize_slashes);
+            let invalidated_source = if let Some(target_file) = target_file.as_deref() {
+                // Explicit path evidence is authoritative. Do not fall back to
+                // a possibly colliding legacy anchor ID when it names another
+                // source.
+                sources_by_path.get(target_file).or_else(|| {
+                    let source_parent = Path::new(&edge.source_file)
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""));
+                    let logical_stem = normalize_slashes(
+                        lexical_normalize(
+                            &source_parent.join(target_file.trim_start_matches("./")),
+                        )
+                        .with_extension("")
+                        .to_string_lossy()
+                        .as_ref(),
+                    );
+                    sources_by_stem.get(&logical_stem)
+                })
+            } else {
+                sources_by_anchor.get(edge.true_target())
+            };
+            let Some(invalidated_source) = invalidated_source else {
+                return true;
+            };
+            if matches!(
+                edge.relation.as_str(),
+                "imports_from" | "re_exports" | "dynamic_import"
+            ) {
+                let unresolved = make_id(&[
+                    "ref",
+                    &Path::new(invalidated_source)
+                        .with_extension("")
+                        .to_string_lossy(),
+                ]);
+                edge.target = unresolved.clone();
+                edge.extra.insert("_tgt".into(), unresolved.into());
+                edge.extra.remove("target_file");
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
 fn is_resolver_metadata(source: &str) -> bool {
@@ -3178,8 +3272,102 @@ mod tests {
         classify_es_module_specifier, EsModuleSpecifier, ProjectSnapshot, ProjectSnapshotAdmission,
         ProjectSnapshotError,
     };
-    use graphoxide_core::{make_id, Extraction};
-    use std::path::Path;
+    use graphoxide_core::{make_id, Confidence, Edge, Extraction};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::Path,
+    };
+
+    #[test]
+    fn mpeg_transport_stream_is_excluded_from_project_snapshot_admission() {
+        let mut media = vec![0xff; 5 * 188];
+        for packet in 0..5 {
+            let offset = packet * 188;
+            media[offset..offset + 4].copy_from_slice(&[0x47, 0x40, packet as u8, 0x10]);
+        }
+
+        assert!(ProjectSnapshot::needs_file("public/camera/segment.ts"));
+        assert!(!ProjectSnapshot::needs_admitted_file(
+            "public/camera/segment.ts",
+            &media
+        ));
+        assert!(ProjectSnapshot::needs_admitted_file(
+            "src/main.ts",
+            b"export const main = true;\n"
+        ));
+    }
+
+    #[test]
+    fn invalidated_target_cleanup_is_path_authoritative_and_rewrites_modules_only() {
+        fn edge(source: &str, target: String, relation: &str, target_file: Option<&str>) -> Edge {
+            let mut extra = BTreeMap::new();
+            if let Some(target_file) = target_file {
+                extra.insert("target_file".into(), target_file.into());
+            }
+            Edge {
+                source: source.into(),
+                target,
+                relation: relation.into(),
+                confidence: Confidence::Extracted,
+                source_file: "src/main.ts".into(),
+                extra,
+            }
+        }
+
+        let segment_anchor = make_id(&["src/segment"]);
+        let mut extractions = vec![Extraction {
+            nodes: Vec::new(),
+            edges: vec![
+                edge(
+                    "explicit-module",
+                    segment_anchor.clone(),
+                    "imports_from",
+                    Some("segment.ts"),
+                ),
+                edge(
+                    "symbol-binding",
+                    make_id(&["src/segment", "value"]),
+                    "imports",
+                    Some("segment.ts"),
+                ),
+                edge("legacy-module", segment_anchor.clone(), "re_exports", None),
+                edge(
+                    "colliding-anchor",
+                    segment_anchor,
+                    "imports_from",
+                    Some("other.ts"),
+                ),
+            ],
+            hyperedges: Vec::new(),
+        }];
+        super::invalidate_resolved_targets_for_sources(
+            &mut extractions,
+            &BTreeSet::from(["src/segment.ts".into()]),
+        );
+
+        let edges = &extractions[0].edges;
+        assert_eq!(edges.len(), 3, "symbol-level binding must be removed");
+        let unresolved = make_id(&["ref", "src/segment"]);
+        for source in ["explicit-module", "legacy-module"] {
+            let rewritten = edges
+                .iter()
+                .find(|edge| edge.source == source)
+                .expect("module edge remains as unresolved evidence");
+            assert_eq!(rewritten.true_target(), unresolved);
+            assert!(!rewritten.extra.contains_key("target_file"));
+        }
+        let collision = edges
+            .iter()
+            .find(|edge| edge.source == "colliding-anchor")
+            .expect("path evidence protects an unrelated colliding anchor");
+        assert_eq!(
+            collision
+                .extra
+                .get("target_file")
+                .and_then(serde_json::Value::as_str),
+            Some("other.ts")
+        );
+    }
 
     fn byte_extraction(source_file: &str, source: &[u8]) -> Extraction {
         crate::engine::extract_as_bytes(

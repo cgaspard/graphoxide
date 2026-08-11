@@ -124,24 +124,35 @@ bounded queues and a resolved managed-memory budget. `--memory-budget-bytes`,
 `--io-workers`, `--compute-workers`, `--read-batch-bytes`, and `--io-backend`
 provide explicit overrides; unsupported `io-uring` requests fall back to the
 portable threaded backend and record that decision in the optional runtime
-report. It persists validated parser results under `cache/runtime-v2`; exact
+report. Without an explicit memory override, Graphoxide uses one eighth of the
+detected host or process memory ceiling, capped at 8 GiB; if the platform cannot
+report a trustworthy ceiling, it falls back to 512 MiB. It persists validated
+parser results under `cache/runtime-v2`; exact
 path, content, extractor-version, and runtime-option evidence can avoid parsing
 on a later build, while strong source-generation evidence can also avoid a
 payload read. Unsafe, stale, incomplete, or corrupt entries are treated as
-cache misses, and `--force` bypasses cache reads. The optional runtime report
+cache misses. `--force` reparses every selected source and publishes no runtime
+cache authorization; the next ordinary build reparses and safely repairs those
+entries before they can be reused. The optional runtime report
 records cache hits, misses, bypasses, rejected entries, and writes without
 changing graph bytes. Cache frames are integrity-checked for accidental damage;
 like other user-writable build outputs, they are not an authentication boundary
 against a process running as the same user. Treat `graphoxide-out` as local
 managed state: remove any copy received from an untrusted source before reusing
-it. `--force` bypasses cache reads for the current build, but fail-open cache
-write errors can leave older entries in place. `graphoxide formats --json`
+it. Older cache files may remain after a forced build, but its committed manifest
+does not authorize them for replay. `graphoxide formats --json`
 reports each registered family's actual semantic, schema, structural,
 container, or inventory-only support and its parser limits. The managed budget
 governs Graphoxide's queues and registered format-parser allowances, admits
 completed extraction facts before they enter the aggregate result, and bounds
 caches and graph staging. It is not a hard process RSS limit; discovery and
 language parsers retain their own fixed safety caps.
+
+Because `.ts` is shared by TypeScript and MPEG transport streams, Graphoxide
+uses a fixed-size packet-header probe before classification. Confirmed media is
+classified as video and represented by a schema-compatible inventory-only media
+node. It is never admitted to the TypeScript parser or JavaScript resolver;
+ordinary and near-match `.ts` source remains code.
 
 ### 2. Query the graph
 

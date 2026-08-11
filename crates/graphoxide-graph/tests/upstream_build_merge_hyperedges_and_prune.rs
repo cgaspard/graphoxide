@@ -90,7 +90,250 @@ fn deleted_file_hyperedges_are_pruned() {
     assert!(!ids.contains("he_a"));
     assert!(ids.contains("he_b"));
     assert!(ids.contains("he_global"));
+    assert_eq!(
+        graph
+            .hyperedges
+            .iter()
+            .find(|hyperedge| hyperedge["id"] == "he_global")
+            .unwrap()["nodes"],
+        json!(["b1"])
+    );
     assert!(!graph.nodes.iter().any(|node| node.id == "a1"));
+}
+
+#[test]
+fn ownership_prune_repairs_only_endpoints_that_lost_a_real_node() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("corpus");
+    fs::create_dir(&root).unwrap();
+    let graph_path = tmp.path().join("graph.json");
+    write_graph(
+        &graph_path,
+        json!([
+            {"id":"main","label":"main","file_type":"code","source_file":"main.ts"},
+            {"id":"segment_symbol","label":"phantom","file_type":"code","source_file":"segment.ts"},
+            {"id":"keep","label":"keep","file_type":"code","source_file":"keep.ts"}
+        ]),
+        json!([
+            {"source":"main","target":"segment_symbol","relation":"semantic_dependency","confidence":"INFERRED","source_file":"main.ts","_origin":"semantic"},
+            {"source":"main","target":"ref_segment","relation":"imports_from","confidence":"EXTRACTED","source_file":"main.ts"},
+            {"source":"main","target":"external_missing","relation":"mentions","confidence":"INFERRED","source_file":"main.ts","_origin":"semantic"}
+        ]),
+        json!([
+            {"id":"mixed","source_file":"main.ts","nodes":["main","segment_symbol","keep"]},
+            {"id":"unary","source_file":"main.ts","nodes":["main","segment_symbol"]},
+            {"id":"empty_after_prune","source_file":"main.ts","nodes":["segment_symbol"]},
+            {"id":"unrelated_missing","source_file":"main.ts","nodes":["main","external_missing","keep"]}
+        ]),
+    );
+    let prune = [root.join("segment.ts")];
+
+    let raw = graphoxide_graph::incremental::merge_raw_extraction(
+        &Extraction::default(),
+        &graph_path,
+        &prune,
+        Some(&root),
+    )
+    .unwrap();
+    assert!(raw.nodes.iter().all(|node| node.id != "segment_symbol"));
+    assert!(raw
+        .edges
+        .iter()
+        .all(|edge| edge.true_target() != "segment_symbol"));
+    assert!(raw
+        .edges
+        .iter()
+        .any(|edge| edge.true_target() == "ref_segment"));
+    assert!(raw
+        .edges
+        .iter()
+        .any(|edge| edge.true_target() == "external_missing"));
+    let mixed = raw
+        .hyperedges
+        .iter()
+        .find(|hyperedge| hyperedge["id"] == "mixed")
+        .unwrap();
+    assert_eq!(mixed["nodes"], json!(["main", "keep"]));
+    assert_eq!(
+        raw.hyperedges
+            .iter()
+            .find(|hyperedge| hyperedge["id"] == "unary")
+            .unwrap()["nodes"],
+        json!(["main"])
+    );
+    assert!(raw
+        .hyperedges
+        .iter()
+        .all(|hyperedge| hyperedge["id"] != "empty_after_prune"));
+    assert!(raw
+        .hyperedges
+        .iter()
+        .any(|hyperedge| hyperedge["id"] == "unrelated_missing"));
+
+    let clustered = build_merge(&[], &graph_path, &prune, Some(&root)).unwrap();
+    assert!(clustered
+        .links
+        .iter()
+        .all(|edge| edge.true_target() != "segment_symbol"));
+    let mixed = clustered
+        .hyperedges
+        .iter()
+        .find(|hyperedge| hyperedge["id"] == "mixed")
+        .unwrap();
+    assert_eq!(mixed["nodes"], json!(["main", "keep"]));
+}
+
+#[test]
+fn ownership_prune_keeps_endpoints_when_a_fresh_node_reuses_the_id() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("corpus");
+    fs::create_dir(&root).unwrap();
+    let graph_path = tmp.path().join("graph.json");
+    write_graph(
+        &graph_path,
+        json!([
+            {"id":"main","label":"main","file_type":"code","source_file":"main.ts"},
+            {"id":"shared","label":"old","file_type":"code","source_file":"segment.ts"}
+        ]),
+        json!([
+            {"source":"main","target":"shared","relation":"semantic_dependency","confidence":"INFERRED","source_file":"main.ts","_origin":"semantic"}
+        ]),
+        json!([{"id":"shared_flow","source_file":"main.ts","nodes":["main","shared"]}]),
+    );
+    let fresh = extraction(json!({
+        "nodes":[{"id":"shared","label":"replacement","file_type":"concept","source_file":"replacement.md","_origin":"semantic"}],
+        "edges":[],
+        "hyperedges":[]
+    }));
+    let prune = [root.join("segment.ts")];
+
+    let raw = graphoxide_graph::incremental::merge_raw_extraction(
+        &fresh,
+        &graph_path,
+        &prune,
+        Some(&root),
+    )
+    .unwrap();
+    assert!(raw
+        .nodes
+        .iter()
+        .any(|node| node.id == "shared" && node.source_file == "replacement.md"));
+    assert!(raw.edges.iter().any(|edge| edge.true_target() == "shared"));
+    assert!(raw
+        .hyperedges
+        .iter()
+        .any(|hyperedge| hyperedge["id"] == "shared_flow"));
+
+    let clustered = build_merge(&[fresh], &graph_path, &prune, Some(&root)).unwrap();
+    assert!(clustered
+        .nodes
+        .iter()
+        .any(|node| node.id == "shared" && node.source_file == "replacement.md"));
+    assert!(clustered
+        .links
+        .iter()
+        .any(|edge| edge.true_target() == "shared"));
+    assert!(clustered
+        .hyperedges
+        .iter()
+        .any(|hyperedge| hyperedge["id"] == "shared_flow"));
+}
+
+#[test]
+fn authoritative_ownership_reset_replaces_both_tiers_but_keeps_fresh_facts() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("corpus");
+    fs::create_dir(&root).unwrap();
+    let graph_path = tmp.path().join("graph.json");
+    write_graph(
+        &graph_path,
+        json!([
+            {"id":"main","label":"main","file_type":"code","source_file":"main.ts"},
+            {"id":"old_ast","label":"old structural","file_type":"code","source_file":"segment.ts"},
+            {"id":"old_semantic","label":"old semantic","file_type":"concept","source_file":"segment.ts","_origin":"semantic"},
+            {"id":"keep","label":"keep","file_type":"code","source_file":"keep.ts"}
+        ]),
+        json!([
+            {"source":"old_semantic","target":"keep","relation":"semantic_dependency","confidence":"INFERRED","source_file":"segment.ts","_origin":"semantic"},
+            {"source":"main","target":"old_semantic","relation":"semantic_dependency","confidence":"INFERRED","source_file":"main.ts","_origin":"semantic"},
+            {"source":"main","target":"ref_segment","relation":"imports_from","confidence":"EXTRACTED","source_file":"main.ts"}
+        ]),
+        json!([
+            {"id":"owned_semantic","source_file":"segment.ts","_origin":"semantic","nodes":["old_semantic","keep"]},
+            {"id":"foreign_multi","source_file":"main.ts","_origin":"semantic","nodes":["main","old_semantic","keep"]},
+            {"id":"foreign_unary","source_file":"main.ts","_origin":"semantic","nodes":["main","old_semantic"]},
+            {"id":"foreign_empty","source_file":"main.ts","_origin":"semantic","nodes":["old_semantic"]}
+        ]),
+    );
+    let existing = graphoxide_core::read_graph(&graph_path).unwrap();
+    let fresh = extraction(json!({
+        "nodes":[{"id":"format_inventory_mpeg_transport_stream_segment","label":"segment.ts","file_type":"document","source_file":"segment.ts","type":"format_inventory"}],
+        "edges":[{"source":"format_inventory_mpeg_transport_stream_segment","target":"ref_media","relation":"references","confidence":"EXTRACTED","source_file":"segment.ts"}],
+        "hyperedges":[{"id":"fresh_media_flow","source_file":"segment.ts","nodes":["format_inventory_mpeg_transport_stream_segment"]}]
+    }));
+    let rebuilt = [root.join("segment.ts")];
+    let ownership_resets = [root.join("segment.ts")];
+    let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_ownership_resets_and_materialization_limit(
+        fresh,
+        &existing,
+        &rebuilt,
+        &[],
+        graphoxide_graph::incremental::IncrementalBaselinePrunes {
+            deletion_sources: &[],
+            ownership_reset_sources: &ownership_resets,
+        },
+        Some(&root),
+        usize::MAX,
+    )
+    .unwrap();
+
+    assert!(merged
+        .nodes
+        .iter()
+        .all(|node| node.id != "old_ast" && node.id != "old_semantic"));
+    assert!(merged.nodes.iter().any(|node| {
+        node.id == "format_inventory_mpeg_transport_stream_segment"
+            && node.source_file == "segment.ts"
+    }));
+    assert!(merged
+        .edges
+        .iter()
+        .all(|edge| edge.true_source() != "old_semantic" && edge.true_target() != "old_semantic"));
+    assert!(merged
+        .edges
+        .iter()
+        .any(|edge| edge.true_target() == "ref_segment"));
+    assert!(merged.edges.iter().any(|edge| {
+        edge.true_source() == "format_inventory_mpeg_transport_stream_segment"
+            && edge.true_target() == "ref_media"
+    }));
+    assert!(
+        merged
+            .hyperedges
+            .iter()
+            .all(|hyperedge| hyperedge["id"] != "owned_semantic"
+                && hyperedge["id"] != "foreign_empty")
+    );
+    assert_eq!(
+        merged
+            .hyperedges
+            .iter()
+            .find(|hyperedge| hyperedge["id"] == "foreign_multi")
+            .unwrap()["nodes"],
+        json!(["main", "keep"])
+    );
+    assert_eq!(
+        merged
+            .hyperedges
+            .iter()
+            .find(|hyperedge| hyperedge["id"] == "foreign_unary")
+            .unwrap()["nodes"],
+        json!(["main"])
+    );
+    assert!(merged
+        .hyperedges
+        .iter()
+        .any(|hyperedge| hyperedge["id"] == "fresh_media_flow"));
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! still covered through the released binary.
 
 use graphoxide_cli::build_guard::{commit_build, BuildArtifact, BuildProgress};
-use graphoxide_core::{Confidence, Edge, KnowledgeGraph, Node};
+use graphoxide_core::{make_id, Confidence, Edge, KnowledgeGraph, Node};
 use graphoxide_extract::{
     cache::{check_semantic_cache, save_semantic_cache, SemanticCacheOptions},
     detect::{save_manifest, DetectedFiles, ManifestKind, SaveManifestOptions},
@@ -103,6 +103,15 @@ fn manifest_path(output_root: &Path) -> PathBuf {
 
 fn graph(output_root: &Path) -> KnowledgeGraph {
     graphoxide_core::read_graph(graph_path(output_root)).unwrap()
+}
+
+fn graph_node_value<'a>(value: &'a Value, id: &str) -> &'a Value {
+    value["nodes"]
+        .as_array()
+        .expect("graph nodes")
+        .iter()
+        .find(|node| node["id"] == id)
+        .expect("graph node")
 }
 
 fn sources(output_root: &Path) -> BTreeSet<String> {
@@ -641,7 +650,7 @@ fn default_isolated_extract_cleans_fact_runs_and_enforces_graph_stage_budget() {
     assert!(!output.status.success(), "{}", combined(&output));
     let output_text = combined(&output);
     assert!(
-        output_text.contains("isolated retained extraction output exceeds")
+        output_text.contains("isolated retained extraction output exhausted")
             || output_text.contains("graph-stage budget"),
         "{output_text}"
     );
@@ -1020,6 +1029,764 @@ fn exclusion_arguments<'a>(project: &'a Path, output: &'a Path, no_cluster: bool
         arguments.push("--no-cluster");
     }
     arguments
+}
+
+fn write_mpeg_transport_stream(path: &Path) {
+    let mut media = vec![0xff; 5 * 188];
+    for packet in 0..5 {
+        let offset = packet * 188;
+        media[offset..offset + 4].copy_from_slice(&[0x47, 0x40, packet as u8, 0x10 | packet as u8]);
+    }
+    fs::write(path, media).unwrap();
+}
+
+fn assert_mpeg_graph_resolution_integrity(graph: &KnowledgeGraph, require_unresolved_edge: bool) {
+    let media_id = make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+    let former_code_id = make_id(&["segment"]);
+    let unresolved = make_id(&["ref", "segment"]);
+    let node_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(graph.nodes.iter().any(|node| {
+        node.id == media_id
+            && node.source_file == "segment.ts"
+            && node.extra.get("format").and_then(Value::as_str) == Some("mpeg_transport_stream")
+    }));
+    assert!(!node_ids.contains(former_code_id.as_str()));
+    let module_edge = graph
+        .links
+        .iter()
+        .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from");
+    if require_unresolved_edge {
+        assert!(
+            module_edge.is_some(),
+            "raw output retains unresolved evidence"
+        );
+    }
+    if let Some(module_edge) = module_edge {
+        assert_eq!(module_edge.true_target(), unresolved);
+        assert!(!module_edge.extra.contains_key("target_file"));
+    }
+    for edge in &graph.links {
+        assert_ne!(edge.true_target(), media_id);
+        assert_ne!(
+            edge.extra.get("target_file").and_then(Value::as_str),
+            Some("segment.ts")
+        );
+        if edge.true_target() != unresolved {
+            assert!(
+                node_ids.contains(edge.true_target()),
+                "non-reference target must resolve: {edge:?}"
+            );
+        }
+    }
+}
+
+fn seed_stale_segment_semantic_facts(output_root: &Path) {
+    let path = graph_path(output_root);
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let main_file_id = make_id(&["main"]);
+    let main_member_id = {
+        let nodes = value["nodes"].as_array_mut().expect("graph nodes");
+        assert!(nodes.iter().any(|node| node["id"] == main_file_id));
+        let member = nodes
+            .iter()
+            .find(|node| {
+                node["source_file"] == "main.ts"
+                    && node["id"].as_str().is_some_and(|id| id != main_file_id)
+            })
+            .and_then(|node| node["id"].as_str())
+            .expect("main.ts member node")
+            .to_owned();
+        nodes.push(json!({
+            "id":"segment_semantic_ghost",
+            "label":"stale segment semantic fact",
+            "file_type":"concept",
+            "source_file":"segment.ts",
+            "_origin":"semantic"
+        }));
+        member
+    };
+    let edge_key = if value.get("links").is_some_and(Value::is_array) {
+        "links"
+    } else {
+        "edges"
+    };
+    value[edge_key]
+        .as_array_mut()
+        .expect("graph edges")
+        .extend([
+            json!({
+                "source":"segment_semantic_ghost",
+                "target":main_file_id,
+                "relation":"semantic_dependency",
+                "confidence":"INFERRED",
+                "source_file":"segment.ts",
+                "_origin":"semantic"
+            }),
+            json!({
+                "source":main_file_id,
+                "target":"segment_semantic_ghost",
+                "relation":"semantic_dependency",
+                "confidence":"INFERRED",
+                "source_file":"main.ts",
+                "_origin":"semantic"
+            }),
+        ]);
+    value["hyperedges"]
+        .as_array_mut()
+        .expect("graph hyperedges")
+        .extend([
+            json!({
+                "id":"segment_owned_semantic_flow",
+                "source_file":"segment.ts",
+                "_origin":"semantic",
+                "nodes":["segment_semantic_ghost", main_file_id]
+            }),
+            json!({
+                "id":"segment_foreign_multi_flow",
+                "source_file":"main.ts",
+                "_origin":"semantic",
+                "nodes":[main_file_id, "segment_semantic_ghost", main_member_id]
+            }),
+            json!({
+                "id":"segment_foreign_unary_flow",
+                "source_file":"main.ts",
+                "_origin":"semantic",
+                "nodes":[main_file_id, "segment_semantic_ghost"]
+            }),
+            json!({
+                "id":"segment_foreign_empty_flow",
+                "source_file":"main.ts",
+                "_origin":"semantic",
+                "nodes":["segment_semantic_ghost"]
+            }),
+        ]);
+    graphoxide_core::write_json_atomic(&path, &value, true).unwrap();
+}
+
+fn assert_stale_segment_semantic_facts_removed(graph: &KnowledgeGraph) {
+    assert!(graph
+        .nodes
+        .iter()
+        .all(|node| node.id != "segment_semantic_ghost"));
+    assert!(graph.links.iter().all(|edge| {
+        edge.true_source() != "segment_semantic_ghost"
+            && edge.true_target() != "segment_semantic_ghost"
+    }));
+    assert!(graph.hyperedges.iter().all(|hyperedge| {
+        hyperedge["id"] != "segment_owned_semantic_flow"
+            && hyperedge["id"] != "segment_foreign_empty_flow"
+    }));
+    let multi = graph
+        .hyperedges
+        .iter()
+        .find(|hyperedge| hyperedge["id"] == "segment_foreign_multi_flow")
+        .expect("foreign multi-member semantic flow remains");
+    assert_eq!(multi["nodes"].as_array().map(Vec::len), Some(2));
+    assert!(multi["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|member| member != "segment_semantic_ghost"));
+    let unary = graph
+        .hyperedges
+        .iter()
+        .find(|hyperedge| hyperedge["id"] == "segment_foreign_unary_flow")
+        .expect("foreign unary semantic flow remains");
+    assert_eq!(unary["nodes"].as_array().map(Vec::len), Some(1));
+    assert!(unary["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|member| member != "segment_semantic_ghost"));
+}
+
+fn seed_stale_media_endpoint_facts(output_root: &Path, media_id: &str) {
+    let path = graph_path(output_root);
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let main_file_id = make_id(&["main"]);
+    let main_member_id = value["nodes"]
+        .as_array()
+        .expect("graph nodes")
+        .iter()
+        .find(|node| {
+            node["source_file"] == "main.ts"
+                && node["id"].as_str().is_some_and(|id| id != main_file_id)
+        })
+        .and_then(|node| node["id"].as_str())
+        .expect("main.ts member node")
+        .to_owned();
+    value["nodes"]
+        .as_array_mut()
+        .expect("graph nodes")
+        .push(json!({
+            "id":"stale_media_semantic_ghost",
+            "label":"stale media semantic fact",
+            "file_type":"concept",
+            "source_file":"segment.ts",
+            "_origin":"semantic"
+        }));
+    let edge_key = if value.get("links").is_some_and(Value::is_array) {
+        "links"
+    } else {
+        "edges"
+    };
+    value[edge_key]
+        .as_array_mut()
+        .expect("graph edges")
+        .extend([
+            json!({
+                "source":main_file_id,
+                "target":media_id,
+                "relation":"semantic_dependency",
+                "confidence":"INFERRED",
+                "source_file":"main.ts",
+                "_origin":"semantic"
+            }),
+            json!({
+                "source":"stale_media_semantic_ghost",
+                "target":main_file_id,
+                "relation":"semantic_dependency",
+                "confidence":"INFERRED",
+                "source_file":"segment.ts",
+                "_origin":"semantic"
+            }),
+        ]);
+    value["hyperedges"]
+        .as_array_mut()
+        .expect("graph hyperedges")
+        .extend([
+            json!({
+                "id":"stale_media_owned_flow",
+                "source_file":"segment.ts",
+                "_origin":"semantic",
+                "nodes":["stale_media_semantic_ghost", main_file_id]
+            }),
+            json!({
+                "id":"stale_media_foreign_multi_flow",
+                "source_file":"main.ts",
+                "_origin":"semantic",
+                "nodes":[main_file_id, media_id, main_member_id]
+            }),
+            json!({
+                "id":"stale_media_foreign_unary_flow",
+                "source_file":"main.ts",
+                "_origin":"semantic",
+                "nodes":[main_file_id, media_id]
+            }),
+            json!({
+                "id":"stale_media_foreign_empty_flow",
+                "source_file":"main.ts",
+                "_origin":"semantic",
+                "nodes":[media_id]
+            }),
+        ]);
+    graphoxide_core::write_json_atomic(&path, &value, true).unwrap();
+}
+
+fn assert_stale_media_endpoint_facts_removed(graph: &KnowledgeGraph, media_id: &str) {
+    assert!(graph
+        .nodes
+        .iter()
+        .all(|node| node.id != media_id && node.id != "stale_media_semantic_ghost"));
+    assert!(graph.links.iter().all(|edge| {
+        edge.true_source() != media_id
+            && edge.true_target() != media_id
+            && edge.true_source() != "stale_media_semantic_ghost"
+            && edge.true_target() != "stale_media_semantic_ghost"
+    }));
+    assert!(graph.hyperedges.iter().all(|hyperedge| {
+        hyperedge["id"] != "stale_media_owned_flow"
+            && hyperedge["id"] != "stale_media_foreign_empty_flow"
+    }));
+    let multi = graph
+        .hyperedges
+        .iter()
+        .find(|hyperedge| hyperedge["id"] == "stale_media_foreign_multi_flow")
+        .expect("foreign multi-member media flow remains");
+    assert_eq!(multi["nodes"].as_array().map(Vec::len), Some(2));
+    assert!(multi["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|member| member != media_id));
+    let unary = graph
+        .hyperedges
+        .iter()
+        .find(|hyperedge| hyperedge["id"] == "stale_media_foreign_unary_flow")
+        .expect("foreign unary media flow remains");
+    assert_eq!(unary["nodes"].as_array().map(Vec::len), Some(1));
+    assert!(unary["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|member| member != media_id));
+}
+
+#[test]
+fn legacy_full_fresh_and_unchanged_mpeg_imports_remain_unresolved() {
+    for no_cluster in [false, true] {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(
+            &project.join("main.ts"),
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        write_mpeg_transport_stream(&project.join("segment.ts"));
+        let mut arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        arguments.push("--legacy-executor");
+
+        assert_success(&run(fixture.path(), &arguments));
+        assert_mpeg_graph_resolution_integrity(&graph(&output_root), no_cluster);
+        assert_success(&run(fixture.path(), &arguments));
+        assert_mpeg_graph_resolution_integrity(&graph(&output_root), no_cluster);
+    }
+}
+
+#[test]
+fn mpeg_inventory_is_raw_schema_valid_and_cluster_mode_stable() {
+    let fixture = TempDir::new().unwrap();
+    let project = fixture.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    write_mpeg_transport_stream(&project.join("segment.ts"));
+    let raw_output = fixture.path().join("raw-output");
+    let clustered_output = fixture.path().join("clustered-output");
+
+    assert_success(&run(
+        fixture.path(),
+        &exclusion_arguments(&project, &raw_output, true),
+    ));
+    assert_success(&run(
+        fixture.path(),
+        &exclusion_arguments(&project, &clustered_output, false),
+    ));
+
+    let raw: Value = serde_json::from_slice(&fs::read(graph_path(&raw_output)).unwrap()).unwrap();
+    let clustered: Value =
+        serde_json::from_slice(&fs::read(graph_path(&clustered_output)).unwrap()).unwrap();
+    assert_eq!(
+        graphoxide_core::validate::validate_extraction_json(&raw),
+        Vec::<String>::new(),
+        "raw MPEG inventory must satisfy the public extraction schema"
+    );
+    assert_eq!(
+        graphoxide_core::validate::validate_extraction_json(&clustered),
+        Vec::<String>::new(),
+        "clustered MPEG inventory must satisfy the public extraction schema"
+    );
+    let media_id = make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+    let raw_node = graph_node_value(&raw, &media_id);
+    let clustered_node = graph_node_value(&clustered, &media_id);
+    for field in [
+        "id",
+        "label",
+        "file_type",
+        "source_file",
+        "type",
+        "format",
+        "format_capability",
+        "parse_status",
+        "diagnostic",
+        "byte_length",
+    ] {
+        assert_eq!(
+            raw_node[field], clustered_node[field],
+            "raw/clustered MPEG inventory differs at {field}"
+        );
+    }
+    assert_eq!(raw_node["file_type"], "document");
+    assert_eq!(raw_node["format"], "mpeg_transport_stream");
+    assert_eq!(raw_node["format_capability"], "inventory_only");
+    assert_eq!(
+        manifest_value(&manifest_path(&raw_output))["segment.ts"]["source_kind"],
+        "video"
+    );
+    assert_eq!(
+        manifest_value(&manifest_path(&clustered_output))["segment.ts"]["source_kind"],
+        "video"
+    );
+}
+
+#[test]
+fn stable_mpeg_scan_preserves_same_source_semantic_overlay_in_all_modes() {
+    for (no_cluster, legacy_executor) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(
+            &project.join("main.ts"),
+            "import './segment';\nexport const main = true;\n",
+        );
+        write_mpeg_transport_stream(&project.join("segment.ts"));
+        let mut arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        if legacy_executor {
+            arguments.push("--legacy-executor");
+        }
+        assert_success(&run(fixture.path(), &arguments));
+        seed_stale_segment_semantic_facts(&output_root);
+
+        assert_success(&run(fixture.path(), &arguments));
+        let preserved = graph(&output_root);
+        assert!(preserved
+            .nodes
+            .iter()
+            .any(|node| node.id == "segment_semantic_ghost"));
+        assert!(preserved.links.iter().any(|edge| {
+            edge.source_file == "segment.ts"
+                && (edge.true_source() == "segment_semantic_ghost"
+                    || edge.true_target() == "segment_semantic_ghost")
+        }));
+        for id in [
+            "segment_owned_semantic_flow",
+            "segment_foreign_multi_flow",
+            "segment_foreign_unary_flow",
+            "segment_foreign_empty_flow",
+        ] {
+            assert!(
+                preserved
+                    .hyperedges
+                    .iter()
+                    .any(|hyperedge| hyperedge["id"] == id),
+                "legacy_executor={legacy_executor}, no_cluster={no_cluster}, missing={id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn semantic_only_mpeg_baseline_repairs_inventory_without_wiping_overlay() {
+    for (no_cluster, legacy_executor) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(&project.join("main.ts"), "export const main = true;\n");
+        write_mpeg_transport_stream(&project.join("segment.ts"));
+        let mut arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        if legacy_executor {
+            arguments.push("--legacy-executor");
+        }
+        assert_success(&run(fixture.path(), &arguments));
+        seed_stale_segment_semantic_facts(&output_root);
+        let path = graph_path(&output_root);
+        let mut semantic_only: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        semantic_only["nodes"]
+            .as_array_mut()
+            .expect("graph nodes")
+            .retain(|node| node["format"].as_str() != Some("mpeg_transport_stream"));
+        graphoxide_core::write_json_atomic(&path, &semantic_only, true).unwrap();
+
+        assert_success(&run(fixture.path(), &arguments));
+        let repaired = graph(&output_root);
+        assert!(repaired
+            .nodes
+            .iter()
+            .any(|node| node.id == "segment_semantic_ghost"));
+        assert!(repaired.nodes.iter().any(|node| {
+            node.extra.get("format").and_then(Value::as_str) == Some("mpeg_transport_stream")
+        }));
+    }
+}
+
+#[test]
+fn full_scan_repairs_graph_published_ahead_of_same_kind_video_manifest() {
+    for (no_cluster, legacy_executor) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(
+            &project.join("main.ts"),
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = project.join("segment.ts");
+        write_mpeg_transport_stream(&segment);
+        let mut arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        if legacy_executor {
+            arguments.push("--legacy-executor");
+        }
+
+        assert_success(&run(fixture.path(), &arguments));
+        let manifest_path = manifest_path(&output_root);
+        let video_manifest = fs::read(&manifest_path).expect("same-kind Video manifest bytes");
+
+        write(&segment, "export const phantom = 42;\n");
+        assert_success(&run(fixture.path(), &arguments));
+        assert!(graph(&output_root).nodes.iter().any(|node| {
+            node.source_file == "segment.ts"
+                && node.extra.get("type").and_then(Value::as_str) == Some("file")
+        }));
+        seed_stale_segment_semantic_facts(&output_root);
+        let seeded = graph(&output_root);
+        assert!(seeded
+            .nodes
+            .iter()
+            .any(|node| node.id == "segment_semantic_ghost"));
+        assert_eq!(
+            seeded
+                .hyperedges
+                .iter()
+                .filter(|hyperedge| {
+                    hyperedge["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("segment_"))
+                })
+                .count(),
+            4
+        );
+        fs::write(&manifest_path, video_manifest)
+            .expect("model graph-first/manifest-second publication failure");
+        write_mpeg_transport_stream(&segment);
+
+        assert_success(&run(fixture.path(), &arguments));
+        let repaired = graph(&output_root);
+        assert_mpeg_graph_resolution_integrity(&repaired, no_cluster);
+        assert_stale_segment_semantic_facts_removed(&repaired);
+        assert_eq!(
+            manifest_value(&manifest_path)["segment.ts"]["source_kind"],
+            "video"
+        );
+    }
+}
+
+#[test]
+fn full_mpeg_to_typescript_transition_resets_semantic_endpoints_in_all_modes() {
+    for (no_cluster, legacy_executor) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(
+            &project.join("main.ts"),
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = project.join("segment.ts");
+        write_mpeg_transport_stream(&segment);
+        let mut arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        if legacy_executor {
+            arguments.push("--legacy-executor");
+        }
+        assert_success(&run(fixture.path(), &arguments));
+        let media_id = make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+        seed_stale_media_endpoint_facts(&output_root, &media_id);
+        let seeded = graph(&output_root);
+        assert!(seeded.nodes.iter().any(|node| node.id == media_id));
+        assert!(seeded
+            .links
+            .iter()
+            .any(|edge| edge.true_target() == media_id && edge.extra.contains_key("_origin")));
+
+        write(&segment, "export const phantom = 42;\n");
+        assert_success(&run(fixture.path(), &arguments));
+        let updated = graph(&output_root);
+        let code_id = make_id(&["segment"]);
+        assert!(updated.nodes.iter().any(|node| {
+            node.id == code_id
+                && node.source_file == "segment.ts"
+                && node.extra.get("type").and_then(Value::as_str) == Some("file")
+        }));
+        let module_edge = updated
+            .links
+            .iter()
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from")
+            .expect("reverse transition keeps the fresh resolved import");
+        assert_eq!(module_edge.true_target(), code_id);
+        assert_stale_media_endpoint_facts_removed(&updated, &media_id);
+        assert_eq!(
+            manifest_value(&manifest_path(&output_root))["segment.ts"]["source_kind"],
+            "code"
+        );
+    }
+}
+
+#[test]
+fn code_only_incremental_typescript_to_mpeg_prunes_owner_in_all_merge_and_executor_modes() {
+    for (no_cluster, legacy_executor) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(
+            &project.join("main.ts"),
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = project.join("segment.ts");
+        write(&segment, "export const phantom = 42;\n");
+        let mut baseline_arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        if legacy_executor {
+            baseline_arguments.push("--legacy-executor");
+        }
+        assert_success(&run(fixture.path(), &baseline_arguments));
+        assert!(sources(&output_root).contains("segment.ts"));
+
+        write_mpeg_transport_stream(&segment);
+        let mut transition_arguments = baseline_arguments;
+        transition_arguments.push("--code-only");
+        let transition = run(fixture.path(), &transition_arguments);
+        assert_success(&transition);
+        assert!(segment.is_file(), "live MPEG source must not be deleted");
+
+        let updated = graph(&output_root);
+        let media_id = make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+        assert!(updated
+            .nodes
+            .iter()
+            .all(|node| node.source_file != "segment.ts"));
+        assert!(updated
+            .links
+            .iter()
+            .all(|edge| edge.source_file != "segment.ts"));
+        assert!(
+            updated.links.iter().all(|edge| {
+                edge.source_file != "main.ts"
+                    || (edge.true_target() != make_id(&["segment"])
+                        && edge.true_target() != media_id)
+            }),
+            "legacy_executor={legacy_executor}, no_cluster={no_cluster}, links={:?}",
+            updated.links
+        );
+        assert!(manifest_value(&manifest_path(&output_root))
+            .get("segment.ts")
+            .is_none());
+    }
+}
+
+#[test]
+fn code_only_mpeg_prunes_stale_graph_ownership_despite_valid_stale_manifest() {
+    for (no_cluster, legacy_executor, stale_video_row) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+    ] {
+        let fixture = TempDir::new().unwrap();
+        let project = fixture.path().join("project");
+        let output_root = fixture.path().join("output");
+        write(
+            &project.join("main.ts"),
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = project.join("segment.ts");
+        write(&segment, "export const phantom = 42;\n");
+        let mut arguments = exclusion_arguments(&project, &output_root, no_cluster);
+        if legacy_executor {
+            arguments.push("--legacy-executor");
+        }
+        assert_success(&run(fixture.path(), &arguments));
+
+        let manifest_path = manifest_path(&output_root);
+        let stale_manifest = if stale_video_row {
+            let mut manifest = manifest_value(&manifest_path);
+            manifest["segment.ts"]["source_kind"] = json!("video");
+            manifest
+        } else {
+            json!({})
+        };
+        graphoxide_core::write_json_atomic(&manifest_path, &stale_manifest, true).unwrap();
+        write_mpeg_transport_stream(&segment);
+        arguments.push("--code-only");
+        let transition = run(fixture.path(), &arguments);
+        assert_success(&transition);
+
+        let updated = graph(&output_root);
+        let unresolved = make_id(&["ref", "segment"]);
+        let node_ids = updated
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(updated
+            .nodes
+            .iter()
+            .all(|node| node.source_file != "segment.ts"));
+        assert!(updated
+            .links
+            .iter()
+            .all(|edge| edge.source_file != "segment.ts"));
+        let module_edge = updated
+            .links
+            .iter()
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from");
+        if no_cluster {
+            assert!(
+                module_edge.is_some(),
+                "raw output retains unresolved evidence"
+            );
+        }
+        if let Some(module_edge) = module_edge {
+            assert_eq!(module_edge.true_target(), unresolved);
+            assert!(!module_edge.extra.contains_key("target_file"));
+        }
+        for edge in &updated.links {
+            assert_ne!(
+                edge.extra.get("target_file").and_then(Value::as_str),
+                Some("segment.ts")
+            );
+            if edge.true_target() != unresolved {
+                assert!(
+                    node_ids.contains(edge.true_target()),
+                    "legacy_executor={legacy_executor}, no_cluster={no_cluster}, stale_video_row={stale_video_row}, dangling edge={edge:?}"
+                );
+            }
+        }
+        assert!(manifest_value(&manifest_path).get("segment.ts").is_none());
+    }
+}
+
+#[test]
+fn code_only_mpeg_with_untrusted_manifest_fails_closed_without_publication() {
+    for legacy_executor in [false, true] {
+        for corrupt_manifest in [false, true] {
+            let fixture = TempDir::new().unwrap();
+            let project = fixture.path().join("project");
+            let output_root = fixture.path().join("output");
+            write(&project.join("main.ts"), "export const main = true;\n");
+            let segment = project.join("segment.ts");
+            write(&segment, "export const phantom = 42;\n");
+            let mut arguments = exclusion_arguments(&project, &output_root, true);
+            if legacy_executor {
+                arguments.push("--legacy-executor");
+            }
+            assert_success(&run(fixture.path(), &arguments));
+
+            write_mpeg_transport_stream(&segment);
+            let graph_path = graph_path(&output_root);
+            let manifest_path = manifest_path(&output_root);
+            let graph_before = fs::read(&graph_path).unwrap();
+            if corrupt_manifest {
+                fs::write(&manifest_path, b"{not-json").unwrap();
+            } else {
+                fs::remove_file(&manifest_path).unwrap();
+            }
+            let manifest_before = fs::read(&manifest_path).ok();
+            arguments.push("--code-only");
+
+            let failed = run(fixture.path(), &arguments);
+            assert!(!failed.status.success(), "{}", combined(&failed));
+            let diagnostic = combined(&failed);
+            assert!(
+                diagnostic.contains("cannot safely perform a --code-only")
+                    && diagnostic.contains("full rebuild"),
+                "{diagnostic}"
+            );
+            assert_eq!(fs::read(&graph_path).unwrap(), graph_before);
+            assert_eq!(fs::read(&manifest_path).ok(), manifest_before);
+        }
+    }
 }
 
 #[test]

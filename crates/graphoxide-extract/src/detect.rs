@@ -5,7 +5,10 @@
 //! sensitive, ignored, and unreadable paths are all reported explicitly.
 
 pub use crate::format_registry::FileType;
-use crate::{cache::AST_CACHE_VERSION, format_registry::format_registry};
+use crate::{
+    cache::{Manifest, AST_CACHE_VERSION},
+    format_registry::format_registry,
+};
 use md5::{Digest as _, Md5};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -32,6 +35,77 @@ const OFFICE_MAX_MARKDOWN_BYTES: usize = 16 * 1024 * 1024;
 /// an entire source merely to decide whether a graph is likely useful.
 pub const WORD_COUNT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const PAPER_HEURISTIC_MAX_BYTES: u64 = 12_000;
+
+/// Byte width of one ISO/IEC 13818-1 MPEG transport-stream packet.
+const MPEG_TRANSPORT_STREAM_PACKET_BYTES: usize = 188;
+/// Requiring five structurally valid headers makes an accidental match in a
+/// legitimate TypeScript source vanishingly unlikely while keeping the probe
+/// fixed-size and independent of an untrusted file's length.
+const MPEG_TRANSPORT_STREAM_CONFIRMATION_PACKETS: usize = 5;
+/// A transport stream may start at any byte within one packet. The fixed probe
+/// therefore retains one less than a packet of alignment plus five complete
+/// packets, regardless of the input file's length.
+const MPEG_TRANSPORT_STREAM_PROBE_BYTES: usize = MPEG_TRANSPORT_STREAM_PACKET_BYTES - 1
+    + MPEG_TRANSPORT_STREAM_PACKET_BYTES * MPEG_TRANSPORT_STREAM_CONFIRMATION_PACKETS;
+
+/// Return whether an extension-ambiguous `.ts` input is an MPEG transport
+/// stream rather than TypeScript.
+///
+/// The discriminator performs a constant amount of work over at most the first
+/// 1,127 bytes: zero to 187 alignment bytes followed by five complete 188-byte
+/// packets. Every confirmed packet must have the MPEG sync byte, a clear
+/// transport-error bit, a non-zero adaptation-field-control value, and a
+/// structurally possible adaptation-field length. The window must also contain
+/// positive binary evidence: a definite UTF-8 error. An otherwise-valid code
+/// point truncated exactly at the fixed probe boundary is not binary evidence,
+/// and raw control bytes remain source-compatible because JavaScript comments
+/// can contain them. This accepts mid-stream continuation packets without
+/// requiring a payload-unit start while rejecting cadence-shaped valid
+/// TypeScript; it does not use file length or entropy.
+#[must_use]
+pub(crate) fn is_mpeg_transport_stream_bytes(path: &Path, source: &[u8]) -> bool {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+    {
+        return false;
+    }
+
+    let confirmation_bytes = MPEG_TRANSPORT_STREAM_PACKET_BYTES
+        .saturating_mul(MPEG_TRANSPORT_STREAM_CONFIRMATION_PACKETS);
+    let Some(max_alignment) = source.len().checked_sub(confirmation_bytes) else {
+        return false;
+    };
+    let max_alignment = max_alignment.min(MPEG_TRANSPORT_STREAM_PACKET_BYTES - 1);
+    (0..=max_alignment).any(|alignment| {
+        let window = &source[alignment..alignment + confirmation_bytes];
+        (0..MPEG_TRANSPORT_STREAM_CONFIRMATION_PACKETS).all(|packet| {
+            let offset = packet * MPEG_TRANSPORT_STREAM_PACKET_BYTES;
+            mpeg_transport_stream_packet_is_valid(
+                &window[offset..offset + MPEG_TRANSPORT_STREAM_PACKET_BYTES],
+            )
+        }) && std::str::from_utf8(window).is_err_and(|error| error.error_len().is_some())
+    })
+}
+
+fn mpeg_transport_stream_packet_is_valid(packet: &[u8]) -> bool {
+    let header = &packet[..4];
+    let adaptation_field_control = (header[3] >> 4) & 0x03;
+    if header[0] != 0x47 || header[1] & 0x80 != 0 || adaptation_field_control == 0 {
+        return false;
+    }
+    match adaptation_field_control {
+        // Payload only.
+        1 => true,
+        // Adaptation field only: its length byte must consume the rest of the
+        // fixed 188-byte packet exactly.
+        2 => packet[4] == 183,
+        // Adaptation plus payload must leave at least one payload byte.
+        3 => usize::from(packet[4]) <= MPEG_TRANSPORT_STREAM_PACKET_BYTES - 6,
+        _ => false,
+    }
+}
 
 /// Maximum bytes read from any one ignore-policy source.
 ///
@@ -308,7 +382,71 @@ pub fn classify_file(path: &Path) -> Option<FileType> {
     classify_file_at(path, path)
 }
 
-fn classify_file_at(logical_path: &Path, physical_path: &Path) -> Option<FileType> {
+/// Classify the exact bytes already admitted for a logical source without
+/// reopening its path. This is the canonical discovery-bucket mapping for
+/// manifest ownership evidence and post-discovery generation checks.
+pub(crate) fn classify_admitted_source(logical_path: &Path, source: &[u8]) -> Option<FileType> {
+    if is_package_manifest(logical_path)
+        || logical_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.to_lowercase().ends_with(".blade.php"))
+    {
+        return Some(FileType::Code);
+    }
+    let extension = lower_extension(logical_path);
+    let registry = format_registry();
+    let registered_fallback = || {
+        registry
+            .find_by_path(logical_path)
+            .map(|_| FileType::Document)
+    };
+    if extension.is_empty() {
+        return shebang_interpreter_bytes(source)
+            .and_then(|interpreter| {
+                SHEBANG_CODE_INTERPRETERS
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(&interpreter))
+                    .then_some(FileType::Code)
+            })
+            .or_else(registered_fallback);
+    }
+    if extension == "ts" && is_mpeg_transport_stream_bytes(logical_path, source) {
+        return Some(FileType::Video);
+    }
+    if registry.classify_extension(&extension) == Some(FileType::Paper) {
+        return (!is_asset_paper_path(logical_path))
+            .then_some(FileType::Paper)
+            .or_else(registered_fallback);
+    }
+    if registry.is_document_heuristic_extension(&extension) {
+        return Some(if looks_like_paper_bytes(source) {
+            FileType::Paper
+        } else {
+            FileType::Document
+        });
+    }
+    registry
+        .classify_extension(&extension)
+        .or_else(registered_fallback)
+}
+
+fn is_asset_paper_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy().to_lowercase();
+        [
+            ".imageset",
+            ".xcassets",
+            ".appiconset",
+            ".colorset",
+            ".launchimage",
+        ]
+        .iter()
+        .any(|marker| name.ends_with(marker))
+    })
+}
+
+pub(crate) fn classify_file_at(logical_path: &Path, physical_path: &Path) -> Option<FileType> {
     if is_package_manifest(logical_path)
         || logical_path
             .file_name()
@@ -327,20 +465,11 @@ fn classify_file_at(logical_path: &Path, physical_path: &Path) -> Option<FileTyp
                 .then_some(FileType::Code)
         });
     }
+    if extension == "ts" && is_mpeg_transport_stream_file(logical_path, physical_path) {
+        return Some(FileType::Video);
+    }
     if registry.classify_extension(&extension) == Some(FileType::Paper) {
-        let asset = logical_path.components().any(|component| {
-            let name = component.as_os_str().to_string_lossy().to_lowercase();
-            [
-                ".imageset",
-                ".xcassets",
-                ".appiconset",
-                ".colorset",
-                ".launchimage",
-            ]
-            .iter()
-            .any(|marker| name.ends_with(marker))
-        });
-        return (!asset).then_some(FileType::Paper);
+        return (!is_asset_paper_path(logical_path)).then_some(FileType::Paper);
     }
     if registry.is_document_heuristic_extension(&extension) {
         return Some(if looks_like_paper(physical_path) {
@@ -350,6 +479,272 @@ fn classify_file_at(logical_path: &Path, physical_path: &Path) -> Option<FileTyp
         });
     }
     registry.classify_extension(&extension)
+}
+
+/// Inspect a fixed prefix through a no-follow regular-file handle so discovery
+/// can resolve the `.ts` extension collision before assigning a file bucket.
+/// Failure to establish the positive transport-stream signature deliberately
+/// falls back to TypeScript classification.
+fn is_mpeg_transport_stream_file(logical_path: &Path, physical_path: &Path) -> bool {
+    classify_ambiguous_typescript_file_checked(logical_path, physical_path)
+        .is_ok_and(|kind| kind == FileType::Video)
+}
+
+/// Classify an extension-ambiguous `.ts` source through one bounded no-follow
+/// handle while preserving probe I/O failure as an error.
+///
+/// Discovery may deliberately treat such a failure as ordinary TypeScript,
+/// but post-extraction ownership transitions must use this checked form so a
+/// missing or unreadable generation cannot authorize destructive publication.
+pub fn classify_ambiguous_typescript_file_checked(
+    logical_path: &Path,
+    physical_path: &Path,
+) -> std::io::Result<FileType> {
+    if lower_extension(logical_path) != "ts" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "checked ambiguous-source classification requires a .ts path",
+        ));
+    }
+    let mut file = open_probe_source_nofollow(physical_path)?;
+    let mut probe = [0_u8; MPEG_TRANSPORT_STREAM_PROBE_BYTES];
+    let mut length = 0;
+    while length < probe.len() {
+        match file.read(&mut probe[length..]) {
+            Ok(0) => break,
+            Ok(read) => length = length.saturating_add(read),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(
+        if is_mpeg_transport_stream_bytes(logical_path, &probe[..length]) {
+            FileType::Video
+        } else {
+            FileType::Code
+        },
+    )
+}
+
+/// Bounded-memory inventory evidence for a positively identified MPEG `.ts`.
+///
+/// The content hash is streamed from the same no-follow handle that supplied
+/// the discriminator prefix. This lets explicit/watch extraction avoid
+/// retaining an arbitrarily large media payload while preserving manifest
+/// compatibility and deterministic inventory metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CheckedMpegTransportStreamEvidence {
+    pub byte_length: u64,
+    pub mtime: f64,
+    pub ast_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CheckedAmbiguousSourceEvidence {
+    pub kind: FileType,
+    pub byte_length: u64,
+    pub mtime: f64,
+    pub ast_hash: String,
+}
+
+/// Stream a complete `.ts` generation through a no-follow handle and bind its
+/// detector bucket plus manifest digest to the current path. Positively
+/// detected MPEG uses the stricter single-link generation proof above;
+/// ordinary TypeScript retains legacy hard-link compatibility while still
+/// comparing the opened and reopened length/mtime generation evidence.
+pub(crate) fn checked_ambiguous_source_evidence(
+    logical_path: &Path,
+    physical_path: &Path,
+) -> std::io::Result<CheckedAmbiguousSourceEvidence> {
+    checked_ambiguous_source_evidence_impl(logical_path, physical_path, None, true, |_| {})?
+        .ok_or_else(|| {
+            std::io::Error::other("checked ambiguous-source evidence unexpectedly omitted Code")
+        })
+}
+
+pub(crate) fn checked_mpeg_transport_stream_evidence(
+    logical_path: &Path,
+    physical_path: &Path,
+) -> std::io::Result<Option<CheckedMpegTransportStreamEvidence>> {
+    checked_mpeg_transport_stream_evidence_impl(logical_path, physical_path, None)
+}
+
+pub(crate) fn checked_mpeg_transport_stream_evidence_with_cancellation(
+    logical_path: &Path,
+    physical_path: &Path,
+    cancellation: &graphoxide_index_runtime::RuntimeCancellation,
+) -> std::io::Result<Option<CheckedMpegTransportStreamEvidence>> {
+    checked_mpeg_transport_stream_evidence_impl(logical_path, physical_path, Some(cancellation))
+}
+
+fn checked_mpeg_transport_stream_evidence_impl(
+    logical_path: &Path,
+    physical_path: &Path,
+    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+) -> std::io::Result<Option<CheckedMpegTransportStreamEvidence>> {
+    checked_mpeg_transport_stream_evidence_impl_with_chunk_hook(
+        logical_path,
+        physical_path,
+        cancellation,
+        |_| {},
+    )
+}
+
+fn checked_mpeg_transport_stream_evidence_impl_with_chunk_hook(
+    logical_path: &Path,
+    physical_path: &Path,
+    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+    after_chunk: impl FnMut(u64),
+) -> std::io::Result<Option<CheckedMpegTransportStreamEvidence>> {
+    if lower_extension(logical_path) != "ts" {
+        return Ok(None);
+    }
+    let evidence = checked_ambiguous_source_evidence_impl(
+        logical_path,
+        physical_path,
+        cancellation,
+        false,
+        after_chunk,
+    )?;
+    Ok(evidence.map(|evidence| CheckedMpegTransportStreamEvidence {
+        byte_length: evidence.byte_length,
+        mtime: evidence.mtime,
+        ast_hash: evidence.ast_hash,
+    }))
+}
+
+fn checked_ambiguous_source_evidence_impl(
+    logical_path: &Path,
+    physical_path: &Path,
+    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+    stream_code: bool,
+    mut after_chunk: impl FnMut(u64),
+) -> std::io::Result<Option<CheckedAmbiguousSourceEvidence>> {
+    if lower_extension(logical_path) != "ts" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "checked ambiguous-source evidence requires a .ts path",
+        ));
+    }
+    let ensure_not_cancelled = || {
+        if cancellation.is_some_and(|cancellation| cancellation.is_cancelled()) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "MPEG transport stream inventory cancelled",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    ensure_not_cancelled()?;
+    let mut file = open_probe_source_nofollow(physical_path)?;
+    let before = file.metadata()?;
+    let mut probe = [0_u8; MPEG_TRANSPORT_STREAM_PROBE_BYTES];
+    let mut length = 0;
+    while length < probe.len() {
+        match file.read(&mut probe[length..]) {
+            Ok(0) => break,
+            Ok(read) => length = length.saturating_add(read),
+            Err(error) => return Err(error),
+        }
+    }
+    let kind = if is_mpeg_transport_stream_bytes(logical_path, &probe[..length]) {
+        FileType::Video
+    } else {
+        FileType::Code
+    };
+    if kind == FileType::Code && !stream_code {
+        return Ok(None);
+    }
+    // Positive media evidence requires a strong single-link identity. Keep
+    // ordinary TypeScript hard-link compatibility while still using one held
+    // handle for its classification prefix and complete digest.
+    let opened_identity = match kind {
+        FileType::Video => Some(
+            graphoxide_index_runtime::validate_opened_regular_single_link(&file)?.ok_or_else(
+                || {
+                    std::io::Error::other(
+                        "MPEG transport stream source lacks strong generation identity",
+                    )
+                },
+            )?,
+        ),
+        _ => graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+            .ok()
+            .flatten(),
+    };
+
+    let mut digest = Md5::new();
+    digest.update(&probe[..length]);
+    let mut byte_length = u64::try_from(length).unwrap_or(u64::MAX);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        ensure_not_cancelled()?;
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        byte_length = byte_length
+            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+            .ok_or_else(|| std::io::Error::other("MPEG transport stream length overflow"))?;
+        after_chunk(byte_length);
+    }
+    ensure_not_cancelled()?;
+    let after = file.metadata()?;
+    let after_identity = match kind {
+        FileType::Video => Some(
+            graphoxide_index_runtime::validate_opened_regular_single_link(&file)?.ok_or_else(
+                || {
+                    std::io::Error::other(
+                        "MPEG transport stream source lost strong generation identity",
+                    )
+                },
+            )?,
+        ),
+        _ => graphoxide_index_runtime::validate_opened_regular_single_link(&file)
+            .ok()
+            .flatten(),
+    };
+    ensure_not_cancelled()?;
+    let reopened = open_probe_source_nofollow(physical_path)?;
+    let current = reopened.metadata()?;
+    let current_identity = match kind {
+        FileType::Video => Some(
+            graphoxide_index_runtime::validate_opened_regular_single_link(&reopened)?.ok_or_else(
+                || {
+                    std::io::Error::other(
+                        "MPEG transport stream path lacks strong generation identity",
+                    )
+                },
+            )?,
+        ),
+        _ => graphoxide_index_runtime::validate_opened_regular_single_link(&reopened)
+            .ok()
+            .flatten(),
+    };
+    let stable_metadata = before.len() == byte_length
+        && after.len() == byte_length
+        && current.len() == byte_length
+        && before.modified().ok() == after.modified().ok()
+        && before.modified().ok() == current.modified().ok();
+    let stable_strong_identity = opened_identity
+        .is_none_or(|opened| after_identity == Some(opened) && current_identity == Some(opened));
+    if !stable_metadata || !stable_strong_identity {
+        return Err(std::io::Error::other(
+            "extension-ambiguous source changed during checked manifest evidence",
+        ));
+    }
+    let mtime = after
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    Ok(Some(CheckedAmbiguousSourceEvidence {
+        kind,
+        byte_length,
+        mtime,
+        ast_hash: format!("{:x}", digest.finalize()),
+    }))
 }
 
 /// Heuristic used to distinguish converted papers from ordinary Markdown.
@@ -365,7 +760,12 @@ pub fn looks_like_paper(path: &Path) -> bool {
     {
         return false;
     }
-    let text = String::from_utf8_lossy(&bytes);
+    looks_like_paper_bytes(&bytes)
+}
+
+fn looks_like_paper_bytes(bytes: &[u8]) -> bool {
+    let prefix = &bytes[..bytes.len().min(PAPER_HEURISTIC_MAX_BYTES as usize)];
+    let text = String::from_utf8_lossy(prefix);
     let signals = [
         r"(?i)\barxiv\b",
         r"(?i)\bdoi\s*:",
@@ -423,6 +823,31 @@ pub(crate) fn open_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "source is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn open_probe_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // `O_NONBLOCK` prevents a regular-file-to-FIFO race from stalling the
+        // discovery control plane before the post-open metadata check.
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "probe source is not a regular file",
         ));
     }
     Ok(file)
@@ -2760,15 +3185,22 @@ fn is_supported_path_at(logical_path: &Path, physical_path: &Path) -> bool {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("");
+    let classified = classify_file_at(logical_path, physical_path);
+    let confirmed_transport_stream = logical_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+        && classified == Some(FileType::Video);
     !SKIP_FILES.contains(&name)
         && !is_sensitive(logical_path)
         && !is_sensitive(physical_path)
         && (matches!(
-            classify_file_at(logical_path, physical_path),
+            classified,
             Some(FileType::Code | FileType::Document | FileType::Paper | FileType::Image)
-        ) || crate::format_registry::format_registry()
-            .find_by_path(logical_path)
-            .is_some()
+        ) || confirmed_transport_stream
+            || crate::format_registry::format_registry()
+                .find_by_path(logical_path)
+                .is_some()
             || (logical_path.extension().is_none() && has_code_shebang(physical_path)))
 }
 
@@ -3184,6 +3616,115 @@ pub fn detect_incremental(
     })
 }
 
+/// Compare an already-completed detection with one already-admitted typed
+/// extraction manifest.
+///
+/// Watch coordinators use this instead of reopening and decoding the manifest
+/// after bounded admission. Keys are normalized with the same portable-root
+/// rules as [`save_manifest`], and only source bytes whose stored mtime differs
+/// are reread for a content digest.
+pub fn compare_incremental_manifest(
+    root: &Path,
+    detection: DetectResult,
+    manifest: &Manifest,
+    kind: ManifestKind,
+) -> IncrementalResult {
+    let mut new_files: DetectedFiles = detection
+        .files
+        .keys()
+        .map(|key| (key.clone(), Vec::new()))
+        .collect();
+    let mut unchanged_files = new_files.clone();
+    if manifest.is_empty() {
+        return IncrementalResult {
+            new_total: detection.total_files,
+            new_files: detection.files.clone(),
+            unchanged_files,
+            detection,
+            deleted_files: Vec::new(),
+            excluded_files: Vec::new(),
+        };
+    }
+
+    let lexical_root = lexical_absolute(root);
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| lexical_root.clone());
+    let portable_key = |path: &str| {
+        let path = Path::new(path);
+        let absolute = lexical_absolute(path);
+        absolute
+            .strip_prefix(&lexical_root)
+            .or_else(|_| absolute.strip_prefix(&canonical_root))
+            .map_or_else(
+                |_| nfc(&absolute.to_string_lossy()),
+                |relative| nfc(&relative.to_string_lossy().replace('\\', "/")),
+            )
+    };
+
+    for (file_type, paths) in &detection.files {
+        for path in paths {
+            let physical = detection.physical_source(Path::new(path));
+            let current_mtime = modified_time(&physical).unwrap_or_default();
+            let stored = manifest.get(&portable_key(path));
+            let changed = stored.is_none_or(|entry| {
+                let hash = if kind == ManifestKind::Semantic {
+                    &entry.semantic_hash
+                } else {
+                    &entry.ast_hash
+                };
+                let stale_ast_schema =
+                    kind != ManifestKind::Semantic && entry.ast_version != AST_CACHE_VERSION;
+                stale_ast_schema
+                    || hash.is_empty()
+                    || (current_mtime != entry.mtime && content_md5(&physical) != *hash)
+            });
+            if changed {
+                new_files
+                    .get_mut(file_type)
+                    .expect("new bucket")
+                    .push(path.clone());
+            } else {
+                unchanged_files
+                    .get_mut(file_type)
+                    .expect("unchanged bucket")
+                    .push(path.clone());
+            }
+        }
+    }
+
+    let current = detection
+        .files
+        .values()
+        .flatten()
+        .map(|path| portable_key(path))
+        .collect::<HashSet<_>>();
+    let mut deleted_files = Vec::new();
+    let mut excluded_files = Vec::new();
+    for key in manifest.keys().filter(|key| !current.contains(*key)) {
+        let path = if Path::new(key).is_absolute() {
+            PathBuf::from(key)
+        } else {
+            canonical_root.join(key)
+        };
+        let rendered = nfc(&path.to_string_lossy());
+        if path.exists() {
+            excluded_files.push(rendered);
+        } else {
+            deleted_files.push(rendered);
+        }
+    }
+    deleted_files.sort();
+    excluded_files.sort();
+    let new_total = new_files.values().map(Vec::len).sum();
+    IncrementalResult {
+        detection,
+        new_files,
+        unchanged_files,
+        new_total,
+        deleted_files,
+        excluded_files,
+    }
+}
+
 /// Write deterministic Office/Google-Workspace Markdown sidecars.
 pub fn convert_office_text(
     source: &Path,
@@ -3240,6 +3781,342 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
     use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    fn mpeg_transport_stream_packets(count: usize, alignment: usize) -> Vec<u8> {
+        let mut bytes = vec![0xff; alignment + count * MPEG_TRANSPORT_STREAM_PACKET_BYTES];
+        for packet in 0..count {
+            let offset = alignment + packet * MPEG_TRANSPORT_STREAM_PACKET_BYTES;
+            bytes[offset..offset + 4].copy_from_slice(&[
+                0x47,
+                0x40 | ((packet >> 8) as u8 & 0x1f),
+                packet as u8,
+                0x10 | (packet as u8 & 0x0f),
+            ]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn mpeg_transport_stream_detection_is_bounded_and_extension_specific() {
+        assert_eq!(MPEG_TRANSPORT_STREAM_PROBE_BYTES, 1_127);
+        let packets = mpeg_transport_stream_packets(5, 0);
+        assert!(is_mpeg_transport_stream_bytes(
+            Path::new("segment.ts"),
+            &packets
+        ));
+        assert!(is_mpeg_transport_stream_bytes(
+            Path::new("segment.TS"),
+            &mpeg_transport_stream_packets(5, 37)
+        ));
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("source.mts"),
+            &packets
+        ));
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("clip.mp4"),
+            &packets
+        ));
+
+        let mut no_payload_unit_start = mpeg_transport_stream_packets(5, 0);
+        for packet in 0..5 {
+            no_payload_unit_start[packet * MPEG_TRANSPORT_STREAM_PACKET_BYTES + 1] &= !0x40;
+        }
+        assert!(is_mpeg_transport_stream_bytes(
+            Path::new("midstream-continuation.ts"),
+            &no_payload_unit_start
+        ));
+
+        let mut production_shaped = vec![0xff; 5 * MPEG_TRANSPORT_STREAM_PACKET_BYTES];
+        for (packet, header) in [
+            [0x47, 0x40, 0x11, 0x10],
+            [0x47, 0x40, 0x00, 0x10],
+            [0x47, 0x50, 0x00, 0x10],
+            [0x47, 0x41, 0x00, 0x30],
+            [0x47, 0x01, 0x00, 0x11],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let offset = packet * MPEG_TRANSPORT_STREAM_PACKET_BYTES;
+            production_shaped[offset..offset + 4].copy_from_slice(&header);
+            if header[3] & 0x20 != 0 {
+                production_shaped[offset + 4] = 0;
+            }
+        }
+        assert!(is_mpeg_transport_stream_bytes(
+            Path::new("safeevac-segment.ts"),
+            &production_shaped
+        ));
+
+        let mut packets_with_uninspected_tail = packets;
+        packets_with_uninspected_tail.extend(std::iter::repeat_n(0x47, 4 * 1024 * 1024));
+        assert!(is_mpeg_transport_stream_bytes(
+            Path::new("large.ts"),
+            &packets_with_uninspected_tail
+        ));
+    }
+
+    #[test]
+    fn mpeg_inventory_stream_honors_cancellation_between_fixed_chunks() {
+        let project = tempdir().expect("temporary cancellation project");
+        let media = project.path().join("large.ts");
+        fs::write(&media, mpeg_transport_stream_packets(1_000, 0))
+            .expect("write multi-chunk transport stream");
+        let cancellation = graphoxide_index_runtime::RuntimeCancellation::new();
+        let mut chunks = 0_u64;
+
+        let error = checked_mpeg_transport_stream_evidence_impl_with_chunk_hook(
+            Path::new("large.ts"),
+            &media,
+            Some(&cancellation),
+            |_| {
+                chunks = chunks.saturating_add(1);
+                cancellation.cancel();
+            },
+        )
+        .expect_err("cancellation after the first fixed chunk must stop inventory hashing");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(
+            error.to_string(),
+            "MPEG transport stream inventory cancelled"
+        );
+        assert_eq!(
+            chunks, 1,
+            "the next chunk must not be read after cancellation"
+        );
+    }
+
+    #[test]
+    fn mpeg_only_evidence_keeps_code_negative_path_prefix_bounded() {
+        let project = tempdir().expect("temporary negative-probe project");
+        let source = project.path().join("large.ts");
+        let mut typescript = b"export const admitted = true;\n".to_vec();
+        typescript.extend(std::iter::repeat_n(b' ', 4 * 1024 * 1024));
+        fs::write(&source, typescript).expect("write large TypeScript source");
+        let mut streamed_chunks = 0_u64;
+
+        let evidence = checked_mpeg_transport_stream_evidence_impl_with_chunk_hook(
+            Path::new("large.ts"),
+            &source,
+            None,
+            |_| streamed_chunks = streamed_chunks.saturating_add(1),
+        )
+        .expect("bounded negative MPEG probe");
+
+        assert!(evidence.is_none());
+        assert_eq!(streamed_chunks, 0, "Code must stop after the fixed prefix");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambiguous_evidence_rejects_path_replacement_during_its_single_handle_pass() {
+        let project = tempdir().expect("temporary generation project");
+        let source = project.path().join("segment.ts");
+        let replacement = project.path().join("replacement.ts");
+        let mut typescript = b"export const admitted = true;\n".to_vec();
+        typescript.extend(std::iter::repeat_n(b' ', 192 * 1024));
+        fs::write(&source, &typescript).expect("write admitted TypeScript");
+        fs::write(&replacement, mpeg_transport_stream_packets(1_100, 0))
+            .expect("write replacement transport stream");
+        let mut replaced = false;
+
+        let error = checked_ambiguous_source_evidence_impl(
+            Path::new("segment.ts"),
+            &source,
+            None,
+            true,
+            |_| {
+                if !replaced {
+                    fs::rename(&replacement, &source)
+                        .expect("atomically replace the current source path");
+                    replaced = true;
+                }
+            },
+        )
+        .expect_err("a replaced path must not inherit the held handle's Code evidence");
+
+        assert!(replaced);
+        assert_eq!(classify_file(&source), Some(FileType::Video));
+        assert_eq!(
+            error.to_string(),
+            "extension-ambiguous source changed during checked manifest evidence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_ambiguous_evidence_preserves_code_hardlinks_but_rejects_media_hardlinks() {
+        let project = tempdir().expect("temporary hard-link project");
+        let code = project.path().join("code.ts");
+        let code_alias = project.path().join("code-alias.ts");
+        fs::write(&code, b"export const linked = true;\n").expect("write TypeScript");
+        fs::hard_link(&code, &code_alias).expect("hard-link TypeScript");
+        assert_eq!(
+            checked_ambiguous_source_evidence(Path::new("code.ts"), &code)
+                .expect("legacy TypeScript hard links remain supported")
+                .kind,
+            FileType::Code
+        );
+
+        let media = project.path().join("media.ts");
+        let media_alias = project.path().join("media-alias.ts");
+        fs::write(&media, mpeg_transport_stream_packets(8, 0)).expect("write MPEG stream");
+        fs::hard_link(&media, &media_alias).expect("hard-link MPEG stream");
+        assert!(
+            checked_mpeg_transport_stream_evidence(Path::new("media.ts"), &media).is_err(),
+            "positive media evidence requires a single-link generation"
+        );
+    }
+
+    #[test]
+    fn mpeg_transport_stream_detection_rejects_adversarial_near_matches() {
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("four-packets.ts"),
+            &mpeg_transport_stream_packets(4, 0)
+        ));
+
+        let mut invalid_header = mpeg_transport_stream_packets(5, 0);
+        invalid_header[3] = 0;
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("invalid-header.ts"),
+            &invalid_header
+        ));
+
+        let mut wrong_cadence = vec![0xff; 5 * 189];
+        for packet in 0..5 {
+            let offset = packet * 189;
+            wrong_cadence[offset..offset + 4].copy_from_slice(&[0x47, 0x40, 0, 0x10]);
+        }
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("wrong-cadence.ts"),
+            &wrong_cadence
+        ));
+
+        let mut sync_bytes_only = vec![b' '; 5 * MPEG_TRANSPORT_STREAM_PACKET_BYTES];
+        for packet in 0..5 {
+            sync_bytes_only[packet * MPEG_TRANSPORT_STREAM_PACKET_BYTES] = b'G';
+        }
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("sync-shaped-source.ts"),
+            &sync_bytes_only
+        ));
+
+        let mut valid_ascii_typescript = Vec::new();
+        for _ in 0..5 {
+            valid_ascii_typescript.extend_from_slice(b"GAAP;");
+            valid_ascii_typescript.extend(std::iter::repeat_n(b' ', 188 - 5));
+        }
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("valid-cadence-shaped-source.ts"),
+            &valid_ascii_typescript
+        ));
+
+        let mut split_utf8_typescript = valid_ascii_typescript.clone();
+        split_utf8_typescript[5 * MPEG_TRANSPORT_STREAM_PACKET_BYTES - 1] = 0xc3;
+        split_utf8_typescript.extend_from_slice(&[0xa9, b';']);
+        assert!(std::str::from_utf8(&split_utf8_typescript).is_ok());
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("valid-probe-boundary-utf8.ts"),
+            &split_utf8_typescript
+        ));
+
+        let mut raw_control_comment = b"/*".to_vec();
+        raw_control_comment.extend_from_slice(&valid_ascii_typescript);
+        raw_control_comment[2 + 32] = 0;
+        raw_control_comment.extend_from_slice(b"*/");
+        assert!(std::str::from_utf8(&raw_control_comment).is_ok());
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("valid-raw-control-comment.ts"),
+            &raw_control_comment
+        ));
+    }
+
+    #[test]
+    fn legitimate_typescript_is_not_mpeg_transport_stream() {
+        let source = br#"import { value } from './value';
+export interface Result { value: number }
+export const run = (): Result => ({ value });
+"#;
+        assert!(!is_mpeg_transport_stream_bytes(
+            Path::new("main.ts"),
+            source
+        ));
+    }
+
+    #[test]
+    fn discovery_classifies_transport_stream_as_video_and_preserves_typescript() {
+        let project = tempdir().expect("temporary transport-stream project");
+        let root = fs::canonicalize(project.path()).expect("canonical project root");
+        let media = root.join("segment.ts");
+        let typescript = root.join("main.ts");
+        let near_match = root.join("near-match.ts");
+        fs::write(&media, mpeg_transport_stream_packets(5, 0)).expect("write transport stream");
+        fs::write(&typescript, b"export const value: number = 42;\n").expect("write TypeScript");
+        let mut sync_bytes_only = vec![b' '; 5 * MPEG_TRANSPORT_STREAM_PACKET_BYTES];
+        for packet in 0..5 {
+            sync_bytes_only[packet * MPEG_TRANSPORT_STREAM_PACKET_BYTES] = b'G';
+        }
+        fs::write(&near_match, sync_bytes_only).expect("write adversarial near match");
+
+        assert_eq!(classify_file(&media), Some(FileType::Video));
+        assert_eq!(classify_file(&typescript), Some(FileType::Code));
+        assert_eq!(classify_file(&near_match), Some(FileType::Code));
+
+        let detected = detect(&root, &DetectOptions::default()).expect("detect project");
+        assert_eq!(
+            detected.files[FileType::Video.as_str()],
+            vec![media.to_string_lossy().into_owned()]
+        );
+        assert!(detected.files[FileType::Code.as_str()]
+            .contains(&typescript.to_string_lossy().into_owned()));
+        assert!(detected.files[FileType::Code.as_str()]
+            .contains(&near_match.to_string_lossy().into_owned()));
+        assert!(detected.is_supported_source(&media));
+    }
+
+    #[test]
+    fn admitted_classification_matches_effective_discovery_buckets() {
+        let project = tempdir().expect("temporary classification-equivalence project");
+        let root = fs::canonicalize(project.path()).expect("canonical project root");
+        let asset_dir = root.join("Assets.xcassets").join("Fixture.imageset");
+        fs::create_dir_all(&asset_dir).expect("create asset directory");
+
+        let asset_pdf = asset_dir.join("manual.pdf");
+        let named_configuration = root.join(".prettierrc");
+        let typescript = root.join("main.ts");
+        let transport_stream = root.join("segment.ts");
+        fs::write(&asset_pdf, b"%PDF-1.7\n").expect("write asset PDF");
+        fs::write(&named_configuration, b"{\"semi\": true}\n")
+            .expect("write extensionless registered configuration");
+        fs::write(&typescript, b"export const value: number = 42;\n").expect("write TypeScript");
+        fs::write(
+            &transport_stream,
+            mpeg_transport_stream_packets(MPEG_TRANSPORT_STREAM_CONFIRMATION_PACKETS, 0),
+        )
+        .expect("write transport stream");
+
+        let detected = detect(&root, &DetectOptions::default()).expect("detect project");
+        for (path, expected) in [
+            (&asset_pdf, FileType::Document),
+            (&named_configuration, FileType::Document),
+            (&typescript, FileType::Code),
+            (&transport_stream, FileType::Video),
+        ] {
+            let bytes = fs::read(path).expect("read admitted classification fixture");
+            assert_eq!(
+                classify_admitted_source(path, &bytes),
+                Some(expected),
+                "admitted classification for {}",
+                path.display()
+            );
+            assert!(
+                detected.files[expected.as_str()].contains(&path.to_string_lossy().into_owned()),
+                "discovery bucket for {}",
+                path.display()
+            );
+        }
+    }
 
     fn write_test_zip(path: &Path) {
         let file = fs::File::create(path).expect("create Office ZIP fixture");
