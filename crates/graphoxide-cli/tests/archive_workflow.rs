@@ -106,6 +106,31 @@ fn artifact_bytes(project: &Path) -> [Vec<u8>; 3] {
     ]
 }
 
+fn manifest_without_runtime_cache(bytes: &[u8]) -> Value {
+    let mut manifest: Value = serde_json::from_slice(bytes).expect("manifest JSON");
+    for entry in manifest
+        .as_object_mut()
+        .expect("manifest object")
+        .values_mut()
+    {
+        entry
+            .as_object_mut()
+            .expect("manifest entry object")
+            .remove("runtime_cache");
+    }
+    manifest
+}
+
+fn manifest_runtime_cache_count(bytes: &[u8]) -> usize {
+    serde_json::from_slice::<Value>(bytes)
+        .expect("manifest JSON")
+        .as_object()
+        .expect("manifest object")
+        .values()
+        .filter(|entry| entry.get("runtime_cache").is_some())
+        .count()
+}
+
 #[test]
 fn default_index_recurses_archives_and_warm_cache_is_worker_deterministic() {
     let fixture = tempfile::tempdir().expect("temporary fixture");
@@ -146,7 +171,13 @@ fn default_index_recurses_archives_and_warm_cache_is_worker_deterministic() {
     assert!(!project.join("nested/design.tar").exists());
     assert!(!project.join("design/architecture.dot").exists());
     let accepted = artifact_bytes(&project);
+    assert_eq!(
+        manifest_runtime_cache_count(&accepted[1]),
+        0,
+        "forced extraction must reset runtime-cache authorization"
+    );
 
+    fs::remove_file(managed(&project, "graph.json")).expect("remove forced graph only");
     let warm_report = fixture.path().join("warm-runtime.json");
     let warm = graphoxide(&project)
         .args([
@@ -164,12 +195,60 @@ fn default_index_recurses_archives_and_warm_cache_is_worker_deterministic() {
         .output()
         .expect("warm archive index");
     assert_success(&warm);
-    assert_eq!(artifact_bytes(&project), accepted);
+    let warm_artifacts = artifact_bytes(&project);
+    assert_eq!(
+        warm_artifacts[0], accepted[0],
+        "warm graph must remain byte-identical"
+    );
+    assert_eq!(
+        warm_artifacts[2], accepted[2],
+        "warm coverage must remain byte-identical"
+    );
+    assert_eq!(
+        manifest_without_runtime_cache(&warm_artifacts[1]),
+        manifest_without_runtime_cache(&accepted[1]),
+        "the successful warm repair may authorize a runtime-cache artifact but must not change other manifest evidence"
+    );
+    assert_eq!(
+        manifest_runtime_cache_count(&warm_artifacts[1]),
+        1,
+        "successful warm repair must authorize the persisted archive extraction"
+    );
     let report: Value = serde_json::from_slice(&fs::read(warm_report).expect("runtime report"))
         .expect("runtime report JSON");
-    assert_eq!(report["cache"]["metadata_hits"], 1);
-    assert_eq!(report["cache"]["payload_reads_avoided"], 1);
-    assert_eq!(report["cache"]["parses_avoided"], 1);
+    assert_eq!(report["cache"]["metadata_hits"], 0);
+    assert_eq!(report["cache"]["payload_reads_avoided"], 0);
+    assert_eq!(report["cache"]["parses_avoided"], 0);
+
+    fs::remove_file(managed(&project, "graph.json")).expect("remove repaired graph only");
+    let second_warm_report = fixture.path().join("second-warm-runtime.json");
+    let second_warm = graphoxide(&project)
+        .args([
+            "index",
+            ".",
+            "--no-cluster",
+            "--json",
+            "--io-workers",
+            "1",
+            "--compute-workers",
+            "1",
+        ])
+        .arg("--runtime-report")
+        .arg(&second_warm_report)
+        .output()
+        .expect("second warm archive index");
+    assert_success(&second_warm);
+    assert_eq!(
+        artifact_bytes(&project),
+        warm_artifacts,
+        "once runtime-cache authorization is repaired, the next warm graph reconstruction must be byte-identical"
+    );
+    let second_report: Value =
+        serde_json::from_slice(&fs::read(second_warm_report).expect("second warm runtime report"))
+            .expect("second runtime report JSON");
+    assert_eq!(second_report["cache"]["metadata_hits"], 1);
+    assert_eq!(second_report["cache"]["payload_reads_avoided"], 1);
+    assert_eq!(second_report["cache"]["parses_avoided"], 1);
 }
 
 #[test]

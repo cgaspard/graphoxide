@@ -7,9 +7,7 @@
 
 use fs2::FileExt as _;
 use graphoxide_core::{Edge, Extraction, KnowledgeGraph, Node};
-use graphoxide_extract::detect::{
-    self, DetectOptions, DetectResult, FileType, ManifestKind, SaveManifestOptions,
-};
+use graphoxide_extract::detect::{self, DetectOptions, DetectResult, FileType, ManifestKind};
 pub use graphoxide_extract::format_registry::WATCHED_EXTENSIONS;
 use graphoxide_graph::{origin_is_structural, BuildOptions};
 use serde::{Deserialize, Serialize};
@@ -781,6 +779,10 @@ pub struct ReconcileEvidence {
     pub current_sources: BTreeSet<PathBuf>,
     pub rebuilt_sources: BTreeSet<PathBuf>,
     pub deleted_sources: BTreeSet<PathBuf>,
+    /// Successfully verified representation changes whose carried ownership
+    /// must be removed across both AST and semantic tiers. Fresh facts are
+    /// never filtered by this set.
+    pub ownership_reset_sources: BTreeSet<PathBuf>,
 }
 
 fn reconcile_graph(
@@ -805,6 +807,9 @@ fn reconcile_graph(
             if identity_in(&node.source_file, &evidence.deleted_sources, paths) {
                 return false;
             }
+            if identity_in(&node.source_file, &evidence.ownership_reset_sources, paths) {
+                return false;
+            }
             let rebuilt = identity_in(&node.source_file, &evidence.rebuilt_sources, paths);
             if rebuilt {
                 return !is_ast_node(node);
@@ -825,6 +830,7 @@ fn reconcile_graph(
         .iter()
         .filter(|edge| all_ids.contains(edge.true_source()) && all_ids.contains(edge.true_target()))
         .filter(|edge| !identity_in(&edge.source_file, &evidence.deleted_sources, paths))
+        .filter(|edge| !identity_in(&edge.source_file, &evidence.ownership_reset_sources, paths))
         .filter(|edge| {
             !(is_ast_edge(edge) && identity_in(&edge.source_file, &evidence.rebuilt_sources, paths))
         })
@@ -847,6 +853,10 @@ fn reconcile_graph(
         .filter(|value| {
             source_field_hyperedge(value)
                 .is_none_or(|source| !identity_in(source, &evidence.deleted_sources, paths))
+        })
+        .filter(|value| {
+            source_field_hyperedge(value)
+                .is_none_or(|source| !identity_in(source, &evidence.ownership_reset_sources, paths))
         })
         .filter(|value| {
             hyperedge_members(value)
@@ -1559,6 +1569,21 @@ fn detected_ast_files_in(files_by_type: &detect::DetectedFiles) -> Vec<PathBuf> 
             .map(PathBuf::from)
             .filter(|path| ast_document(path)),
     );
+    // `.ts` is extension-ambiguous. Only the detector's positive bounded
+    // MPEG transport-stream classification joins the structural watch set;
+    // unrelated Video formats remain policy-excluded.
+    files.extend(
+        files_by_type
+            .get(FileType::Video.as_str())
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+            }),
+    );
     files.sort();
     files.dedup();
     files
@@ -1568,17 +1593,127 @@ fn detected_ast_files(detection: &DetectResult) -> Vec<PathBuf> {
     detected_ast_files_in(&detection.files)
 }
 
-fn usable_incremental_manifest(path: &Path) -> bool {
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, Value>>(&bytes).ok())
-        .is_some_and(|manifest| {
-            !manifest.is_empty()
-                && manifest.values().all(|entry| {
-                    entry.get("ast_version").and_then(Value::as_u64)
-                        == Some(u64::from(graphoxide_extract::cache::AST_CACHE_VERSION))
-                })
+fn is_ambiguous_typescript_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+}
+
+fn detected_ambiguous_identities(
+    detection: &DetectResult,
+    kind: FileType,
+    project_root: &Path,
+) -> BTreeSet<PathBuf> {
+    detection
+        .files
+        .get(kind.as_str())
+        .into_iter()
+        .flatten()
+        .map(Path::new)
+        .filter(|path| is_ambiguous_typescript_path(path))
+        .filter_map(|path| absolute_identity(path, project_root))
+        .collect()
+}
+
+fn is_mpeg_transport_stream_inventory(node: &Node) -> bool {
+    node.extra.get("type").and_then(Value::as_str) == Some("format_inventory")
+        && node.extra.get("format").and_then(Value::as_str) == Some("mpeg_transport_stream")
+}
+
+fn baseline_ambiguous_representation_evidence(
+    existing: Option<&KnowledgeGraph>,
+    current_code: &BTreeSet<PathBuf>,
+    current_mpeg: &BTreeSet<PathBuf>,
+    paths: &StoredSourcePaths,
+) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
+    let Some(existing) = existing else {
+        return (
+            current_code.union(current_mpeg).cloned().collect(),
+            BTreeSet::new(),
+        );
+    };
+    let mut representations = BTreeMap::<PathBuf, (bool, bool)>::new();
+    for node in &existing.nodes {
+        let Some(identity) = paths.identity(&node.source_file) else {
+            continue;
+        };
+        if !current_code.contains(&identity) && !current_mpeg.contains(&identity) {
+            continue;
+        }
+        let representation = representations.entry(identity).or_default();
+        if is_mpeg_transport_stream_inventory(node) {
+            representation.0 = true;
+        } else if is_ast_node(node) {
+            representation.1 = true;
+        }
+    }
+    let needs_rebuild = current_code
+        .iter()
+        .filter(|identity| {
+            let (has_mpeg, has_code) = representations.get(*identity).copied().unwrap_or_default();
+            has_mpeg || !has_code
         })
+        .chain(current_mpeg.iter().filter(|identity| {
+            let (has_mpeg, has_code) = representations.get(*identity).copied().unwrap_or_default();
+            !has_mpeg || has_code
+        }))
+        .cloned()
+        .collect();
+    let ownership_conflicts = current_code
+        .iter()
+        .filter(|identity| {
+            representations
+                .get(*identity)
+                .is_some_and(|(has_mpeg, _)| *has_mpeg)
+        })
+        .chain(current_mpeg.iter().filter(|identity| {
+            representations
+                .get(*identity)
+                .is_some_and(|(_, has_code)| *has_code)
+        }))
+        .cloned()
+        .collect();
+    (needs_rebuild, ownership_conflicts)
+}
+
+const REPRESENTATION_DIAGNOSTIC_PATH_MAX_BYTES: usize = 256;
+
+fn bounded_representation_source(path: &Path, project_root: &Path) -> String {
+    let display = path
+        .strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy();
+    let mut end = display.len().min(REPRESENTATION_DIAGNOSTIC_PATH_MAX_BYTES);
+    while !display.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let sample = if end < display.len() {
+        format!("{}…", &display[..end])
+    } else {
+        display.into_owned()
+    };
+    format!("{sample:?}")
+}
+
+fn unverified_representation_error(
+    sources: &BTreeSet<PathBuf>,
+    project_root: &Path,
+) -> anyhow::Error {
+    let first = sources.first().map_or_else(
+        || "<none>".to_owned(),
+        |path| bounded_representation_source(path, project_root),
+    );
+    anyhow::anyhow!(
+        "extension-ambiguous TypeScript/MPEG representation could not be verified for {} source(s); first source: {first}; graph and manifest were not changed; retry the update or run `graphoxide extract . --force` for a Full Rebuild",
+        sources.len()
+    )
+}
+
+fn usable_incremental_manifest(manifest: &graphoxide_extract::cache::Manifest) -> bool {
+    !manifest.is_empty()
+        && manifest
+            .values()
+            .all(|entry| entry.ast_version == graphoxide_extract::cache::AST_CACHE_VERSION)
 }
 
 #[derive(Debug, Default)]
@@ -1667,23 +1802,68 @@ fn flatten(chunks: Vec<Extraction>) -> Extraction {
     output
 }
 
-fn full_scan_manifest(detection: &DetectResult, context: &WatchContext) -> anyhow::Result<()> {
-    let scan_corpus = detection
+fn watch_manifest_key(path: &Path, watch_root: &Path) -> Option<String> {
+    let root = fs::canonicalize(watch_root).unwrap_or_else(|_| watch_root.to_path_buf());
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let candidate = fs::canonicalize(&candidate).unwrap_or(candidate);
+    let relative = candidate.strip_prefix(&root).ok()?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(slash(relative.to_string_lossy()))
+}
+
+fn prepare_watch_manifest(
+    detection: &DetectResult,
+    context: &WatchContext,
+    previous_entries: graphoxide_extract::cache::Manifest,
+    exact_entries: graphoxide_extract::cache::Manifest,
+    retained_limit: u64,
+) -> anyhow::Result<graphoxide_extract::PendingProjectManifest> {
+    let current_keys = detection
         .files
         .values()
         .flatten()
-        .cloned()
+        .filter_map(|path| watch_manifest_key(Path::new(path), &context.watch_root))
         .collect::<BTreeSet<_>>();
-    detect::save_manifest(
-        &detection.files,
-        &context.output.join("manifest.json"),
-        &SaveManifestOptions {
-            kind: ManifestKind::Ast,
-            root: Some(context.watch_root.clone()),
-            scan_corpus: Some(scan_corpus),
-            clear_semantic: BTreeSet::new(),
-        },
-    )
+    anyhow::ensure!(
+        current_keys.len() <= detection.total_files,
+        "prepared watch manifest exceeded the bounded detected-file inventory"
+    );
+
+    let normalize_entries = |entries: graphoxide_extract::cache::Manifest| {
+        entries
+            .into_iter()
+            .filter_map(|(key, entry)| {
+                watch_manifest_key(Path::new(&key), &context.watch_root).map(|key| (key, entry))
+            })
+            .collect::<graphoxide_extract::cache::Manifest>()
+    };
+    let mut previous = normalize_entries(previous_entries);
+    let mut exact = normalize_entries(exact_entries);
+    previous.retain(|key, _| current_keys.contains(key));
+    exact.retain(|key, _| current_keys.contains(key));
+    let overlapping_retained = graphoxide_extract::project_manifest_retained_bytes(&previous)
+        .saturating_add(graphoxide_extract::project_manifest_retained_bytes(&exact));
+    anyhow::ensure!(
+        u64::try_from(overlapping_retained).unwrap_or(u64::MAX) <= retained_limit,
+        "prepared watch manifest maps retain {overlapping_retained} bytes, exceeding the {retained_limit}-byte retained-memory cap; request a Full Rebuild with a larger graph byte limit"
+    );
+    previous.extend(exact);
+    let pending =
+        graphoxide_extract::PendingProjectManifest::from_entries(context.output.clone(), previous);
+    anyhow::ensure!(
+        u64::try_from(pending.retained_bytes()).unwrap_or(u64::MAX) <= retained_limit,
+        "prepared watch manifest exceeds its {retained_limit}-byte retained-memory cap; request a Full Rebuild with a larger graph byte limit"
+    );
+    Ok(pending)
 }
 
 fn git_head(root: &Path) -> Option<String> {
@@ -1904,17 +2084,6 @@ fn rebuild_once(
     let graph_path = context.output.join("graph.json");
     let manifest_path = context.output.join("manifest.json");
     let existing = load_existing(&graph_path, options.max_graph_bytes)?;
-    let incremental_manifest_eligible =
-        existing.is_some() && usable_incremental_manifest(&manifest_path);
-    let derive_incremental_paths = changed_paths.is_none()
-        && options.scope == RebuildScope::Incremental
-        && incremental_manifest_eligible;
-    let use_explicit_changed_paths = changed_paths.is_some() && incremental_manifest_eligible;
-    let scope = if use_explicit_changed_paths || derive_incremental_paths {
-        RebuildScope::Incremental
-    } else {
-        RebuildScope::Full
-    };
     let mut stats = RebuildStats::default();
     let mut timings = RebuildTimings::default();
     let config = read_build_config(&context.output);
@@ -1926,28 +2095,7 @@ fn rebuild_once(
         ..Default::default()
     };
     let detect_started = Instant::now();
-    let mut incremental_selection = None;
-    let detection = if derive_incremental_paths {
-        let incremental = detect::detect_incremental(
-            &context.watch_root,
-            &manifest_path,
-            &detect_options,
-            ManifestKind::Ast,
-        )?;
-        incremental_selection = Some(IncrementalSelection {
-            changed: detected_ast_files_in(&incremental.new_files),
-            unchanged: detected_ast_files_in(&incremental.unchanged_files).len(),
-            deleted: incremental
-                .deleted_files
-                .into_iter()
-                .map(PathBuf::from)
-                .collect(),
-        });
-        incremental.detection
-    } else {
-        detect::detect(&context.watch_root, &detect_options)?
-    };
-    timings.detect_ms = elapsed_millis(detect_started);
+    let detection = detect::detect(&context.watch_root, &detect_options)?;
     if !detection.walk_errors.is_empty() {
         let preview = detection
             .walk_errors
@@ -1967,6 +2115,61 @@ fn rebuild_once(
             detection.walk_errors.len()
         );
     }
+    let manifest_retained_limit = options
+        .max_graph_bytes
+        .unwrap_or(graphoxide_core::DEFAULT_MAX_GRAPH_BYTES);
+    let manifest_retained_limit_usize =
+        usize::try_from(manifest_retained_limit).unwrap_or(usize::MAX);
+    let manifest_wire_limit = graphoxide_extract::project_manifest_wire_byte_limit(
+        manifest_retained_limit_usize,
+        detection.total_files,
+    );
+    let admitted_manifest = graphoxide_extract::cache::load_manifest_from_output_bounded(
+        &context.output,
+        manifest_wire_limit,
+    );
+    let manifest_status = admitted_manifest.status;
+    let previous_manifest = admitted_manifest.manifest;
+    let previous_manifest_retained =
+        graphoxide_extract::project_manifest_retained_bytes(&previous_manifest);
+    anyhow::ensure!(
+        previous_manifest_retained <= manifest_retained_limit_usize,
+        "committed watch manifest requires a {previous_manifest_retained}-byte retained ownership charge, exceeding the effective {manifest_retained_limit}-byte graph memory limit; run `graphoxide extract . --force` with a larger --max-graph-bytes value"
+    );
+    let incremental_manifest_eligible = existing.is_some()
+        && manifest_status == graphoxide_extract::cache::RuntimeManifestLoadStatus::Loaded
+        && usable_incremental_manifest(&previous_manifest);
+    let derive_incremental_paths = changed_paths.is_none()
+        && options.scope == RebuildScope::Incremental
+        && incremental_manifest_eligible;
+    let use_explicit_changed_paths = changed_paths.is_some() && incremental_manifest_eligible;
+    let scope = if use_explicit_changed_paths || derive_incremental_paths {
+        RebuildScope::Incremental
+    } else {
+        RebuildScope::Full
+    };
+    let mut incremental_selection = None;
+    let detection = if derive_incremental_paths {
+        let incremental = detect::compare_incremental_manifest(
+            &context.watch_root,
+            detection,
+            &previous_manifest,
+            ManifestKind::Ast,
+        );
+        incremental_selection = Some(IncrementalSelection {
+            changed: detected_ast_files_in(&incremental.new_files),
+            unchanged: detected_ast_files_in(&incremental.unchanged_files).len(),
+            deleted: incremental
+                .deleted_files
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+        });
+        incremental.detection
+    } else {
+        detection
+    };
+    timings.detect_ms = elapsed_millis(detect_started);
     let ast_files = detected_ast_files(&detection);
     stats.detected_files = ast_files.len();
     if let Some(selection) = &incremental_selection {
@@ -1998,6 +2201,17 @@ fn rebuild_once(
         &context.watch_root,
     );
     let semantic_docs = semantic_doc_sources(existing.as_ref(), &ast_files, &source_paths);
+    let current_code_ts =
+        detected_ambiguous_identities(&detection, FileType::Code, &context.project_root);
+    let current_mpeg_ts =
+        detected_ambiguous_identities(&detection, FileType::Video, &context.project_root);
+    let (representation_rebuild_candidates, representation_reset_candidates) =
+        baseline_ambiguous_representation_evidence(
+            existing.as_ref(),
+            &current_code_ts,
+            &current_mpeg_ts,
+            &source_paths,
+        );
     let current_sources = ast_files
         .iter()
         .filter_map(|path| absolute_identity(path, &context.project_root))
@@ -2054,6 +2268,21 @@ fn rebuild_once(
             stats.changed_files = targets.len();
             stats.unchanged_files = ast_files.len().saturating_sub(targets.len());
             stats.deleted_files = deleted_sources.len();
+        }
+        if !representation_rebuild_candidates.is_empty() {
+            // A committed graph and current detector disagree about the
+            // extension-ambiguous representation. Rebuild the complete
+            // structural set so imports are resolved against one verified
+            // generation; semantic facts remain tier-preserved except for the
+            // exact ownership-reset source below.
+            targets = ast_files
+                .iter()
+                .filter(|file| {
+                    absolute_identity(file, &context.project_root)
+                        .is_none_or(|identity| !semantic_docs.contains(&identity))
+                })
+                .cloned()
+                .collect();
         }
         if targets.is_empty() && deleted_sources.is_empty() && incremental_selection.is_none() {
             if let Some(existing) = &existing {
@@ -2118,28 +2347,54 @@ fn rebuild_once(
             excluded_alive.len()
         )]
     };
+    let required_ambiguous_targets = targets
+        .iter()
+        .filter_map(|path| absolute_identity(path, &context.project_root))
+        .filter(|identity| current_code_ts.contains(identity) || current_mpeg_ts.contains(identity))
+        .chain(representation_reset_candidates.iter().cloned())
+        .chain(representation_rebuild_candidates.iter().cloned())
+        .collect::<BTreeSet<_>>();
     // Extract before deciding what counts as rebuilt. A file that could not be
     // extracted must not be reported as rebuilt-to-nothing, or reconciliation
     // would delete the records it still has in the existing graph.
     let extract_started = Instant::now();
     let mut chunks = Vec::new();
     let mut skipped: Vec<PathBuf> = Vec::new();
+    let mut admitted_source_kinds = BTreeMap::<PathBuf, String>::new();
+    let mut exact_manifest_entries = graphoxide_extract::cache::Manifest::new();
     if !targets.is_empty() {
-        match graphoxide_extract::extract_files_deferred_manifest_with_output(
+        match graphoxide_extract::extract_files_deferred_manifest_with_output_and_previous(
             &targets,
             Some(&context.watch_root),
             &context.output,
             true,
+            &previous_manifest,
+            manifest_retained_limit_usize,
         ) {
             Ok(prepared) => {
-                let extracted = prepared.discard_manifest();
+                let (extracted, entries) = prepared.into_uncommitted_parts();
+                exact_manifest_entries = entries;
                 // Skipped files are reported, not swallowed: `graphoxide update`
                 // is where a user first learns a file could not be indexed.
                 warnings.extend(extracted.warnings);
                 skipped = extracted.skipped;
+                admitted_source_kinds = extracted.admitted_source_kinds;
                 chunks = extracted.extractions;
             }
             Err(error) => {
+                if error
+                    .downcast_ref::<graphoxide_extract::ManifestRetainedLimitError>()
+                    .is_some()
+                {
+                    return Err(error);
+                }
+                if !required_ambiguous_targets.is_empty() {
+                    drop(error);
+                    return Err(unverified_representation_error(
+                        &required_ambiguous_targets,
+                        &context.project_root,
+                    ));
+                }
                 // Nothing in this pass could be extracted. An incremental pass
                 // holds a previous graph, so it reports the fault and keeps
                 // that graph rather than refusing to run at all.
@@ -2149,6 +2404,17 @@ fn rebuild_once(
         }
     }
     timings.extract_ms = elapsed_millis(extract_started);
+    let failed_representation_candidates = skipped
+        .iter()
+        .filter_map(|path| absolute_identity(path, &context.project_root))
+        .filter(|identity| required_ambiguous_targets.contains(identity))
+        .collect::<BTreeSet<_>>();
+    if !failed_representation_candidates.is_empty() {
+        return Err(unverified_representation_error(
+            &failed_representation_candidates,
+            &context.project_root,
+        ));
+    }
     let targets = targets
         .into_iter()
         .filter(|target| !skipped.contains(target))
@@ -2163,6 +2429,42 @@ fn rebuild_once(
         .iter()
         .filter_map(|path| absolute_identity(path, &context.project_root))
         .collect::<BTreeSet<_>>();
+    // Explicit-file extraction conservatively nominates every MPEG `.ts` for
+    // generic incremental callers. Here the already-admitted baseline graph
+    // gives stronger representation evidence: reset only a proven graph/current
+    // mismatch. A stable MPEG inventory may have same-source semantic media
+    // enrichment, which ordinary structural refreshes must preserve.
+    let ownership_reset_sources = representation_reset_candidates
+        .iter()
+        .filter(|identity| rebuilt_sources.contains(*identity))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let unverified_ownership_resets = required_ambiguous_targets
+        .iter()
+        .filter_map(|identity| {
+            let expected = if current_mpeg_ts.contains(identity) {
+                Some(FileType::Video)
+            } else if current_code_ts.contains(identity) {
+                Some(FileType::Code)
+            } else {
+                None
+            }?;
+            let admitted =
+                admitted_source_kinds.get(identity).map(String::as_str) == Some(expected.as_str());
+            let verified = admitted
+                && graphoxide_extract::detect::classify_ambiguous_typescript_file_checked(
+                    identity, identity,
+                )
+                .is_ok_and(|actual| actual == expected);
+            (!verified).then(|| identity.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    if !unverified_ownership_resets.is_empty() {
+        return Err(unverified_representation_error(
+            &unverified_ownership_resets,
+            &context.project_root,
+        ));
+    }
     let changed_sources = incremental_selection.as_ref().map_or_else(
         || {
             if scope == RebuildScope::Incremental && changed_paths.is_some() {
@@ -2172,11 +2474,13 @@ fn rebuild_once(
             }
         },
         |selection| {
-            selection
+            let mut changed = selection
                 .changed
                 .iter()
                 .filter_map(|path| absolute_identity(path, &context.project_root))
-                .collect()
+                .collect::<BTreeSet<_>>();
+            changed.extend(representation_rebuild_candidates.iter().cloned());
+            changed
         },
     );
     let file_sets = RebuildFileSets {
@@ -2200,7 +2504,9 @@ fn rebuild_once(
             stats.edges = existing.links.len();
         }
         let write_started = Instant::now();
-        full_scan_manifest(&detection, context)?;
+        // With no verified structural work, retain the exact committed
+        // manifest. Re-reading sources here could advance manifest evidence
+        // without a corresponding graph publication.
         clear_needs_update(&context.output)?;
         timings.write_ms = elapsed_millis(write_started);
         return Ok(finish_rebuild_result(
@@ -2219,6 +2525,16 @@ fn rebuild_once(
             total_started,
         ));
     }
+    let pending_manifest_limit = options
+        .max_graph_bytes
+        .unwrap_or(graphoxide_core::DEFAULT_MAX_GRAPH_BYTES);
+    let pending_manifest = prepare_watch_manifest(
+        &detection,
+        context,
+        previous_manifest,
+        exact_manifest_entries,
+        pending_manifest_limit,
+    )?;
     for (chunk, target) in chunks.iter_mut().zip(&targets) {
         rewrite_extraction_source(chunk, target, &context.project_root);
     }
@@ -2232,6 +2548,7 @@ fn rebuild_once(
             current_sources,
             rebuilt_sources: rebuilt_sources.clone(),
             deleted_sources: deleted_sources.clone(),
+            ownership_reset_sources: ownership_reset_sources.clone(),
         },
         &source_paths,
     );
@@ -2258,7 +2575,7 @@ fn rebuild_once(
         .is_some_and(|existing| same_topology(existing, &candidate))
     {
         let write_started = Instant::now();
-        full_scan_manifest(&detection, context)?;
+        pending_manifest.commit_strict()?;
         clear_needs_update(&context.output)?;
         timings.write_ms = elapsed_millis(write_started);
         return Ok(finish_rebuild_result(
@@ -2324,10 +2641,10 @@ fn rebuild_once(
             total_started,
         ));
     }
-    // The graph is now accepted. Publish the full-corpus manifest before
-    // derived reports so a report/rendering failure cannot leave a new graph
-    // paired with the pre-build manifest.
-    full_scan_manifest(&detection, context)?;
+    // The graph is now accepted. Publish the already-prepared full-corpus
+    // manifest before derived reports. No source path is reopened after graph
+    // acceptance, so graph and manifest describe the same admitted rows.
+    pending_manifest.commit_strict()?;
     if !options.no_cluster {
         write_cluster_outputs(
             &context.output,

@@ -1,14 +1,27 @@
 import * as vscode from 'vscode';
-import { GraphoxideCli } from './cli';
+import { automaticGraphUpdateArguments } from './build';
+import { GraphoxideCli, MutationRunOutcome } from './cli';
 import { integrationReports } from './mcp/installers';
 import { resolvedInvocation } from './mcp/runtime';
+import { busyCompletionSatisfiesStructuralTarget } from './mutation-coordinator';
 import { GraphStore } from './store';
 
 export type FreshnessMode = 'watch' | 'save' | 'manual';
 
+export interface ManagedResumeWatchBarrierControl {
+  waitUntilReached(): Promise<void>;
+  waitUntilBusyJoined(): Promise<void>;
+  release(): void;
+}
+
 export class ManagedWorkspaceService implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private readonly subscriptions: vscode.Disposable[] = [];
+  private lifecycleGeneration = 0;
+  private startPromise?: Promise<void>;
+  private nextResumeWatchBarrier?: ManagedResumeWatchBarrier;
+  private activeResumeWatchBarrier?: ManagedResumeWatchBarrier;
+  private disposed = false;
   readonly onDidChangeEnablement = this.changeEmitter.event;
 
   constructor(
@@ -27,15 +40,43 @@ export class ManagedWorkspaceService implements vscode.Disposable {
     return this.context.workspaceState.get<FreshnessMode>(this.freshnessKey(folder), 'manual');
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    if (this.startPromise) return this.startPromise;
+    const startPromise = this.startOnce().catch((error: unknown) => {
+      if (error instanceof vscode.CancellationError || this.disposed || this.cli.errorWasReported(error)) return;
+      this.cli.output.error(`Managed workspace startup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => {
+      if (this.startPromise === startPromise) this.startPromise = undefined;
+    });
+    this.startPromise = startPromise;
+    return startPromise;
+  }
+
+  holdNextResumeWatchStart(): ManagedResumeWatchBarrierControl {
+    if (this.nextResumeWatchBarrier || this.activeResumeWatchBarrier) {
+      throw new Error('A managed resume watch barrier is already armed.');
+    }
+    const barrier = new ManagedResumeWatchBarrier();
+    this.nextResumeWatchBarrier = barrier;
+    return {
+      waitUntilReached: () => barrier.waitUntilReached(),
+      waitUntilBusyJoined: () => barrier.waitUntilBusyJoined(),
+      release: () => barrier.release(),
+    };
+  }
+
+  private async startOnce(): Promise<void> {
     if (!vscode.workspace.isTrusted) return;
+    const generation = this.lifecycleGeneration;
     const folder = await this.store.preferredFolder(false);
-    if (!folder) return;
+    if (!folder || !this.isCurrent(generation)) return;
     const state = this.context.workspaceState.get<boolean>(this.enabledKey(folder));
     if (state === true) {
-      await this.resume(folder);
+      await this.resume(folder, generation);
     } else if (state === undefined && vscode.workspace.getConfiguration('graphoxide', folder.uri).get<boolean>('promptOnFirstOpen', true)) {
-      await this.prompt(folder);
+      if (!this.isCurrent(generation)) return;
+      await this.prompt(folder, generation);
     }
   }
 
@@ -48,39 +89,78 @@ export class ManagedWorkspaceService implements vscode.Disposable {
       void vscode.window.showWarningMessage('Trust this workspace before enabling Graphoxide.');
       return;
     }
+    const generation = this.invalidateLifecycle();
     const target = folder ?? await this.store.preferredFolder(true);
-    if (!target) return;
+    if (!target || !this.isCurrent(generation)) return;
     let environment: Readonly<{ GRAPHOXIDE_OUT: string }>;
     try {
       environment = this.store.managedOutput(target).environment;
       const state = await this.store.load(target);
+      if (!this.isCurrent(generation)) return;
       if (state?.model) {
-        await this.cli.run({ title: 'Graphoxide: synchronizing workspace graph…', folder: target, args: ['update', target.uri.fsPath, '--force'], environment });
+        const outcome = await this.cli.runMutation({
+          title: 'Graphoxide: synchronizing workspace graph…',
+          folder: target,
+          args: automaticGraphUpdateArguments(target.uri.fsPath),
+          environment,
+          mutationTarget: environment.GRAPHOXIDE_OUT,
+          mutationOrigin: 'interactive',
+          mutationLabel: 'synchronizing the managed workspace',
+          suppressAutomaticOnFailure: true,
+        });
+        if (outcome.kind !== 'completed') return;
       } else {
-        await this.cli.run({ title: 'Graphoxide: building workspace graph…', folder: target, args: ['extract', target.uri.fsPath], environment });
+        const outcome = await this.cli.runMutation({
+          title: 'Graphoxide: building workspace graph…',
+          folder: target,
+          args: ['extract', target.uri.fsPath],
+          environment,
+          mutationTarget: environment.GRAPHOXIDE_OUT,
+          mutationOrigin: 'interactive',
+          mutationLabel: 'building the managed workspace',
+          suppressAutomaticOnFailure: true,
+        });
+        if (outcome.kind !== 'completed') return;
       }
+      if (!this.isCurrent(generation)) return;
       await this.store.load(target);
     } catch (error) {
-      await this.context.workspaceState.update(this.enabledKey(target), undefined);
+      // A newer enable/disable/configuration action owns workspace state. A
+      // failed continuation from this invocation must not erase that choice or
+      // surface stale recovery UI after its lifecycle generation was revoked.
+      if (error instanceof vscode.CancellationError || !this.isCurrent(generation)) return;
       const action = await vscode.window.showErrorMessage(
         `Graphoxide could not initialize this workspace: ${error instanceof Error ? error.message : String(error)}`,
         'Open settings',
       );
+      if (!this.isCurrent(generation)) return;
       if (action === 'Open settings') await vscode.commands.executeCommand('graphoxide.openSettings');
       return;
     }
 
+    if (!this.isCurrent(generation)) return;
     await this.context.workspaceState.update(this.enabledKey(target), true);
+    if (!this.isCurrent(generation)) return;
     this.changeEmitter.fire();
     const mode = preferredFreshness ?? await this.chooseFreshness(target) ?? 'manual';
+    if (!this.isCurrent(generation) || !this.isEnabled(target)) return;
     await this.context.workspaceState.update(this.freshnessKey(target), mode);
-    if (mode === 'watch') await this.cli.startWatch(target, environment);
+    if (!this.isCurrent(generation)) return;
+    if (mode === 'watch') {
+      await this.cli.startWatch(target, environment, 'interactive');
+      if (!this.isCurrent(generation)) return;
+      if (!this.watchesTarget(environment.GRAPHOXIDE_OUT)) {
+        void vscode.window.showWarningMessage(`Graphoxide is enabled for ${target.name} with continuous watch selected, but the watcher did not start. Retry Start Watch after the current graph operation finishes.`);
+        return;
+      }
+    }
 
     if (!offerExternalIntegrations) {
       void vscode.window.showInformationMessage(`Graphoxide is managing ${target.name} with ${freshnessDescription(mode)}.`);
       return;
     }
     const toolNames = await this.detectUnconfiguredTools(target);
+    if (!this.isCurrent(generation)) return;
     if (toolNames.length > 0) {
       const choice = await vscode.window.showInformationMessage(
         `Graphoxide is enabled. Also configure MCP for ${formatNames(toolNames)}?`,
@@ -94,11 +174,15 @@ export class ManagedWorkspaceService implements vscode.Disposable {
   }
 
   async disable(folder?: vscode.WorkspaceFolder): Promise<void> {
+    const generation = this.invalidateLifecycle();
     const target = folder ?? await this.store.preferredFolder(true);
-    if (!target) return;
-    this.cli.stopWatch();
+    if (!target || !this.isCurrent(generation)) return;
+    await this.cli.stopWatchAndWait();
+    if (!this.isCurrent(generation)) return;
     await this.context.workspaceState.update(this.enabledKey(target), false);
+    if (!this.isCurrent(generation)) return;
     await this.context.workspaceState.update(this.freshnessKey(target), 'manual');
+    if (!this.isCurrent(generation)) return;
     this.changeEmitter.fire();
     void vscode.window.showInformationMessage('Graphoxide workspace management is disabled. Existing graph and external MCP registrations were left intact.');
   }
@@ -113,53 +197,169 @@ export class ManagedWorkspaceService implements vscode.Disposable {
     }
     const mode = preferredFreshness ?? await this.chooseFreshness(target);
     if (!mode) return;
+    const generation = this.invalidateLifecycle();
     const watchEnvironment = mode === 'watch' ? this.store.managedOutput(target).environment : undefined;
     await this.context.workspaceState.update(this.freshnessKey(target), mode);
+    if (!this.isCurrent(generation)) return;
     await this.cli.stopWatchAndWait();
-    if (watchEnvironment) await this.cli.startWatch(target, watchEnvironment);
+    if (watchEnvironment && this.isCurrent(generation) && this.isEnabled(target) && this.freshness(target) === 'watch') {
+      await this.cli.startWatch(target, watchEnvironment, 'interactive');
+      if (!this.isCurrent(generation)) return;
+      if (!this.watchesTarget(watchEnvironment.GRAPHOXIDE_OUT)) {
+        void vscode.window.showWarningMessage(`Graphoxide is configured for continuous watch mode in ${target.name}, but the watcher did not start. Retry Start Watch after the current graph operation finishes.`);
+        return;
+      }
+    }
+    if (!this.isCurrent(generation)) return;
     void vscode.window.showInformationMessage(`Graphoxide will use ${freshnessDescription(mode)} for ${target.name}.`);
   }
 
   async resetPrompt(folder?: vscode.WorkspaceFolder): Promise<void> {
+    const generation = this.invalidateLifecycle();
     const target = folder ?? await this.store.preferredFolder(true);
-    if (!target) return;
+    if (!target || !this.isCurrent(generation)) return;
     await this.context.workspaceState.update(this.enabledKey(target), undefined);
+    if (!this.isCurrent(generation)) return;
     await this.context.workspaceState.update(this.freshnessKey(target), undefined);
+    if (!this.isCurrent(generation)) return;
     this.changeEmitter.fire();
-    await this.prompt(target);
+    await this.prompt(target, generation);
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.lifecycleGeneration += 1;
+    this.nextResumeWatchBarrier?.cancel();
+    this.activeResumeWatchBarrier?.cancel();
+    this.nextResumeWatchBarrier = undefined;
+    this.activeResumeWatchBarrier = undefined;
     for (const subscription of this.subscriptions) subscription.dispose();
     this.changeEmitter.dispose();
   }
 
-  private async prompt(folder: vscode.WorkspaceFolder): Promise<void> {
+  private async prompt(folder: vscode.WorkspaceFolder, generation: number): Promise<void> {
     const choice = await vscode.window.showInformationMessage(
       `Enable Graphoxide for “${folder.name}”? It will build a local architecture graph, register MCP with VS Code, and offer automatic updates.`,
       'Enable Graphoxide',
       'Not now',
       'Don’t ask for this workspace',
     );
+    if (!this.isCurrent(generation)) return;
     if (choice === 'Enable Graphoxide') await this.enable(folder);
     if (choice === 'Don’t ask for this workspace') await this.context.workspaceState.update(this.enabledKey(folder), false);
   }
 
-  private async resume(folder: vscode.WorkspaceFolder): Promise<void> {
+  private async resume(folder: vscode.WorkspaceFolder, generation: number): Promise<void> {
     const mode = this.freshness(folder);
-    const state = await this.store.load(folder);
+    let state = await this.store.load(folder);
+    if (!this.resumeIsCurrent(folder, mode, generation)) return;
     try {
       const environment = this.store.managedOutput(folder).environment;
+      if (mode === 'watch' && this.watchesTarget(environment.GRAPHOXIDE_OUT)) return;
       if (!state?.model) {
-        await this.cli.run({ title: 'Graphoxide: rebuilding managed workspace…', folder, args: ['extract', folder.uri.fsPath], showProgress: false, cancellable: false, environment });
-        await this.store.load(folder);
+        const completed = await this.completeResumeMutation(folder, mode, generation, environment.GRAPHOXIDE_OUT, () => this.cli.runMutation({
+          title: 'Graphoxide: rebuilding managed workspace…',
+          folder,
+          args: ['extract', folder.uri.fsPath],
+          showProgress: false,
+          cancellable: false,
+          environment,
+          mutationTarget: environment.GRAPHOXIDE_OUT,
+          mutationOrigin: 'automatic',
+          mutationLabel: 'rebuilding the managed workspace at startup',
+          suppressAutomaticOnFailure: true,
+        }));
+        if (!completed) return;
+        if (!this.resumeIsCurrent(folder, mode, generation)) return;
+        state = await this.store.load(folder);
+        if (!state?.model || !this.resumeIsCurrent(folder, mode, generation)) return;
       } else if (mode !== 'manual') {
-        await this.cli.run({ title: 'Graphoxide: refreshing managed workspace…', folder, args: ['update', folder.uri.fsPath, '--force'], showProgress: false, cancellable: false, environment });
-        await this.store.load(folder);
+        // `--force` currently authorizes legitimate graph shrink after source
+        // deletion as well as bypassing extraction caches. Keep it until the
+        // CLI exposes those policies independently; dropping it can retain
+        // stale deleted facts.
+        const completed = await this.completeResumeMutation(folder, mode, generation, environment.GRAPHOXIDE_OUT, () => this.cli.runMutation({
+          title: 'Graphoxide: refreshing managed workspace…',
+          folder,
+          args: automaticGraphUpdateArguments(folder.uri.fsPath),
+          showProgress: false,
+          cancellable: false,
+          environment,
+          mutationTarget: environment.GRAPHOXIDE_OUT,
+          mutationOrigin: 'automatic',
+          mutationLabel: 'refreshing the managed workspace at startup',
+          suppressAutomaticOnFailure: true,
+        }));
+        if (!completed) return;
+        if (!this.resumeIsCurrent(folder, mode, generation)) return;
+        state = await this.store.load(folder);
+        if (!state?.model || !this.resumeIsCurrent(folder, mode, generation)) return;
       }
-      if (mode === 'watch' && !this.cli.watching) await this.cli.startWatch(folder, environment);
+      if (this.resumeIsCurrent(folder, mode, generation)
+        && mode === 'watch'
+        && !this.cli.mutationLifecycle().automaticFailures.includes(environment.GRAPHOXIDE_OUT)
+        && !this.watchesTarget(environment.GRAPHOXIDE_OUT)) {
+        const watching = await this.startWatchAfterResume(folder, mode, generation, environment);
+        if (!watching
+          && this.resumeIsCurrent(folder, mode, generation)
+          && !this.cli.mutationLifecycle().automaticFailures.includes(environment.GRAPHOXIDE_OUT)) {
+          this.cli.output.warn('Managed workspace startup could not start continuous watch after one bounded retry. Retry Start Watch after the current graph operation finishes.');
+        }
+      }
     } catch (error) {
-      this.cli.output.error(`Managed workspace startup failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (error instanceof vscode.CancellationError || this.disposed) return;
+      if (!this.cli.errorWasReported(error)) {
+        this.cli.output.error(`Managed workspace startup failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  private async completeResumeMutation(
+    folder: vscode.WorkspaceFolder,
+    mode: FreshnessMode,
+    generation: number,
+    target: string,
+    request: () => Promise<MutationRunOutcome>,
+  ): Promise<boolean> {
+    const outcome = await request();
+    if (outcome.kind === 'completed') return this.resumeIsCurrent(folder, mode, generation);
+    if (outcome.kind !== 'busy') return false;
+
+    const completion = await outcome.completion;
+    if (!this.resumeIsCurrent(folder, mode, generation)) return false;
+    if (this.cli.mutationLifecycle().automaticFailures.includes(target)) return false;
+    if (busyCompletionSatisfiesStructuralTarget(outcome, completion, target)) return true;
+
+    // A different target or report-only writer did not service this workspace.
+    // Re-request once after ownership clears; never turn this into a queue loop.
+    const retry = await request();
+    return retry.kind === 'completed' && this.resumeIsCurrent(folder, mode, generation);
+  }
+
+  private async startWatchAfterResume(
+    folder: vscode.WorkspaceFolder,
+    mode: FreshnessMode,
+    generation: number,
+    environment: Readonly<{ GRAPHOXIDE_OUT: string }>,
+  ): Promise<boolean> {
+    const barrier = this.nextResumeWatchBarrier;
+    this.nextResumeWatchBarrier = undefined;
+    if (barrier) this.activeResumeWatchBarrier = barrier;
+    try {
+      await barrier?.pause();
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!this.resumeIsCurrent(folder, mode, generation)
+          || this.cli.mutationLifecycle().automaticFailures.includes(environment.GRAPHOXIDE_OUT)) return false;
+        const outcome = await this.cli.startWatch(folder, environment, 'automatic');
+        if (this.watchesTarget(environment.GRAPHOXIDE_OUT)) return true;
+        if (outcome.kind !== 'busy') return false;
+        barrier?.markBusyJoined();
+        await outcome.completion;
+      }
+      return this.watchesTarget(environment.GRAPHOXIDE_OUT);
+    } finally {
+      if (this.activeResumeWatchBarrier === barrier) this.activeResumeWatchBarrier = undefined;
     }
   }
 
@@ -190,6 +390,79 @@ export class ManagedWorkspaceService implements vscode.Disposable {
 
   private freshnessKey(folder: vscode.WorkspaceFolder): string {
     return `managed.freshness.${folder.uri.toString()}`;
+  }
+
+  private invalidateLifecycle(): number {
+    this.lifecycleGeneration += 1;
+    return this.lifecycleGeneration;
+  }
+
+  private isCurrent(generation: number): boolean {
+    return !this.disposed && this.lifecycleGeneration === generation;
+  }
+
+  private resumeIsCurrent(folder: vscode.WorkspaceFolder, mode: FreshnessMode, generation: number): boolean {
+    return this.isCurrent(generation) && this.isEnabled(folder) && this.freshness(folder) === mode;
+  }
+
+  private watchesTarget(outputDirectory: string): boolean {
+    const lifecycle = this.cli.watchLifecycle(outputDirectory);
+    return this.cli.watching && lifecycle.phase === 'ready' && lifecycle.targetMatchesExpected === true;
+  }
+}
+
+class ManagedResumeWatchBarrier {
+  private reached = false;
+  private busyJoined = false;
+  private released = false;
+  private readonly reachedPromise: Promise<void>;
+  private readonly busyJoinedPromise: Promise<void>;
+  private readonly releasePromise: Promise<void>;
+  private markReached!: () => void;
+  private markBusy!: () => void;
+  private markReleased!: () => void;
+
+  constructor() {
+    this.reachedPromise = new Promise<void>((resolve) => { this.markReached = resolve; });
+    this.busyJoinedPromise = new Promise<void>((resolve) => { this.markBusy = resolve; });
+    this.releasePromise = new Promise<void>((resolve) => { this.markReleased = resolve; });
+  }
+
+  waitUntilReached(): Promise<void> {
+    return this.reachedPromise;
+  }
+
+  waitUntilBusyJoined(): Promise<void> {
+    return this.busyJoinedPromise;
+  }
+
+  async pause(): Promise<void> {
+    if (!this.reached) {
+      this.reached = true;
+      this.markReached();
+    }
+    await this.releasePromise;
+  }
+
+  markBusyJoined(): void {
+    if (this.busyJoined) return;
+    this.busyJoined = true;
+    this.markBusy();
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    this.markReleased();
+  }
+
+  cancel(): void {
+    if (!this.reached) {
+      this.reached = true;
+      this.markReached();
+    }
+    this.markBusyJoined();
+    this.release();
   }
 }
 

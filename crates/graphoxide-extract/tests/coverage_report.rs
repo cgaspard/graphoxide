@@ -13,6 +13,20 @@ fn write(root: &Path, relative: &str, bytes: &[u8]) {
     fs::write(path, bytes).expect("write fixture");
 }
 
+fn mpeg_transport_stream_fixture() -> Vec<u8> {
+    let mut bytes = vec![0xff; 5 * 188];
+    for packet in 0..5 {
+        let offset = packet * 188;
+        bytes[offset..offset + 4].copy_from_slice(&[
+            0x47,
+            0x40 | ((packet >> 8) as u8 & 0x1f),
+            packet as u8,
+            0x10 | (packet as u8 & 0x0f),
+        ]);
+    }
+    bytes
+}
+
 #[test]
 fn reports_registry_capabilities_unknowns_sensitive_and_policy_outcomes() {
     let project = tempfile::tempdir().expect("temporary project");
@@ -144,6 +158,71 @@ fn code_only_matches_detector_buckets_without_losing_declared_metadata() {
     assert!(file("README.md").format_id.is_some());
     assert!(file("README.md").declared_capability.is_some());
     assert_eq!(file("unknown.zzz").status, CoverageStatus::Unsupported);
+}
+
+#[test]
+fn transport_stream_coverage_is_inventory_and_code_only_excludes_it() {
+    let project = tempfile::tempdir().expect("temporary project");
+    write(
+        project.path(),
+        "video/segment.ts",
+        &mpeg_transport_stream_fixture(),
+    );
+    write(
+        project.path(),
+        "src/main.ts",
+        b"export const value: number = 42;\n",
+    );
+
+    let report = audit_coverage(project.path(), &CoverageOptions::default()).expect("coverage");
+    let media = report
+        .files
+        .iter()
+        .find(|file| file.path == "video/segment.ts")
+        .expect("transport-stream coverage");
+    assert_eq!(media.status, CoverageStatus::InventoryOnly);
+    assert_eq!(media.format_id.as_deref(), Some("media"));
+    assert_eq!(
+        media.declared_capability,
+        Some(FormatCapability::InventoryOnly)
+    );
+    assert_eq!(
+        media.reason.as_deref(),
+        Some("mpeg_transport_stream_not_typescript")
+    );
+    let source = report
+        .files
+        .iter()
+        .find(|file| file.path == "src/main.ts")
+        .expect("TypeScript coverage");
+    assert_eq!(source.status, CoverageStatus::Covered);
+    assert_eq!(source.format_id.as_deref(), Some("source-code"));
+
+    let code_only = audit_coverage(
+        project.path(),
+        &CoverageOptions {
+            code_only: true,
+            ..CoverageOptions::default()
+        },
+    )
+    .expect("code-only coverage");
+    let media = code_only
+        .files
+        .iter()
+        .find(|file| file.path == "video/segment.ts")
+        .expect("transport-stream code-only outcome");
+    assert_eq!(media.status, CoverageStatus::ExcludedPolicy);
+    assert_eq!(media.format_id.as_deref(), Some("media"));
+    assert_eq!(media.reason.as_deref(), Some("code_only"));
+    assert_eq!(
+        code_only
+            .files
+            .iter()
+            .find(|file| file.path == "src/main.ts")
+            .expect("TypeScript code-only outcome")
+            .status,
+        CoverageStatus::Covered
+    );
 }
 
 fn populate_deterministic_tree(root: &Path) {

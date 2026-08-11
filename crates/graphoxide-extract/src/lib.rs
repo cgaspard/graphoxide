@@ -266,10 +266,12 @@ pub fn extract_project_with_runtime_with_telemetry(
         )
         .with_context(|| format!("extract {relative}"))?;
         let retained_bytes = extraction_retained_bytes(&extraction)?;
-        anyhow::ensure!(
-            output_admission.try_reserve(retained_bytes),
-            "isolated retained extraction output exceeds its {output_budget}-byte budget at {relative}"
-        );
+        if !output_admission.try_reserve(retained_bytes) {
+            return Err(retained_output_budget_error(
+                config.memory_budget_bytes,
+                output_budget,
+            ));
+        }
         Ok(extraction)
     })
     .map_err(|error| anyhow::anyhow!("isolated extraction runtime failed: {error:?}"))?;
@@ -383,9 +385,58 @@ pub struct PendingProjectManifest {
     entries: cache::Manifest,
 }
 
+/// A whole-pass manifest ownership limit was exhausted before a pending map
+/// could be admitted. Callers must not downgrade this to a per-file skip,
+/// because no subset manifest can truthfully authorize the accepted graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifestRetainedLimitError {
+    limit: usize,
+    pending: bool,
+}
+
+impl std::fmt::Display for ManifestRetainedLimitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let phase = if self.pending {
+            "explicit pending manifest retained ownership would exceed"
+        } else {
+            "explicit committed manifest retained ownership exceeds"
+        };
+        write!(
+            formatter,
+            "{phase} the effective {}-byte manifest cap; retry with a larger graph byte limit or request a Full Rebuild",
+            self.limit
+        )
+    }
+}
+
+impl std::error::Error for ManifestRetainedLimitError {}
+
 impl PendingProjectManifest {
     pub fn path(&self) -> std::path::PathBuf {
         self.output_directory.join("manifest.json")
+    }
+
+    /// Exact held-generation entries prepared by extraction.
+    ///
+    /// Graph coordinators may clone a bounded subset into a full-corpus
+    /// pending manifest, but must never recompute these rows from source paths
+    /// after accepting the corresponding graph facts.
+    pub fn entries(&self) -> &cache::Manifest {
+        &self.entries
+    }
+
+    /// Conservative retained-memory charge for this unpublished map.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        pending_manifest_retained_charge(&self.entries)
+    }
+
+    /// Construct an unpublished manifest from already-admitted entries.
+    pub fn from_entries(output_directory: std::path::PathBuf, entries: cache::Manifest) -> Self {
+        Self {
+            output_directory,
+            entries,
+        }
     }
 
     pub fn commit(self) -> anyhow::Result<()> {
@@ -412,6 +463,12 @@ pub struct DeferredProjectExtractionResult {
     /// cache-and-run partition before all per-file results can accumulate.
     /// Legacy execution reports the same estimate without claiming admission.
     pub retained_output_bytes: usize,
+    /// Conservative retained ownership charge for the deferred manifest map.
+    ///
+    /// This map remains live beside the returned extractions until graph
+    /// publication succeeds, so graph-stage callers must reserve both values
+    /// from the shared cache/run partition.
+    pub pending_manifest_retained_bytes: usize,
     pub detection: detect::DetectResult,
     pub progress: ProjectExtractionProgress,
     /// One entry per file that could not be read or extracted.
@@ -423,6 +480,23 @@ pub struct DeferredProjectExtractionResult {
     /// reads/extractions are deliberately absent so their committed facts can
     /// survive a retry.
     pub rebuilt_sources: Vec<std::path::PathBuf>,
+    /// Successfully generation-verified ambiguous representation sources.
+    ///
+    /// A caller with a committed graph may use this non-destructive evidence
+    /// to authorize repair of an actual structural Code/MPEG conflict, or to
+    /// prove that a code-only policy exclusion was checked. Verification alone
+    /// is not permission to erase a byte-identical media inventory or its
+    /// semantic enrichment.
+    pub verified_representation_sources: Vec<std::path::PathBuf>,
+    /// Authoritative cross-tier ownership resets for the current generation.
+    ///
+    /// These are narrower than `verified_representation_sources`: they cover
+    /// proven source-kind transitions and changed media only when the scan
+    /// produced replacement inventory. Callers must pass them through the
+    /// unsuppressed baseline ownership-reset channel, never ordinary deletion
+    /// prunes. The reset applies only to carried baseline facts, so fresh facts
+    /// for the same source remain intact.
+    pub ownership_prune_sources: Vec<std::path::PathBuf>,
     /// Sources whose bytes differed from the previously committed manifest.
     ///
     /// The isolated runtime reads and hashes every candidate through its I/O
@@ -470,6 +544,7 @@ impl std::ops::Deref for DeferredProjectExtractionWithTelemetry {
 /// Returned as an error only for faults specific to this file, so the caller
 /// can record the failure and continue with the rest of the corpus.
 type ProjectExtractionRow = (String, graphoxide_core::Extraction, f64, String);
+type DetectionTestHook<'a> = &'a mut dyn FnMut(&detect::DetectResult) -> anyhow::Result<()>;
 
 fn extract_one_project_file(
     path: &std::path::Path,
@@ -478,6 +553,17 @@ fn extract_one_project_file(
     managed_output_dir: &std::path::Path,
 ) -> anyhow::Result<ProjectExtractionRow> {
     use md5::Digest as _;
+    if is_ambiguous_typescript_extension(relative)
+        && let Some(evidence) =
+            detect::checked_mpeg_transport_stream_evidence(std::path::Path::new(relative), path)?
+    {
+        return Ok((
+            relative.to_owned(),
+            engine::mpeg_transport_stream_inventory(path, relative, evidence.byte_length),
+            evidence.mtime,
+            evidence.ast_hash,
+        ));
+    }
     let bytes = std::fs::read(path)?;
     let cached = (!force)
         .then(|| cache::ast_cache_get_from_output(managed_output_dir, relative, &bytes))
@@ -486,7 +572,14 @@ fn extract_one_project_file(
         cached
     } else {
         // The caller names the file in the context it attaches to this error.
-        let extracted = engine::extract_as(path, relative)?;
+        let extracted = if is_ambiguous_typescript_extension(relative) {
+            // `.ts` is extension-ambiguous. Keep classification, extraction,
+            // and cache evidence bound to the same admitted allocation rather
+            // than reopening a generation that may have changed meanwhile.
+            engine::extract_as_admitted_bytes_with_path_probes(path, relative, &bytes)?
+        } else {
+            engine::extract_as(path, relative)?
+        };
         // The cache is an optimization: a failed write costs the next scan
         // some time, not this scan its result.
         if let Err(error) =
@@ -512,6 +605,8 @@ struct RuntimeFileContext {
     path: std::path::PathBuf,
     /// Once-canonicalized regular target used only by runtime I/O.
     physical_path: std::path::PathBuf,
+    /// Stable discovery bucket persisted as incremental ownership evidence.
+    source_kind: String,
     indexed: bool,
 }
 
@@ -619,10 +714,90 @@ fn runtime_manifest_byte_limit(cache_and_runs_bytes: usize, admitted_files: usiz
         .min(MAX_RUNTIME_MANIFEST_BYTES)
 }
 
-fn runtime_manifest_reservation(cache_and_runs_bytes: usize, admitted_files: usize) -> usize {
-    runtime_manifest_byte_limit(cache_and_runs_bytes, admitted_files)
+/// Conservative wire-byte admission for a project manifest that will remain
+/// live beside graph work. The one-sixty-fourth partition preserves the
+/// runtime loader's historical 32x decode allowance while leaving at least
+/// half of the caller's retained budget for the decoded map and pending rows.
+#[must_use]
+pub fn project_manifest_wire_byte_limit(
+    retained_budget_bytes: usize,
+    admitted_files: usize,
+) -> usize {
+    runtime_manifest_byte_limit(retained_budget_bytes, admitted_files)
+}
+
+fn runtime_manifest_retained_charge(
+    cache_and_runs_bytes: usize,
+    admitted_manifest_bytes: usize,
+) -> usize {
+    admitted_manifest_bytes
         .saturating_mul(32)
         .min(cache_and_runs_bytes / 2)
+}
+
+fn pending_manifest_retained_reservation(
+    cache_and_runs_bytes: usize,
+    prospective_entries: usize,
+) -> usize {
+    runtime_manifest_byte_limit(cache_and_runs_bytes, prospective_entries)
+        .saturating_mul(32)
+        .min(cache_and_runs_bytes / 2)
+}
+
+fn pending_manifest_entry_retained_charge(
+    key: &str,
+    ast_hash: &str,
+    semantic_hash: &str,
+    source_kind: Option<&str>,
+) -> usize {
+    // The key, both hashes, and optional source kind own separate allocations. The fixed charge
+    // covers the BTree slot, inline strings/evidence, allocator metadata, and
+    // node slack; doubling the complete total remains conservative across
+    // allocator and BTree implementations without serializing another copy.
+    const BTREE_AND_ALLOCATOR_SLACK_BYTES: usize = 64;
+    std::mem::size_of::<(String, cache::ManifestEntry)>()
+        .saturating_add(BTREE_AND_ALLOCATOR_SLACK_BYTES)
+        .saturating_add(key.len())
+        .saturating_add(ast_hash.len())
+        .saturating_add(semantic_hash.len())
+        .saturating_add(source_kind.map_or(0, str::len))
+        .saturating_mul(2)
+}
+
+fn pending_manifest_retained_charge(manifest: &cache::Manifest) -> usize {
+    manifest.iter().fold(0usize, |total, (key, entry)| {
+        total.saturating_add(pending_manifest_entry_retained_charge(
+            key,
+            &entry.ast_hash,
+            &entry.semantic_hash,
+            entry.source_kind.as_deref(),
+        ))
+    })
+}
+
+/// Conservative retained-memory charge for a prepared project manifest.
+#[must_use]
+pub fn project_manifest_retained_bytes(manifest: &cache::Manifest) -> usize {
+    pending_manifest_retained_charge(manifest)
+}
+
+fn pending_manifest_budget_error(
+    memory_budget_bytes: usize,
+    reservation_bytes: usize,
+    required_bytes: usize,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "isolated pending manifest requires a {required_bytes}-byte retained ownership charge beyond its {reservation_bytes}-byte reservation within the effective {memory_budget_bytes}-byte managed-memory budget; retry with a larger --memory-budget-bytes value"
+    )
+}
+
+fn retained_output_budget_error(
+    memory_budget_bytes: usize,
+    output_budget_bytes: usize,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "isolated retained extraction output exhausted its {output_budget_bytes}-byte output cap within the effective {memory_budget_bytes}-byte managed-memory budget; retry with a larger --memory-budget-bytes value"
+    )
 }
 
 #[derive(Debug)]
@@ -1034,6 +1209,153 @@ fn normalized_project_key(
         .collect()
 }
 
+fn detected_source_kinds(
+    detection: &detect::DetectResult,
+    resolved_root: &std::path::Path,
+    original_root: &std::path::Path,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut kinds = std::collections::BTreeMap::new();
+    for (kind, paths) in &detection.files {
+        for path in paths {
+            let key =
+                normalized_project_key(std::path::Path::new(path), resolved_root, original_root);
+            if let Some(previous) = kinds.insert(key.clone(), kind.clone()) {
+                anyhow::ensure!(
+                    previous == *kind,
+                    "source {key:?} was discovered in both {previous:?} and {kind:?} buckets"
+                );
+            }
+        }
+    }
+    Ok(kinds)
+}
+
+/// Whether a live source's current discovery bucket proves that its committed
+/// fact ownership changed. Missing legacy evidence is not enough to invalidate
+/// unrelated policy-excluded formats, but an ambiguous `.ts` now positively
+/// classified as video must never preserve facts formerly parsed as code.
+fn source_kind_transition(
+    entry: &cache::ManifestEntry,
+    current_kind: &str,
+    relative: &str,
+) -> bool {
+    match entry.source_kind.as_deref() {
+        Some(previous_kind) => previous_kind != current_kind,
+        None => {
+            current_kind == detect::FileType::Video.as_str()
+                && std::path::Path::new(relative)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+        }
+    }
+}
+
+fn source_kind_transition_affects_code(
+    entry: &cache::ManifestEntry,
+    current_kind: &str,
+    relative: &str,
+) -> bool {
+    source_kind_transition(entry, current_kind, relative)
+        && entry.source_kind.as_deref().is_none_or(|previous_kind| {
+            previous_kind == detect::FileType::Code.as_str()
+                || current_kind == detect::FileType::Code.as_str()
+        })
+}
+
+const DIAGNOSTIC_SOURCE_PATH_MAX_BYTES: usize = 256;
+
+fn bounded_diagnostic_source_path(path: &str) -> String {
+    let mut end = path.len().min(DIAGNOSTIC_SOURCE_PATH_MAX_BYTES);
+    while !path.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let sample = if end < path.len() {
+        format!("{}…", &path[..end])
+    } else {
+        path.to_owned()
+    };
+    // Debug formatting escapes control characters so an untrusted path cannot
+    // forge additional diagnostic lines. The input slice is fixed-size, so
+    // escape expansion is bounded as well.
+    format!("{sample:?}")
+}
+
+fn unverified_source_kind_transition_error(
+    sources: &std::collections::BTreeSet<String>,
+) -> anyhow::Error {
+    let first = sources.first().map_or_else(
+        || "<none>".to_owned(),
+        |source| bounded_diagnostic_source_path(source),
+    );
+    anyhow::anyhow!(
+        "source classification transition could not be verified from admitted bytes for {} source(s); first source: {first}; retry the extraction",
+        sources.len()
+    )
+}
+
+fn ensure_code_only_ambiguous_media_has_trusted_manifest(
+    force: bool,
+    code_only: bool,
+    committed_graph_exists: bool,
+    committed_manifest_is_trusted: bool,
+    detected_kinds: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    if force || !code_only || !committed_graph_exists || committed_manifest_is_trusted {
+        return Ok(());
+    }
+    let ambiguous_sources = detected_kinds
+        .iter()
+        .filter(|(relative, current_kind)| {
+            current_kind.as_str() == detect::FileType::Video.as_str()
+                && std::path::Path::new(relative.as_str())
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+        })
+        .map(|(relative, _)| relative.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(first) = ambiguous_sources.first() {
+        anyhow::bail!(
+            "cannot safely perform a --code-only incremental extraction: the committed graph has no trustworthy manifest for {} extension-ambiguous MPEG transport-stream source(s); first source: {}; rerun without --code-only or use --force for a full rebuild",
+            ambiguous_sources.len(),
+            bounded_diagnostic_source_path(first)
+        );
+    }
+    Ok(())
+}
+
+fn extraction_confirms_mpeg_transport_stream(
+    extraction: &graphoxide_core::Extraction,
+    relative: &str,
+) -> bool {
+    extraction.nodes.iter().any(|node| {
+        node.source_file == relative
+            && node.extra.get("format").and_then(serde_json::Value::as_str)
+                == Some("mpeg_transport_stream")
+    })
+}
+
+fn is_ambiguous_typescript_extension(relative: &str) -> bool {
+    std::path::Path::new(relative)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+}
+
+fn admitted_mpeg_classification_matches_extraction(
+    relative: &str,
+    source_kind: Option<&str>,
+    extraction: &graphoxide_core::Extraction,
+) -> bool {
+    if !is_ambiguous_typescript_extension(relative) {
+        return true;
+    }
+    let admitted_as_mpeg = source_kind == Some(detect::FileType::Video.as_str());
+    let extracted_as_mpeg = extraction_confirms_mpeg_transport_stream(extraction, relative);
+    admitted_as_mpeg == extracted_as_mpeg
+}
+
 fn normalized_manifest_key(
     stored: &str,
     resolved_root: &std::path::Path,
@@ -1347,6 +1669,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         config,
         cancellation,
         false,
+        None,
     )
     .map(|extraction| extraction.result)
 }
@@ -1372,6 +1695,7 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         config,
         cancellation,
         true,
+        None,
     )
 }
 
@@ -1385,6 +1709,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     config: graphoxide_index_runtime::IndexRuntimeConfig,
     cancellation: graphoxide_index_runtime::RuntimeCancellation,
     require_telemetry: bool,
+    mut post_request_test_hook: Option<DetectionTestHook<'_>>,
 ) -> anyhow::Result<DeferredProjectExtractionWithTelemetry> {
     use graphoxide_index_runtime::{
         read_files_concurrently_with_cancellation_and_telemetry, FileReadRequest, InputIdentity,
@@ -1427,6 +1752,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         .len()
         .saturating_add(detection.walk_errors.len());
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let detected_kinds = detected_source_kinds(&detection, &resolved_root, root)?;
     // Metadata needed by JS/TS/SFC resolution is admitted by I/O owners even
     // in `--code-only` mode. It is retained only in the bounded project
     // snapshot and never becomes a manifest/output row unless it was already
@@ -1458,11 +1784,15 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                 |_| normalized_project_key(&path, &resolved_root, root),
                 |relative| normalized_project_key(relative, &resolved_root, root),
             );
+        let source_kind = detected_kinds.get(&relative).cloned().ok_or_else(|| {
+            anyhow::anyhow!("discovered source {relative:?} has no stable classification")
+        })?;
         match contexts.entry(relative) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(RuntimeFileContext {
                     path,
                     physical_path,
+                    source_kind,
                     indexed,
                 });
             }
@@ -1475,22 +1805,44 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                         entry.key()
                     );
                 }
+                anyhow::ensure!(
+                    entry.get().source_kind == source_kind,
+                    "source {:?} changed discovery bucket while preparing runtime input",
+                    entry.key()
+                );
                 entry.get_mut().indexed |= indexed;
             }
         }
     }
     let cache_and_runs_budget = config.memory_budget().cache_and_runs_bytes;
-    let manifest_byte_limit = runtime_manifest_byte_limit(cache_and_runs_budget, contexts.len());
-    // Manifest entries have a fixed schema, but decoding and lexical
-    // normalization briefly overlap tree-node storage. Reserve a conservative
-    // 32x expansion while the one-pass priority staging map is consumed.
-    let manifest_reservation = runtime_manifest_reservation(cache_and_runs_budget, contexts.len());
+    // Code-only scans still preserve committed non-code ownership rows. Size
+    // the bounded wire admission from the complete discovered corpus rather
+    // than only the paths selected for runtime reads.
+    let manifest_byte_limit =
+        runtime_manifest_byte_limit(cache_and_runs_budget, detected_kinds.len());
     let bounded_manifest =
         cache::load_manifest_from_output_bounded(&managed_output_dir, manifest_byte_limit);
     let cache::RuntimeManifestLoad {
         manifest: loaded_manifest,
         status: manifest_status,
+        admitted_bytes: admitted_manifest_bytes,
     } = bounded_manifest;
+    // The bounded loader caps the transient raw read before decode. Once it
+    // returns, charge only the exact successfully decoded wire length whose
+    // normalized tree remains live. Missing or rejected inputs report zero.
+    let loaded_manifest_reservation =
+        runtime_manifest_retained_charge(cache_and_runs_budget, admitted_manifest_bytes);
+    // The loaded and next manifests coexist until the deferred result is
+    // returned. Reserve the historical 32x bounded-normalization allowance for
+    // the pending map independently of the exact post-load charge above.
+    let pending_manifest_reservation = pending_manifest_retained_reservation(
+        cache_and_runs_budget,
+        contexts.len().saturating_add(loaded_manifest.len()),
+    );
+    let manifest_reservation = loaded_manifest_reservation
+        .checked_add(pending_manifest_reservation)
+        .expect("two half-partition manifest charges cannot overflow");
+    debug_assert!(manifest_reservation <= cache_and_runs_budget);
     let committed_manifest_exists = manifest_status == cache::RuntimeManifestLoadStatus::Loaded;
     let baseline_graph_path = managed_output_dir.join("graph.json");
     let committed_baseline_eligible = committed_manifest_exists && baseline_graph_path.is_file();
@@ -1507,7 +1859,37 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     } else {
         Arc::new(cache::Manifest::new())
     };
-
+    ensure_code_only_ambiguous_media_has_trusted_manifest(
+        force,
+        code_only,
+        baseline_graph_path.is_file(),
+        committed_manifest_exists,
+        &detected_kinds,
+    )?;
+    let source_kind_transitions = detected_kinds
+        .iter()
+        .filter_map(|(relative, current_kind)| {
+            previous.get(relative).and_then(|entry| {
+                source_kind_transition_affects_code(entry, current_kind, relative)
+                    .then(|| relative.clone())
+            })
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    // A syntactically valid manifest can still predate the committed graph
+    // because graph publication precedes manifest publication. Reverify every
+    // extension-ambiguous media path so callers can prove a policy exclusion or
+    // repair an actual structural representation conflict. Verification alone
+    // is deliberately not authority to erase stable media ownership.
+    let ambiguous_media_sources = detected_kinds
+        .iter()
+        .filter(|(relative, current_kind)| {
+            current_kind.as_str() == detect::FileType::Video.as_str()
+                && is_ambiguous_typescript_extension(relative)
+        })
+        .map(|(relative, _)| relative.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let resolver_dependencies_invalidated =
+        !source_kind_transitions.is_empty() || !ambiguous_media_sources.is_empty();
     let mut runtime_cache = cache::RuntimeCacheTelemetry::default();
     let mut runtime_cache_diagnostics = Vec::new();
     match manifest_status {
@@ -1537,16 +1919,23 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     let all_requests = contexts
         .iter()
         .enumerate()
-        .map(|(ordinal, (relative, context))| {
-            FileReadRequest::new_verified_under(
-                InputIdentity::new(relative.clone(), ordinal as u64),
-                context.physical_path.clone(),
-                &resolved_root,
-            )
+        .filter_map(|(ordinal, (relative, context))| {
+            let streaming_media = context.source_kind == detect::FileType::Video.as_str()
+                && is_ambiguous_typescript_extension(relative);
+            (!streaming_media).then(|| {
+                FileReadRequest::new_verified_under(
+                    InputIdentity::new(relative.clone(), ordinal as u64),
+                    context.physical_path.clone(),
+                    &resolved_root,
+                )
+            })
         })
         .collect::<std::io::Result<Vec<_>>>()?;
-    let selected_sources = u64::try_from(all_requests.len()).unwrap_or(u64::MAX);
-    let source_bytes_selected = all_requests.iter().fold(0_u64, |total, request| {
+    if let Some(hook) = post_request_test_hook.as_mut() {
+        hook(&detection)?;
+    }
+    let selected_sources = u64::try_from(contexts.len()).unwrap_or(u64::MAX);
+    let mut source_bytes_selected = all_requests.iter().fold(0_u64, |total, request| {
         total.saturating_add(request.selected_source_bytes().unwrap_or(0))
     });
     let mut source_bytes_avoided = 0_u64;
@@ -1562,7 +1951,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         u64::try_from(parser_allowance_bytes).unwrap_or(u64::MAX),
     );
     let budget_after_manifest = cache_and_runs_budget.saturating_sub(manifest_reservation);
-    let cache_service_budget = budget_after_manifest / 2;
+    let cache_service_budget = if force { 0 } else { budget_after_manifest / 2 };
     let mut runtime_cache_service = if cache_service_budget == 0 {
         None
     } else {
@@ -1602,11 +1991,91 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         .map_or(0, |service| service.memory_accounting().max_resident_bytes);
     let output_budget = budget_after_manifest.saturating_sub(cache_reservation);
     let output_admission = Arc::new(RuntimeOutputAdmission::new(output_budget));
+    // Confirmed MPEG `.ts` inputs are inventory-only. Stream their digest and
+    // length through one fixed buffer instead of admitting the complete media
+    // payload into the runtime source arena. The checked helper binds the
+    // discriminator, digest, and current path to one no-follow generation.
+    let mut streaming_media_rows = Vec::new();
+    let mut streaming_media_sources_read = 0_u64;
+    let mut streaming_media_source_bytes_read = 0_u64;
+    for (relative, context) in &contexts {
+        if context.source_kind != detect::FileType::Video.as_str()
+            || !is_ambiguous_typescript_extension(relative)
+        {
+            continue;
+        }
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
+        let evidence = detect::checked_mpeg_transport_stream_evidence_with_cancellation(
+            std::path::Path::new(relative),
+            &context.physical_path,
+            &cancellation,
+        )
+        .map_err(|error| {
+            if cancellation.is_cancelled() {
+                anyhow::anyhow!("isolated extraction cancelled")
+            } else {
+                anyhow::Error::from(error).context(
+                    unverified_source_kind_transition_error(&std::collections::BTreeSet::from([
+                        relative.clone(),
+                    ]))
+                    .to_string(),
+                )
+            }
+        })?
+        .ok_or_else(|| {
+            unverified_source_kind_transition_error(&std::collections::BTreeSet::from([
+                relative.clone()
+            ]))
+        })?;
+        source_bytes_selected = source_bytes_selected.saturating_add(evidence.byte_length);
+        streaming_media_sources_read = streaming_media_sources_read.saturating_add(1);
+        streaming_media_source_bytes_read =
+            streaming_media_source_bytes_read.saturating_add(evidence.byte_length);
+        let extraction = if context.indexed {
+            let extraction = engine::mpeg_transport_stream_inventory(
+                &context.path,
+                relative,
+                evidence.byte_length,
+            );
+            let retained_bytes = extraction_retained_bytes(&extraction)?;
+            if !output_admission.try_reserve_with_cancellation(retained_bytes, Some(&cancellation))
+            {
+                anyhow::ensure!(
+                    !cancellation.is_cancelled(),
+                    "isolated extraction cancelled"
+                );
+                return Err(retained_output_budget_error(
+                    config.memory_budget_bytes,
+                    output_budget,
+                ));
+            }
+            Some(extraction)
+        } else {
+            None
+        };
+        streaming_media_rows.push(RuntimeScanRow {
+            relative: relative.clone(),
+            extraction,
+            mtime: evidence.mtime,
+            hash: evidence.ast_hash,
+            changed: context.indexed,
+            indexed: context.indexed,
+            snapshot_source: None,
+            warning: None,
+            runtime_manifest: None,
+            runtime_cache: cache::RuntimeCacheTelemetry::default(),
+            runtime_cache_diagnostics: Vec::new(),
+            parses: 0,
+        });
+    }
 
     // Probe metadata-authorized entries in stable request order. Only sources
     // the project resolver does not need may avoid their payload read.
     let mut requests = Vec::with_capacity(all_requests.len());
-    let mut metadata_rows = Vec::new();
+    let mut metadata_rows = streaming_media_rows;
     let mut preflight_skip_probe = BTreeMap::<String, bool>::new();
     for request in all_requests {
         anyhow::ensure!(
@@ -1639,7 +2108,10 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             || !context.indexed
             || !cache::runtime_ast_cache_is_eligible(&relative)
             || crate::js_resolution::ProjectSnapshot::needs_file(&relative)
+            || (resolver_dependencies_invalidated
+                && crate::js_resolution::is_javascript_source(&relative))
             || prior_entry.ast_version != cache::AST_CACHE_VERSION
+            || prior_entry.source_kind.as_deref() != Some(context.source_kind.as_str())
             || evidence.key.as_bytes() != prior_cache.artifact_key
         {
             requests.push(request);
@@ -1750,6 +2222,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     let contexts = Arc::new(contexts);
     let contexts_for_compute = Arc::clone(&contexts);
     let previous_for_compute = Arc::clone(&previous);
+    let cache_previous_for_compute = Arc::clone(&cache_previous);
     let preflight_skip_probe = Arc::new(preflight_skip_probe);
     let snapshot_admission = Arc::new(crate::js_resolution::ProjectSnapshotAdmission::new(
         snapshot_budget,
@@ -1773,13 +2246,22 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             .expect("runtime ticket context must exist");
         let path = &context.path;
         let indexed = context.indexed;
+        anyhow::ensure!(
+            detect::classify_admitted_source(std::path::Path::new(&relative), input.bytes())
+                .is_some_and(|kind| kind.as_str() == context.source_kind.as_str()),
+            "source classification changed after discovery for {}; retry the extraction",
+            bounded_diagnostic_source_path(&relative)
+        );
         let mtime = input
             .file_identity
             .modified
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
             .unwrap_or_default()
             .as_secs_f64();
-        let snapshot_required = crate::js_resolution::ProjectSnapshot::needs_file(&relative);
+        let snapshot_required = crate::js_resolution::ProjectSnapshot::needs_admitted_file(
+            &relative,
+            input.bytes(),
+        );
         if snapshot_required
             && !snapshot_admission.try_reserve(
                 crate::js_resolution::ProjectSnapshot::admission_bytes(
@@ -1789,7 +2271,8 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             )
         {
             anyhow::bail!(
-                "isolated project resolution snapshot exceeds its {snapshot_budget}-byte budget"
+                "isolated project resolution snapshot exhausted its {snapshot_budget}-byte cap within the effective {}-byte managed-memory budget; retry with a larger --memory-budget-bytes value",
+                config.memory_budget_bytes
             );
         }
         let source_identity = input.source_identity_evidence();
@@ -1805,28 +2288,50 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             .flatten();
         let hash = indexed.then(|| format!("{:x}", md5::Md5::digest(input.bytes())));
         let previous_entry = previous_for_compute.get(relative.as_str());
+        let cache_previous_entry = cache_previous_for_compute.get(relative.as_str());
         let cache_policy_changed = evidence.as_ref().is_some_and(|evidence| {
-            previous_entry
+            cache_previous_entry
                 .and_then(|entry| entry.runtime_cache)
                 .is_none_or(|stored| stored.artifact_key != evidence.key.as_bytes())
         });
         let preflight_requires_repair = preflight_skip_probe.contains_key(relative.as_str());
         let changed = indexed
             && (force
+                || (context.source_kind == detect::FileType::Video.as_str()
+                    && is_ambiguous_typescript_extension(&relative))
                 || !committed_baseline_eligible
                 || previous_entry.is_none_or(|entry| {
                     entry.ast_version != cache::AST_CACHE_VERSION
                         || entry.ast_hash != hash.as_deref().unwrap_or_default()
+                        || entry.source_kind.as_deref() != Some(context.source_kind.as_str())
                 })
+                || (resolver_dependencies_invalidated
+                    && crate::js_resolution::is_javascript_source(&relative))
                 || cache_policy_changed
                 || preflight_requires_repair);
-        let runtime_manifest = evidence.as_ref().and_then(|evidence| {
-            source_identity.map(|identity| cache::RuntimeAstManifestEvidence {
-                content_digest: evidence.content_digest,
-                source_identity_digest: identity.digest(),
-                artifact_key: evidence.key.as_bytes(),
+        let candidate_runtime_manifest = (!force).then(|| {
+            evidence.as_ref().and_then(|evidence| {
+                source_identity.map(|identity| cache::RuntimeAstManifestEvidence {
+                    content_digest: evidence.content_digest,
+                    source_identity_digest: identity.digest(),
+                    artifact_key: evidence.key.as_bytes(),
+                })
             })
-        });
+        }).flatten();
+        // Authorization is committed only when it was already present on an
+        // unchanged row, a cache hit is validated below, or fresh persistence
+        // succeeds. Merely computing the deterministic key must never bless a
+        // stale artifact after startup or store failure.
+        let mut runtime_manifest = if !force
+            && !changed
+            && cache_previous_entry
+                .and_then(|entry| entry.runtime_cache)
+                .is_some()
+        {
+            candidate_runtime_manifest
+        } else {
+            None
+        };
         let mut row_cache = if cache_client_for_compute.is_some() {
             cache::RuntimeCacheTelemetry::enabled()
         } else {
@@ -1841,17 +2346,29 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
 
         if changed {
             if force || evidence.is_none() {
-                if cache_client_for_compute.is_some() {
+                if force && cache_eligible {
+                    // Force disables the cache service entirely, but an
+                    // eligible source was still bypassed by explicit policy.
+                    // Report that decision even though there was no client
+                    // from which to attempt a read.
+                    row_cache.bypasses = row_cache.bypasses.saturating_add(1);
+                } else if cache_client_for_compute.is_some() {
                     row_cache.bypasses = row_cache.bypasses.saturating_add(1);
                 }
                 should_persist = evidence.is_some() && cache_client_for_compute.is_some();
-                // `--force` makes the fresh parser result authoritative. A
-                // valid outer runtime frame with a forged or stale inner
-                // envelope must not survive as AlreadyPresent.
-                replace_existing = force && evidence.is_some();
             } else if cache_client_for_compute.is_none() {
                 // Startup/protocol failure is recorded once at the control
                 // plane. It is not a per-file policy bypass.
+            } else if cache_previous_entry.is_some_and(|entry| {
+                entry.runtime_cache.is_none()
+                    || entry.source_kind.as_deref() != Some(context.source_kind.as_str())
+            }) {
+                // A committed manifest without cache authorization requires a
+                // fresh parse. Do not probe a same-key artifact left by an
+                // interrupted or forced run; replace it only after parsing.
+                row_cache.misses = row_cache.misses.saturating_add(1);
+                replace_existing = true;
+                should_persist = true;
             } else if let Some(preflight_replace) =
                 preflight_skip_probe.get(relative.as_str()).copied()
             {
@@ -1880,6 +2397,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                                 Ok(cached) => {
                                     row_cache.record_hit(source);
                                     extraction = Some(cached);
+                                    runtime_manifest = candidate_runtime_manifest;
                                 }
                                 Err(RuntimeCacheHitUseError::Rejected(rejection)) => {
                                     row_cache.stale_or_corrupt =
@@ -1943,7 +2461,8 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                         "isolated extraction cancelled"
                     );
                     anyhow::bail!(
-                        "isolated parser allowance exceeds its {parser_pool_bytes}-byte pool"
+                        "isolated parser requires a {parser_allowance_bytes}-byte allowance beyond its {parser_pool_bytes}-byte pool cap within the effective {}-byte managed-memory budget; retry with a larger --memory-budget-bytes value",
+                        config.memory_budget_bytes
                     );
                 };
                 parses = parses.saturating_add(1);
@@ -1966,9 +2485,10 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                                 !compute_cancellation.is_cancelled(),
                                 "isolated extraction cancelled"
                             );
-                            anyhow::bail!(
-                                "isolated retained extraction output exceeds its {output_budget}-byte budget at {relative}"
-                            );
+                            return Err(retained_output_budget_error(
+                                config.memory_budget_bytes,
+                                output_budget,
+                            ));
                         }
                         extraction = Some(parsed);
                     }
@@ -1998,6 +2518,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                 ) {
                     Ok((outcome, _payload_bytes)) => {
                         row_cache.record_persist(outcome);
+                        runtime_manifest = candidate_runtime_manifest;
                     }
                     Err(error) => {
                         row_cache.store_failures = row_cache.store_failures.saturating_add(1);
@@ -2035,6 +2556,12 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     let completed = completed.result;
     runtime_io.sources_selected = selected_sources;
     runtime_io.source_bytes_selected = source_bytes_selected;
+    runtime_io.sources_read = runtime_io
+        .sources_read
+        .saturating_add(streaming_media_sources_read);
+    runtime_io.source_bytes_read = runtime_io
+        .source_bytes_read
+        .saturating_add(streaming_media_source_bytes_read);
     runtime_io.source_bytes_avoided = source_bytes_avoided;
     anyhow::ensure!(
         !cancellation.is_cancelled(),
@@ -2050,6 +2577,105 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         rows.push(completed.value?);
     }
     rows.sort_by(|left, right| left.relative.cmp(&right.relative));
+    let mut runtime_media_generation_mismatches = std::collections::BTreeSet::new();
+    for relative in &ambiguous_media_sources {
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
+        let Ok(row_index) =
+            rows.binary_search_by(|row| row.relative.as_str().cmp(relative.as_str()))
+        else {
+            runtime_media_generation_mismatches.insert(relative.clone());
+            continue;
+        };
+        let row = &rows[row_index];
+        let logical = resolved_root.join(relative);
+        let physical = detection.physical_source(&logical);
+        let verified = detect::checked_mpeg_transport_stream_evidence_with_cancellation(
+            &logical,
+            &physical,
+            &cancellation,
+        )
+        .is_ok_and(|evidence| {
+            evidence.is_some_and(|evidence| {
+                evidence.mtime == row.mtime && evidence.ast_hash == row.hash
+            })
+        });
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "isolated extraction cancelled"
+        );
+        if !verified {
+            runtime_media_generation_mismatches.insert(relative.clone());
+        }
+    }
+    let successfully_admitted_sources = rows
+        .iter()
+        .filter(|row| row.warning.is_none())
+        .map(|row| row.relative.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let ownership_prune_verification_candidates = source_kind_transitions
+        .iter()
+        .chain(ambiguous_media_sources.iter())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let unverified_source_kind_transitions = ownership_prune_verification_candidates
+        .iter()
+        .filter(|relative| {
+            !successfully_admitted_sources.contains(relative.as_str())
+                || runtime_media_generation_mismatches.contains(*relative)
+        })
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let verified_representation_keys = ownership_prune_verification_candidates
+        .iter()
+        .filter(|relative| successfully_admitted_sources.contains(relative.as_str()))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut changed_media_keys = std::collections::BTreeSet::new();
+    if !code_only {
+        for relative in &ambiguous_media_sources {
+            anyhow::ensure!(
+                !cancellation.is_cancelled(),
+                "isolated extraction cancelled"
+            );
+            let Ok(row_index) =
+                rows.binary_search_by(|row| row.relative.as_str().cmp(relative.as_str()))
+            else {
+                continue;
+            };
+            let row = &rows[row_index];
+            if previous.get(relative).is_none_or(|entry| {
+                entry.ast_version != cache::AST_CACHE_VERSION
+                    || entry.ast_hash != row.hash
+                    || entry.source_kind.as_deref() != Some(detect::FileType::Video.as_str())
+            }) {
+                changed_media_keys.insert(relative.clone());
+            }
+        }
+    }
+    let authoritative_ownership_prune_keys = source_kind_transitions
+        .iter()
+        .chain(changed_media_keys.iter())
+        .filter(|relative| verified_representation_keys.contains(*relative))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    // Verification and destructive authority are intentionally distinct. A
+    // byte-identical media row is valid evidence for baseline conflict repair,
+    // but must not erase stable inventory or semantic enrichment by itself.
+    let mut verified_representation_sources = verified_representation_keys
+        .iter()
+        .map(|relative| detection.physical_source(&resolved_root.join(relative)))
+        .collect::<Vec<_>>();
+    verified_representation_sources.sort();
+    verified_representation_sources.dedup();
+    let mut ownership_prune_sources = authoritative_ownership_prune_keys
+        .iter()
+        .map(|relative| detection.physical_source(&resolved_root.join(relative)))
+        .collect::<Vec<_>>();
+    ownership_prune_sources.sort();
+    ownership_prune_sources.dedup();
     for row in &rows {
         runtime_cache.merge(row.runtime_cache);
         runtime_cache_diagnostics.extend(row.runtime_cache_diagnostics.iter().cloned());
@@ -2075,6 +2701,11 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         runtime_cache.store_failures = runtime_cache.store_failures.saturating_add(1);
         runtime_cache_diagnostics.push(format!(
             "runtime cache I/O owner did not shut down cleanly: {error}"
+        ));
+    }
+    if !unverified_source_kind_transitions.is_empty() {
+        return Err(unverified_source_kind_transition_error(
+            &unverified_source_kind_transitions,
         ));
     }
     let mut warnings = completed
@@ -2136,7 +2767,8 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             .map_err(|error| match error {
                 crate::js_resolution::ProjectSnapshotError::ExceedsBudget { byte_limit } => {
                     anyhow::anyhow!(
-                        "isolated project resolution snapshot exceeds its {byte_limit}-byte budget"
+                        "isolated project resolution snapshot exhausted its {byte_limit}-byte cap within the effective {}-byte managed-memory budget; retry with a larger --memory-budget-bytes value",
+                        config.memory_budget_bytes
                     )
                 }
                 crate::js_resolution::ProjectSnapshotError::InvalidPath(path) => {
@@ -2144,14 +2776,77 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                 }
             })?;
     }
+    let mut pending_manifest_charge = rows
+        .iter()
+        .filter(|row| row.indexed && row.warning.is_none())
+        .fold(0usize, |total, row| {
+            let source_kind = contexts
+                .get(row.relative.as_str())
+                .map(|context| context.source_kind.as_str());
+            let semantic_hash = previous
+                .get(&row.relative)
+                .filter(|entry| {
+                    entry.ast_version == cache::AST_CACHE_VERSION
+                        && entry.ast_hash == row.hash
+                        && entry.source_kind.as_deref() == source_kind
+                })
+                .map_or("", |entry| entry.semantic_hash.as_str());
+            total.saturating_add(pending_manifest_entry_retained_charge(
+                &row.relative,
+                &row.hash,
+                semantic_hash,
+                source_kind,
+            ))
+        });
+    if code_only {
+        for paths in detection
+            .files
+            .iter()
+            .filter(|(kind, _)| kind.as_str() != detect::FileType::Code.as_str())
+            .map(|(_, paths)| paths)
+        {
+            for path in paths {
+                let key = normalized_project_key(std::path::Path::new(path), &resolved_root, root);
+                if let Some(entry) = previous
+                    .get(&key)
+                    .filter(|_| !authoritative_ownership_prune_keys.contains(&key))
+                {
+                    // Over-counting a normalization collision is intentional:
+                    // this is a pre-allocation proof, not a usage statistic.
+                    pending_manifest_charge = pending_manifest_charge.saturating_add(
+                        pending_manifest_entry_retained_charge(
+                            &key,
+                            &entry.ast_hash,
+                            &entry.semantic_hash,
+                            entry.source_kind.as_deref(),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if pending_manifest_charge > pending_manifest_reservation {
+        return Err(pending_manifest_budget_error(
+            config.memory_budget_bytes,
+            pending_manifest_reservation,
+            pending_manifest_charge,
+        ));
+    }
+
     let mut manifest = rows
         .iter()
         .filter(|row| row.indexed && row.warning.is_none())
         .map(|row| {
+            let source_kind = contexts
+                .get(row.relative.as_str())
+                .map(|context| context.source_kind.clone())
+                .expect("indexed runtime row has a detected source kind");
             let semantic_hash = previous
                 .get(&row.relative)
                 .filter(|entry| {
-                    entry.ast_version == cache::AST_CACHE_VERSION && entry.ast_hash == row.hash
+                    entry.ast_version == cache::AST_CACHE_VERSION
+                        && entry.ast_hash == row.hash
+                        && entry.source_kind.as_deref() == Some(source_kind.as_str())
                 })
                 .map(|entry| entry.semantic_hash.clone())
                 .unwrap_or_default();
@@ -2162,6 +2857,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                     ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: row.hash.clone(),
                     semantic_hash,
+                    source_kind: Some(source_kind),
                     runtime_cache: row.runtime_manifest,
                 },
             )
@@ -2177,12 +2873,27 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             for path in paths {
                 let path = std::path::Path::new(path);
                 let key = normalized_project_key(path, &resolved_root, root);
-                if let Some(entry) = previous.get(&key) {
-                    manifest.entry(key).or_insert_with(|| entry.clone());
+                if let Some(entry) = previous
+                    .get(&key)
+                    .filter(|_| !authoritative_ownership_prune_keys.contains(&key))
+                {
+                    manifest.entry(key).or_insert_with(|| {
+                        let mut carried = entry.clone();
+                        if force {
+                            // A forced scan is a project-wide trust reset even
+                            // when code-only policy carries non-code ownership.
+                            // Do not let a later full scan replay an artifact
+                            // that this build deliberately did not validate.
+                            carried.runtime_cache = None;
+                        }
+                        carried
+                    });
                 }
             }
         }
     }
+    let pending_manifest_retained_bytes = pending_manifest_retained_charge(&manifest);
+    debug_assert!(pending_manifest_retained_bytes <= pending_manifest_reservation);
     let changed_sources = rows
         .iter()
         .filter(|row| row.indexed && row.changed && row.warning.is_none())
@@ -2212,11 +2923,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     let unchanged_sources = succeeded.saturating_sub(changed_sources);
     let deleted_sources = previous
         .keys()
-        .filter(|source| {
-            contexts
-                .get(source.as_str())
-                .is_none_or(|context| !context.indexed)
-        })
+        .filter(|source| !detected_kinds.contains_key(source.as_str()))
         .count();
     let mut extractions = Vec::new();
     for row in rows {
@@ -2247,7 +2954,8 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             .checked_sub(fresh_before_resolution)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "isolated fresh extraction output exceeds its {output_budget}-byte cache/run budget before resolver baseline admission"
+                    "isolated fresh extraction output exhausted its {output_budget}-byte output cap within the effective {}-byte managed-memory budget before resolver baseline admission; retry with a larger --memory-budget-bytes value",
+                    config.memory_budget_bytes
                 )
             })?;
         let graph_byte_cap = remaining / RESOLUTION_BASELINE_WORKING_SET_MULTIPLIER;
@@ -2257,12 +2965,19 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             &eligible_resolver_owners,
             &resolved_root,
             root,
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "admit the resolver baseline within the {output_budget}-byte output cap and effective {}-byte managed-memory budget; retry with a larger --memory-budget-bytes value",
+                config.memory_budget_bytes
+            )
+        })?;
         if !context.extractions.is_empty() {
             anyhow::ensure!(
                 context.working_set_charge <= remaining,
-                "resolver baseline requires a {}-byte graph working set, exceeding {remaining} remaining cache/run bytes",
-                context.working_set_charge
+                "resolver baseline requires a {}-byte graph working set, exceeding {remaining} remaining bytes of the {output_budget}-byte output cap within the effective {}-byte managed-memory budget; retry with a larger --memory-budget-bytes value",
+                context.working_set_charge,
+                config.memory_budget_bytes
             );
             debug_assert_eq!(
                 context.retained_bytes,
@@ -2296,13 +3011,15 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         .ok_or_else(|| anyhow::anyhow!("isolated resolver cache/run charge exceeds usize"))?;
     anyhow::ensure!(
         cache_run_total <= output_budget,
-        "isolated resolver retains {retained_output_bytes} fresh bytes plus a {baseline_working_set_charge}-byte baseline working-set charge, exceeding its {output_budget}-byte cache/run budget"
+        "isolated resolver retains {retained_output_bytes} fresh bytes plus a {baseline_working_set_charge}-byte baseline working-set charge, exceeding its {output_budget}-byte output cap within the effective {}-byte managed-memory budget; retry with a larger --memory-budget-bytes value",
+        config.memory_budget_bytes
     );
     debug_assert!(output_admission.retained_bytes() <= output_budget);
     Ok(DeferredProjectExtractionWithTelemetry {
         result: DeferredProjectExtractionResult {
             extractions,
             retained_output_bytes,
+            pending_manifest_retained_bytes,
             detection,
             progress: ProjectExtractionProgress {
                 total: total_work,
@@ -2310,6 +3027,8 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             },
             warnings,
             rebuilt_sources,
+            verified_representation_sources,
+            ownership_prune_sources,
             changed_sources,
             unchanged_sources,
             deleted_sources,
@@ -2359,6 +3078,44 @@ pub fn extract_project_with_scan_options_deferred_manifest(
     code_only: bool,
     detect_options: &detect::DetectOptions,
 ) -> anyhow::Result<DeferredProjectExtractionResult> {
+    extract_project_with_scan_options_deferred_manifest_impl(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        None,
+    )
+}
+
+fn extract_project_with_scan_options_deferred_manifest_impl(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    after_extraction_hook: Option<DetectionTestHook<'_>>,
+) -> anyhow::Result<DeferredProjectExtractionResult> {
+    extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        None,
+        after_extraction_hook,
+    )
+}
+
+fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    mut before_extraction_hook: Option<DetectionTestHook<'_>>,
+    mut after_extraction_hook: Option<DetectionTestHook<'_>>,
+) -> anyhow::Result<DeferredProjectExtractionResult> {
     use rayon::prelude::*;
     let managed_output_dir = if managed_output_dir.is_absolute() {
         managed_output_dir.to_path_buf()
@@ -2383,6 +3140,10 @@ pub fn extract_project_with_scan_options_deferred_manifest(
     files.dedup();
     let total_work = files.len().saturating_add(detection.walk_errors.len());
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let detected_kinds = detected_source_kinds(&detection, &resolved_root, root)?;
+    if let Some(hook) = before_extraction_hook.as_mut() {
+        hook(&detection)?;
+    }
     // One unreadable or unextractable file must not abort the scan. Each
     // failure becomes a warning and one unsuccessful unit of progress, which
     // the build guard already interprets as an incomplete build.
@@ -2421,6 +3182,22 @@ pub fn extract_project_with_scan_options_deferred_manifest(
     {
         return Err(first);
     }
+    let unverified_row_classifications = rows
+        .iter()
+        .filter(|(relative, extraction, _, _)| {
+            !admitted_mpeg_classification_matches_extraction(
+                relative,
+                detected_kinds.get(relative).map(String::as_str),
+                extraction,
+            )
+        })
+        .map(|(relative, _, _, _)| relative.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if !unverified_row_classifications.is_empty() {
+        return Err(unverified_source_kind_transition_error(
+            &unverified_row_classifications,
+        ));
+    }
     let succeeded = rows.len();
     let mut rebuilt_sources = rows
         .iter()
@@ -2429,20 +3206,108 @@ pub fn extract_project_with_scan_options_deferred_manifest(
             detection.physical_source(&logical)
         })
         .collect::<Vec<_>>();
-    rebuilt_sources.sort();
-    rebuilt_sources.dedup();
-    let previous = normalized_previous_manifest(
-        &cache::load_manifest_from_output(&managed_output_dir),
-        &resolved_root,
-        root,
-    );
+    let (loaded_previous, committed_manifest_is_trusted) =
+        cache::load_manifest_from_output_with_trust(&managed_output_dir);
+    let previous = normalized_previous_manifest(&loaded_previous, &resolved_root, root);
+    ensure_code_only_ambiguous_media_has_trusted_manifest(
+        force,
+        code_only,
+        managed_output_dir.join("graph.json").is_file(),
+        committed_manifest_is_trusted,
+        &detected_kinds,
+    )?;
+    let source_kind_transition_keys = detected_kinds
+        .iter()
+        .filter_map(|(relative, current_kind)| {
+            previous.get(relative).and_then(|entry| {
+                source_kind_transition_affects_code(entry, current_kind, relative)
+                    .then(|| relative.clone())
+            })
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(hook) = after_extraction_hook.as_mut() {
+        hook(&detection)?;
+    }
+    let current_mpeg_keys = detected_kinds
+        .iter()
+        .filter(|(relative, kind)| {
+            kind.as_str() == detect::FileType::Video.as_str()
+                && is_ambiguous_typescript_extension(relative)
+        })
+        .map(|(relative, _)| relative.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let final_verification_keys = current_mpeg_keys
+        .union(&source_kind_transition_keys)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut verified_mpeg_keys = std::collections::BTreeSet::new();
+    let mut verified_transition_keys = std::collections::BTreeSet::new();
+    let mut verified_ambiguous_evidence = std::collections::BTreeMap::new();
+    let mut unverified_media_generations = std::collections::BTreeSet::new();
+    let extracted_row_evidence = rows
+        .iter()
+        .map(|(relative, _, mtime, hash)| (relative.as_str(), (*mtime, hash.as_str())))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for key in &final_verification_keys {
+        let logical = resolved_root.join(key);
+        let physical = detection.physical_source(&logical);
+        let current_kind = detected_kinds
+            .get(key)
+            .expect("final classification candidate has a detected kind");
+        let row_evidence = extracted_row_evidence.get(key.as_str());
+        // A full project scan may authorize a representation transition only
+        // from a successfully extracted row bound to this exact generation.
+        // Code-only policy intentionally has no row for excluded media, so a
+        // checked final reopen remains its explicit verification path.
+        let row_is_verified =
+            row_evidence.is_some() || code_only && current_kind != detect::FileType::Code.as_str();
+        let ambiguous_evidence = is_ambiguous_typescript_extension(key)
+            .then(|| detect::checked_ambiguous_source_evidence(&logical, &physical).ok())
+            .flatten();
+        let verified = if is_ambiguous_typescript_extension(key) {
+            ambiguous_evidence.as_ref().is_some_and(|evidence| {
+                evidence.kind.as_str() == current_kind
+                    && row_is_verified
+                    && row_evidence.is_none_or(|(mtime, hash)| {
+                        evidence.mtime == *mtime && evidence.ast_hash == *hash
+                    })
+            })
+        } else {
+            row_is_verified
+                && detect::classify_file_at(&logical, &physical)
+                    .is_some_and(|kind| kind.as_str() == current_kind)
+        };
+        if !verified {
+            unverified_media_generations.insert(key.clone());
+            continue;
+        }
+        if let Some(evidence) = ambiguous_evidence {
+            verified_ambiguous_evidence.insert(key.clone(), evidence);
+        }
+        if current_mpeg_keys.contains(key) {
+            verified_mpeg_keys.insert(key.clone());
+        }
+        if source_kind_transition_keys.contains(key) {
+            verified_transition_keys.insert(key.clone());
+        }
+    }
+    if !unverified_media_generations.is_empty() {
+        return Err(unverified_source_kind_transition_error(
+            &unverified_media_generations,
+        ));
+    }
     let mut manifest: cache::Manifest = rows
         .iter()
         .map(|(relative, _, mtime, hash)| {
+            let source_kind = detected_kinds
+                .get(relative)
+                .expect("extracted source has a detected kind");
             let semantic_hash = previous
                 .get(relative)
                 .filter(|entry| {
-                    entry.ast_version == cache::AST_CACHE_VERSION && entry.ast_hash == *hash
+                    entry.ast_version == cache::AST_CACHE_VERSION
+                        && entry.ast_hash == *hash
+                        && entry.source_kind.as_deref() == Some(source_kind.as_str())
                 })
                 .map(|entry| entry.semantic_hash.clone())
                 .unwrap_or_default();
@@ -2453,11 +3318,59 @@ pub fn extract_project_with_scan_options_deferred_manifest(
                     ast_version: cache::AST_CACHE_VERSION,
                     ast_hash: hash.clone(),
                     semantic_hash,
+                    source_kind: Some(source_kind.clone()),
                     runtime_cache: None,
                 },
             )
         })
         .collect();
+    let successfully_extracted_keys = rows
+        .iter()
+        .map(|(relative, _, _, _)| relative.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let changed_mpeg_keys = if code_only {
+        std::collections::BTreeSet::new()
+    } else {
+        verified_mpeg_keys
+            .iter()
+            .filter(|key| {
+                let evidence = verified_ambiguous_evidence
+                    .get(*key)
+                    .expect("verified MPEG key has exact evidence");
+                previous.get(*key).is_none_or(|entry| {
+                    entry.ast_version != cache::AST_CACHE_VERSION
+                        || entry.ast_hash != evidence.ast_hash
+                        || entry.source_kind.as_deref() != Some(detect::FileType::Video.as_str())
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    let verified_representation_keys = verified_mpeg_keys
+        .union(&verified_transition_keys)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let ownership_prune_keys = verified_transition_keys
+        .union(&changed_mpeg_keys)
+        .filter(|key| {
+            code_only
+                && detected_kinds
+                    .get(*key)
+                    .is_some_and(|kind| kind != detect::FileType::Code.as_str())
+                || successfully_extracted_keys.contains(*key)
+        })
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut verified_representation_sources = verified_representation_keys
+        .iter()
+        .map(|key| detection.physical_source(&resolved_root.join(key)))
+        .collect::<Vec<_>>();
+    verified_representation_sources.sort();
+    verified_representation_sources.dedup();
+    let mut ownership_prune_sources = ownership_prune_keys
+        .iter()
+        .map(|key| detection.physical_source(&resolved_root.join(key)))
+        .collect::<Vec<_>>();
     if code_only {
         for paths in detection
             .files
@@ -2468,21 +3381,58 @@ pub fn extract_project_with_scan_options_deferred_manifest(
             for path in paths {
                 let path = std::path::Path::new(path);
                 let key = normalized_project_key(path, &resolved_root, root);
-                if let Some(entry) = previous.get(&key) {
-                    manifest.entry(key).or_insert_with(|| entry.clone());
+                if !ownership_prune_keys.contains(&key)
+                    && let Some(entry) = previous.get(&key)
+                {
+                    manifest.entry(key).or_insert_with(|| {
+                        let mut carried = entry.clone();
+                        if force {
+                            // Legacy force must publish the same cache trust
+                            // boundary as the runtime executor.
+                            carried.runtime_cache = None;
+                        }
+                        carried
+                    });
                 }
             }
         }
     }
+    rebuilt_sources.sort();
+    rebuilt_sources.dedup();
+    ownership_prune_sources.sort();
+    ownership_prune_sources.dedup();
+    let mut resolver_invalidated_keys = ownership_prune_keys
+        .iter()
+        .filter(|key| {
+            detected_kinds
+                .get(*key)
+                .is_some_and(|kind| kind != detect::FileType::Code.as_str())
+        })
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    resolver_invalidated_keys.extend(
+        rows.iter()
+            .filter(|(relative, extraction, _, _)| {
+                extraction_confirms_mpeg_transport_stream(extraction, relative)
+            })
+            .map(|(relative, _, _, _)| relative.clone()),
+    );
+    resolver_invalidated_keys.extend(verified_mpeg_keys);
     let mut extractions: Vec<_> = rows
         .into_iter()
         .map(|(_, extraction, _, _)| extraction)
         .collect();
     resolution::resolve_with_root(&mut extractions, &resolved_root);
+    crate::js_resolution::invalidate_resolved_targets_for_sources(
+        &mut extractions,
+        &resolver_invalidated_keys,
+    );
     let retained_output_bytes = extractions_retained_bytes(&extractions)?;
+    let pending_manifest_retained_bytes = pending_manifest_retained_charge(&manifest);
     Ok(DeferredProjectExtractionResult {
         extractions,
         retained_output_bytes,
+        pending_manifest_retained_bytes,
         detection,
         progress: ProjectExtractionProgress {
             total: total_work,
@@ -2490,6 +3440,8 @@ pub fn extract_project_with_scan_options_deferred_manifest(
         },
         warnings,
         rebuilt_sources,
+        verified_representation_sources,
+        ownership_prune_sources,
         changed_sources: succeeded,
         unchanged_sources: 0,
         deleted_sources: 0,
@@ -2515,6 +3467,20 @@ pub struct ExtractFilesResult {
     /// A caller holding a previous graph uses this to keep those files' records
     /// rather than treating them as rebuilt-to-nothing.
     pub skipped: Vec<std::path::PathBuf>,
+    /// Detector buckets bound to the same admitted bytes as each successful
+    /// extraction, keyed by canonical explicit source identity.
+    pub admitted_source_kinds: std::collections::BTreeMap<std::path::PathBuf, String>,
+    /// Successfully byte-verified candidates whose carried baseline ownership
+    /// may need a reset across structural and semantic tiers.
+    ///
+    /// This may overlap the caller's rebuilt-source set. Baseline-merging
+    /// callers with a committed graph must first gate it on a structural
+    /// representation mismatch, then pass confirmed resets through an
+    /// unsuppressed ownership-reset channel, never fold them into ordinary
+    /// deletion pruning. Current MPEG transport streams and proven
+    /// code-affecting classification transitions are the only explicit-file
+    /// rows nominated here.
+    pub ownership_reset_sources: Vec<std::path::PathBuf>,
     pub key_root: std::path::PathBuf,
     pub managed_output_dir: std::path::PathBuf,
 }
@@ -2543,6 +3509,12 @@ impl DeferredExtractFilesResult {
     /// use this to consume the extraction without exposing the target subset.
     pub fn discard_manifest(self) -> ExtractFilesResult {
         self.result
+    }
+
+    /// Consume the deferred wrapper while retaining its exact held-generation
+    /// entries for a caller-owned full-corpus manifest merge.
+    pub fn into_uncommitted_parts(self) -> (ExtractFilesResult, cache::Manifest) {
+        (self.result, self.pending_manifest.entries)
     }
 }
 
@@ -2583,9 +3555,25 @@ pub fn extract_files_deferred_manifest(
     cache_root: Option<&std::path::Path>,
     force: bool,
 ) -> anyhow::Result<DeferredExtractFilesResult> {
-    extract_files_with_deferred_manifest(files, cache_root, force, |path, relative| {
-        engine::extract_as(path, relative)
-    })
+    let cache_base = cache_root.map(std::path::Path::to_path_buf).unwrap_or(
+        std::env::current_dir()
+            .map_err(|error| anyhow::anyhow!("resolve current directory: {error}"))?,
+    );
+    let managed_output_dir = cache_base.join("graphoxide-out");
+    extract_files_with_deferred_manifest_and_output_impl(
+        files,
+        cache_root,
+        &managed_output_dir,
+        force,
+        ExplicitFileExtractionOptions {
+            admitted_previous: None,
+            manifest_retained_limit: None,
+            bounded_builtin_mpeg_inventory: true,
+        },
+        |path, relative, bytes| {
+            engine::extract_as_admitted_bytes_with_path_probes(path, relative, bytes)
+        },
+    )
 }
 
 /// Extract an explicit file set without publishing its replacement manifest,
@@ -2598,12 +3586,47 @@ pub fn extract_files_deferred_manifest_with_output(
     managed_output_dir: &std::path::Path,
     force: bool,
 ) -> anyhow::Result<DeferredExtractFilesResult> {
-    extract_files_with_deferred_manifest_and_output(
+    extract_files_with_deferred_manifest_and_output_impl(
         files,
         cache_root,
         managed_output_dir,
         force,
-        engine::extract_as,
+        ExplicitFileExtractionOptions {
+            admitted_previous: None,
+            manifest_retained_limit: None,
+            bounded_builtin_mpeg_inventory: true,
+        },
+        |path, relative, bytes| {
+            engine::extract_as_admitted_bytes_with_path_probes(path, relative, bytes)
+        },
+    )
+}
+
+/// Extract an explicit file set using one already-admitted committed
+/// manifest. Watch coordinators use this entrypoint so incremental selection,
+/// cache ownership, and the prepared replacement manifest all share the same
+/// bounded manifest generation without reopening `manifest.json`.
+pub fn extract_files_deferred_manifest_with_output_and_previous(
+    files: &[std::path::PathBuf],
+    cache_root: Option<&std::path::Path>,
+    managed_output_dir: &std::path::Path,
+    force: bool,
+    previous: &cache::Manifest,
+    manifest_retained_limit: usize,
+) -> anyhow::Result<DeferredExtractFilesResult> {
+    extract_files_with_deferred_manifest_and_output_impl(
+        files,
+        cache_root,
+        managed_output_dir,
+        force,
+        ExplicitFileExtractionOptions {
+            admitted_previous: Some(previous),
+            manifest_retained_limit: Some(manifest_retained_limit),
+            bounded_builtin_mpeg_inventory: true,
+        },
+        |path, relative, bytes| {
+            engine::extract_as_admitted_bytes_with_path_probes(path, relative, bytes)
+        },
     )
 }
 
@@ -2657,7 +3680,43 @@ pub fn extract_files_with_deferred_manifest_and_output<F>(
 where
     F: Fn(&std::path::Path, &str) -> anyhow::Result<graphoxide_core::Extraction>,
 {
+    extract_files_with_deferred_manifest_and_output_impl(
+        files,
+        cache_root,
+        managed_output_dir,
+        force,
+        ExplicitFileExtractionOptions {
+            admitted_previous: None,
+            manifest_retained_limit: None,
+            bounded_builtin_mpeg_inventory: false,
+        },
+        |path, relative, _bytes| extractor(path, relative),
+    )
+}
+
+struct ExplicitFileExtractionOptions<'a> {
+    admitted_previous: Option<&'a cache::Manifest>,
+    manifest_retained_limit: Option<usize>,
+    bounded_builtin_mpeg_inventory: bool,
+}
+
+fn extract_files_with_deferred_manifest_and_output_impl<F>(
+    files: &[std::path::PathBuf],
+    cache_root: Option<&std::path::Path>,
+    managed_output_dir: &std::path::Path,
+    force: bool,
+    options: ExplicitFileExtractionOptions<'_>,
+    extractor: F,
+) -> anyhow::Result<DeferredExtractFilesResult>
+where
+    F: Fn(&std::path::Path, &str, &[u8]) -> anyhow::Result<graphoxide_core::Extraction>,
+{
     use md5::Digest as _;
+    let ExplicitFileExtractionOptions {
+        admitted_previous,
+        manifest_retained_limit,
+        bounded_builtin_mpeg_inventory,
+    } = options;
     let common_root = common_file_parent(files)?;
     let key_root = cache_root
         .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()))
@@ -2669,7 +3728,23 @@ where
             })
         })
         .unwrap_or(common_root);
-    let previous = cache::load_manifest_from_output(managed_output_dir);
+    let loaded_previous;
+    let previous = if let Some(previous) = admitted_previous {
+        previous
+    } else {
+        loaded_previous = cache::load_manifest_from_output(managed_output_dir);
+        &loaded_previous
+    };
+    let previous_manifest_retained = pending_manifest_retained_charge(previous);
+    if let Some(limit) = manifest_retained_limit
+        && previous_manifest_retained > limit
+    {
+        return Err(ManifestRetainedLimitError {
+            limit,
+            pending: false,
+        }
+        .into());
+    }
     let mut rows = Vec::with_capacity(files.len());
     let mut warnings = Vec::new();
     // A per-file fault is tolerated, but a fault on every dispatched file is
@@ -2685,6 +3760,39 @@ where
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
+        if bounded_builtin_mpeg_inventory {
+            match detect::checked_mpeg_transport_stream_evidence(
+                std::path::Path::new(&relative),
+                &path,
+            ) {
+                Ok(Some(evidence)) => {
+                    rows.push((
+                        relative.clone(),
+                        engine::mpeg_transport_stream_inventory(
+                            &path,
+                            &relative,
+                            evidence.byte_length,
+                        ),
+                        evidence.mtime,
+                        evidence.ast_hash,
+                        Some(detect::FileType::Video.as_str().to_owned()),
+                    ));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let warning = format!("skipped {relative}: {error}");
+                    tracing::warn!("{warning}");
+                    warnings.push(warning);
+                    failures.push(
+                        anyhow::Error::new(error)
+                            .context(format!("inspect extension-ambiguous source {relative}")),
+                    );
+                    skipped.push(original.clone());
+                    continue;
+                }
+            }
+        }
         // A file-specific fault costs that file, not the run.
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -2697,26 +3805,29 @@ where
                 continue;
             }
         };
+        let source_kind = detect::classify_admitted_source(std::path::Path::new(&relative), &bytes)
+            .map(|kind| kind.as_str().to_owned());
         let cached = (!force)
             .then(|| cache::ast_cache_get_from_output(managed_output_dir, &relative, &bytes))
             .flatten();
         let extraction = if let Some(cached) = cached {
             cached
         } else {
-            let extracted =
-                match extractor(&path, &relative).with_context(|| format!("extract {relative}")) {
-                    Ok(extracted) => extracted,
-                    Err(error) => {
-                        let warning = format!("skipped {relative}: {error:#}");
-                        tracing::warn!("{warning}");
-                        warnings.push(warning);
-                        failures.push(error);
-                        skipped.push(original.clone());
-                        continue;
-                    }
-                };
+            let extracted = match extractor(&path, &relative, &bytes)
+                .with_context(|| format!("extract {relative}"))
+            {
+                Ok(extracted) => extracted,
+                Err(error) => {
+                    let warning = format!("skipped {relative}: {error:#}");
+                    tracing::warn!("{warning}");
+                    warnings.push(warning);
+                    failures.push(error);
+                    skipped.push(original.clone());
+                    continue;
+                }
+            };
             if extracted.nodes.is_empty() {
-                if detect::classify_file(&path) == Some(detect::FileType::Code)
+                if source_kind.as_deref() == Some(detect::FileType::Code.as_str())
                     && !engine::has_ast_extractor(&path)
                 {
                     let suffix = path
@@ -2738,6 +3849,15 @@ where
             }
             extracted
         };
+        if !admitted_mpeg_classification_matches_extraction(
+            &relative,
+            source_kind.as_deref(),
+            &extraction,
+        ) {
+            return Err(unverified_source_kind_transition_error(
+                &std::collections::BTreeSet::from([relative]),
+            ));
+        }
         let mtime = match std::fs::metadata(&path).and_then(|metadata| metadata.modified()) {
             Ok(modified) => modified
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2757,7 +3877,7 @@ where
         } else {
             format!("{:x}", md5::Md5::digest(&bytes))
         };
-        rows.push((relative, extraction, mtime, hash));
+        rows.push((relative, extraction, mtime, hash, source_kind));
     }
     if rows.is_empty()
         && let Some(first) = failures.into_iter().next()
@@ -2774,40 +3894,120 @@ where
             "code files have no AST extractor (#1689): {summary}"
         ));
     }
-    let manifest = rows
+    let unverified_ambiguous_rows = rows
         .iter()
-        .map(|(relative, _, mtime, hash)| {
-            let semantic_hash = previous
-                .get(relative)
-                .filter(|entry| {
-                    entry.ast_version == cache::AST_CACHE_VERSION
-                        && entry.ast_hash == *hash
-                        && !hash.is_empty()
+        .filter_map(|(relative, _, mtime, hash, source_kind)| {
+            let expected = source_kind.as_deref()?;
+            if !is_ambiguous_typescript_extension(relative) {
+                return None;
+            }
+            let physical = key_root.join(relative);
+            (!detect::checked_ambiguous_source_evidence(std::path::Path::new(relative), &physical)
+                .is_ok_and(|actual| {
+                    actual.kind.as_str() == expected
+                        && (hash.is_empty() || actual.ast_hash == *hash)
+                        && actual.mtime == *mtime
+                }))
+            .then(|| relative.clone())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if !unverified_ambiguous_rows.is_empty() {
+        return Err(unverified_source_kind_transition_error(
+            &unverified_ambiguous_rows,
+        ));
+    }
+    let mut manifest = cache::Manifest::new();
+    let mut exact_manifest_retained = 0usize;
+    for (relative, _, mtime, hash, source_kind) in &rows {
+        let semantic_hash = previous
+            .get(relative)
+            .filter(|entry| {
+                entry.ast_version == cache::AST_CACHE_VERSION
+                    && entry.ast_hash == *hash
+                    && !hash.is_empty()
+                    && entry.source_kind.as_deref() == source_kind.as_deref()
+            })
+            .map(|entry| entry.semantic_hash.as_str())
+            .unwrap_or_default();
+        let entry_charge = pending_manifest_entry_retained_charge(
+            relative,
+            hash,
+            semantic_hash,
+            source_kind.as_deref(),
+        );
+        let required = previous_manifest_retained
+            .saturating_add(exact_manifest_retained)
+            .saturating_add(entry_charge);
+        if let Some(limit) = manifest_retained_limit
+            && required > limit
+        {
+            return Err(ManifestRetainedLimitError {
+                limit,
+                pending: true,
+            }
+            .into());
+        }
+        exact_manifest_retained = exact_manifest_retained.saturating_add(entry_charge);
+        manifest.insert(
+            relative.clone(),
+            cache::ManifestEntry {
+                mtime: *mtime,
+                ast_version: cache::AST_CACHE_VERSION,
+                ast_hash: hash.clone(),
+                semantic_hash: semantic_hash.to_owned(),
+                source_kind: source_kind.clone(),
+                runtime_cache: None,
+            },
+        );
+    }
+    let resolver_invalidated_keys = rows
+        .iter()
+        .filter(|(relative, extraction, _, _, source_kind)| {
+            source_kind.as_deref() == Some(detect::FileType::Video.as_str())
+                && extraction_confirms_mpeg_transport_stream(extraction, relative)
+        })
+        .map(|(relative, _, _, _, _)| relative.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut ownership_reset_sources = rows
+        .iter()
+        .filter(|(relative, extraction, _, _, source_kind)| {
+            let current_mpeg = source_kind.as_deref() == Some(detect::FileType::Video.as_str())
+                && extraction_confirms_mpeg_transport_stream(extraction, relative);
+            let proven_transition = source_kind.as_deref().is_some_and(|current_kind| {
+                previous.get(relative).is_some_and(|entry| {
+                    source_kind_transition_affects_code(entry, current_kind, relative)
                 })
-                .map(|entry| entry.semantic_hash.clone())
-                .unwrap_or_default();
-            (
-                relative.clone(),
-                cache::ManifestEntry {
-                    mtime: *mtime,
-                    ast_version: cache::AST_CACHE_VERSION,
-                    ast_hash: hash.clone(),
-                    semantic_hash,
-                    runtime_cache: None,
-                },
-            )
+            });
+            current_mpeg || proven_transition
+        })
+        .map(|(relative, _, _, _, _)| key_root.join(relative))
+        .collect::<Vec<_>>();
+    ownership_reset_sources.sort();
+    ownership_reset_sources.dedup();
+    let admitted_source_kinds = rows
+        .iter()
+        .filter_map(|(relative, _, _, _, source_kind)| {
+            source_kind
+                .as_ref()
+                .map(|kind| (key_root.join(relative), kind.clone()))
         })
         .collect();
     let mut extractions = rows
         .into_iter()
-        .map(|(_, extraction, _, _)| extraction)
+        .map(|(_, extraction, _, _, _)| extraction)
         .collect::<Vec<_>>();
     resolution::resolve_with_root(&mut extractions, &key_root);
+    crate::js_resolution::invalidate_resolved_targets_for_sources(
+        &mut extractions,
+        &resolver_invalidated_keys,
+    );
     Ok(DeferredExtractFilesResult {
         result: ExtractFilesResult {
             extractions,
             warnings,
             skipped,
+            admitted_source_kinds,
+            ownership_reset_sources,
             key_root,
             managed_output_dir: managed_output_dir.to_path_buf(),
         },
@@ -2820,6 +4020,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Context as _;
     use graphoxide_core::{make_id, Edge, Extraction};
     use std::{
         fs,
@@ -2884,6 +4085,173 @@ mod tests {
             compute_workers: 2,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+        }
+    }
+
+    fn mpeg_transport_stream_fixture() -> Vec<u8> {
+        let mut media = vec![0xff; 5 * 188];
+        for packet in 0..5 {
+            let offset = packet * 188;
+            media[offset..offset + 4].copy_from_slice(&[
+                0x47,
+                0x40,
+                packet as u8,
+                0x10 | packet as u8,
+            ]);
+        }
+        media
+    }
+
+    fn assert_mpeg_resolution_integrity(
+        extractions: &[graphoxide_core::Extraction],
+        source: &str,
+        stem: &str,
+    ) {
+        let node_ids = extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let media = extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .find(|node| {
+                node.source_file == source
+                    && node.extra.get("format").and_then(serde_json::Value::as_str)
+                        == Some("mpeg_transport_stream")
+            })
+            .expect("truthful MPEG transport-stream inventory");
+        let expected_media_id = make_id(&["format_inventory", "mpeg_transport_stream", stem]);
+        assert_eq!(media.id, expected_media_id);
+        let former_code_anchor = make_id(&[stem]);
+        assert_ne!(media.id, former_code_anchor);
+        let unresolved = make_id(&["ref", stem]);
+        let module_edge = extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from")
+            .expect("module import evidence");
+        assert_eq!(module_edge.true_target(), unresolved);
+        assert!(!module_edge.extra.contains_key("target_file"));
+        for edge in extractions.iter().flat_map(|extraction| &extraction.edges) {
+            assert_ne!(edge.true_target(), media.id, "media inventory is not code");
+            assert_ne!(
+                edge.true_target(),
+                former_code_anchor,
+                "former TypeScript anchor must not remain resolved"
+            );
+            assert_ne!(
+                edge.extra
+                    .get("target_file")
+                    .and_then(serde_json::Value::as_str),
+                Some(source),
+                "symbol bindings into media must be removed"
+            );
+            if edge.true_target() != unresolved {
+                assert!(
+                    node_ids.contains(edge.true_target()),
+                    "non-reference edge target {} must exist; edge={edge:?}",
+                    edge.true_target()
+                );
+            }
+        }
+    }
+
+    fn seed_forged_python_runtime_artifact(
+        fixture: &Fixture,
+        output: &Path,
+        runtime: graphoxide_index_runtime::IndexRuntimeConfig,
+    ) {
+        let relative = "main.py";
+        let source = b"def answer():\n    return 42\n";
+        let source_path = fixture.root.join(relative);
+        fs::write(&source_path, source).expect("write Python source");
+        let (parser_allowance, _) = super::isolated_parser_layout(runtime, true);
+        let evidence = super::cache::runtime_ast_cache_evidence(
+            relative,
+            source,
+            super::cache::RuntimeAstCacheOptions::isolated(
+                u64::try_from(parser_allowance).expect("parser allowance fits u64"),
+            ),
+        )
+        .expect("runtime cache evidence");
+        let mut forged = super::engine::extract_as_bytes_with_parser_allowance(
+            &source_path,
+            relative,
+            source,
+            parser_allowance,
+        )
+        .expect("fresh Python extraction");
+        forged
+            .nodes
+            .iter_mut()
+            .find(|node| node.label == "answer()")
+            .expect("answer function node")
+            .label = "forged()".into();
+        let forged_payload = super::cache::encode_runtime_ast_cache_payload(&evidence, &forged)
+            .expect("encode forged inner envelope");
+        let mut artifact_store = graphoxide_index_runtime::cache::RuntimeCache::open(output)
+            .expect("open runtime artifact store");
+        artifact_store
+            .put(evidence.key, &forged_payload)
+            .expect("seed valid outer frame with forged facts");
+    }
+
+    fn assert_fresh_answer_without_forgery(result: &super::DeferredProjectExtractionResult) {
+        assert!(result
+            .extractions
+            .iter()
+            .any(|extraction| { extraction.nodes.iter().any(|node| node.label == "answer()") }));
+        assert!(result
+            .extractions
+            .iter()
+            .all(|extraction| { extraction.nodes.iter().all(|node| node.label != "forged()") }));
+    }
+
+    #[cfg(unix)]
+    fn set_runtime_cache_data_files_read_only(output: &Path) -> Vec<(PathBuf, u32)> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn collect(directory: &Path, files: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(directory).expect("read runtime cache directory") {
+                let entry = entry.expect("runtime cache entry");
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).expect("runtime cache metadata");
+                if metadata.is_dir() {
+                    collect(&path, files);
+                } else if metadata.is_file()
+                    && path.file_name().and_then(|name| name.to_str()) != Some("owner.lock")
+                {
+                    files.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        collect(&output.join("cache/runtime-v2"), &mut files);
+        files.sort();
+        assert!(!files.is_empty(), "forged cache created data files");
+        files
+            .into_iter()
+            .map(|path| {
+                let mode = fs::metadata(&path)
+                    .expect("cache data metadata")
+                    .permissions()
+                    .mode();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o400))
+                    .expect("make cache data read-only");
+                (path, mode)
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn restore_runtime_cache_data_permissions(files: &[(PathBuf, u32)]) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for (path, mode) in files {
+            fs::set_permissions(path, fs::Permissions::from_mode(*mode))
+                .expect("restore cache data permissions");
         }
     }
 
@@ -3342,8 +4710,10 @@ mod tests {
             parallel_runtime,
         )
         .expect("parallel near-limit extraction");
-        assert_eq!(serial.runtime_cache.stores, 4);
-        assert_eq!(parallel.runtime_cache.stores, 4);
+        assert!(!serial.runtime_cache.enabled);
+        assert!(!parallel.runtime_cache.enabled);
+        assert_eq!(serial.runtime_cache.stores, 0);
+        assert_eq!(parallel.runtime_cache.stores, 0);
         assert_eq!(
             serde_json::to_vec(&serial.extractions).expect("serial extraction JSON"),
             serde_json::to_vec(&parallel.extractions).expect("parallel extraction JSON"),
@@ -3400,13 +4770,82 @@ mod tests {
     }
 
     #[test]
-    fn runtime_manifest_reservation_keeps_the_full_normalization_expansion() {
-        let budget = 64 * 1024 * 1024;
-        let byte_limit = super::runtime_manifest_byte_limit(budget, usize::MAX);
-        let reservation = super::runtime_manifest_reservation(budget, usize::MAX);
-        assert_eq!(byte_limit, budget / 64);
-        assert_eq!(reservation, byte_limit * 32);
-        assert_eq!(reservation, budget / 2);
+    fn legacy_missing_source_kind_is_ambiguous_only_for_transport_stream_ts() {
+        let legacy = super::cache::ManifestEntry::default();
+        assert!(super::source_kind_transition(
+            &legacy,
+            "video",
+            "segment.ts"
+        ));
+        assert!(super::source_kind_transition(
+            &legacy,
+            "video",
+            "SEGMENT.TS"
+        ));
+        assert!(!super::source_kind_transition(&legacy, "video", "clip.mp4"));
+        assert!(!super::source_kind_transition(&legacy, "video", "clip.mov"));
+
+        let known_code = super::cache::ManifestEntry {
+            source_kind: Some("code".into()),
+            ..super::cache::ManifestEntry::default()
+        };
+        assert!(super::source_kind_transition(
+            &known_code,
+            "video",
+            "clip.mp4"
+        ));
+    }
+
+    #[test]
+    fn runtime_manifest_charge_uses_exact_loaded_bytes_after_bounded_admission() {
+        // Production reproduction: the 512 MiB automatic runtime assigns
+        // 128 MiB to cache/runs and discovered 3,696 inputs. The committed
+        // SafeEVAC manifest is 610,448 bytes, far below the 2 MiB read cap.
+        let cache_and_runs_budget = 134_217_728;
+        let byte_limit = super::runtime_manifest_byte_limit(cache_and_runs_budget, 3_696);
+        let retained_charge =
+            super::runtime_manifest_retained_charge(cache_and_runs_budget, 610_448);
+        assert_eq!(byte_limit, 2_097_152);
+        assert_eq!(retained_charge, 19_534_336);
+        assert_eq!(cache_and_runs_budget - retained_charge, 114_683_392);
+
+        let pending_reservation =
+            super::pending_manifest_retained_reservation(cache_and_runs_budget, 3_696);
+        assert_eq!(pending_reservation, 67_108_864);
+        assert_eq!(
+            cache_and_runs_budget - retained_charge - pending_reservation,
+            47_574_528,
+            "loaded and pending manifest ownership are simultaneously reserved"
+        );
+
+        let mut pending = super::cache::Manifest::new();
+        for index in 0..3_696 {
+            pending.insert(
+                format!("backend-controller/src/generated/unit_{index:04}.graphql"),
+                super::cache::ManifestEntry {
+                    mtime: index as f64,
+                    ast_version: super::cache::AST_CACHE_VERSION,
+                    ast_hash: format!("{index:032x}"),
+                    semantic_hash: format!("{index:032x}"),
+                    source_kind: Some("code".into()),
+                    runtime_cache: None,
+                },
+            );
+        }
+        let owned_pending_charge = super::pending_manifest_retained_charge(&pending);
+        assert!(owned_pending_charge > 0);
+        assert!(owned_pending_charge <= pending_reservation);
+
+        assert_eq!(
+            super::runtime_manifest_retained_charge(cache_and_runs_budget, 0),
+            0,
+            "missing and rejected manifests retain no post-load charge"
+        );
+        assert_eq!(
+            super::runtime_manifest_retained_charge(cache_and_runs_budget, usize::MAX),
+            cache_and_runs_budget / 2,
+            "the exact-byte charge remains conservatively capped"
+        );
     }
 
     #[test]
@@ -3933,7 +5372,7 @@ mod tests {
         let result =
             super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
                 &fixture.root,
-                true,
+                false,
                 &fixture.root.join("graphoxide-out"),
                 false,
                 &super::detect::DetectOptions::default(),
@@ -4015,6 +5454,10 @@ mod tests {
         .expect("incremental isolated scan");
         assert_eq!(incremental.changed_sources, 1);
         assert_eq!(incremental.unchanged_sources, 2);
+        assert!(
+            incremental.ownership_prune_sources.is_empty(),
+            "an ordinary same-kind TypeScript edit preserves the semantic tier"
+        );
         let fresh = graphoxide_graph::dedupe_raw_extractions(&incremental.extractions);
         let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
             fresh,
@@ -4080,6 +5523,7 @@ mod tests {
                 super::RuntimeFileContext {
                     path: changed_path.clone(),
                     physical_path: changed_path,
+                    source_kind: "code".into(),
                     indexed: true,
                 },
             ),
@@ -4088,6 +5532,7 @@ mod tests {
                 super::RuntimeFileContext {
                     path: unchanged_path.clone(),
                     physical_path: unchanged_path,
+                    source_kind: "code".into(),
                     indexed: true,
                 },
             ),
@@ -4394,7 +5839,13 @@ mod tests {
             low_runtime,
         )
         .expect_err("oversized baseline must fail closed");
-        assert!(error.to_string().contains("graph"));
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("resolver baseline"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("effective 8388608-byte"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("--memory-budget-bytes"), "{diagnostic}");
         assert_eq!(fs::read(&graph_path).expect("reread graph"), graph_before);
         assert_eq!(
             fs::read(&manifest_path).expect("reread manifest"),
@@ -4525,7 +5976,7 @@ mod tests {
         let result =
             super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
                 &fixture.root,
-                true,
+                false,
                 &output,
                 false,
                 &super::detect::DetectOptions::default(),
@@ -4535,7 +5986,8 @@ mod tests {
         assert!(result.runtime_cache_diagnostics.is_empty());
         assert_eq!(result.changed_sources, 1);
         assert!(result.runtime_cache.enabled);
-        assert_eq!(result.runtime_cache.bypasses, 1);
+        assert_eq!(result.runtime_cache.bypasses, 0);
+        assert_eq!(result.runtime_cache.misses, 1);
         assert_eq!(result.runtime_cache.stores, 1);
         assert_eq!(result.telemetry.io.sources_selected, 1);
         assert_eq!(
@@ -4618,11 +6070,16 @@ mod tests {
             forced.retained_output_bytes, retained_output_bytes,
             "force bypass must not perturb deterministic output admission"
         );
+        assert!(!forced.runtime_cache.enabled);
         assert_eq!(forced.runtime_cache.bypasses, 1);
         assert_eq!(forced.runtime_cache.metadata_hits, 0);
         assert_eq!(forced.runtime_cache.runtime_hits, 0);
-        assert_eq!(forced.runtime_cache.stores, 1);
+        assert_eq!(forced.runtime_cache.stores, 0);
         assert_eq!(forced.runtime_cache.already_present, 0);
+        assert_eq!(
+            forced.telemetry.cache_io,
+            graphoxide_index_runtime::cache::RuntimeCacheIoTelemetry::default()
+        );
         assert_eq!(forced.telemetry.io.sources_read, 1);
         assert_eq!(forced.telemetry.io.sources_delivered, 1);
         assert_eq!(forced.telemetry.work.parses, 1);
@@ -4650,7 +6107,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_runtime_force_replaces_a_valid_outer_wrong_inner_artifact() {
+    fn isolated_runtime_force_never_authorizes_a_preexisting_runtime_artifact() {
         let fixture = Fixture::new();
         let relative = "main.py";
         let source = b"def answer():\n    return 42\n";
@@ -4697,10 +6154,16 @@ mod tests {
             &super::detect::DetectOptions::default(),
             runtime,
         )
-        .expect("force scan replaces forged runtime artifact");
+        .expect("force scan ignores forged runtime artifact");
+        assert!(!forced.runtime_cache.enabled);
         assert_eq!(forced.runtime_cache.bypasses, 1);
-        assert_eq!(forced.runtime_cache.stores, 1);
+        assert_eq!(forced.runtime_cache.stores, 0);
         assert_eq!(forced.runtime_cache.already_present, 0);
+        assert!(forced
+            .pending_manifest
+            .entries
+            .values()
+            .all(|entry| entry.runtime_cache.is_none()));
         commit_runtime_baseline(forced, &fixture.root, &output);
 
         fs::remove_file(output.join("graph.json")).expect("remove graph to require fact replay");
@@ -4712,9 +6175,12 @@ mod tests {
             &super::detect::DetectOptions::default(),
             runtime,
         )
-        .expect("warm replay after force replacement");
-        assert_eq!(rebuilt.runtime_cache.metadata_hits, 1);
-        assert_eq!(rebuilt.runtime_cache.parses_avoided, 1);
+        .expect("fresh repair after force deliberately omitted cache authorization");
+        assert_eq!(rebuilt.runtime_cache.metadata_hits, 0);
+        assert_eq!(rebuilt.runtime_cache.runtime_hits, 0);
+        assert_eq!(rebuilt.runtime_cache.parses_avoided, 0);
+        assert_eq!(rebuilt.runtime_cache.stores, 1);
+        assert_eq!(rebuilt.changed_sources, 1);
         assert!(rebuilt
             .extractions
             .iter()
@@ -4726,6 +6192,277 @@ mod tests {
     }
 
     #[test]
+    fn force_code_only_clears_carried_non_code_runtime_authorization() {
+        for legacy_executor in [false, true] {
+            let fixture = Fixture::new();
+            fixture.write("main.rs", "pub fn answer() -> u32 { 42 }\n");
+            fixture.write("notes.md", "# Notes\n\nRetained documentation.\n");
+            let output = fixture.root.join("graphoxide-out");
+            let runtime = runtime_config(32 * 1024 * 1024);
+
+            let cold = super::extract_project_with_runtime_scan_options_deferred_manifest(
+                &fixture.root,
+                false,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("cold full runtime scan");
+            assert!(
+                cold.pending_manifest.entries["notes.md"]
+                    .runtime_cache
+                    .is_some(),
+                "the excluded row must begin with real cache authorization"
+            );
+            commit_runtime_baseline(cold, &fixture.root, &output);
+
+            let forced = if legacy_executor {
+                super::extract_project_with_scan_options_deferred_manifest(
+                    &fixture.root,
+                    true,
+                    &output,
+                    true,
+                    &super::detect::DetectOptions::default(),
+                )
+            } else {
+                super::extract_project_with_runtime_scan_options_deferred_manifest(
+                    &fixture.root,
+                    true,
+                    &output,
+                    true,
+                    &super::detect::DetectOptions::default(),
+                    runtime,
+                )
+            }
+            .expect("forced code-only trust reset");
+            assert!(
+                forced.pending_manifest.entries["notes.md"]
+                    .runtime_cache
+                    .is_none(),
+                "policy-preserved non-code ownership cannot preserve cache trust on force"
+            );
+            forced
+                .pending_manifest
+                .commit()
+                .expect("commit forced trust-reset manifest");
+
+            let repair =
+                super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                    &fixture.root,
+                    false,
+                    &output,
+                    false,
+                    &super::detect::DetectOptions::default(),
+                    runtime,
+                )
+                .expect("normal full scan repairs authorization");
+            assert_eq!(repair.runtime_cache.metadata_hits, 0);
+            assert_eq!(repair.runtime_cache.runtime_hits, 0);
+            assert_eq!(repair.runtime_cache.parses_avoided, 0);
+            assert_eq!(repair.telemetry.work.parses, 2);
+            assert!(repair
+                .extractions
+                .iter()
+                .flat_map(|extraction| &extraction.nodes)
+                .any(|node| node.source_file == "notes.md"));
+            assert!(repair
+                .pending_manifest
+                .entries
+                .values()
+                .all(|entry| entry.runtime_cache.is_some()));
+        }
+    }
+
+    #[test]
+    fn cache_startup_failure_after_force_does_not_reauthorize_forged_artifact() {
+        let fixture = Fixture::new();
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        seed_forged_python_runtime_artifact(&fixture, &output, runtime);
+
+        let forced = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("force trust reset");
+        assert!(forced
+            .pending_manifest
+            .entries
+            .values()
+            .all(|entry| entry.runtime_cache.is_none()));
+        commit_runtime_baseline(forced, &fixture.root, &output);
+        fs::remove_file(output.join("graph.json")).expect("force fresh fact rebuild");
+
+        let owner =
+            graphoxide_index_runtime::cache::RuntimeCacheIoService::start(output.clone(), 1)
+                .expect("hold runtime cache owner");
+        let startup_failed = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("fresh extraction survives cache startup failure");
+        assert!(!startup_failed.runtime_cache.enabled);
+        assert!(startup_failed
+            .runtime_cache_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("runtime cache could not start")));
+        assert!(startup_failed
+            .pending_manifest
+            .entries
+            .values()
+            .all(|entry| entry.runtime_cache.is_none()));
+        assert_fresh_answer_without_forgery(&startup_failed);
+        commit_runtime_baseline(startup_failed, &fixture.root, &output);
+        owner.shutdown().expect("release runtime cache owner");
+
+        fs::remove_file(output.join("graph.json")).expect("force later cache decision");
+        let later = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("later scan repairs rather than replaying forged artifact");
+        assert_eq!(later.runtime_cache.runtime_hits, 0);
+        assert_eq!(later.runtime_cache.parses_avoided, 0);
+        assert_eq!(later.runtime_cache.stores, 1);
+        assert_fresh_answer_without_forgery(&later);
+        assert!(later
+            .pending_manifest
+            .entries
+            .values()
+            .all(|entry| entry.runtime_cache.is_some()));
+    }
+
+    #[test]
+    fn unchanged_runtime_manifest_refreshes_current_source_identity() {
+        let fixture = Fixture::new();
+        let source = b"def answer():\n    return 42\n";
+        let source_path = fixture.root.join("main.py");
+        fs::write(&source_path, source).expect("write initial source");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial cache-authorized scan");
+        let initial_evidence = initial.pending_manifest.entries["main.py"]
+            .runtime_cache
+            .expect("initial runtime authorization");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+
+        let replacement = fixture.root.join("replacement.tmp");
+        fs::write(&replacement, source).expect("write byte-identical replacement");
+        fs::remove_file(&source_path).expect("remove original identity");
+        fs::rename(&replacement, &source_path).expect("install replacement identity");
+        let unchanged = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("byte-identical scan with a new physical identity");
+        assert_eq!(unchanged.changed_sources, 0);
+        let current_evidence = unchanged.pending_manifest.entries["main.py"]
+            .runtime_cache
+            .expect("refreshed runtime authorization");
+        assert_eq!(
+            current_evidence.content_digest,
+            initial_evidence.content_digest
+        );
+        assert_eq!(current_evidence.artifact_key, initial_evidence.artifact_key);
+        assert_ne!(
+            current_evidence.source_identity_digest, initial_evidence.source_identity_digest,
+            "byte verification should refresh metadata authorization evidence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_store_failure_after_force_does_not_reauthorize_forged_artifact() {
+        let fixture = Fixture::new();
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        seed_forged_python_runtime_artifact(&fixture, &output, runtime);
+
+        let forced = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("force trust reset");
+        commit_runtime_baseline(forced, &fixture.root, &output);
+        fs::remove_file(output.join("graph.json")).expect("force fresh fact rebuild");
+
+        let cache_files = set_runtime_cache_data_files_read_only(&output);
+        let store_failed = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("fresh extraction survives cache store failure");
+        restore_runtime_cache_data_permissions(&cache_files);
+        assert!(store_failed.runtime_cache.enabled);
+        assert_eq!(store_failed.runtime_cache.store_failures, 1);
+        assert_eq!(store_failed.runtime_cache.stores, 0);
+        assert!(store_failed
+            .runtime_cache_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("runtime cache persistence")));
+        assert!(store_failed
+            .pending_manifest
+            .entries
+            .values()
+            .all(|entry| entry.runtime_cache.is_none()));
+        assert_fresh_answer_without_forgery(&store_failed);
+        commit_runtime_baseline(store_failed, &fixture.root, &output);
+
+        fs::remove_file(output.join("graph.json")).expect("force later cache decision");
+        let later = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("later scan repairs rather than replaying forged artifact");
+        assert_eq!(later.runtime_cache.runtime_hits, 0);
+        assert_eq!(later.runtime_cache.parses_avoided, 0);
+        assert_eq!(later.runtime_cache.stores, 1);
+        assert_fresh_answer_without_forgery(&later);
+        assert!(later
+            .pending_manifest
+            .entries
+            .values()
+            .all(|entry| entry.runtime_cache.is_some()));
+    }
+
+    #[test]
     fn isolated_runtime_cache_keeps_javascript_family_on_contextual_bypass() {
         let fixture = Fixture::new();
         fixture.write("main.ts", "export const answer: number = 42;\n");
@@ -4733,7 +6470,7 @@ mod tests {
         let runtime = runtime_config(32 * 1024 * 1024);
         let cold = super::extract_project_with_runtime_scan_options_deferred_manifest(
             &fixture.root,
-            true,
+            false,
             &output,
             false,
             &super::detect::DetectOptions::default(),
@@ -4853,27 +6590,1281 @@ mod tests {
             }
             fixture.write(&format!("fanout_{file}.rs"), &source);
         }
-        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
-            memory_budget_bytes: 128 * 1024,
-            io_workers: 2,
-            compute_workers: 2,
-            io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
-            read_batch_bytes: 4 * 1024,
+        let mut diagnostics = Vec::new();
+        for workers in [1, 2, 4] {
+            let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+                memory_budget_bytes: 128 * 1024,
+                io_workers: workers,
+                compute_workers: workers,
+                io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
+                read_batch_bytes: 4 * 1024,
+            };
+            let output = fixture.root.join(format!("output-{workers}"));
+            fs::create_dir_all(&output).expect("create committed output");
+            let graph_bytes = br#"{"nodes":[],"edges":[],"sentinel":"last-good"}"#;
+            let manifest_bytes = b"{}";
+            fs::write(output.join("graph.json"), graph_bytes).expect("seed committed graph");
+            fs::write(output.join("manifest.json"), manifest_bytes)
+                .expect("seed committed manifest");
+            let error = super::extract_project_with_runtime_scan_options_deferred_manifest(
+                &fixture.root,
+                true,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect_err("high-fanout facts must exceed the retained-output partition");
+            let diagnostic = error.to_string();
+            assert_eq!(
+                diagnostic,
+                "isolated retained extraction output exhausted its 16320-byte output cap within the effective 131072-byte managed-memory budget; retry with a larger --memory-budget-bytes value"
+            );
+            assert!(!diagnostic.contains("fanout_"));
+            assert_eq!(
+                fs::read(output.join("graph.json")).expect("read last-good graph"),
+                graph_bytes,
+                "a rejected scan changed the committed graph"
+            );
+            assert_eq!(
+                fs::read(output.join("manifest.json")).expect("read last-good manifest"),
+                manifest_bytes,
+                "a rejected scan changed the committed manifest"
+            );
+            let mut output_entries = fs::read_dir(&output)
+                .expect("read committed output")
+                .map(|entry| {
+                    entry
+                        .expect("output entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
+            output_entries.sort();
+            assert_eq!(output_entries, ["graph.json", "manifest.json"]);
+            diagnostics.push(diagnostic);
+        }
+        assert!(diagnostics.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn isolated_incremental_typescript_to_mpeg_rebuilds_importers_without_endpoint_aliasing() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        fixture.write("segment.ts", "export const phantom = 42;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial TypeScript baseline");
+        assert_eq!(
+            initial.pending_manifest.entries["segment.ts"]
+                .source_kind
+                .as_deref(),
+            Some("code")
+        );
+        let baseline = commit_runtime_baseline(initial, &fixture.root, &output);
+        let former_code_id = make_id(&["segment"]);
+        assert!(baseline
+            .links
+            .iter()
+            .any(|edge| { edge.source_file == "main.ts" && edge.true_target() == former_code_id }));
+
+        fs::write(
+            fixture.root.join("segment.ts"),
+            mpeg_transport_stream_fixture(),
+        )
+        .expect("replace TypeScript with MPEG transport stream");
+        let incremental = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("incremental TypeScript-to-MPEG scan");
+
+        assert_eq!(incremental.changed_sources, 2);
+        assert_eq!(incremental.ownership_prune_sources.len(), 1);
+        assert_eq!(
+            incremental.ownership_prune_sources[0],
+            fs::canonicalize(fixture.root.join("segment.ts")).expect("canonical media source")
+        );
+        assert_eq!(
+            incremental.pending_manifest.entries["segment.ts"]
+                .source_kind
+                .as_deref(),
+            Some("video")
+        );
+        let media_node = incremental
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .find(|node| {
+                node.source_file == "segment.ts"
+                    && node.extra.get("format").and_then(serde_json::Value::as_str)
+                        == Some("mpeg_transport_stream")
+            })
+            .expect("fresh MPEG inventory node");
+        let media_id = media_node.id.clone();
+        assert_ne!(media_id, former_code_id);
+        let fresh_import = incremental
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from")
+            .expect("recomputed importer edge");
+        assert_eq!(fresh_import.true_target(), make_id(&["ref", "segment"]));
+        assert_ne!(fresh_import.true_target(), media_id);
+
+        let fresh = graphoxide_graph::dedupe_raw_extractions(&incremental.extractions);
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_ownership_resets_and_materialization_limit(
+            fresh,
+            &baseline,
+            &incremental.rebuilt_sources,
+            &[],
+            graphoxide_graph::incremental::IncrementalBaselinePrunes {
+                deletion_sources: &[],
+                ownership_reset_sources: &incremental.ownership_prune_sources,
+            },
+            Some(&fixture.root),
+            64 * 1024 * 1024,
+        )
+        .expect("merge TypeScript-to-MPEG delta");
+        assert!(merged.nodes.iter().all(|node| {
+            node.source_file != "segment.ts"
+                || node.extra.get("type").and_then(serde_json::Value::as_str) != Some("file")
+        }));
+        assert!(merged
+            .edges
+            .iter()
+            .all(|edge| { edge.source_file != "main.ts" || edge.true_target() != media_id }));
+        let clustered = graphoxide_graph::build_graph_with_options_and_root(
+            std::slice::from_ref(&merged),
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build clustered TypeScript-to-MPEG graph");
+        assert!(clustered.nodes.iter().any(|node| node.id == media_id));
+        assert!(clustered
+            .links
+            .iter()
+            .all(|edge| { edge.source_file != "main.ts" || edge.true_target() != media_id }));
+    }
+
+    #[test]
+    fn transition_diagnostics_are_deterministic_escaped_and_bounded() {
+        let long = format!("a\n{}", "界".repeat(8_192));
+        let mut forward = std::collections::BTreeSet::new();
+        forward.insert("z.ts".to_owned());
+        forward.insert(long.clone());
+        forward.insert("middle.ts".to_owned());
+        let mut reverse = std::collections::BTreeSet::new();
+        reverse.insert("middle.ts".to_owned());
+        reverse.insert(long);
+        reverse.insert("z.ts".to_owned());
+
+        let first = super::unverified_source_kind_transition_error(&forward).to_string();
+        let second = super::unverified_source_kind_transition_error(&reverse).to_string();
+        assert_eq!(
+            first, second,
+            "worker/insertion order must not affect diagnostics"
+        );
+        assert!(first.contains("3 source(s)"));
+        assert!(
+            first.contains("\\n"),
+            "control characters must be escaped: {first}"
+        );
+        assert!(
+            first.contains('…'),
+            "long paths must be visibly truncated: {first}"
+        );
+        assert!(
+            first.len() < 2_500,
+            "diagnostic must remain bounded: {}",
+            first.len()
+        );
+        assert!(super::bounded_diagnostic_source_path(&"界".repeat(1_024)).len() < 1_100);
+    }
+
+    #[test]
+    fn code_only_ambiguous_media_requires_a_trusted_manifest_for_a_committed_graph() {
+        for legacy_executor in [false, true] {
+            for corrupt_manifest in [false, true] {
+                let fixture = Fixture::new();
+                fixture.write("main.ts", "export const main = true;\n");
+                let segment = fixture.write("segment.ts", "export const phantom = 42;\n");
+                let output = fixture.root.join("graphoxide-out");
+                let runtime = runtime_config(32 * 1024 * 1024);
+                let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+                    &fixture.root,
+                    false,
+                    &output,
+                    false,
+                    &super::detect::DetectOptions::default(),
+                    runtime,
+                )
+                .expect("initial TypeScript baseline");
+                commit_runtime_baseline(initial, &fixture.root, &output);
+                fs::write(&segment, mpeg_transport_stream_fixture())
+                    .expect("replace TypeScript with MPEG");
+                let graph_before = fs::read(output.join("graph.json")).expect("baseline graph");
+                let manifest_path = output.join("manifest.json");
+                if corrupt_manifest {
+                    fs::write(&manifest_path, b"{not-json").expect("corrupt committed manifest");
+                } else {
+                    fs::remove_file(&manifest_path).expect("remove committed manifest");
+                }
+                let manifest_before = fs::read(&manifest_path).ok();
+
+                let error = if legacy_executor {
+                    super::extract_project_with_scan_options_deferred_manifest(
+                        &fixture.root,
+                        false,
+                        &output,
+                        true,
+                        &super::detect::DetectOptions::default(),
+                    )
+                } else {
+                    super::extract_project_with_runtime_scan_options_deferred_manifest(
+                        &fixture.root,
+                        false,
+                        &output,
+                        true,
+                        &super::detect::DetectOptions::default(),
+                        runtime,
+                    )
+                }
+                .expect_err("untrusted manifest cannot authorize ambiguous carry-forward");
+                let error = error.to_string();
+                assert!(
+                    error.contains("cannot safely perform a --code-only"),
+                    "{error}"
+                );
+                assert!(error.contains("full rebuild"), "{error}");
+                assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+                assert_eq!(fs::read(&manifest_path).ok(), manifest_before);
+            }
+        }
+    }
+
+    #[test]
+    fn new_mpeg_segment_after_a_trusted_manifest_is_safely_code_only_excluded() {
+        for legacy_executor in [false, true] {
+            let fixture = Fixture::new();
+            fixture.write("main.ts", "export const main = true;\n");
+            let output = fixture.root.join("graphoxide-out");
+            let runtime = runtime_config(32 * 1024 * 1024);
+            let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+                &fixture.root,
+                false,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("initial trusted baseline");
+            commit_runtime_baseline(initial, &fixture.root, &output);
+            fs::write(
+                fixture.root.join("new-segment.ts"),
+                mpeg_transport_stream_fixture(),
+            )
+            .expect("add rotating MPEG segment");
+
+            let result = if legacy_executor {
+                super::extract_project_with_scan_options_deferred_manifest(
+                    &fixture.root,
+                    false,
+                    &output,
+                    true,
+                    &super::detect::DetectOptions::default(),
+                )
+            } else {
+                super::extract_project_with_runtime_scan_options_deferred_manifest(
+                    &fixture.root,
+                    false,
+                    &output,
+                    true,
+                    &super::detect::DetectOptions::default(),
+                    runtime,
+                )
+            }
+            .expect("verified media can authorize a safe code-only exclusion");
+            assert!(result.ownership_prune_sources.is_empty());
+            assert_eq!(result.verified_representation_sources.len(), 1);
+            assert_eq!(
+                result.verified_representation_sources[0],
+                fs::canonicalize(fixture.root.join("new-segment.ts"))
+                    .expect("canonical new media path")
+            );
+            assert!(!result
+                .pending_manifest
+                .entries
+                .contains_key("new-segment.ts"));
+        }
+    }
+
+    #[test]
+    fn code_only_preserved_manifest_ownership_is_reported_as_live_memory() {
+        let fixture = Fixture::new();
+        fixture.write("main.ts", "export const main = true;\n");
+        for index in 0..96 {
+            fixture.write(
+                &format!("docs/section-{index:03}/reference-{index:03}.md"),
+                "# Reference\n\nPreserved non-code ownership.\n",
+            );
+        }
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(64 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial mixed baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+
+        let code_only = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            true,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("code-only scan preserves non-code ownership");
+        assert_eq!(code_only.pending_manifest.entries.len(), 97);
+        assert_eq!(
+            code_only.pending_manifest_retained_bytes,
+            super::pending_manifest_retained_charge(&code_only.pending_manifest.entries)
+        );
+        assert!(code_only.pending_manifest_retained_bytes > code_only.retained_output_bytes);
+    }
+
+    #[test]
+    fn unverified_code_only_kind_transition_preserves_last_good_graph_and_manifest() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let original_typescript = b"export const phantom = 42;\n";
+        let segment_path = fixture.root.join("segment.ts");
+        fs::write(&segment_path, original_typescript).expect("write TypeScript target");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial TypeScript baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+        let graph_before = fs::read(output.join("graph.json")).expect("last-good graph bytes");
+        let manifest_before =
+            fs::read(output.join("manifest.json")).expect("last-good manifest bytes");
+
+        fs::write(&segment_path, mpeg_transport_stream_fixture())
+            .expect("nominate TypeScript-to-MPEG transition");
+        let mut replace_after_detection = |_detection: &super::detect::DetectResult| {
+            fs::write(&segment_path, original_typescript)
+                .context("replace media generation after discovery")?;
+            Ok(())
         };
-        let error = super::extract_project_with_runtime_scan_options_deferred_manifest(
+        let error = super::extract_project_with_runtime_scan_options_deferred_manifest_impl(
+            &fixture.root,
+            false,
+            &output,
+            true,
+            &super::detect::DetectOptions::default(),
+            runtime,
+            graphoxide_index_runtime::RuntimeCancellation::new(),
+            false,
+            Some(&mut replace_after_detection),
+        )
+        .expect_err("unverified transition must abort before publication");
+        assert!(error
+            .to_string()
+            .contains("source classification transition could not be verified"));
+        assert!(error.to_string().contains("segment.ts"));
+        assert_eq!(
+            fs::read(output.join("graph.json")).expect("preserved graph bytes"),
+            graph_before
+        );
+        assert_eq!(
+            fs::read(output.join("manifest.json")).expect("preserved manifest bytes"),
+            manifest_before
+        );
+        let retained_graph = graphoxide_core::read_graph(output.join("graph.json"))
+            .expect("read retained last-good graph");
+        assert!(retained_graph.nodes.iter().any(|node| {
+            node.source_file == "segment.ts"
+                && node.extra.get("type").and_then(serde_json::Value::as_str) == Some("file")
+        }));
+        assert!(retained_graph.links.iter().any(|edge| {
+            edge.source_file == "main.ts" && edge.true_target() == make_id(&["segment"])
+        }));
+        let retained_manifest: super::cache::Manifest =
+            serde_json::from_slice(&manifest_before).expect("decode retained manifest");
+        assert_eq!(
+            retained_manifest["segment.ts"].source_kind.as_deref(),
+            Some("code")
+        );
+    }
+
+    #[test]
+    fn isolated_code_only_typescript_to_mpeg_prunes_stale_code_ownership() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        fixture.write("segment.ts", "export const phantom = 42;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial TypeScript baseline");
+        let baseline = commit_runtime_baseline(initial, &fixture.root, &output);
+        let segment_path = fixture.root.join("segment.ts");
+        fs::write(&segment_path, mpeg_transport_stream_fixture())
+            .expect("replace TypeScript with MPEG transport stream");
+
+        let incremental = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            true,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("code-only TypeScript-to-MPEG scan");
+        assert!(
+            segment_path.is_file(),
+            "the live media source remains on disk"
+        );
+        assert!(!incremental
+            .pending_manifest
+            .entries
+            .contains_key("segment.ts"));
+        assert_eq!(incremental.ownership_prune_sources.len(), 1);
+        assert_eq!(
+            incremental.ownership_prune_sources[0],
+            fs::canonicalize(&segment_path).expect("canonical media source")
+        );
+        assert!(incremental.extractions.iter().all(|extraction| {
+            extraction
+                .nodes
+                .iter()
+                .all(|node| node.source_file != "segment.ts")
+        }));
+        let media_id = make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+        let fresh_import = incremental
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from")
+            .expect("code-only importer was dependency-invalidated");
+        assert_eq!(fresh_import.true_target(), make_id(&["ref", "segment"]));
+
+        let fresh = graphoxide_graph::dedupe_raw_extractions(&incremental.extractions);
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            fresh,
+            &baseline,
+            &incremental.rebuilt_sources,
+            &[],
+            &incremental.ownership_prune_sources,
+            Some(&fixture.root),
+            64 * 1024 * 1024,
+        )
+        .expect("merge code-only ownership prune");
+        assert!(merged
+            .nodes
+            .iter()
+            .all(|node| node.source_file != "segment.ts"));
+        assert!(merged
+            .edges
+            .iter()
+            .all(|edge| edge.source_file != "segment.ts"));
+        assert!(merged.edges.iter().all(|edge| {
+            edge.source_file != "main.ts"
+                || (edge.true_target() != make_id(&["segment"]) && edge.true_target() != media_id)
+        }));
+        let clustered = graphoxide_graph::build_graph_with_options_and_root(
+            std::slice::from_ref(&merged),
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build clustered code-only ownership prune");
+        assert!(clustered
+            .nodes
+            .iter()
+            .all(|node| node.source_file != "segment.ts"));
+        assert!(clustered
+            .links
+            .iter()
+            .all(|edge| { edge.source_file != "main.ts" || edge.true_target() != media_id }));
+    }
+
+    #[test]
+    fn explicit_file_manifest_uses_canonical_kind_for_later_project_transition() {
+        let fixture = Fixture::new();
+        let main = fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = fixture.write("segment.ts", "export const phantom = 42;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let explicit = super::extract_files_deferred_manifest_with_output(
+            &[main, segment.clone()],
+            Some(&fixture.root),
+            &output,
+            false,
+        )
+        .expect("explicit-file TypeScript baseline");
+        assert_eq!(
+            explicit.pending_manifest.entries["segment.ts"]
+                .source_kind
+                .as_deref(),
+            Some("code"),
+            "manifest evidence must use the detector bucket, not node.file_type"
+        );
+        fs::create_dir_all(&output).expect("create explicit managed output");
+        let baseline = graphoxide_graph::build_graph_with_options_and_root(
+            &explicit.result.extractions,
+            &fixture.root,
+            graphoxide_graph::BuildOptions::default(),
+        )
+        .expect("build explicit-file baseline");
+        graphoxide_core::write_graph_atomic(output.join("graph.json"), &baseline, true)
+            .expect("write explicit-file baseline");
+        explicit
+            .pending_manifest
+            .commit()
+            .expect("commit explicit-file manifest");
+
+        fs::write(&segment, mpeg_transport_stream_fixture())
+            .expect("replace explicit TypeScript with MPEG");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let incremental = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            true,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("project scan consumes explicit-file manifest");
+        assert_eq!(incremental.ownership_prune_sources.len(), 1);
+        assert!(!incremental
+            .pending_manifest
+            .entries
+            .contains_key("segment.ts"));
+        let fresh = graphoxide_graph::dedupe_raw_extractions(&incremental.extractions);
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_limit(
+            fresh,
+            &baseline,
+            &incremental.rebuilt_sources,
+            &[],
+            &incremental.ownership_prune_sources,
+            Some(&fixture.root),
+            64 * 1024 * 1024,
+        )
+        .expect("merge cross-writer ownership transition");
+        assert!(merged
+            .nodes
+            .iter()
+            .all(|node| node.source_file != "segment.ts"));
+        assert!(merged
+            .edges
+            .iter()
+            .all(|edge| edge.source_file != "segment.ts"));
+    }
+
+    #[test]
+    fn isolated_incremental_mpeg_to_typescript_replaces_inventory_and_resolves_importer() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        fs::write(
+            fixture.root.join("segment.ts"),
+            mpeg_transport_stream_fixture(),
+        )
+        .expect("write initial MPEG transport stream");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial MPEG baseline");
+        let media_id = initial
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .find(|node| node.source_file == "segment.ts")
+            .expect("initial media node")
+            .id
+            .clone();
+        let baseline = commit_runtime_baseline(initial, &fixture.root, &output);
+        fixture.write("segment.ts", "export const phantom = 42;\n");
+
+        let incremental = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("incremental MPEG-to-TypeScript scan");
+        assert_eq!(incremental.changed_sources, 2);
+        assert_eq!(incremental.ownership_prune_sources.len(), 1);
+        assert_eq!(
+            incremental.ownership_prune_sources[0],
+            fs::canonicalize(fixture.root.join("segment.ts")).expect("canonical code source")
+        );
+        assert_eq!(
+            incremental.pending_manifest.entries["segment.ts"]
+                .source_kind
+                .as_deref(),
+            Some("code")
+        );
+        let fresh_import = incremental
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from")
+            .expect("recomputed TypeScript import");
+        assert_eq!(fresh_import.true_target(), make_id(&["segment"]));
+        assert_ne!(fresh_import.true_target(), media_id);
+        let fresh = graphoxide_graph::dedupe_raw_extractions(&incremental.extractions);
+        let merged = graphoxide_graph::incremental::merge_raw_extraction_from_graph_with_rebuilt_sources_and_ownership_resets_and_materialization_limit(
+            fresh,
+            &baseline,
+            &incremental.rebuilt_sources,
+            &[],
+            graphoxide_graph::incremental::IncrementalBaselinePrunes {
+                deletion_sources: &[],
+                ownership_reset_sources: &incremental.ownership_prune_sources,
+            },
+            Some(&fixture.root),
+            64 * 1024 * 1024,
+        )
+        .expect("merge MPEG-to-TypeScript delta");
+        assert!(merged.nodes.iter().all(|node| node.id != media_id));
+        assert!(merged.nodes.iter().any(|node| {
+            node.source_file == "segment.ts"
+                && node.extra.get("type").and_then(serde_json::Value::as_str) == Some("file")
+        }));
+    }
+
+    #[test]
+    fn isolated_runtime_never_resolves_mpeg_ts_media_as_typescript() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let media = mpeg_transport_stream_fixture();
+        fs::write(fixture.root.join("segment.ts"), &media).expect("write MPEG-TS fixture");
+
+        let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
             &fixture.root,
             true,
             &fixture.root.join("graphoxide-out"),
             false,
             &super::detect::DetectOptions::default(),
-            runtime,
+            runtime_config(16 * 1024 * 1024),
         )
-        .expect_err("high-fanout facts must exceed the retained-output partition");
+        .expect("extract TypeScript beside MPEG transport-stream media");
+
+        let media_node = result
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .find(|node| {
+                node.source_file == "segment.ts"
+                    && node.extra.get("format").and_then(serde_json::Value::as_str)
+                        == Some("mpeg_transport_stream")
+            })
+            .expect("truthful MPEG transport-stream inventory");
+        assert_eq!(media_node.file_type, "document");
+        let media_node_id = media_node.id.clone();
+        assert!(result.extractions.iter().all(|extraction| {
+            extraction.nodes.iter().all(|node| {
+                node.source_file != "segment.ts"
+                    || node.extra.get("type").and_then(serde_json::Value::as_str) != Some("file")
+            })
+        }));
+        let import = result
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.edges)
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from")
+            .expect("unresolved TypeScript import edge");
+        assert_ne!(import.true_target(), media_node_id);
+        assert_eq!(
+            import.true_target(),
+            graphoxide_core::make_id(&["ref", "segment"])
+        );
+        assert!(result.pending_manifest.entries.contains_key("main.ts"));
+        assert!(result.pending_manifest.entries.contains_key("segment.ts"));
+    }
+
+    #[test]
+    fn isolated_runtime_streams_large_mpeg_inventory_outside_source_arena() {
+        use std::io::Write as _;
+
+        let fixture = Fixture::new();
+        fixture.write("main.ts", "export const main = true;\n");
+        let segment = fixture.root.join("segment.ts");
+        let packet_count = 50_000_u64;
+        let mut packet = [0xff; 188];
+        packet[..4].copy_from_slice(&[0x47, 0x40, 0x00, 0x10]);
+        let file = fs::File::create(&segment).expect("create large MPEG stream");
+        let mut writer = std::io::BufWriter::new(file);
+        for _ in 0..packet_count {
+            writer.write_all(&packet).expect("stream MPEG packet");
+        }
+        writer.flush().expect("flush MPEG stream");
+        let expected_bytes = packet_count * 188;
+        let output = fixture.root.join("graphoxide-out");
+
+        let result =
+            super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                &fixture.root,
+                true,
+                &output,
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime_config(4 * 1024 * 1024),
+            )
+            .expect("large media remains inventory-only under a smaller source arena");
+        let media = result
+            .extractions
+            .iter()
+            .flat_map(|extraction| &extraction.nodes)
+            .find(|node| {
+                node.extra.get("format").and_then(serde_json::Value::as_str)
+                    == Some("mpeg_transport_stream")
+            })
+            .expect("streamed MPEG inventory");
+        assert_eq!(
+            media
+                .extra
+                .get("byte_length")
+                .and_then(serde_json::Value::as_u64),
+            Some(expected_bytes)
+        );
+        assert_eq!(
+            result.pending_manifest.entries["segment.ts"].ast_hash,
+            super::detect::md5_file(&segment)
+        );
+        assert_eq!(result.telemetry.io.sources_selected, 2);
+        assert!(result.telemetry.io.source_bytes_selected >= expected_bytes);
+        assert_eq!(result.telemetry.io.sources_read, 2);
+        assert!(result.telemetry.io.source_bytes_read >= expected_bytes);
+        assert!(result.telemetry.io.source_bytes_delivered < expected_bytes);
+        assert!(result.telemetry.io.peak_ready_bytes < expected_bytes);
+        assert_eq!(result.telemetry.work.parses, 1);
+    }
+
+    #[test]
+    fn legacy_full_and_unchanged_scans_never_resolve_mpeg_as_typescript() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        fs::write(
+            fixture.root.join("segment.ts"),
+            mpeg_transport_stream_fixture(),
+        )
+        .expect("write MPEG transport stream");
+        let output = fixture.root.join("graphoxide-out");
+
+        let first = super::extract_project_with_scan_options_deferred_manifest(
+            &fixture.root,
+            true,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+        )
+        .expect("fresh legacy extraction");
+        assert_mpeg_resolution_integrity(&first.extractions, "segment.ts", "segment");
+        first
+            .pending_manifest
+            .commit()
+            .expect("commit fresh legacy manifest");
+
+        let unchanged = super::extract_project_with_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+        )
+        .expect("unchanged legacy extraction");
+        assert_mpeg_resolution_integrity(&unchanged.extractions, "segment.ts", "segment");
+    }
+
+    #[test]
+    fn explicit_file_scans_never_resolve_mpeg_as_typescript() {
+        let fixture = Fixture::new();
+        let main = fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = fixture.root.join("segment.ts");
+        fs::write(&segment, mpeg_transport_stream_fixture()).expect("write MPEG transport stream");
+        let output = fixture.root.join("graphoxide-out");
+
+        let first = super::extract_files_deferred_manifest_with_output(
+            &[main.clone(), segment.clone()],
+            Some(&fixture.root),
+            &output,
+            true,
+        )
+        .expect("fresh explicit-file extraction");
+        assert_mpeg_resolution_integrity(&first.result.extractions, "segment.ts", "segment");
+        first
+            .pending_manifest
+            .commit()
+            .expect("commit explicit-file manifest");
+
+        let cached = super::extract_files_deferred_manifest_with_output(
+            &[main, segment],
+            Some(&fixture.root),
+            &output,
+            false,
+        )
+        .expect("cached explicit-file extraction");
+        assert_mpeg_resolution_integrity(&cached.result.extractions, "segment.ts", "segment");
+    }
+
+    #[test]
+    fn explicit_builtin_admitted_bytes_preserve_legacy_path_probe_semantics() {
+        let fixture = Fixture::new();
+        let main = fixture.write(
+            "main.py",
+            "from helper import helper\n\ndef caller():\n    return helper()\n",
+        );
+        fixture.write("helper.py", "def helper():\n    return 42\n");
+        let mut expected =
+            vec![super::engine::extract_as(&main, "main.py").expect("legacy path extraction")];
+        super::resolution::resolve_with_root(&mut expected, &fixture.root);
+
+        let output = fixture.root.join("graphoxide-out");
+        let actual = super::extract_files_deferred_manifest_with_output(
+            std::slice::from_ref(&main),
+            Some(&fixture.root),
+            &output,
+            true,
+        )
+        .expect("admitted-byte explicit extraction");
+        assert_eq!(
+            serde_json::to_value(&actual.result.extractions).expect("serialize actual"),
+            serde_json::to_value(expected).expect("serialize expected")
+        );
+    }
+
+    #[test]
+    fn explicit_pending_manifest_preflights_previous_plus_exact_ownership() {
+        use md5::Digest as _;
+
+        let fixture = Fixture::new();
+        let source_bytes = b"export const answer = 42;\n";
+        let source = fixture.root.join("main.ts");
+        fs::write(&source, source_bytes).expect("write source");
+        let output = fixture.root.join("graphoxide-out");
+        fs::create_dir_all(&output).expect("create output");
+        fs::write(output.join("graph.json"), b"last-good-graph").expect("seed graph");
+        fs::write(output.join("manifest.json"), b"{\"sentinel\":true}").expect("seed manifest");
+        let graph_before = fs::read(output.join("graph.json")).expect("graph sentinel");
+        let manifest_before = fs::read(output.join("manifest.json")).expect("manifest sentinel");
+        let mut previous = super::cache::Manifest::new();
+        previous.insert(
+            "main.ts".into(),
+            super::cache::ManifestEntry {
+                mtime: 0.0,
+                ast_version: super::cache::AST_CACHE_VERSION,
+                ast_hash: format!("{:x}", md5::Md5::digest(source_bytes)),
+                semantic_hash: "s".repeat(64 * 1024),
+                source_kind: Some("code".into()),
+                runtime_cache: None,
+            },
+        );
+        let previous_charge = super::project_manifest_retained_bytes(&previous);
+        let admitted = super::extract_files_deferred_manifest_with_output_and_previous(
+            std::slice::from_ref(&source),
+            Some(&fixture.root),
+            &output,
+            true,
+            &previous,
+            usize::MAX,
+        )
+        .expect("measure one exact row");
+        let exact_charge = admitted.pending_manifest.retained_bytes();
+        drop(admitted);
+        let limit = previous_charge
+            .checked_add(exact_charge)
+            .expect("bounded fixture charge")
+            .saturating_sub(1);
+
+        let error = super::extract_files_deferred_manifest_with_output_and_previous(
+            std::slice::from_ref(&source),
+            Some(&fixture.root),
+            &output,
+            true,
+            &previous,
+            limit,
+        )
+        .expect_err("candidate row must be rejected before manifest insertion");
         assert!(
             error
                 .to_string()
-                .contains("isolated retained extraction output exceeds"),
-            "unexpected admission error: {error:#}"
+                .contains("explicit pending manifest retained ownership would exceed"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+        assert_eq!(
+            fs::read(output.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn explicit_final_recheck_rejects_path_mutation_after_matching_extraction() {
+        let fixture = Fixture::new();
+        let segment = fixture.root.join("segment.ts");
+        let media = mpeg_transport_stream_fixture();
+        fs::write(&segment, &media).expect("write admitted media");
+        let output = fixture.root.join("graphoxide-out");
+        fs::create_dir_all(&output).expect("create managed output");
+        fs::write(output.join("graph.json"), b"last-good-graph").expect("seed graph sentinel");
+        fs::write(output.join("manifest.json"), b"{}").expect("seed manifest sentinel");
+        let graph_before = fs::read(output.join("graph.json")).expect("graph sentinel");
+        let manifest_before = fs::read(output.join("manifest.json")).expect("manifest sentinel");
+
+        let error = super::extract_files_with_deferred_manifest_and_output(
+            std::slice::from_ref(&segment),
+            Some(&fixture.root),
+            &output,
+            true,
+            |path, relative| {
+                fs::write(path, b"export const replacement = true;\n")
+                    .context("replace path after admitted media")?;
+                Ok(super::engine::mpeg_transport_stream_inventory(
+                    path,
+                    relative,
+                    media.len() as u64,
+                ))
+            },
+        )
+        .expect_err("final path generation must agree with admitted/extracted media");
+        assert!(
+            error
+                .to_string()
+                .contains("source classification transition could not be verified"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+        assert_eq!(
+            fs::read(output.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn explicit_generic_extractor_fails_closed_on_both_mpeg_classification_races() {
+        for admitted_media in [false, true] {
+            let fixture = Fixture::new();
+            let segment = fixture.root.join("segment.ts");
+            if admitted_media {
+                fs::write(&segment, mpeg_transport_stream_fixture()).expect("write admitted media");
+            } else {
+                fs::write(&segment, b"export const phantom = 42;\n")
+                    .expect("write admitted TypeScript");
+            }
+            let output = fixture.root.join("graphoxide-out");
+            fs::create_dir_all(&output).expect("create managed output");
+            fs::write(output.join("graph.json"), b"last-good-graph").expect("seed graph sentinel");
+            fs::write(output.join("manifest.json"), b"{}").expect("seed manifest sentinel");
+            let graph_before = fs::read(output.join("graph.json")).expect("graph sentinel");
+            let manifest_before =
+                fs::read(output.join("manifest.json")).expect("manifest sentinel");
+
+            let error = super::extract_files_with_deferred_manifest_and_output(
+                std::slice::from_ref(&segment),
+                Some(&fixture.root),
+                &output,
+                true,
+                |path, relative| {
+                    if admitted_media {
+                        fs::write(path, b"export const phantom = 42;\n")
+                            .context("replace media with TypeScript")?;
+                    } else {
+                        fs::write(path, mpeg_transport_stream_fixture())
+                            .context("replace TypeScript with media")?;
+                    }
+                    super::engine::extract_as(path, relative)
+                },
+            )
+            .expect_err("classification/extraction disagreement must abort");
+            assert!(
+                error
+                    .to_string()
+                    .contains("source classification transition could not be verified"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+            assert_eq!(
+                fs::read(output.join("manifest.json")).unwrap(),
+                manifest_before
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_code_only_reclassification_race_aborts_before_publication() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = fixture.write("segment.ts", "export const phantom = 42;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial TypeScript baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+        let graph_before = fs::read(output.join("graph.json")).expect("baseline graph");
+        let manifest_before = fs::read(output.join("manifest.json")).expect("baseline manifest");
+        fs::write(&segment, mpeg_transport_stream_fixture()).expect("nominate ambiguous media");
+        let mut replace_after_extraction = |_detection: &super::detect::DetectResult| {
+            fs::write(&segment, b"export const replacement = true;\n")
+                .context("replace media after legacy extraction")?;
+            Ok(())
+        };
+
+        let error = super::extract_project_with_scan_options_deferred_manifest_impl(
+            &fixture.root,
+            false,
+            &output,
+            true,
+            &super::detect::DetectOptions::default(),
+            Some(&mut replace_after_extraction),
+        )
+        .expect_err("final ambiguous-media reclassification must be fatal");
+        assert!(
+            error
+                .to_string()
+                .contains("source classification transition could not be verified"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+        assert_eq!(
+            fs::read(output.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn legacy_mpeg_to_typescript_missing_after_extraction_preserves_last_good_artifacts() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = fixture.root.join("segment.ts");
+        fs::write(&segment, mpeg_transport_stream_fixture())
+            .expect("write initial MPEG transport stream");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial MPEG baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+        let graph_before = fs::read(output.join("graph.json")).expect("baseline graph");
+        let manifest_before = fs::read(output.join("manifest.json")).expect("baseline manifest");
+        fixture.write("segment.ts", "export const phantom = 42;\n");
+        let mut remove_after_extraction = |_detection: &super::detect::DetectResult| {
+            fs::remove_file(&segment).context("remove TypeScript after legacy extraction")?;
+            Ok(())
+        };
+
+        let error = super::extract_project_with_scan_options_deferred_manifest_impl(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            Some(&mut remove_after_extraction),
+        )
+        .expect_err("missing reverse-transition generation must abort");
+        assert!(
+            error
+                .to_string()
+                .contains("source classification transition could not be verified"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+        assert_eq!(
+            fs::read(output.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn legacy_failed_mpeg_transition_row_aborts_before_hybrid_publication() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = fixture.write("segment.ts", "export const phantom = 42;\n");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial TypeScript baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+        let graph_before = fs::read(output.join("graph.json")).expect("baseline graph");
+        let manifest_before = fs::read(output.join("manifest.json")).expect("baseline manifest");
+        fs::write(&segment, mpeg_transport_stream_fixture()).expect("nominate MPEG transition");
+        let mut remove_before_extraction = |_detection: &super::detect::DetectResult| {
+            fs::remove_file(&segment).context("remove MPEG before legacy extraction")?;
+            Ok(())
+        };
+        let mut restore_after_extraction = |_detection: &super::detect::DetectResult| {
+            fs::write(&segment, mpeg_transport_stream_fixture())
+                .context("restore MPEG before final classification")?;
+            Ok(())
+        };
+
+        let error = super::extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            Some(&mut remove_before_extraction),
+            Some(&mut restore_after_extraction),
+        )
+        .expect_err("a missing transition row must abort the entire deferred build");
+        assert!(
+            error
+                .to_string()
+                .contains("source classification transition could not be verified"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+        assert_eq!(
+            fs::read(output.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn full_runtime_mpeg_read_failure_aborts_before_publication() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "main.ts",
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        let segment = fixture.root.join("segment.ts");
+        fs::write(&segment, mpeg_transport_stream_fixture())
+            .expect("write initial MPEG transport stream");
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let initial = super::extract_project_with_runtime_scan_options_deferred_manifest(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+        )
+        .expect("initial MPEG baseline");
+        commit_runtime_baseline(initial, &fixture.root, &output);
+        let graph_before = fs::read(output.join("graph.json")).expect("baseline graph");
+        let manifest_before = fs::read(output.join("manifest.json")).expect("baseline manifest");
+        let mut remove_after_requests = |_detection: &super::detect::DetectResult| {
+            fs::remove_file(&segment).context("remove MPEG after verified request creation")?;
+            Ok(())
+        };
+
+        let error = super::extract_project_with_runtime_scan_options_deferred_manifest_impl(
+            &fixture.root,
+            false,
+            &output,
+            false,
+            &super::detect::DetectOptions::default(),
+            runtime,
+            graphoxide_index_runtime::RuntimeCancellation::new(),
+            false,
+            Some(&mut remove_after_requests),
+        )
+        .expect_err("every nominated MPEG source must be verified before publication");
+        assert!(
+            error
+                .to_string()
+                .contains("source classification transition could not be verified"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(output.join("graph.json")).unwrap(), graph_before);
+        assert_eq!(
+            fs::read(output.join("manifest.json")).unwrap(),
+            manifest_before
         );
     }
 

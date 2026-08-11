@@ -18,6 +18,14 @@ interface JsonRpcResponse {
 export async function run(): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder, 'The E2E workspace must be open.');
+  // This suite deliberately preserves custom graph outputs while switching the
+  // active graph path. Keep those generated JSON artifacts out of later source
+  // scans so graph counts describe the sample code rather than self-indexing.
+  await fs.appendFile(
+    path.join(folder.uri.fsPath, '.graphoxideignore'),
+    '\ncustom-output/\nintermediate-output/\n',
+    'utf8',
+  );
   const extension = vscode.extensions.getExtension<GraphoxideExtensionApi>('cgaspard.graphoxide-vscode');
   assert.ok(extension, 'The Graphoxide extension was not discovered.');
   const api = await extension.activate();
@@ -29,6 +37,15 @@ export async function run(): Promise<void> {
   assert.ok(path.isAbsolute(before.mcp.command), `Expected an absolute Graphoxide executable, got ${before.mcp.command}`);
   await fs.access(before.mcp.command);
 
+  const testApi = api.test;
+  assert.ok(testApi, 'The Extension Development Host did not expose Graphoxide test controls.');
+  assert.equal(
+    await testApi.staleEnableFailurePreservesDisable(),
+    false,
+    'A stale failed Enable continuation overwrote the newer Disable choice.',
+  );
+  assert.equal((await api.status()).enabled, false);
+
   await api.enableWorkspace('manual');
   const enabled = await api.status();
   assert.equal(enabled.enabled, true);
@@ -37,6 +54,12 @@ export async function run(): Promise<void> {
   assert.ok((enabled.edges ?? 0) >= 50, `Expected graph relationships, got ${enabled.edges ?? 0} edges.`);
   assert.deepEqual(enabled.mcp?.args.slice(-1), ['serve']);
   assert.equal(enabled.mcp?.cwd, folder.uri.fsPath);
+
+  const mutationBefore = testApi.mutationLifecycle();
+  const mutationAfter = await testApi.runUpdateConcurrently();
+  assert.equal(mutationAfter.phase, 'idle');
+  assert.equal(mutationAfter.generation, mutationBefore.generation + 1, 'Concurrent update callers launched more than one graph child.');
+  assert.equal(mutationAfter.lastCompletedGeneration, mutationAfter.generation);
 
   await verifyMcpProtocol(enabled.mcp!);
   await verifyGraphPlacement(api, folder, enabled.graphPath!);
@@ -50,6 +73,13 @@ export async function run(): Promise<void> {
   assert.equal(finalStatus.enabled, true);
   assert.equal(finalStatus.freshness, 'manual');
   assert.equal(finalStatus.watching, false);
+  assert.ok(finalStatus.graphPath, 'The final managed graph path was not available.');
+  const finalGraph = parseGraphJson(await fs.readFile(finalStatus.graphPath, 'utf8'));
+  assert.equal(
+    finalGraph.nodes.some((node) => /(?:^|[\\/])(?:custom-output|intermediate-output|graphoxide-out)[\\/]/u.test(node.sourceFile)),
+    false,
+    'A preserved generated graph output was re-indexed as source input.',
+  );
   console.log(`Graphoxide E2E passed: ${finalStatus.nodes} nodes, ${finalStatus.edges} edges.`);
 }
 
@@ -414,12 +444,40 @@ async function verifyProjectInstallers(
 }
 
 async function verifySaveAndWatchUpdates(api: GraphoxideExtensionApi, folder: vscode.WorkspaceFolder, graphPath: string): Promise<void> {
+  const testApi = api.test;
+  assert.ok(testApi, 'Mutation lifecycle controls must be available in Extension Development mode.');
   await api.configureFreshness('save');
   await appendAndSave(vscode.Uri.joinPath(folder.uri, 'cartograph', 'domain.py'), '\n\ndef e2e_save_refresh_marker() -> str:\n    return "save"\n');
   await poll(() => graphContains(graphPath, 'e2e_save_refresh_marker'), 'save-triggered graph update', 30000);
+  await poll(
+    () => testApi.mutationLifecycle().phase === 'idle',
+    'save-triggered graph process to release mutation ownership',
+  );
 
   await api.configureFreshness('watch');
   await poll(async () => (await api.status()).watching, 'watch process to start');
+  await vscode.commands.executeCommand('graphoxide.stopWatch');
+  await poll(async () => !(await api.status()).watching, 'watch process to stop before managed resume');
+  const joined = await testApi.resumeManagedBehindMutation();
+  assert.equal(joined.watch.phase, 'ready');
+  assert.equal(joined.watch.processTarget, 'expected');
+  assert.equal(joined.watch.graphTarget, 'expected');
+  assert.equal(
+    joined.mutationAfter.generation,
+    joined.mutationBefore.generation + 2,
+    'Manual-first managed resume did not converge on one update child followed by one watch child.',
+  );
+  assert.equal(joined.mutationAfter.phase, 'idle');
+  const raced = await testApi.resumeManagedAcrossWatchRace();
+  assert.equal(raced.watch.phase, 'ready');
+  assert.equal(raced.watch.processTarget, 'expected');
+  assert.equal(raced.watch.graphTarget, 'expected');
+  assert.equal(
+    raced.mutationAfter.generation,
+    raced.mutationBefore.generation + 3,
+    'Managed resume did not join one intervening writer and retry watch exactly once.',
+  );
+  assert.equal(raced.mutationAfter.phase, 'idle');
   await appendAndSave(vscode.Uri.joinPath(folder.uri, 'cartograph', 'notifications.py'), '\n\ndef e2e_watch_refresh_marker() -> str:\n    return "watch"\n');
   await poll(() => graphContains(graphPath, 'e2e_watch_refresh_marker'), 'watch-triggered graph update', 30000);
   await api.configureFreshness('manual');
@@ -443,6 +501,10 @@ async function verifyCustomOutputMaintenance(api: GraphoxideExtensionApi, folder
     '\n\ndef e2e_custom_save_marker() -> str:\n    return "custom-save"\n',
   );
   await poll(() => graphContains(graphPath, 'e2e_custom_save_marker'), 'custom-output save update', 30000);
+  await poll(
+    () => testApi.mutationLifecycle().phase === 'idle',
+    'custom-output save graph process to release mutation ownership',
+  );
 
   await api.configureFreshness('watch');
   const customWatch = testApi.watchLifecycle();

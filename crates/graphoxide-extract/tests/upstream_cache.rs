@@ -440,15 +440,15 @@ fn test_ast_cache_schema_preparation_retires_only_pre_redaction_versions() {
     let source = write(temp.path(), "mod.py", b"def f(): pass\n");
     let value = json!({"nodes": [{"id": "n1"}], "edges": []});
     save_cached_value_with_version(&source, &value, temp.path(), "ast", None, 29).unwrap();
-    save_cached_value_with_version(&source, &value, temp.path(), "ast", None, 31).unwrap();
+    save_cached_value_with_version(&source, &value, temp.path(), "ast", None, 32).unwrap();
     let retired = temp.path().join("graphoxide-out/cache/ast/v29");
-    let future = temp.path().join("graphoxide-out/cache/ast/v31");
+    let future = temp.path().join("graphoxide-out/cache/ast/v32");
     assert!(retired.read_dir().unwrap().next().is_some());
     assert!(future.read_dir().unwrap().next().is_some());
 
     let current = cache_dir(temp.path(), "ast", None).unwrap();
     assert!(retired.exists(), "opening a schema must not erase another");
-    assert!(future.exists(), "opening v30 must preserve a future schema");
+    assert!(future.exists(), "opening v31 must preserve a future schema");
 
     prepare_structured_redaction_cache_schema(&temp.path().join("graphoxide-out")).unwrap();
     assert!(!retired.exists());

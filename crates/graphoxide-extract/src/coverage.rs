@@ -605,7 +605,15 @@ impl AuditWalker<'_> {
             );
             return Ok(());
         }
+        let extension_is_ts = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"));
+        // Preserve the original path-only code-only policy for every
+        // unambiguous format. Only `.ts` must wait for the bounded physical
+        // prefix probe that distinguishes TypeScript from transport media.
         if self.options.code_only
+            && !extension_is_ts
             && declared.is_some_and(|spec| {
                 detect::classify_file(path) != Some(crate::format_registry::FileType::Code)
                     && spec.legacy_file_type != Some(crate::format_registry::FileType::Code)
@@ -663,6 +671,9 @@ impl AuditWalker<'_> {
             );
             return Ok(());
         }
+        let legacy_file_type = detect::classify_file_at(path, &physical);
+        let is_mpeg_transport_stream =
+            extension_is_ts && legacy_file_type == Some(crate::format_registry::FileType::Video);
         let is_alias = physical != path;
         let replacement =
             if let Some((index, existing_alias)) = self.seen_physical.get(&physical).copied() {
@@ -673,28 +684,36 @@ impl AuditWalker<'_> {
             } else {
                 None
             };
-        let spec = declared.or_else(|| {
-            (path.extension().is_none() && detect::has_code_shebang(&physical))
-                .then(|| format_registry().find_by_id("source-code"))
-                .flatten()
-        });
-        let file = match spec {
-            Some(spec)
-                if self.options.code_only
-                    && detect::classify_file(path)
-                        != Some(crate::format_registry::FileType::Code)
-                    && spec.legacy_file_type != Some(crate::format_registry::FileType::Code) =>
-            {
-                self.terminal_file(
-                    path,
-                    CoverageStatus::ExcludedPolicy,
-                    Some(spec),
-                    "code_only",
-                )
-            }
-            Some(spec) => self.registered_file(path, spec),
-            None => {
-                self.terminal_file(path, CoverageStatus::Unsupported, None, "unregistered_path")
+        let spec = if is_mpeg_transport_stream {
+            None
+        } else {
+            declared.or_else(|| {
+                (path.extension().is_none() && detect::has_code_shebang(&physical))
+                    .then(|| format_registry().find_by_id("source-code"))
+                    .flatten()
+            })
+        };
+        let file = if is_mpeg_transport_stream {
+            self.mpeg_transport_stream_file(path)
+        } else {
+            match spec {
+                Some(spec)
+                    if self.options.code_only
+                        && legacy_file_type != Some(crate::format_registry::FileType::Code)
+                        && spec.legacy_file_type
+                            != Some(crate::format_registry::FileType::Code) =>
+                {
+                    self.terminal_file(
+                        path,
+                        CoverageStatus::ExcludedPolicy,
+                        Some(spec),
+                        "code_only",
+                    )
+                }
+                Some(spec) => self.registered_file(path, spec),
+                None => {
+                    self.terminal_file(path, CoverageStatus::Unsupported, None, "unregistered_path")
+                }
             }
         };
         if let Some(index) = replacement {
@@ -704,6 +723,24 @@ impl AuditWalker<'_> {
             self.seen_physical.insert(physical, (index, is_alias));
         }
         Ok(())
+    }
+
+    fn mpeg_transport_stream_file(&self, path: &Path) -> CoverageFile {
+        let media = format_registry()
+            .find_by_id("media")
+            .expect("the registry must declare inventory-only media");
+        if self.options.code_only {
+            self.terminal_file(
+                path,
+                CoverageStatus::ExcludedPolicy,
+                Some(media),
+                "code_only",
+            )
+        } else {
+            let mut file = self.registered_file(path, media);
+            file.reason = Some("mpeg_transport_stream_not_typescript".to_owned());
+            file
+        }
     }
 
     fn registered_file(&self, path: &Path, spec: &FormatSpec) -> CoverageFile {
@@ -1095,6 +1132,24 @@ mod tests {
                 output_dir: Some(PathBuf::from("custom-output")),
             }
         );
+    }
+
+    #[test]
+    fn code_only_rejects_unambiguous_non_code_before_opening_its_source() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let root = fs::canonicalize(root.path()).expect("canonical root");
+        let cancellation = RuntimeCancellation::new();
+        let mut walker = test_walker(root.clone(), &cancellation);
+        walker.options.code_only = true;
+
+        let missing = root.join("missing.md");
+        walker
+            .visit_regular_file(&missing, None, false)
+            .expect("code-only policy outcome");
+        assert_eq!(walker.files.len(), 1);
+        assert_eq!(walker.files[0].status, CoverageStatus::ExcludedPolicy);
+        assert_eq!(walker.files[0].reason.as_deref(), Some("code_only"));
+        assert_eq!(walker.files[0].format_id.as_deref(), Some("markdown"));
     }
 
     #[test]

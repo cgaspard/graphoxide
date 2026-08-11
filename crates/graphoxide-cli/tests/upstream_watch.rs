@@ -1,6 +1,6 @@
 use filetime::{set_file_mtime, FileTime};
 use graphoxide_cli::watch::*;
-use graphoxide_core::{Confidence, Edge, KnowledgeGraph, Node};
+use graphoxide_core::{make_id, Confidence, Edge, KnowledgeGraph, Node};
 use serde_json::{json, Value};
 use std::{
     cell::RefCell,
@@ -47,6 +47,22 @@ fn write(path: impl AsRef<Path>, text: &str) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, text).unwrap();
+}
+
+fn write_mpeg_transport_stream(path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let mut media = vec![0xff; 5 * 188];
+    for packet in 0..5 {
+        let offset = packet * 188;
+        media[offset..offset + 4].copy_from_slice(&[0x47, 0x40, packet as u8, 0x10]);
+    }
+    fs::write(path, media).unwrap();
+}
+
+fn manifest_path(root: &Path) -> PathBuf {
+    root.join(OUTPUT_DIRECTORY).join("manifest.json")
 }
 
 fn retired_ast_artifact(output: &Path, hash_byte: char, contents: &str) -> PathBuf {
@@ -136,6 +152,245 @@ fn semantic_pair(graph: &mut KnowledgeGraph, source: &str) {
         "nodes": ["docs_topic", "shared_concept"],
         "source_file": source,
     }));
+}
+
+fn file_node_id(graph: &KnowledgeGraph, source: &str) -> String {
+    graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.source_file == source
+                && node.extra.get("type").and_then(Value::as_str) == Some("file")
+        })
+        .map(|node| node.id.clone())
+        .unwrap_or_else(|| panic!("missing file node for {source}"))
+}
+
+fn seed_ambiguous_cross_tier_facts(root: &Path, stale_target: &str) {
+    let mut seeded = graph(root);
+    let main_id = file_node_id(&seeded, "main.ts");
+    let mut stale = node("segment_semantic_ghost", "segment.ts", false);
+    stale
+        .extra
+        .insert("_origin".into(), Value::String("semantic".into()));
+    let mut unrelated = node("unrelated_semantic", "main.ts", false);
+    unrelated
+        .extra
+        .insert("_origin".into(), Value::String("semantic".into()));
+    seeded.nodes.extend([stale, unrelated]);
+    let mut foreign = edge(
+        "unrelated_semantic",
+        stale_target,
+        "semantic_dependency",
+        "main.ts",
+        false,
+    );
+    foreign
+        .extra
+        .insert("_origin".into(), Value::String("semantic".into()));
+    seeded.links.push(foreign);
+    seeded.hyperedges.extend([
+        json!({
+            "id": "segment_owned_semantic_flow",
+            "nodes": ["segment_semantic_ghost", stale_target],
+            "source_file": "segment.ts",
+            "_origin": "semantic",
+        }),
+        json!({
+            "id": "foreign_semantic_flow",
+            "nodes": ["unrelated_semantic", stale_target, main_id],
+            "source_file": "main.ts",
+            "_origin": "semantic",
+        }),
+    ]);
+    write_graph(root, &seeded);
+}
+
+fn assert_ambiguous_reset_integrity(graph: &KnowledgeGraph, removed_target: &str) {
+    let node_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(!node_ids.contains("segment_semantic_ghost"));
+    assert!(!node_ids.contains(removed_target));
+    assert!(node_ids.contains("unrelated_semantic"));
+    assert!(graph.links.iter().all(|edge| {
+        (edge.true_source().starts_with("ref_") || node_ids.contains(edge.true_source()))
+            && (edge.true_target().starts_with("ref_") || node_ids.contains(edge.true_target()))
+    }));
+    assert!(graph
+        .hyperedges
+        .iter()
+        .all(|hyperedge| hyperedge["id"] != "segment_owned_semantic_flow"));
+    if let Some(foreign) = graph
+        .hyperedges
+        .iter()
+        .find(|hyperedge| hyperedge["id"] == "foreign_semantic_flow")
+    {
+        let members = foreign["nodes"].as_array().expect("hyperedge members");
+        assert!(!members.iter().any(|member| member == removed_target));
+        assert!(members
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|member| { member.starts_with("ref_") || node_ids.contains(member) }));
+    }
+}
+
+fn replace_source_representation_with_semantic_only(root: &Path, source: &str) {
+    let mut baseline = graph(root);
+    let removed = baseline
+        .nodes
+        .iter()
+        .filter(|node| node.source_file == source)
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    baseline.nodes.retain(|node| node.source_file != source);
+    baseline.links.retain(|edge| {
+        edge.source_file != source
+            && !removed.contains(edge.true_source())
+            && !removed.contains(edge.true_target())
+    });
+    baseline.hyperedges.retain_mut(|hyperedge| {
+        let Some(members) = hyperedge.get_mut("nodes").and_then(Value::as_array_mut) else {
+            return false;
+        };
+        members.retain(|member| member.as_str().is_none_or(|id| !removed.contains(id)));
+        !members.is_empty()
+    });
+    let mut semantic = node("semantic_only_segment", source, false);
+    semantic
+        .extra
+        .insert("_origin".into(), Value::String("semantic".into()));
+    baseline.nodes.push(semantic);
+    write_graph(root, &baseline);
+}
+
+#[test]
+fn test_legacy_watch_typescript_to_mpeg_resets_cross_tier_ownership() {
+    for no_cluster in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main.ts");
+        let segment = temp.path().join("segment.ts");
+        write(
+            &main,
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        write(&segment, "export const phantom = 42;\n");
+        assert!(build(temp.path(), no_cluster).succeeded());
+        let old_code_id = file_node_id(&graph(temp.path()), "segment.ts");
+        seed_ambiguous_cross_tier_facts(temp.path(), &old_code_id);
+
+        write_mpeg_transport_stream(&segment);
+        let mut update = options(temp.path(), no_cluster);
+        update.scope = RebuildScope::Incremental;
+        update.changed_paths = Some(vec![segment]);
+        assert!(rebuild_project(temp.path(), &update).unwrap().succeeded());
+
+        let updated = graph(temp.path());
+        let media_id = make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+        assert!(updated.nodes.iter().any(|node| {
+            node.id == media_id
+                && node.extra.get("format").and_then(Value::as_str) == Some("mpeg_transport_stream")
+        }));
+        assert_ambiguous_reset_integrity(&updated, &old_code_id);
+        let import = updated
+            .links
+            .iter()
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from");
+        if let Some(import) = import {
+            assert_eq!(import.true_target(), make_id(&["ref", "segment"]));
+        }
+    }
+}
+
+#[test]
+fn test_legacy_watch_mpeg_to_typescript_resets_cross_tier_ownership() {
+    for no_cluster in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main.ts");
+        let segment = temp.path().join("segment.ts");
+        write(
+            &main,
+            "import { phantom } from './segment';\nexport const main = phantom;\n",
+        );
+        write_mpeg_transport_stream(&segment);
+        assert!(build(temp.path(), no_cluster).succeeded());
+        let media_id = make_id(&["format_inventory", "mpeg_transport_stream", "segment"]);
+        seed_ambiguous_cross_tier_facts(temp.path(), &media_id);
+
+        rewrite_with_new_mtime(&segment, "export const phantom = 42;\n");
+        let mut update = options(temp.path(), no_cluster);
+        update.scope = RebuildScope::Incremental;
+        update.changed_paths = Some(vec![segment]);
+        assert!(rebuild_project(temp.path(), &update).unwrap().succeeded());
+
+        let updated = graph(temp.path());
+        assert_ambiguous_reset_integrity(&updated, &media_id);
+        let code_id = file_node_id(&updated, "segment.ts");
+        let import = updated
+            .links
+            .iter()
+            .find(|edge| edge.source_file == "main.ts" && edge.relation == "imports_from")
+            .expect("fresh TypeScript import remains resolved");
+        assert_eq!(import.true_target(), code_id);
+    }
+}
+
+#[test]
+fn test_legacy_watch_preserves_semantic_overlay_for_stable_mpeg_representation() {
+    for no_cluster in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path().join("main.ts"), "export const main = true;\n");
+        write_mpeg_transport_stream(&temp.path().join("segment.ts"));
+        assert!(build(temp.path(), no_cluster).succeeded());
+        let mut seeded = graph(temp.path());
+        let mut overlay = node("media_semantic_overlay", "segment.ts", false);
+        overlay
+            .extra
+            .insert("_origin".into(), Value::String("semantic".into()));
+        seeded.nodes.push(overlay);
+        write_graph(temp.path(), &seeded);
+
+        assert!(build(temp.path(), no_cluster).succeeded());
+        assert!(graph(temp.path())
+            .nodes
+            .iter()
+            .any(|node| node.id == "media_semantic_overlay"));
+    }
+}
+
+#[test]
+fn test_legacy_watch_repairs_semantic_only_ambiguous_sources_without_wiping_overlay() {
+    for (no_cluster, media) in [(false, false), (true, false), (false, true), (true, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path().join("main.ts"), "export const main = true;\n");
+        let segment = temp.path().join("segment.ts");
+        if media {
+            write_mpeg_transport_stream(&segment);
+        } else {
+            write(&segment, "export const phantom = 42;\n");
+        }
+        assert!(build(temp.path(), no_cluster).succeeded());
+        replace_source_representation_with_semantic_only(temp.path(), "segment.ts");
+
+        assert!(build(temp.path(), no_cluster).succeeded());
+        let repaired = graph(temp.path());
+        assert!(repaired
+            .nodes
+            .iter()
+            .any(|node| node.id == "semantic_only_segment"));
+        if media {
+            assert!(repaired.nodes.iter().any(|node| {
+                node.extra.get("format").and_then(Value::as_str) == Some("mpeg_transport_stream")
+            }));
+        } else {
+            assert!(repaired.nodes.iter().any(|node| {
+                node.source_file == "segment.ts"
+                    && node.extra.get("type").and_then(Value::as_str) == Some("file")
+            }));
+        }
+    }
 }
 
 #[test]
@@ -1284,16 +1539,16 @@ fn test_legacy_update_keeps_cache_manifest_and_migration_in_custom_output() {
     assert!(output.join("graph.json").is_file());
     let manifest: Value =
         serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["settings.json"]["ast_version"], 30);
+    assert_eq!(manifest["settings.json"]["ast_version"], 31);
     assert!(output
-        .join("cache/ast/v30")
+        .join("cache/ast/v31")
         .read_dir()
         .unwrap()
         .next()
         .is_some());
     assert!(!default_output.join("graph.json").exists());
     assert!(!default_output.join("manifest.json").exists());
-    assert!(!default_output.join("cache/ast/v30").exists());
+    assert!(!default_output.join("cache/ast/v31").exists());
 
     let graph_bytes = fs::read(output.join("graph.json")).unwrap();
     let graph: Value = serde_json::from_slice(&graph_bytes).unwrap();
@@ -1375,7 +1630,7 @@ fn test_caller_owned_no_lock_rebuilds_prepare_cache_schema_in_both_entrypoints()
     );
     assert!(observer_output.join("manifest.json").is_file());
     assert!(observer_output
-        .join("cache/ast/v30")
+        .join("cache/ast/v31")
         .read_dir()
         .unwrap()
         .next()
@@ -1882,6 +2137,57 @@ fn test_deferred_target_extraction_does_not_publish_subset_manifest() {
     let committed: Value = serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
     assert!(committed.get("app.py").is_some());
     assert!(committed.get("old.py").is_none());
+}
+
+#[test]
+fn test_watch_pending_manifest_cap_fails_before_graph_or_manifest_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join(OUTPUT_DIRECTORY);
+    fs::create_dir_all(&output).unwrap();
+    for index in 0..200 {
+        write(
+            temp.path().join(format!(
+                "long_manifest_source_{index:04}_abcdefghijklmnopqrstuvwxyz.js"
+            )),
+            &format!("export const value_{index} = {index};\n"),
+        );
+    }
+    let baseline = KnowledgeGraph {
+        nodes: vec![node("sentinel", "sentinel.ts", false)],
+        ..Default::default()
+    };
+    write_graph(temp.path(), &baseline);
+    let previous = graphoxide_extract::cache::Manifest::from([(
+        "sentinel.ts".into(),
+        graphoxide_extract::cache::ManifestEntry {
+            mtime: 0.0,
+            ast_version: graphoxide_extract::cache::AST_CACHE_VERSION,
+            ast_hash: String::new(),
+            semantic_hash: String::new(),
+            source_kind: Some("code".into()),
+            runtime_cache: None,
+        },
+    )]);
+    graphoxide_core::write_json_atomic(manifest_path(temp.path()), &previous, true).unwrap();
+    let graph_before = fs::read(graph_path(temp.path())).unwrap();
+    let manifest_before = fs::read(manifest_path(temp.path())).unwrap();
+    let mut capped = options(temp.path(), true);
+    capped.scope = RebuildScope::Incremental;
+    capped.max_graph_bytes = Some(32 * 1024);
+
+    let error = rebuild_project(temp.path(), &capped)
+        .expect_err("many exact manifest rows must fail their retained ledger");
+    let diagnostic = format!("{error:#}");
+    assert!(
+        diagnostic.contains("explicit pending manifest retained ownership would exceed")
+            && diagnostic.contains("32768-byte manifest cap"),
+        "{diagnostic}"
+    );
+    assert_eq!(fs::read(graph_path(temp.path())).unwrap(), graph_before);
+    assert_eq!(
+        fs::read(manifest_path(temp.path())).unwrap(),
+        manifest_before
+    );
 }
 
 #[test]

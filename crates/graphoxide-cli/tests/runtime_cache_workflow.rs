@@ -94,6 +94,21 @@ fn graph_and_coverage_bytes(project: &Path) -> [Vec<u8>; 2] {
     ]
 }
 
+fn manifest_without_runtime_cache(bytes: &[u8]) -> Value {
+    let mut manifest: Value = serde_json::from_slice(bytes).expect("manifest JSON");
+    for entry in manifest
+        .as_object_mut()
+        .expect("manifest object")
+        .values_mut()
+    {
+        entry
+            .as_object_mut()
+            .expect("manifest entry object")
+            .remove("runtime_cache");
+    }
+    manifest
+}
+
 fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(cursor);
@@ -499,7 +514,7 @@ fn recreated_same_bytes_fall_back_to_a_content_hit_without_stale_identity_replay
 }
 
 #[test]
-fn force_bypasses_cache_reads_but_preserves_deterministic_artifacts() {
+fn force_resets_cache_trust_then_normal_and_warm_runs_repair_deterministically() {
     let fixture = tempfile::tempdir().expect("temporary fixture");
     let project = fixture.path().join("project");
     fs::create_dir_all(&project).expect("project");
@@ -519,7 +534,60 @@ fn force_bypasses_cache_reads_but_preserves_deterministic_artifacts() {
     assert!(forced_cache["bypasses"]
         .as_u64()
         .is_some_and(|value| value >= 1));
-    assert_eq!(artifact_bytes(&project), accepted);
+    let forced_artifacts = artifact_bytes(&project);
+    assert_eq!(forced_artifacts[0], accepted[0], "graph bytes");
+    assert_eq!(forced_artifacts[2], accepted[2], "coverage bytes");
+    assert_ne!(
+        forced_artifacts[1], accepted[1],
+        "force deliberately removes runtime-cache authorization"
+    );
+    assert_eq!(
+        manifest_without_runtime_cache(&forced_artifacts[1]),
+        manifest_without_runtime_cache(&accepted[1]),
+        "force may change only runtime-cache authorization"
+    );
+    let forced_manifest: Value =
+        serde_json::from_slice(&forced_artifacts[1]).expect("forced manifest JSON");
+    assert!(
+        forced_manifest
+            .as_object()
+            .expect("forced manifest object")
+            .values()
+            .all(|entry| entry.get("runtime_cache").is_none()),
+        "force cannot authorize any runtime artifact"
+    );
+
+    let repaired_report = fixture.path().join("repaired-runtime.json");
+    assert_success(&run_index(&project, &repaired_report, &[]));
+    let repaired_cache = runtime_cache(&repaired_report);
+    assert_eq!(repaired_cache["metadata_hits"], 0);
+    assert_eq!(repaired_cache["runtime_hits"], 0);
+    assert_eq!(repaired_cache["parses_avoided"], 0);
+    assert!(repaired_cache["stores"]
+        .as_u64()
+        .is_some_and(|value| value >= 1));
+    let repaired_artifacts = artifact_bytes(&project);
+    assert_eq!(repaired_artifacts[0], accepted[0], "repaired graph bytes");
+    assert_eq!(
+        repaired_artifacts[2], accepted[2],
+        "repaired coverage bytes"
+    );
+    assert_eq!(
+        manifest_without_runtime_cache(&repaired_artifacts[1]),
+        manifest_without_runtime_cache(&forced_artifacts[1]),
+        "repair may change only runtime-cache authorization"
+    );
+
+    let warm_report = fixture.path().join("warm-runtime.json");
+    assert_success(&run_index(&project, &warm_report, &[]));
+    let warm_cache = runtime_cache(&warm_report);
+    assert_eq!(warm_cache["metadata_hits"], 1);
+    assert_eq!(warm_cache["parses_avoided"], 1);
+    assert_eq!(
+        artifact_bytes(&project),
+        repaired_artifacts,
+        "the repaired authorization and graph must be byte-stable when warm"
+    );
 }
 
 #[test]
@@ -1035,6 +1103,33 @@ fn unsafe_runtime_cache_path_fails_open_without_touching_its_target() {
     assert!(disabled_cache["probe_failures"]
         .as_u64()
         .is_some_and(|value| value >= 1));
-    assert_eq!(artifact_bytes(&project), accepted);
+    let repaired = artifact_bytes(&project);
+    assert_eq!(repaired[0], accepted[0], "graph remains deterministic");
+    assert_eq!(repaired[2], accepted[2], "coverage remains deterministic");
+    assert_eq!(
+        manifest_without_runtime_cache(&repaired[1]),
+        manifest_without_runtime_cache(&accepted[1]),
+        "cache authorization is the only intentional manifest difference"
+    );
+    let repaired_manifest: Value =
+        serde_json::from_slice(&repaired[1]).expect("repaired manifest JSON");
+    assert!(
+        repaired_manifest
+            .as_object()
+            .expect("manifest object")
+            .values()
+            .all(|entry| entry.get("runtime_cache").is_none()),
+        "failed cache persistence must not authorize the unsafe artifact path"
+    );
+    assert_eq!(fs::read_dir(&outside).expect("outside target").count(), 0);
+
+    let second_report = fixture.path().join("second-disabled-runtime.json");
+    let second = run_index(&project, &second_report, &[]);
+    assert_success(&second);
+    assert_eq!(
+        artifact_bytes(&project),
+        repaired,
+        "a later run must not replay or reauthorize the unsafe cache target"
+    );
     assert_eq!(fs::read_dir(&outside).expect("outside target").count(), 0);
 }

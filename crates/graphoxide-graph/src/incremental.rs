@@ -122,6 +122,7 @@ pub fn build_merge_with_options(
         effective_root.as_deref(),
     );
     let mut chunks = Vec::new();
+    let mut carried_chunk_index = None;
     if let Some(existing) = existing {
         let mut carried = Extraction {
             nodes: existing.nodes,
@@ -155,6 +156,7 @@ pub fn build_merge_with_options(
                 effective_root.as_deref(),
             )
         });
+        carried_chunk_index = Some(chunks.len());
         chunks.push(carried);
     }
     chunks.extend_from_slice(new_chunks);
@@ -176,44 +178,43 @@ pub fn build_merge_with_options(
                 })
         })
         .collect();
-    for chunk in &mut chunks {
+    let pruned_node_ids = carried_chunk_index
+        .and_then(|index| chunks.get(index))
+        .into_iter()
+        .flat_map(|chunk| &chunk.nodes)
+        .filter(|node| node_owned_by_prunes(node, &effective_prunes, effective_root.as_deref()))
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let surviving_node_ids = chunks
+        .iter()
+        .flat_map(|chunk| &chunk.nodes)
+        .filter(|node| !node_owned_by_prunes(node, &effective_prunes, effective_root.as_deref()))
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let removed_pruned_node_ids = pruned_node_ids
+        .into_iter()
+        .filter(|id| !surviving_node_ids.contains(id.as_str()))
+        .collect::<BTreeSet<_>>();
+    drop(surviving_node_ids);
+    for (index, chunk) in chunks.iter_mut().enumerate() {
         chunk.nodes.retain(|node| {
-            !effective_prunes.iter().any(|prune| {
-                same_source_or_container_prune(
-                    &node.source_file,
-                    container_source(&node.extra),
-                    &prune.to_string_lossy(),
-                    effective_root.as_deref(),
-                )
-            })
+            !node_owned_by_prunes(node, &effective_prunes, effective_root.as_deref())
         });
         chunk.edges.retain(|edge| {
-            !effective_prunes.iter().any(|prune| {
-                same_source_or_container_prune(
-                    &edge.source_file,
-                    container_source(&edge.extra),
-                    &prune.to_string_lossy(),
-                    effective_root.as_deref(),
-                )
-            })
+            !edge_owned_by_prunes(edge, &effective_prunes, effective_root.as_deref())
+                && (carried_chunk_index != Some(index)
+                    || !edge_references_removed_node(edge, &removed_pruned_node_ids))
         });
         chunk.hyperedges.retain(|hyperedge| {
-            let source_file = hyperedge
-                .get("source_file")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            !effective_prunes.iter().any(|prune| {
-                same_source_or_container_prune(
-                    source_file,
-                    hyperedge
-                        .get(CONTAINER_SOURCE_ATTRIBUTE)
-                        .and_then(|value| value.as_str())
-                        .filter(|source| !source.is_empty()),
-                    &prune.to_string_lossy(),
-                    effective_root.as_deref(),
-                )
-            })
+            !hyperedge_owned_by_prunes(hyperedge, &effective_prunes, effective_root.as_deref())
+                && (carried_chunk_index != Some(index)
+                    || hyperedge_survives_removed_members(hyperedge, &removed_pruned_node_ids))
         });
+        if carried_chunk_index == Some(index) {
+            for hyperedge in &mut chunk.hyperedges {
+                prune_hyperedge_members(hyperedge, &removed_pruned_node_ids);
+            }
+        }
     }
     let build_options = BuildOptions {
         directed,
@@ -266,7 +267,18 @@ pub fn merge_raw_extraction_from_graph(
     prune_sources: &[PathBuf],
     root: Option<&Path>,
 ) -> anyhow::Result<Extraction> {
-    merge_raw_extraction_from_graph_impl(new, existing, prune_sources, None, &[], root, None)
+    merge_raw_extraction_from_graph_impl(
+        new,
+        existing,
+        IncrementalBaselinePrunes {
+            deletion_sources: prune_sources,
+            ownership_reset_sources: &[],
+        },
+        None,
+        &[],
+        root,
+        None,
+    )
 }
 
 /// Merge against an already-loaded graph only when the conservative working
@@ -289,7 +301,10 @@ pub fn merge_raw_extraction_from_graph_with_materialization_limit(
     merge_raw_extraction_from_graph_impl(
         new,
         existing,
-        prune_sources,
+        IncrementalBaselinePrunes {
+            deletion_sources: prune_sources,
+            ownership_reset_sources: &[],
+        },
         None,
         &[],
         root,
@@ -324,7 +339,53 @@ pub fn merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_
     merge_raw_extraction_from_graph_impl(
         new,
         existing,
-        prune_sources,
+        IncrementalBaselinePrunes {
+            deletion_sources: prune_sources,
+            ownership_reset_sources: &[],
+        },
+        Some(rebuilt_sources),
+        rebuilt_provider_sources,
+        root,
+        Some(max_materialized_bytes),
+    )
+}
+
+/// Baseline-only removals for a bounded incremental merge.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IncrementalBaselinePrunes<'a> {
+    /// Ordinary deletions, suppressed when the same source was successfully
+    /// rebuilt in this merge.
+    pub deletion_sources: &'a [PathBuf],
+    /// Verified cross-tier ownership resets, never suppressed by rebuilding
+    /// the same source and never applied to fresh facts.
+    pub ownership_reset_sources: &'a [PathBuf],
+}
+
+/// Merge with both tier-scoped replacement and authoritative ownership resets.
+///
+/// Unlike ordinary deletion prunes, `ownership_reset_sources` are never
+/// suppressed when the same source was rebuilt. They remove every carried
+/// baseline fact owned by the source across structural and semantic tiers,
+/// while fresh facts in `new` remain untouched. Callers must include a source
+/// only after successfully verifying that its current generation authoritatively
+/// supersedes all previously committed representations.
+pub fn merge_raw_extraction_from_graph_with_rebuilt_sources_and_ownership_resets_and_materialization_limit(
+    new: Extraction,
+    existing: &KnowledgeGraph,
+    rebuilt_sources: &[PathBuf],
+    rebuilt_provider_sources: &[String],
+    baseline_prunes: IncrementalBaselinePrunes<'_>,
+    root: Option<&Path>,
+    max_materialized_bytes: usize,
+) -> anyhow::Result<Extraction> {
+    anyhow::ensure!(
+        max_materialized_bytes > 0,
+        "incremental graph materialization limit must be greater than zero"
+    );
+    merge_raw_extraction_from_graph_impl(
+        new,
+        existing,
+        baseline_prunes,
         Some(rebuilt_sources),
         rebuilt_provider_sources,
         root,
@@ -335,12 +396,16 @@ pub fn merge_raw_extraction_from_graph_with_rebuilt_sources_and_materialization_
 fn merge_raw_extraction_from_graph_impl(
     mut new: Extraction,
     existing: &KnowledgeGraph,
-    prune_sources: &[PathBuf],
+    baseline_prunes: IncrementalBaselinePrunes<'_>,
     rebuilt_sources: Option<&[PathBuf]>,
     rebuilt_provider_sources: &[String],
     effective_root: Option<&Path>,
     max_materialized_bytes: Option<usize>,
 ) -> anyhow::Result<Extraction> {
+    let IncrementalBaselinePrunes {
+        deletion_sources,
+        ownership_reset_sources,
+    } = baseline_prunes;
     let (mut new_ast_sources, mut new_semantic_sources) =
         tier_sources(std::slice::from_ref(&new), effective_root);
     if let Some(rebuilt_sources) = rebuilt_sources {
@@ -370,7 +435,7 @@ fn merge_raw_extraction_from_graph_impl(
         .map_or_else(ContainerRepresentationFamily::default, |sources| {
             container_representation_family(existing, sources, effective_root)
         });
-    let effective_prunes: Vec<&PathBuf> = prune_sources
+    let mut effective_prunes: Vec<&PathBuf> = deletion_sources
         .iter()
         .filter(|prune| {
             if let Some(rebuilt_sources) = rebuilt_sources {
@@ -396,6 +461,9 @@ fn merge_raw_extraction_from_graph_impl(
             }
         })
         .collect();
+    effective_prunes.extend(ownership_reset_sources);
+    effective_prunes.sort();
+    effective_prunes.dedup();
     let retained_node = |node: &Node| {
         !is_replaced_node(
             node,
@@ -415,6 +483,23 @@ fn merge_raw_extraction_from_graph_impl(
                 )
             })
     };
+    let pruned_node_ids = existing
+        .nodes
+        .iter()
+        .filter(|node| node_owned_by_prunes(node, &effective_prunes, effective_root))
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let surviving_node_ids = existing
+        .nodes
+        .iter()
+        .filter(|node| retained_node(node))
+        .map(|node| node.id.as_str())
+        .chain(new.nodes.iter().map(|node| node.id.as_str()))
+        .collect::<BTreeSet<_>>();
+    let removed_pruned_node_ids = pruned_node_ids
+        .difference(&surviving_node_ids)
+        .map(|id| (*id).to_owned())
+        .collect::<BTreeSet<_>>();
     let retained_edge = |edge: &Edge| {
         !is_replaced_edge(
             edge,
@@ -433,7 +518,7 @@ fn merge_raw_extraction_from_graph_impl(
                 &prune.to_string_lossy(),
                 effective_root,
             )
-        })
+        }) && !edge_references_removed_node(edge, &removed_pruned_node_ids)
     };
     let retained_hyperedge = |hyperedge: &serde_json::Value| {
         let source_file = hyperedge
@@ -456,7 +541,7 @@ fn merge_raw_extraction_from_graph_impl(
                 &prune.to_string_lossy(),
                 effective_root,
             )
-        })
+        }) && hyperedge_survives_removed_members(hyperedge, &removed_pruned_node_ids)
     };
 
     if let Some(max_materialized_bytes) = max_materialized_bytes {
@@ -488,6 +573,10 @@ fn merge_raw_extraction_from_graph_impl(
             .iter()
             .filter(|hyperedge| retained_hyperedge(hyperedge))
             .cloned()
+            .map(|mut hyperedge| {
+                prune_hyperedge_members(&mut hyperedge, &removed_pruned_node_ids);
+                hyperedge
+            })
             .collect(),
     };
     merged.nodes.append(&mut new.nodes);
@@ -1004,6 +1093,101 @@ fn container_source(extra: &std::collections::BTreeMap<String, serde_json::Value
         .get(CONTAINER_SOURCE_ATTRIBUTE)
         .and_then(|value| value.as_str())
         .filter(|source| !source.is_empty())
+}
+
+fn node_owned_by_prunes(node: &Node, prunes: &[&PathBuf], root: Option<&Path>) -> bool {
+    prunes.iter().any(|prune| {
+        same_source_or_container_prune(
+            &node.source_file,
+            container_source(&node.extra),
+            &prune.to_string_lossy(),
+            root,
+        )
+    })
+}
+
+fn edge_owned_by_prunes(edge: &Edge, prunes: &[&PathBuf], root: Option<&Path>) -> bool {
+    prunes.iter().any(|prune| {
+        same_source_or_container_prune(
+            &edge.source_file,
+            container_source(&edge.extra),
+            &prune.to_string_lossy(),
+            root,
+        )
+    })
+}
+
+fn hyperedge_owned_by_prunes(
+    hyperedge: &serde_json::Value,
+    prunes: &[&PathBuf],
+    root: Option<&Path>,
+) -> bool {
+    let source_file = hyperedge
+        .get("source_file")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    prunes.iter().any(|prune| {
+        same_source_or_container_prune(
+            source_file,
+            hyperedge
+                .get(CONTAINER_SOURCE_ATTRIBUTE)
+                .and_then(serde_json::Value::as_str)
+                .filter(|source| !source.is_empty()),
+            &prune.to_string_lossy(),
+            root,
+        )
+    })
+}
+
+fn edge_references_removed_node(edge: &Edge, removed_node_ids: &BTreeSet<String>) -> bool {
+    removed_node_ids.contains(edge.true_source()) || removed_node_ids.contains(edge.true_target())
+}
+
+fn hyperedge_members(hyperedge: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    ["nodes", "members", "node_ids"]
+        .into_iter()
+        .find_map(|field| hyperedge.get(field).and_then(serde_json::Value::as_array))
+}
+
+fn hyperedge_survives_removed_members(
+    hyperedge: &serde_json::Value,
+    removed_node_ids: &BTreeSet<String>,
+) -> bool {
+    let Some(members) = hyperedge_members(hyperedge) else {
+        return true;
+    };
+    let removed = members.iter().any(|member| {
+        member
+            .as_str()
+            .is_some_and(|member| removed_node_ids.contains(member))
+    });
+    if !removed {
+        return true;
+    }
+    !members
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|member| !removed_node_ids.contains(*member))
+        .collect::<BTreeSet<_>>()
+        .is_empty()
+}
+
+fn prune_hyperedge_members(hyperedge: &mut serde_json::Value, removed_node_ids: &BTreeSet<String>) {
+    let Some(object) = hyperedge.as_object_mut() else {
+        return;
+    };
+    for field in ["nodes", "members", "node_ids"] {
+        if let Some(members) = object
+            .get_mut(field)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            members.retain(|member| {
+                !member
+                    .as_str()
+                    .is_some_and(|member| removed_node_ids.contains(member))
+            });
+        }
+    }
 }
 
 fn same_source_or_container_prune(

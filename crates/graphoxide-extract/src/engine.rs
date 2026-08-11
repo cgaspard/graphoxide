@@ -167,6 +167,9 @@ pub(crate) fn has_ast_extractor(path: &Path) -> bool {
 /// Return whether the already-admitted source has an AST extractor without
 /// reopening its path from a CPU worker.
 pub(crate) fn has_ast_extractor_bytes(path: &Path, source: &[u8]) -> bool {
+    if crate::detect::is_mpeg_transport_stream_bytes(path, source) {
+        return false;
+    }
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -187,6 +190,17 @@ pub(crate) fn has_ast_extractor_bytes(path: &Path, source: &[u8]) -> bool {
 pub(crate) fn extract_as(path: &Path, source_file: &str) -> anyhow::Result<Extraction> {
     let source = fs::read(path)?;
     extract_as_with_path_probes(path, source_file, &source, true, None, None)
+}
+
+/// Extract already-admitted source bytes while retaining the legacy
+/// explicit-file sibling/path probes. The primary source generation is bound
+/// to `source`; only compatibility metadata is allowed to consult `path`.
+pub(crate) fn extract_as_admitted_bytes_with_path_probes(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+) -> anyhow::Result<Extraction> {
+    extract_as_with_path_probes(path, source_file, source, true, None, None)
 }
 
 /// Extract a graph fragment from I/O-owned source bytes.
@@ -250,6 +264,13 @@ fn extract_as_with_path_probes(
         cancellation.is_none_or(|token| !token.is_cancelled()),
         "isolated extraction cancelled"
     );
+    if crate::detect::is_mpeg_transport_stream_bytes(path, source) {
+        return Ok(mpeg_transport_stream_inventory(
+            path,
+            source_file,
+            source.len() as u64,
+        ));
+    }
     let mut lang = crate::languages::for_path(path);
     let extension = path
         .extension()
@@ -546,6 +567,52 @@ fn extract_as_with_path_probes(
         );
     }
     Ok(extraction)
+}
+
+pub(crate) fn mpeg_transport_stream_inventory(
+    path: &Path,
+    source_file: &str,
+    byte_length: u64,
+) -> Extraction {
+    let stem = Path::new(source_file)
+        .with_extension("")
+        .to_string_lossy()
+        .into_owned();
+    // Inventory identities live in their own namespace. In particular, an
+    // incremental TypeScript-to-media transition must not let a retained
+    // import edge to the former code-file anchor bind to this video node.
+    let id = make_id(&["format_inventory", "mpeg_transport_stream", &stem]);
+    let label = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(source_file)
+        .to_owned();
+    Extraction {
+        nodes: vec![Node {
+            id,
+            label,
+            // Graph file_type is the compatibility schema tier, not the
+            // detector bucket. Opaque inventory roots use the established
+            // document convention; format/source_kind retain media truth.
+            file_type: "document".into(),
+            source_file: source_file.into(),
+            source_location: None,
+            community: None,
+            extra: BTreeMap::from([
+                ("type".into(), "format_inventory".into()),
+                ("format".into(), "mpeg_transport_stream".into()),
+                ("format_capability".into(), "inventory_only".into()),
+                ("parse_status".into(), "inventory_only".into()),
+                (
+                    "diagnostic".into(),
+                    "mpeg_transport_stream_not_typescript".into(),
+                ),
+                ("byte_length".into(), byte_length.into()),
+            ]),
+        }],
+        edges: Vec::new(),
+        hyperedges: Vec::new(),
+    }
 }
 
 fn parser_compatible_source<'a>(
@@ -4898,9 +4965,69 @@ fn go_predeclared_function(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_as_bytes, parser_compatible_source};
+    use super::{extract_as_bytes, has_ast_extractor_bytes, parser_compatible_source};
     use graphoxide_core::make_id;
     use std::{borrow::Cow, collections::BTreeSet, path::Path};
+
+    fn mpeg_transport_stream_fixture() -> Vec<u8> {
+        let mut bytes = vec![0xff; 5 * 188];
+        for packet in 0..5 {
+            let offset = packet * 188;
+            bytes[offset..offset + 4].copy_from_slice(&[
+                0x47,
+                0x40,
+                packet as u8,
+                0x10 | packet as u8,
+            ]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn mpeg_transport_stream_ts_is_truthful_inventory_not_typescript() {
+        let source = mpeg_transport_stream_fixture();
+        let path = Path::new("video/segment.ts");
+        assert!(!has_ast_extractor_bytes(path, &source));
+
+        let extraction = extract_as_bytes(path, "video/segment.ts", &source)
+            .expect("inventory MPEG transport stream");
+        assert_eq!(extraction.nodes.len(), 1);
+        assert!(extraction.edges.is_empty());
+        let node = &extraction.nodes[0];
+        assert_eq!(node.file_type, "document");
+        assert_eq!(node.extra["type"], "format_inventory");
+        assert_eq!(node.extra["format"], "mpeg_transport_stream");
+        assert_eq!(node.extra["format_capability"], "inventory_only");
+        assert_eq!(
+            node.extra["diagnostic"],
+            "mpeg_transport_stream_not_typescript"
+        );
+        graphoxide_core::validate::validate_extraction(&extraction)
+            .expect("MPEG inventory must satisfy the raw graph schema");
+        assert_eq!(node.extra["byte_length"], source.len());
+        assert!(extraction.nodes.iter().all(|node| {
+            node.extra.get("type").and_then(serde_json::Value::as_str) != Some("file")
+        }));
+    }
+
+    #[test]
+    fn legitimate_typescript_keeps_ast_extraction() {
+        let source = b"export function run(value: number): number { return value + 1; }\n";
+        let path = Path::new("src/main.ts");
+        assert!(has_ast_extractor_bytes(path, source));
+
+        let extraction =
+            extract_as_bytes(path, "src/main.ts", source).expect("extract TypeScript source");
+        assert!(extraction.nodes.iter().any(|node| {
+            node.extra.get("type").and_then(serde_json::Value::as_str) == Some("file")
+        }));
+        assert!(extraction.nodes.iter().any(|node| node.label == "run()"));
+        assert!(extraction.nodes.iter().all(|node| node
+            .extra
+            .get("format")
+            .and_then(serde_json::Value::as_str)
+            != Some("mpeg_transport_stream")));
+    }
 
     #[test]
     fn normal_parser_inputs_borrow_the_original_source() {

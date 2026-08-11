@@ -233,12 +233,17 @@ export class AiLabelingService {
       );
       if (choice !== 'Build Graph') return;
       const output = this.store.managedOutput(folder);
-      await this.cli.run({
+      const outcome = await this.cli.runMutation({
         title: 'Graphoxide: building graph…',
         folder,
         args: ['extract', folder.uri.fsPath],
         environment: output.environment,
+        mutationTarget: output.outputDirectory,
+        mutationOrigin: 'interactive',
+        mutationLabel: 'building the graph for community labeling',
+        suppressAutomaticOnFailure: true,
       });
+      if (outcome.kind !== 'completed') return;
       state = await this.store.load(folder);
     }
     if (!state?.model) throw new Error(`No graph was found at ${state?.graphUri.fsPath ?? this.store.graphUri(folder).fsPath}.`);
@@ -289,13 +294,18 @@ export class AiLabelingService {
       if (confirmation !== 'Label communities') return;
     }
 
-    await this.cli.run({
+    const labeling = await this.cli.runMutation({
       title: `Graphoxide: labeling communities with ${configuration.profile.label}…`,
       folder,
       args: labelingArguments(state.graphUri.fsPath, configuration),
       environment: labelingEnvironment(configuration.profile, configuration.baseUrl, key),
       trustedExecutable: true,
+      mutationTarget: path.dirname(state.graphUri.fsPath),
+      mutationOrigin: 'interactive',
+      mutationLabel: 'labeling graph communities',
+      suppressAutomaticOnFailure: false,
     });
+    if (labeling.kind !== 'completed') return;
     await this.store.load(folder);
     const report = vscode.Uri.file(path.join(path.dirname(state.graphUri.fsPath), 'GRAPH_REPORT.md'));
     if (!skipConfirmation) {

@@ -158,7 +158,7 @@ fn graph_audit_uses_the_configured_output_for_cache_and_schema_migration() {
     let _: Value = serde_json::from_slice(&audit.stdout).expect("graph audit JSON");
     assert!(!retired.exists(), "pre-redaction cache was not retired");
     assert!(output.join("manifest.json").is_file());
-    let current = output.join("cache/ast/v30");
+    let current = output.join("cache/ast/v31");
     assert!(
         current
             .read_dir()

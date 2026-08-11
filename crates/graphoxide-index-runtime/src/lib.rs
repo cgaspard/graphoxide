@@ -105,7 +105,7 @@ impl IoBackendSelection {
 /// cgroup limit wins when it is lower.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeMemoryLimits {
-    /// Physical-memory limit observed by the host integration, if known.
+    /// Host/process memory ceiling observed by the host integration, if known.
     pub host_memory_bytes: Option<usize>,
     /// Cgroup or job-object limit observed by the host integration, if known.
     pub cgroup_memory_bytes: Option<usize>,
@@ -117,14 +117,13 @@ impl RuntimeMemoryLimits {
     ///
     /// Failures are deliberately treated as unknown limits. This keeps the
     /// runtime portable and conservative: [`automatic_budget_bytes`](Self::automatic_budget_bytes)
-    /// then selects its documented 512 MiB unknown-limit default rather than failing an
-    /// extraction solely because a host does not expose Linux procfs/cgroups.
+    /// then selects its documented 512 MiB unknown-limit default rather than
+    /// failing an extraction solely because the host does not expose a
+    /// supported memory-limit interface.
     #[must_use]
     pub fn discover() -> Self {
         Self {
-            host_memory_bytes: std::fs::read_to_string("/proc/meminfo")
-                .ok()
-                .and_then(|contents| parse_meminfo_total_bytes(&contents)),
+            host_memory_bytes: discover_host_memory_limit(),
             cgroup_memory_bytes: discover_cgroup_memory_limit(),
         }
     }
@@ -152,6 +151,84 @@ impl RuntimeMemoryLimits {
                 (limit / 8).min(MAX_MEMORY_BUDGET_BYTES).min(limit)
             })
     }
+}
+
+fn discover_host_memory_limit() -> Option<usize> {
+    discover_native_host_memory_limit().or_else(|| {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|contents| parse_meminfo_total_bytes(&contents))
+    })
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+fn addressable_memory_bytes_from_u64(bytes: u64) -> Option<usize> {
+    usize::try_from(bytes).ok().filter(|bytes| *bytes > 0)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_memory_limit_from_sysctl(status: i32, bytes_len: usize, bytes: u64) -> Option<usize> {
+    if status != 0 || bytes_len != std::mem::size_of::<u64>() {
+        return None;
+    }
+    addressable_memory_bytes_from_u64(bytes)
+}
+
+#[cfg(any(windows, test))]
+fn windows_memory_limit_from_status(
+    call_succeeded: bool,
+    total_physical_bytes: u64,
+    total_page_file_bytes: u64,
+) -> Option<usize> {
+    if !call_succeeded {
+        return None;
+    }
+    [total_physical_bytes, total_page_file_bytes]
+        .into_iter()
+        .filter(|bytes| *bytes > 0)
+        .min()
+        .and_then(addressable_memory_bytes_from_u64)
+}
+
+#[cfg(target_os = "macos")]
+fn discover_native_host_memory_limit() -> Option<usize> {
+    let mut bytes = 0_u64;
+    let mut bytes_len = std::mem::size_of::<u64>();
+    // SAFETY: `hw.memsize` is NUL-terminated, `bytes` and `bytes_len` are live
+    // writable objects of the advertised size, no new value is supplied, and
+    // `sysctlbyname` does not retain any of these pointers after it returns.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            std::ptr::addr_of_mut!(bytes).cast(),
+            std::ptr::addr_of_mut!(bytes_len),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    macos_memory_limit_from_sysctl(status, bytes_len, bytes)
+}
+
+#[cfg(windows)]
+fn discover_native_host_memory_limit() -> Option<usize> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX {
+        dwLength: u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>()).ok()?,
+        ..MEMORYSTATUSEX::default()
+    };
+    // SAFETY: `status` is a live writable `MEMORYSTATUSEX` whose required
+    // `dwLength` field is initialized, and `GlobalMemoryStatusEx` does not
+    // retain the pointer after returning.
+    let succeeded = unsafe { GlobalMemoryStatusEx(std::ptr::addr_of_mut!(status)) } != 0;
+    // `ullTotalPageFile` is the current process's maximum commit allowance,
+    // which can be tighter than physical RAM under a job/container limit.
+    windows_memory_limit_from_status(succeeded, status.ullTotalPhys, status.ullTotalPageFile)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn discover_native_host_memory_limit() -> Option<usize> {
+    None
 }
 
 fn parse_meminfo_total_bytes(contents: &str) -> Option<usize> {
@@ -3484,6 +3561,101 @@ mod tests {
         assert_eq!(
             RuntimeMemoryLimits::default().automatic_budget_bytes(),
             MIN_MEMORY_BUDGET_BYTES
+        );
+    }
+
+    #[test]
+    fn memory_conversion_requires_nonzero_addressable_bytes() {
+        assert_eq!(addressable_memory_bytes_from_u64(0), None);
+        assert_eq!(addressable_memory_bytes_from_u64(1), Some(1));
+        assert_eq!(
+            addressable_memory_bytes_from_u64(8 * 1024 * 1024 * 1024),
+            usize::try_from(8_u64 * 1024 * 1024 * 1024).ok()
+        );
+    }
+
+    #[test]
+    fn macos_sysctl_measurement_requires_success_exact_width_and_nonzero_value() {
+        let width = std::mem::size_of::<u64>();
+        assert_eq!(macos_memory_limit_from_sysctl(0, width, 4096), Some(4096));
+        assert_eq!(macos_memory_limit_from_sysctl(-1, width, 4096), None);
+        assert_eq!(
+            macos_memory_limit_from_sysctl(0, width.saturating_sub(1), 4096),
+            None
+        );
+        assert_eq!(
+            macos_memory_limit_from_sysctl(0, width.saturating_add(1), 4096),
+            None
+        );
+        assert_eq!(macos_memory_limit_from_sysctl(0, width, 0), None);
+        assert_eq!(
+            macos_memory_limit_from_sysctl(0, width, u64::MAX),
+            usize::try_from(u64::MAX).ok()
+        );
+    }
+
+    #[test]
+    fn windows_memory_measurement_uses_the_tightest_nonzero_process_ceiling() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(
+            windows_memory_limit_from_status(true, 512 * MIB, 256 * MIB),
+            Some(256 * 1024 * 1024)
+        );
+        assert_eq!(
+            windows_memory_limit_from_status(true, 256 * MIB, 512 * MIB),
+            Some(256 * 1024 * 1024)
+        );
+        assert_eq!(
+            windows_memory_limit_from_status(true, 512 * MIB, 0),
+            Some(512 * 1024 * 1024)
+        );
+        assert_eq!(
+            windows_memory_limit_from_status(true, 0, 256 * MIB),
+            Some(256 * 1024 * 1024)
+        );
+        assert_eq!(windows_memory_limit_from_status(true, 0, 0), None);
+        assert_eq!(
+            windows_memory_limit_from_status(false, 512 * MIB, 256 * MIB),
+            None
+        );
+        assert_eq!(
+            windows_memory_limit_from_status(true, u64::MAX, 256 * MIB),
+            Some(256 * 1024 * 1024),
+            "selection must happen before addressability conversion"
+        );
+        assert_eq!(
+            windows_memory_limit_from_status(true, u64::MAX, u64::MAX),
+            usize::try_from(u64::MAX).ok()
+        );
+    }
+
+    #[test]
+    fn large_desktop_memory_clamps_the_automatic_budget_to_eight_gib() {
+        let host_memory_bytes = addressable_memory_bytes_from_u64(128 * 1024 * 1024 * 1024)
+            .expect("128 GiB is addressable on supported 64-bit desktop targets");
+        let limits = RuntimeMemoryLimits {
+            host_memory_bytes: Some(host_memory_bytes),
+            cgroup_memory_bytes: None,
+        };
+        assert_eq!(limits.automatic_budget_bytes(), MAX_MEMORY_BUDGET_BYTES);
+        assert_eq!(limits.automatic_budget_bytes(), 8 * 1024 * 1024 * 1024);
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn available_native_desktop_memory_drives_the_automatic_budget() {
+        // A sandbox may deny an otherwise supported host API. Production
+        // deliberately treats that as unknown and retains the 512 MiB
+        // fallback, so the integration check must tolerate the same outcome.
+        let Some(native) = discover_native_host_memory_limit() else {
+            return;
+        };
+        assert!(native > 0);
+        let discovered = RuntimeMemoryLimits::discover();
+        assert_eq!(discovered.host_memory_bytes, Some(native));
+        assert_eq!(
+            discovered.automatic_budget_bytes(),
+            (native / 8).min(MAX_MEMORY_BUDGET_BYTES).min(native)
         );
     }
 
