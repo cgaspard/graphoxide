@@ -1,0 +1,16 @@
+version: 0.10.2
+date: 2026-08-10
+highlights:
+  - Introduce a purple-first cinematic graph explorer that combines the Constellation overview with a focused Investigation Lens and derives every displayed relationship and semantic cue from the loaded graph.
+added:
+  - Explore the global graph through deterministic community territories, search, filters, density controls, pan and zoom, selection history, keyboard navigation, and exact source reveal.
+  - Switch to an Investigation Lens that preserves context while presenting recorded incoming and outgoing relationships with exact relation, known confidence, provenance, and community details.
+  - Support screen readers, visible keyboard focus, reduced motion, forced colors, and redundant node-shape and relationship-direction cues.
+changed:
+  - Use purple for primary focus, selection, actions, modes, and community emphasis, with cyan reserved for secondary relationship flow and confidence cues.
+  - Bound each webview snapshot to a configurable 25 to 5,000 nodes plus deterministic relationship, detail, string, and aggregate payload limits; prioritize selected context and explicitly report omissions.
+  - Load all visualizer JavaScript and CSS from the packaged extension under a strict local-only content security policy.
+fixed:
+  - Clear stale or malformed graph state and reset invalid selections, filters, history, camera, and status instead of leaving obsolete UI state visible.
+  - Treat only exact known confidence values as confidence facts and label missing, empty, lowercase, or custom values as `Unspecified` without inventing callers, dependencies, effects, risk, source previews, or evidence.
+removed: []

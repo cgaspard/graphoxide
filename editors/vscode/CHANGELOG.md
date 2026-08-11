@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.10.2 — 2026-08-10
+
+- Rebuilt the graph visualizer as a purple-first cinematic explorer with a
+  Constellation overview and a focused Investigation Lens.
+- Preserved graph truth by presenting recorded incoming and outgoing
+  relationships, exact known confidence, provenance, and community facts, and
+  explicit `Unspecified` labels when the graph does not provide a known value.
+- Added deterministic search, filters, density controls, pan and zoom, selection
+  history, source reveal, and keyboard navigation across global and focused
+  views.
+- Bounded webview snapshots and rendering with deterministic node, relationship,
+  detail, and string limits while disclosing omitted graph content.
+- Improved screen-reader status, visible focus, reduced-motion behavior,
+  forced-colors support, and redundant non-color relationship cues.
+- Kept the visualizer local-only under a strict content security policy and
+  cleared stale or malformed graph state instead of leaving obsolete content
+  visible.
+
 ## 0.10.1 — 2026-08-10
 
 - Redacted high-confidence credential-bearing values before generic structured
