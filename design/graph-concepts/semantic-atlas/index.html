@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#17201c">
+  <title>Semantic Atlas · Graphoxide graph concept</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#atlas">Skip to graph</a>
+
+  <div class="app-shell">
+    <header class="masthead">
+      <a class="brand" href="#" aria-label="Graphoxide Semantic Atlas home">
+        <span class="brand-mark" aria-hidden="true">
+          <i></i><i></i><i></i><i></i>
+        </span>
+        <span>
+          <strong>GRAPH<em>OXIDE</em></strong>
+          <small>Semantic Atlas</small>
+        </span>
+      </a>
+
+      <label class="search-box" for="search">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg>
+        <span class="sr-only">Search the graph</span>
+        <input id="search" type="search" autocomplete="off" placeholder="Find a symbol or file…" aria-controls="search-results" aria-expanded="false">
+        <kbd>F</kbd>
+        <span class="search-count" id="search-count" aria-live="polite"></span>
+      </label>
+
+      <div class="view-switcher" role="group" aria-label="Semantic zoom level">
+        <button type="button" data-view="overview" aria-pressed="true">Overview</button>
+        <button type="button" data-view="structure" aria-pressed="false">Structure</button>
+        <button type="button" data-view="detail" aria-pressed="false">Detail</button>
+      </div>
+
+      <button class="icon-button" id="help-button" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M9.8 9a2.4 2.4 0 0 1 4.7.6c0 2.1-2.5 2.3-2.5 4.1M12 17.5h.01"></path></svg>
+      </button>
+    </header>
+
+    <div class="workspace">
+      <nav class="facet-rail" aria-label="Graph filters">
+        <section class="scope-block">
+          <p class="eyebrow">Current atlas</p>
+          <h1>Cartograph<br>checkout</h1>
+          <p class="commit"><span aria-hidden="true"></span> Indexed at <code id="commit">—</code></p>
+          <div class="metric-row" aria-label="Graph totals">
+            <span><strong id="node-total">0</strong> nodes</span>
+            <span><strong id="edge-total">0</strong> relations</span>
+          </div>
+        </section>
+
+        <section class="facet-section" aria-labelledby="domains-title">
+          <div class="section-heading">
+            <h2 id="domains-title">Domains</h2>
+            <button type="button" id="show-all-domains">All</button>
+          </div>
+          <div id="domain-filters" class="domain-filters"></div>
+        </section>
+
+        <section class="facet-section" aria-labelledby="relations-title">
+          <div class="section-heading">
+            <h2 id="relations-title">Relations</h2>
+            <span id="relation-total">0</span>
+          </div>
+          <div id="relation-filters" class="relation-filters"></div>
+        </section>
+
+        <section class="facet-section confidence-section" aria-labelledby="confidence-title">
+          <h2 id="confidence-title">Evidence</h2>
+          <div class="confidence-filters" id="confidence-filters">
+            <button type="button" data-confidence="EXTRACTED" aria-pressed="true"><i class="line solid"></i>Extracted</button>
+            <button type="button" data-confidence="INFERRED" aria-pressed="true"><i class="line dashed"></i>Inferred</button>
+            <button type="button" data-confidence="AMBIGUOUS" aria-pressed="true"><i class="line dotted"></i>Ambiguous</button>
+          </div>
+        </section>
+
+        <p class="rail-note"><span>Tip</span> Select a node to isolate its immediate neighborhood.</p>
+      </nav>
+
+      <main class="atlas-stage" id="atlas" tabindex="-1">
+        <div class="axis-caption" aria-hidden="true">
+          <span>UPSTREAM</span>
+          <i></i>
+          <b>EXECUTION FLOW</b>
+          <i></i>
+          <span>DEPENDENCIES</span>
+        </div>
+
+        <svg id="graph" role="tree" aria-labelledby="graph-title graph-description">
+          <title id="graph-title">Cartograph code knowledge graph</title>
+          <desc id="graph-description">A directed graph arranged in horizontal domain lanes from upstream entry points to downstream dependencies.</desc>
+          <defs>
+            <pattern id="dot-grid" width="28" height="28" patternUnits="userSpaceOnUse">
+              <circle cx="1" cy="1" r="1" fill="currentColor"></circle>
+            </pattern>
+            <marker id="arrow-solid" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+              <path d="M 1 1 L 9 5 L 1 9 z"></path>
+            </marker>
+            <marker id="arrow-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1 L 9 5 L 1 9"></path>
+            </marker>
+            <filter id="node-shadow" x="-30%" y="-40%" width="160%" height="180%">
+              <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#17201c" flood-opacity=".12"></feDropShadow>
+            </filter>
+          </defs>
+          <rect class="plot-background" width="100%" height="100%"></rect>
+          <g id="world">
+            <g id="lane-layer"></g>
+            <g id="edge-layer"></g>
+            <g id="node-layer"></g>
+          </g>
+        </svg>
+
+        <div class="search-results" id="search-results" role="listbox" aria-label="Search results" hidden></div>
+
+        <div class="zoom-tools" role="group" aria-label="Map controls">
+          <button type="button" id="zoom-in" aria-label="Zoom in" title="Zoom in (+)">+</button>
+          <button type="button" id="zoom-out" aria-label="Zoom out" title="Zoom out (−)">−</button>
+          <button type="button" id="fit" aria-label="Fit graph" title="Fit graph (0)">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path></svg>
+          </button>
+        </div>
+
+        <section class="minimap-shell" aria-label="Graph minimap">
+          <div class="minimap-label"><span>Map</span><output id="zoom-output">100%</output></div>
+          <svg id="minimap" viewBox="0 0 1820 1090" role="img" aria-label="Click to reposition the graph">
+            <g id="minimap-content"></g>
+            <rect id="minimap-viewport" rx="8"></rect>
+          </svg>
+        </section>
+
+        <div class="canvas-key" aria-label="Visual encoding legend">
+          <span><i class="shape code"></i>Code</span>
+          <span><i class="shape data"></i>Data</span>
+          <span><i class="shape config"></i>Config</span>
+          <span><i class="flow-arrow">→</i>Direction</span>
+        </div>
+
+        <p class="interaction-hint" id="interaction-hint" aria-live="polite">Drag to pan · scroll to zoom · select a node to trace dependencies</p>
+      </main>
+
+      <aside class="inspector" id="inspector" aria-labelledby="inspector-title">
+        <div class="empty-inspector" id="empty-inspector">
+          <span class="empty-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <p class="eyebrow">Detail panel</p>
+          <h2 id="inspector-title">Choose a landmark</h2>
+          <p>Select any node to inspect its source, evidence, and immediate connections.</p>
+          <ol>
+            <li><kbd>F</kbd><span>Find a symbol</span></li>
+            <li><kbd>↑ ↓</kbd><span>Move by proximity</span></li>
+            <li><kbd>Enter</kbd><span>Inspect selection</span></li>
+          </ol>
+        </div>
+        <div class="node-inspector" id="node-inspector" hidden>
+          <button class="inspector-close" type="button" id="inspector-close" aria-label="Close node details">×</button>
+          <div class="node-kind" id="detail-kind"></div>
+          <h2 id="detail-label"></h2>
+          <p class="detail-id" id="detail-id"></p>
+          <button class="source-card" type="button" id="source-card">
+            <span class="source-icon" aria-hidden="true">↗</span>
+            <span><small>Source location</small><strong id="detail-file"></strong><em id="detail-location"></em></span>
+          </button>
+          <dl class="detail-metrics">
+            <div><dt>Domain</dt><dd id="detail-domain"></dd></div>
+            <div><dt>Connections</dt><dd id="detail-degree"></dd></div>
+            <div><dt>Flow</dt><dd id="detail-flow"></dd></div>
+          </dl>
+          <section class="connection-section" aria-labelledby="connections-title">
+            <div class="section-heading"><h3 id="connections-title">Immediate connections</h3><span id="connection-count"></span></div>
+            <div id="connections" class="connections"></div>
+          </section>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="statusbar">
+      <span><i class="status-dot"></i> Deterministic snapshot</span>
+      <span id="visible-status">0 of 0 nodes visible</span>
+      <span class="status-help">Press <kbd>?</kbd> for shortcuts</span>
+    </footer>
+  </div>
+
+  <dialog id="help-dialog">
+    <form method="dialog">
+      <button class="dialog-close" aria-label="Close shortcuts">×</button>
+      <p class="eyebrow">Navigate without a mouse</p>
+      <h2>Keyboard shortcuts</h2>
+      <dl>
+        <div><dt><kbd>F</kbd></dt><dd>Focus search</dd></div>
+        <div><dt><kbd>↑ ↓ ← →</kbd></dt><dd>Move to the nearest node in that direction</dd></div>
+        <div><dt><kbd>Enter</kbd></dt><dd>Inspect the focused node</dd></div>
+        <div><dt><kbd>+</kbd> <kbd>−</kbd></dt><dd>Zoom in or out</dd></div>
+        <div><dt><kbd>0</kbd></dt><dd>Fit the complete atlas</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Clear selection or close this panel</dd></div>
+      </dl>
+      <p class="dialog-note">Motion is automatically reduced when your system requests it.</p>
+    </form>
+  </dialog>
+
+  <script src="../shared/fixture.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

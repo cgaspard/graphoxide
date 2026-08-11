@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#080a12">
+  <title>Graphoxide · Constellation concept</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+  <div class="app-shell">
+    <header class="command-bar">
+      <div class="brand" aria-label="Graphoxide">
+        <span class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </span>
+        <span class="brand-name">graphoxide</span>
+        <span class="context-label">explorer</span>
+      </div>
+
+      <div class="project-switcher" aria-label="Current graph">
+        <span class="status-beacon" aria-hidden="true"></span>
+        <span><strong>cartograph</strong><small>architecture · main</small></span>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg>
+      </div>
+
+      <div class="search-wrap">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m12.5 12.5 4 4"/></svg>
+        <input id="search" type="search" autocomplete="off" spellcheck="false" placeholder="Find a symbol, file, or service…" aria-label="Search graph">
+        <kbd>/</kbd>
+        <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
+      </div>
+
+      <div class="header-actions">
+        <button class="icon-button" id="help-button" type="button" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M7.9 7.7A2.3 2.3 0 0 1 10.3 6c1.4 0 2.5.8 2.5 2 0 1.5-1.3 2-2.2 2.7-.5.4-.6.8-.6 1.3M10 14.7h.01"/></svg>
+        </button>
+        <button class="avatar" type="button" aria-label="Account menu">CG</button>
+      </div>
+    </header>
+
+    <aside class="navigation-panel" aria-label="Graph navigation">
+      <div class="nav-heading">
+        <p class="eyebrow">Architecture map</p>
+        <button class="icon-button compact" type="button" aria-label="Graph options">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1"/><circle cx="10" cy="10" r="1"/><circle cx="16" cy="10" r="1"/></svg>
+        </button>
+      </div>
+
+      <button class="overview-button active" id="all-communities" type="button" aria-pressed="true">
+        <span class="overview-icon" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i>
+        </span>
+        <span><strong>All systems</strong><small id="overview-count">42 nodes · 71 links</small></span>
+        <span class="shortcut">⌘1</span>
+      </button>
+
+      <div class="section-title"><span>Communities</span><span id="community-total">6</span></div>
+      <nav id="community-list" class="community-list" aria-label="Communities"></nav>
+
+      <div class="section-title relation-heading"><span>Relationship signal</span></div>
+      <fieldset id="relation-filters" class="relation-filters">
+        <legend class="visually-hidden">Visible relationship categories</legend>
+      </fieldset>
+
+      <div class="graph-health">
+        <div class="health-heading"><span>Graph freshness</span><strong><i></i> Current</strong></div>
+        <div class="health-track"><span></span></div>
+        <p>Indexed from <code>8f2c6f1</code><br>just now</p>
+      </div>
+    </aside>
+
+    <main class="graph-stage" id="graph-stage">
+      <div class="stage-heading">
+        <div>
+          <p class="eyebrow">System landscape</p>
+          <h1 id="view-title">All communities</h1>
+        </div>
+        <div class="stage-actions">
+          <div class="segmented" aria-label="Graph detail level">
+            <button type="button" data-density="focus">Focus</button>
+            <button type="button" data-density="balanced" class="active">Balanced</button>
+            <button type="button" data-density="complete">Complete</button>
+          </div>
+          <button id="trace-button" class="trace-button" type="button" aria-pressed="false" disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="2"/><circle cx="16" cy="5" r="2"/><circle cx="16" cy="15" r="2"/><path d="M6 10h3c2.2 0 2-5 5-5M9 10c2.2 0 2 5 5 5"/></svg>
+            Trace impact
+          </button>
+        </div>
+      </div>
+
+      <canvas id="graph-canvas" tabindex="0" role="application" aria-label="Interactive architecture graph. Use arrow keys to move between nodes, Enter to select, T to trace impact, and Escape to clear selection."></canvas>
+
+      <div class="graph-vignette" aria-hidden="true"></div>
+      <div id="community-labels" class="community-labels" aria-hidden="true"></div>
+      <div id="tooltip" class="node-tooltip" role="tooltip"></div>
+      <div id="empty-state" class="empty-state" hidden>
+        <span class="empty-orbit" aria-hidden="true"><i></i></span>
+        <strong>No relationships in this view</strong>
+        <p>Turn on another signal or reset the filters.</p>
+        <button type="button" id="empty-reset">Reset filters</button>
+      </div>
+
+      <div class="viewport-tools" aria-label="Viewport controls">
+        <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+        <span></span>
+        <button type="button" id="fit-view" aria-label="Fit graph to view">
+          <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M6.5 3H3v3.5M11.5 3H15v3.5M6.5 15H3v-3.5M11.5 15H15v-3.5"/></svg>
+        </button>
+      </div>
+
+      <div class="stage-footer">
+        <div id="render-stats" class="render-stats" aria-live="polite"></div>
+        <div class="canvas-key"><span><i class="node-key"></i> Symbol</span><span><i class="hub-key"></i> Hub</span><span><i class="edge-key"></i> Relationship</span></div>
+        <p><kbd>Scroll</kbd> zoom <span>·</span> <kbd>Drag</kbd> pan <span>·</span> <kbd>Enter</kbd> inspect</p>
+      </div>
+    </main>
+
+    <aside id="inspector" class="inspector" aria-label="Node inspector" aria-live="polite">
+      <div id="inspector-empty" class="inspector-empty">
+        <div class="empty-glyph" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">Inspector</p>
+        <h2>Select a symbol</h2>
+        <p>Choose any point in the constellation to inspect its role and immediate dependencies.</p>
+        <div class="empty-tip"><kbd>↑</kbd><kbd>↓</kbd><span>Navigate nodes</span></div>
+      </div>
+
+      <div id="inspector-content" class="inspector-content" hidden>
+        <div class="inspector-topline">
+          <span id="inspector-community" class="community-pill"><i></i><span></span></span>
+          <button class="icon-button compact" id="close-inspector" type="button" aria-label="Close inspector">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8M14 6l-8 8"/></svg>
+          </button>
+        </div>
+        <p id="inspector-kind" class="eyebrow"></p>
+        <h2 id="inspector-title"></h2>
+        <p id="inspector-id" class="symbol-id"></p>
+
+        <div class="inspector-actions">
+          <button type="button" class="primary-action">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 3h6v6M17 3l-8 8M15 11v5H4V5h5"/></svg>
+            Open source
+          </button>
+          <button id="explain-button" type="button" class="secondary-action">
+            <span aria-hidden="true">✦</span> Explain
+          </button>
+        </div>
+
+        <dl class="metadata">
+          <div><dt>Source</dt><dd id="inspector-file"></dd></div>
+          <div><dt>Location</dt><dd id="inspector-location"></dd></div>
+          <div><dt>Connections</dt><dd id="inspector-degree"></dd></div>
+        </dl>
+
+        <section class="connection-section">
+          <div class="section-title"><span>Connected symbols</span><span id="connection-count"></span></div>
+          <div id="connection-list" class="connection-list"></div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <dialog id="shortcut-dialog" class="shortcut-dialog">
+    <form method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">Command map</p><h2>Keyboard shortcuts</h2></div><button class="icon-button" value="close" aria-label="Close shortcuts"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8M14 6l-8 8"/></svg></button></div>
+      <dl>
+        <div><dt>Search symbols</dt><dd><kbd>/</kbd></dd></div>
+        <div><dt>Move through nodes</dt><dd><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></dd></div>
+        <div><dt>Select focused node</dt><dd><kbd>Enter</kbd></dd></div>
+        <div><dt>Trace downstream impact</dt><dd><kbd>T</kbd></dd></div>
+        <div><dt>Reset the graph</dt><dd><kbd>R</kbd></dd></div>
+        <div><dt>Clear selection</dt><dd><kbd>Esc</kbd></dd></div>
+      </dl>
+    </form>
+  </dialog>
+
+  <div id="a11y-status" class="visually-hidden" aria-live="polite"></div>
+  <script src="../shared/fixture.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
