@@ -1,0 +1,9 @@
+version: 0.10.2
+date: 2026-08-10
+highlights:
+  - Keep CLI, MCP, graph, and cache behavior unchanged while aligning the standalone and bundled Graphoxide executable with the VS Code 0.10.2 release.
+added: []
+changed:
+  - Update release metadata and bundled executable versions to 0.10.2 without changing extraction, graph construction, query, transport, or cache semantics.
+fixed: []
+removed: []
