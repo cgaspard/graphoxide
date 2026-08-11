@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.3 — 2026-08-11
+
+- Applied native macOS and Windows memory ceilings to the bounded automatic
+  budget policy while preserving explicit overrides and the conservative
+  fallback when no trustworthy ceiling is available.
+- Classified confirmed MPEG transport streams named `.ts` through a bounded
+  no-follow probe and cancellation-aware streaming instead of TypeScript
+  parsing, while preserving ordinary and adversarial near-match TypeScript.
+- Admitted loaded and pending manifest bytes before extraction and graph
+  materialization, preserved the last committed graph and manifest on capacity
+  or transition-verification failures, and repaired stale endpoints and
+  hyperedges across TypeScript/media changes.
+- Kept forced builds from authorizing runtime-cache replay and let a later
+  ordinary build safely repair authorization before reuse.
+- Coordinated activation resume, explicit graph commands, save refresh, and
+  watch startup through one bounded non-queuing graph-mutation lifecycle.
+- Paused automatic retries after a structural failure with one actionable
+  diagnostic until an explicit successful command clears the failure for that
+  output.
+- Retained extension-owned process writers through child `close`, added finite
+  watch readiness and stop deadlines, and quarantined unclosed watch children
+  until exit is confirmed.
+
 ## 0.10.2 — 2026-08-10
 
 - Rebuilt the graph visualizer as a purple-first cinematic explorer with a

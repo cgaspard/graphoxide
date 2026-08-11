@@ -1,0 +1,12 @@
+version: 0.10.3
+date: 2026-08-11
+highlights:
+  - Coordinate managed graph mutations and extension-owned processes so competing lifecycle requests do not create duplicate rebuild-lock waiters and structural failures remain bounded and actionable.
+added: []
+changed:
+  - Run activation resume, Build, Update, Full Rebuild, save refresh, and watch startup through one bounded non-queuing graph-mutation lifecycle so competing requests do not spawn a second child waiting on the filesystem rebuild lock.
+  - Let busy lifecycle callers observe the active completion while requiring a successful same-target structural completion before managed resume is satisfied.
+fixed:
+  - Emit one compact actionable diagnostic after a structural failure and pause automatic retries for that output until an explicit Build, Update, or Full Rebuild succeeds.
+  - Retain writer ownership for extension-owned one-shot and watch processes until `close`; use finite watch readiness and stop deadlines and quarantine an unclosed child as active until exit is confirmed.
+removed: []
