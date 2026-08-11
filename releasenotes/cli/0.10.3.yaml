@@ -1,0 +1,13 @@
+version: 0.10.3
+date: 2026-08-11
+highlights:
+  - Prevent managed extraction failures on large macOS and Windows workspaces and on repositories containing confirmed MPEG transport streams named `.ts`, while preserving bounded resource use and the last committed graph and manifest on capacity or transition-verification failure.
+added:
+  - Discover native macOS and Windows memory ceilings for the same bounded automatic-budget policy used on Linux, selecting one eighth of the tightest trustworthy ceiling up to 8 GiB while keeping explicit `--memory-budget-bytes` authoritative and retaining the 512 MiB fallback when no ceiling is trustworthy.
+changed:
+  - Identify confirmed MPEG transport streams named `.ts` with a fixed-size no-follow probe, inventory them as video with bounded cancellation-aware streaming, and keep them out of TypeScript parsing and JavaScript resolution while preserving ordinary and adversarial near-match TypeScript as code.
+  - Admit loaded and pending manifest bytes before extraction and graph materialization so capacity and transition-verification failures preserve the last committed graph and manifest.
+  - Make `--force` reparse selected sources without authorizing runtime-cache replay; a later ordinary build reparses and safely repairs authorization before reuse.
+fixed:
+  - Repair stale endpoints and hyperedges when files transition between TypeScript and media ownership while preserving unrelated semantic overlays.
+removed: []
