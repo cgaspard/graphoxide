@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   lstat,
@@ -14,9 +13,8 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
+import { executeBrowserProcess } from './browser-process.mjs';
 
-const execute = promisify(execFile);
 const extensionRoot = process.cwd();
 const sourcePath = process.env.GRAPHOXIDE_CONTROL_CENTER_BUILD_SUMMARY_SOURCE
   ? path.resolve(process.env.GRAPHOXIDE_CONTROL_CENTER_BUILD_SUMMARY_SOURCE)
@@ -296,19 +294,13 @@ async function captureScreenshot(url, scenario) {
 }
 
 async function executeChrome(arguments_) {
-  try {
-    return await execute(chrome, arguments_, {
-      env: { ...process.env, LANG: 'en_US.UTF-8', TZ: 'UTC' },
-      maxBuffer: 8 * 1024 * 1024,
-      timeout: 8_000,
-      killSignal: 'SIGKILL',
-    });
-  } catch (error) {
-    if (error && typeof error === 'object' && error.killed === true && typeof error.stdout === 'string') {
-      return { stdout: error.stdout, stderr: typeof error.stderr === 'string' ? error.stderr : '' };
-    }
-    throw error;
-  }
+  return executeBrowserProcess(chrome, arguments_, {
+    env: { ...process.env, LANG: 'en_US.UTF-8', TZ: 'UTC' },
+    maxBuffer: 8 * 1024 * 1024,
+    acceptTimedOutStdout: arguments_.includes('--dump-dom')
+      ? (stdout) => /<output[^>]*id="build-summary-result"[^>]*>[\s\S]*\S[\s\S]*<\/output>/u.test(stdout)
+      : () => true,
+  });
 }
 
 function chromeArguments(profile, scenario, url, additions) {
@@ -386,7 +378,7 @@ async function locateChrome() {
   ].filter(Boolean);
   for (const candidate of candidates) {
     try {
-      await execute(candidate, ['--version']);
+      await executeBrowserProcess(candidate, ['--version'], { maxBuffer: 1024 * 1024 });
       return candidate;
     } catch {
       // Continue through the fixed local browser candidates.
