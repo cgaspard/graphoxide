@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -164,7 +164,7 @@ async function auditLayout(url, scenario) {
   if (stderr && /(?:uncaught|fatal error)/iu.test(stderr)) throw new Error(stderr);
   const match = /<output[^>]*id="layout-result"[^>]*>([\s\S]*?)<\/output>/u.exec(stdout);
   if (!match?.[1]) throw new Error(`Chrome did not return a ${scenario.name} Control Center layout report.`);
-  return JSON.parse(decodeHtmlText(match[1]));
+  return JSON.parse(match[1]);
 }
 
 function assertLayout(report, scenario) {
@@ -200,10 +200,7 @@ async function captureScreenshot(url, scenario) {
   const target = path.join(artifactRoot, `control-center-${scenario.name}.png`);
   const { stderr } = await executeChrome(chromeArguments(profile, scenario, url, [`--screenshot=${target}`]));
   if (stderr && /(?:uncaught|fatal error)/iu.test(stderr)) throw new Error(stderr);
-  const metadata = await stat(target);
-  if (!metadata.isFile() || metadata.size < 2_048) throw new Error(`Chrome did not paint ${target}.`);
-  if (metadata.size > 16 * 1024 * 1024) throw new Error(`${target} exceeded the bounded screenshot size.`);
-  const bytes = await readFile(target);
+  const bytes = await readBoundedScreenshot(target);
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   if (bytes.length < 24 || !bytes.subarray(0, signature.length).equals(signature)) {
     throw new Error(`${target} is not a complete PNG screenshot.`);
@@ -254,8 +251,28 @@ function assertClose(left, right, tolerance, message) {
   if (Math.abs(left - right) > tolerance) throw new Error(`${message}: ${left}px vs ${right}px.`);
 }
 
-function decodeHtmlText(value) {
-  return value.replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>');
+async function readBoundedScreenshot(target) {
+  const handle = await open(target, 'r');
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size < 2_048) throw new Error(`Chrome did not paint ${target}.`);
+    if (metadata.size > 16 * 1024 * 1024) throw new Error(`${target} exceeded the bounded screenshot size.`);
+    const bytes = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) throw new Error(`${target} changed while its screenshot was read.`);
+      offset += bytesRead;
+    }
+    const trailing = Buffer.alloc(1);
+    const { bytesRead: trailingBytes } = await handle.read(trailing, 0, 1, bytes.length);
+    if (trailingBytes !== 0 || (await handle.stat()).size !== metadata.size) {
+      throw new Error(`${target} changed while its screenshot was read.`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 }
 
 async function locateChrome() {
