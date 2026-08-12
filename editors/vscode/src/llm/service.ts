@@ -11,6 +11,7 @@ import {
   apiKeyRequired,
   credentialForEndpoint,
   encodeStoredCredential,
+  labelingConfirmationDetail,
   labelingArguments,
   labelingEnvironment,
   modelDiscoveryUrl,
@@ -88,7 +89,9 @@ export class AiLabelingService {
     const configuredBaseUrl = profile.editableEndpoint
       ? await vscode.window.showInputBox({
           title: `${profile.label} endpoint`,
-          prompt: 'OpenAI-compatible API base URL. HTTP is accepted only for this computer.',
+          prompt: profile.id === 'ollama'
+            ? 'Ollama API base URL. LAN HTTP is allowed and disclosed before labeling.'
+            : 'OpenAI-compatible API base URL. HTTP is accepted only for this computer.',
           value: initialBaseUrl,
           placeHolder: profile.defaultBaseUrl || 'https://llm.example.com/v1',
           ignoreFocusOut: true,
@@ -107,7 +110,7 @@ export class AiLabelingService {
         ? 'A key is stored for this endpoint. Leave empty to keep it; it may be sent to this endpoint to list models.'
         : apiKeyRequired(profile, baseUrl)
           ? 'Required. The key is stored in VS Code Secret Storage and sent only to this endpoint for model discovery and labeling.'
-          : 'Optional for this local endpoint. A key is sent as Bearer authentication; leave empty for keyless access.',
+          : 'Optional for this endpoint. A key is sent as Bearer authentication; leave empty for keyless access.',
       placeHolder: existingKey ? 'Leave empty to keep the stored key' : 'API key (input hidden)',
       password: true,
       ignoreFocusOut: true,
@@ -275,16 +278,11 @@ export class AiLabelingService {
     }
 
     const invocation = this.cli.trustedInvocation(folder);
-    const detail = [
-      `Endpoint: ${configuration.baseUrl}`,
-      `Model: ${configuration.model}`,
-      `Request timeout: ${configuration.timeoutSeconds} seconds`,
-      `Graph: ${state.graphUri.fsPath}`,
-      `Executable: ${invocation.command}`,
-      '',
-      'Graphoxide sends up to 12 graph node labels per community. Labels can include source-derived identifiers, filenames, and truncated comments or docstrings. Full files and source_file metadata are not included.',
-      'This replaces community names in graph.json, writes the label sidecar, and regenerates GRAPH_REPORT.md beside the graph.',
-    ].join('\n');
+    const detail = labelingConfirmationDetail(
+      configuration,
+      state.graphUri.fsPath,
+      invocation.command,
+    );
     if (!skipConfirmation) {
       const confirmation = await vscode.window.showWarningMessage(
         `Use ${configuration.profile.label} to replace all Graphoxide community names?`,

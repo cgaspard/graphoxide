@@ -3225,6 +3225,9 @@ fn label_communities(
         );
     };
     let transport = LabelHttpTransport::new(&backend, model, timeout_seconds)?;
+    if let Some(warning) = &transport.warning {
+        eprintln!("[graphoxide] warning: {warning}");
+    }
     let mut options = graphoxide_graph::LabelingOptions::new(&backend);
     options.model = model.map(str::to_owned);
     options.max_concurrency = max_concurrency;
@@ -3309,6 +3312,184 @@ struct LabelHttpTransport {
     anthropic: bool,
     disable_reasoning: bool,
     timeout: std::time::Duration,
+    warning: Option<String>,
+    require_success_status: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LabelTransportInputs {
+    endpoint: String,
+    model: String,
+    key: Option<String>,
+    anthropic: bool,
+    disable_reasoning: bool,
+    warning: Option<String>,
+    ollama_dns_override: Option<OllamaDnsOverride>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OllamaDnsOverride {
+    host: String,
+    addresses: Vec<std::net::SocketAddr>,
+}
+
+fn resolve_label_transport_inputs<F>(
+    backend: &str,
+    requested_model: Option<&str>,
+    mut environment: F,
+) -> anyhow::Result<LabelTransportInputs>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let (backend, disable_reasoning) = match backend {
+        "anthropic" => ("claude", false),
+        "lm-studio" | "lmstudio" => ("openai", true),
+        backend => (backend, false),
+    };
+    let (base_key, default_base, key_names, model_key, default_model, anthropic) = match backend {
+        "gemini" => (
+            "GEMINI_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            &["GEMINI_API_KEY", "GOOGLE_API_KEY"][..],
+            "GRAPHIFY_GEMINI_MODEL",
+            "gemini-3-flash-preview",
+            false,
+        ),
+        "kimi" => (
+            "KIMI_BASE_URL",
+            "https://api.moonshot.ai/v1",
+            &["MOONSHOT_API_KEY"][..],
+            "GRAPHIFY_KIMI_MODEL",
+            "kimi-k2.6",
+            false,
+        ),
+        "claude" => (
+            "ANTHROPIC_BASE_URL",
+            "https://api.anthropic.com/v1",
+            &["ANTHROPIC_API_KEY"][..],
+            "ANTHROPIC_MODEL",
+            "claude-sonnet-4-6",
+            true,
+        ),
+        "openai" => (
+            "OPENAI_BASE_URL",
+            "https://api.openai.com/v1",
+            &["OPENAI_API_KEY"][..],
+            "GRAPHIFY_OPENAI_MODEL",
+            "gpt-4.1-mini",
+            false,
+        ),
+        "deepseek" => (
+            "DEEPSEEK_BASE_URL",
+            "https://api.deepseek.com",
+            &["DEEPSEEK_API_KEY"][..],
+            "GRAPHIFY_DEEPSEEK_MODEL",
+            "deepseek-v4-flash",
+            false,
+        ),
+        "ollama" => (
+            "OLLAMA_BASE_URL",
+            "http://localhost:11434/v1",
+            &["OLLAMA_API_KEY"][..],
+            "OLLAMA_MODEL",
+            "qwen2.5-coder:7b",
+            false,
+        ),
+        _ => anyhow::bail!("unsupported labeling backend {backend:?}"),
+    };
+    let base = environment("GRAPHOXIDE_LLM_BASE_URL")
+        .or_else(|| environment(base_key))
+        .unwrap_or_else(|| default_base.into());
+    let mut parsed_base = reqwest::Url::parse(&base)?;
+    let mut ollama_dns_override = None;
+    let normalized_base = if backend == "ollama" {
+        anyhow::ensure!(
+            parsed_base.username().is_empty()
+                && parsed_base.password().is_none()
+                && parsed_base.query().is_none()
+                && parsed_base.fragment().is_none(),
+            "Ollama base URL may not contain credentials, a query string, or a fragment"
+        );
+        let validated = graphoxide_extract::llm::plan_ollama_connection(&base, false)?;
+        if let Ok(address) = validated.canonical_host.parse::<std::net::IpAddr>() {
+            parsed_base
+                .set_ip_host(address)
+                .map_err(|()| anyhow::anyhow!("Ollama base URL has an invalid IP host"))?;
+        } else {
+            parsed_base
+                .set_host(Some(&validated.canonical_host))
+                .map_err(|error| anyhow::anyhow!("Ollama base URL has an invalid host: {error}"))?;
+        }
+        ollama_dns_override = Some(OllamaDnsOverride {
+            host: validated.canonical_host,
+            addresses: validated
+                .resolved_addresses
+                .into_iter()
+                .map(|address| std::net::SocketAddr::new(address, 0))
+                .collect(),
+        });
+        parsed_base.to_string()
+    } else {
+        base
+    };
+    let suffix = if anthropic {
+        "messages"
+    } else {
+        "chat/completions"
+    };
+    let endpoint = if normalized_base.trim_end_matches('/').ends_with(suffix) {
+        normalized_base.trim_end_matches('/').to_owned()
+    } else {
+        format!("{}/{suffix}", normalized_base.trim_end_matches('/'))
+    };
+    let key = key_names
+        .iter()
+        .find_map(|name| environment(name).filter(|key| !key.is_empty()));
+    let parsed = reqwest::Url::parse(&endpoint)?;
+    let loopback = ollama_dns_override.as_ref().map_or_else(
+        || {
+            parsed.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            })
+        },
+        |resolution| {
+            resolution
+                .addresses
+                .iter()
+                .all(|address| address.ip().is_loopback())
+        },
+    );
+    if key.is_none() && !loopback && backend != "ollama" {
+        anyhow::bail!(
+            "none of {} is set for backend {backend:?}",
+            key_names.join(", ")
+        )
+    }
+    let warning = (backend == "ollama" && parsed_base.scheme() == "http" && !loopback).then(|| {
+        let host = graphoxide_core::sanitize_label(parsed_base.host_str().unwrap_or_default());
+        format!(
+            "Ollama labeling sends graph-derived labels and any configured API key to {:?} over plaintext HTTP",
+            host
+        )
+    });
+    let model = requested_model
+        .map(str::to_owned)
+        .or_else(|| environment(model_key))
+        .or_else(|| environment("GRAPHOXIDE_MODEL"))
+        .unwrap_or_else(|| default_model.into());
+    Ok(LabelTransportInputs {
+        endpoint,
+        model,
+        key,
+        anthropic,
+        disable_reasoning,
+        warning,
+        ollama_dns_override,
+    })
 }
 
 impl LabelHttpTransport {
@@ -3317,110 +3498,29 @@ impl LabelHttpTransport {
         requested_model: Option<&str>,
         timeout_seconds: Option<f64>,
     ) -> anyhow::Result<Self> {
-        let (backend, disable_reasoning) = match backend {
-            "anthropic" => ("claude", false),
-            "lm-studio" | "lmstudio" => ("openai", true),
-            backend => (backend, false),
-        };
-        let (base_key, default_base, key_names, model_key, default_model, anthropic) = match backend
-        {
-            "gemini" => (
-                "GEMINI_BASE_URL",
-                "https://generativelanguage.googleapis.com/v1beta/openai/",
-                &["GEMINI_API_KEY", "GOOGLE_API_KEY"][..],
-                "GRAPHIFY_GEMINI_MODEL",
-                "gemini-3-flash-preview",
-                false,
-            ),
-            "kimi" => (
-                "KIMI_BASE_URL",
-                "https://api.moonshot.ai/v1",
-                &["MOONSHOT_API_KEY"][..],
-                "GRAPHIFY_KIMI_MODEL",
-                "kimi-k2.6",
-                false,
-            ),
-            "claude" => (
-                "ANTHROPIC_BASE_URL",
-                "https://api.anthropic.com/v1",
-                &["ANTHROPIC_API_KEY"][..],
-                "ANTHROPIC_MODEL",
-                "claude-sonnet-4-6",
-                true,
-            ),
-            "openai" => (
-                "OPENAI_BASE_URL",
-                "https://api.openai.com/v1",
-                &["OPENAI_API_KEY"][..],
-                "GRAPHIFY_OPENAI_MODEL",
-                "gpt-4.1-mini",
-                false,
-            ),
-            "deepseek" => (
-                "DEEPSEEK_BASE_URL",
-                "https://api.deepseek.com",
-                &["DEEPSEEK_API_KEY"][..],
-                "GRAPHIFY_DEEPSEEK_MODEL",
-                "deepseek-v4-flash",
-                false,
-            ),
-            "ollama" => (
-                "OLLAMA_BASE_URL",
-                "http://localhost:11434/v1",
-                &["OLLAMA_API_KEY"][..],
-                "OLLAMA_MODEL",
-                "qwen2.5-coder:7b",
-                false,
-            ),
-            _ => anyhow::bail!("unsupported labeling backend {backend:?}"),
-        };
-        let base = std::env::var("GRAPHOXIDE_LLM_BASE_URL")
-            .ok()
-            .or_else(|| std::env::var(base_key).ok())
-            .unwrap_or_else(|| default_base.into());
-        let suffix = if anthropic {
-            "messages"
-        } else {
-            "chat/completions"
-        };
-        let endpoint = if base.trim_end_matches('/').ends_with(suffix) {
-            base.trim_end_matches('/').to_owned()
-        } else {
-            format!("{}/{suffix}", base.trim_end_matches('/'))
-        };
-        let key = key_names
-            .iter()
-            .find_map(|name| std::env::var(name).ok().filter(|key| !key.is_empty()));
-        let parsed = reqwest::Url::parse(&endpoint)?;
-        let loopback = parsed.host_str().is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        });
-        if key.is_none() && !loopback {
-            anyhow::bail!(
-                "none of {} is set for backend {backend:?}",
-                key_names.join(", ")
-            )
-        }
-        let model = requested_model
-            .map(str::to_owned)
-            .or_else(|| std::env::var(model_key).ok())
-            .or_else(|| std::env::var("GRAPHOXIDE_MODEL").ok())
-            .unwrap_or_else(|| default_model.into());
+        let inputs = resolve_label_transport_inputs(backend, requested_model, |name| {
+            std::env::var(name).ok()
+        })?;
         let timeout = label_request_timeout(timeout_seconds)?;
+        let mut client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(timeout);
+        if let Some(resolution) = &inputs.ollama_dns_override {
+            client = client
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .resolve_to_addrs(&resolution.host, &resolution.addresses);
+        }
         Ok(Self {
-            client: reqwest::blocking::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(timeout)
-                .build()?,
-            endpoint,
-            model,
-            key,
-            anthropic,
-            disable_reasoning,
+            client: client.build()?,
+            endpoint: inputs.endpoint,
+            model: inputs.model,
+            key: inputs.key,
+            anthropic: inputs.anthropic,
+            disable_reasoning: inputs.disable_reasoning,
             timeout,
+            warning: inputs.warning,
+            require_success_status: inputs.ollama_dns_override.is_some(),
         })
     }
 
@@ -3459,9 +3559,15 @@ impl LabelHttpTransport {
                 } else {
                     error.into()
                 }
-            })?
-            .error_for_status()?
-            .json::<serde_json::Value>()?;
+            })?;
+        if self.require_success_status {
+            anyhow::ensure!(
+                response.status().is_success(),
+                "label endpoint returned HTTP {}",
+                response.status()
+            );
+        }
+        let response = response.error_for_status()?.json::<serde_json::Value>()?;
         let content = response
             .pointer("/choices/0/message/content")
             .or_else(|| response.pointer("/content/0/text"))
@@ -5300,9 +5406,10 @@ mod tests {
         annotate_query_context, audit_report, format_capability_output, format_god_nodes,
         incremental_graph_budget_after_retained_scan, load_learning_overlay,
         optional_baseline_leaves_full_graph_headroom, read_incremental_baseline,
-        relevant_watch_paths, run_project_build_with_cancellation, stale_local_sources,
-        watch_change_requires_structural_rebuild, Cli, Command, IncrementalGraphBudget,
-        ProjectBuildOptions, ProjectBuildWorkflow, RuntimeIoBackendArg, RuntimeOptions,
+        relevant_watch_paths, resolve_label_transport_inputs, run_project_build_with_cancellation,
+        stale_local_sources, watch_change_requires_structural_rebuild, Cli, Command,
+        IncrementalGraphBudget, ProjectBuildOptions, ProjectBuildWorkflow, RuntimeIoBackendArg,
+        RuntimeOptions,
     };
     use clap::Parser;
     use std::path::{Path, PathBuf};
@@ -5347,6 +5454,92 @@ mod tests {
             extra: Default::default(),
         });
         graph
+    }
+
+    #[test]
+    fn remote_ollama_http_is_key_optional_but_transport_is_disclosed() {
+        let environment = std::collections::BTreeMap::from([
+            (
+                "GRAPHOXIDE_LLM_BASE_URL".to_owned(),
+                "http://192.168.10.10:11434/v1".to_owned(),
+            ),
+            ("OLLAMA_MODEL".to_owned(), "qwen-test:latest".to_owned()),
+        ]);
+        let inputs =
+            resolve_label_transport_inputs("ollama", None, |name| environment.get(name).cloned())
+                .expect("resolve keyless LAN Ollama transport");
+
+        assert_eq!(
+            inputs.endpoint,
+            "http://192.168.10.10:11434/v1/chat/completions"
+        );
+        assert_eq!(inputs.model, "qwen-test:latest");
+        assert_eq!(inputs.key, None);
+        let override_ = inputs.ollama_dns_override.as_ref().unwrap();
+        assert_eq!(override_.host, "192.168.10.10");
+        assert_eq!(
+            override_.addresses,
+            vec!["192.168.10.10:0".parse().unwrap()]
+        );
+        assert!(inputs.warning.is_some_and(|warning| {
+            warning.contains("graph-derived labels") && warning.contains("plaintext HTTP")
+        }));
+    }
+
+    #[test]
+    fn remote_ollama_transport_keeps_optional_key_and_blocks_metadata_targets() {
+        let keyed = std::collections::BTreeMap::from([
+            (
+                "GRAPHOXIDE_LLM_BASE_URL".to_owned(),
+                "http://192.168.10.10:11434/v1".to_owned(),
+            ),
+            ("OLLAMA_API_KEY".to_owned(), "bound-key".to_owned()),
+        ]);
+        let inputs =
+            resolve_label_transport_inputs("ollama", Some("qwen"), |name| keyed.get(name).cloned())
+                .expect("resolve keyed LAN Ollama transport");
+        assert_eq!(inputs.key.as_deref(), Some("bound-key"));
+
+        for base_url in [
+            "http://169.254.169.254:11434/v1",
+            "http://0.0.0.0:11434/v1",
+            "file:///tmp/ollama",
+            "http://secret@192.168.10.10:11434/v1",
+            "http://@192.168.10.10:11434/v1",
+            "http://:@192.168.10.10:11434/v1",
+            "http:@192.168.10.10:11434/v1",
+            r"http:\@192.168.10.10:11434/v1",
+            "http://192.168.10.10:11434/v1?key=secret",
+        ] {
+            let environment = std::collections::BTreeMap::from([(
+                "GRAPHOXIDE_LLM_BASE_URL".to_owned(),
+                base_url.to_owned(),
+            )]);
+            assert!(
+                resolve_label_transport_inputs("ollama", Some("qwen"), |name| {
+                    environment.get(name).cloned()
+                })
+                .is_err(),
+                "{base_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn ollama_ipv6_loopback_keeps_a_bracketed_endpoint_without_a_remote_warning() {
+        let environment = std::collections::BTreeMap::from([(
+            "GRAPHOXIDE_LLM_BASE_URL".to_owned(),
+            "http://[::1]:11434/v1".to_owned(),
+        )]);
+        let inputs = resolve_label_transport_inputs("ollama", Some("qwen"), |name| {
+            environment.get(name).cloned()
+        })
+        .expect("resolve IPv6 loopback Ollama transport");
+        assert_eq!(inputs.endpoint, "http://[::1]:11434/v1/chat/completions");
+        assert!(inputs.warning.is_none());
+        let override_ = inputs.ollama_dns_override.as_ref().unwrap();
+        assert_eq!(override_.host, "::1");
+        assert_eq!(override_.addresses, vec!["[::1]:0".parse().unwrap()]);
     }
 
     #[test]

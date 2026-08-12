@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn node(id: &str, label: &str, community: i64) -> Node {
@@ -167,6 +167,76 @@ fn serve_once_after(
     (format!("http://{address}/v1"), receiver, handle)
 }
 
+fn serve_redirect_once() -> (
+    String,
+    Receiver<()>,
+    Receiver<bool>,
+    JoinHandle<()>,
+    JoinHandle<()>,
+) {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let target_address = target.local_addr().unwrap();
+    let (target_sender, target_receiver) = mpsc::channel();
+    let (target_start_sender, target_start_receiver) = mpsc::channel();
+    let target_handle = std::thread::spawn(move || {
+        target_start_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let contacted = loop {
+            match target.accept() {
+                Ok(_) => break true,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("target accept failed: {error}"),
+            }
+        };
+        target_sender.send(contacted).unwrap();
+    });
+
+    let redirect = TcpListener::bind("127.0.0.1:0").unwrap();
+    let redirect_address = redirect.local_addr().unwrap();
+    let (redirect_sender, redirect_receiver) = mpsc::channel();
+    let redirect_handle = std::thread::spawn(move || {
+        let (mut stream, _) = redirect.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while request.len() < 64 * 1024 {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        redirect_sender.send(()).unwrap();
+        let location = format!("http://{target_address}/metadata");
+        write!(
+            stream,
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        target_start_sender.send(()).unwrap();
+    });
+    (
+        format!("http://{redirect_address}/v1"),
+        redirect_receiver,
+        target_receiver,
+        redirect_handle,
+        target_handle,
+    )
+}
+
 fn output_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -261,6 +331,39 @@ fn test_label_cli_lm_studio_allows_keyless_loopback() {
     assert!(!request.headers.contains_key("authorization"));
     assert_eq!(request.body["model"], "local-model");
     assert_eq!(request.body["reasoning_effort"], "none");
+}
+
+#[test]
+fn test_label_cli_ollama_does_not_follow_redirects() {
+    let temporary = tempdir().unwrap();
+    let output = two_community_graph(temporary.path());
+    let graph_path = output.join("graph.json");
+    let graph_before = fs::read(&graph_path).unwrap();
+    let (endpoint, redirected, target_contacted, redirect_server, target_server) =
+        serve_redirect_once();
+    let result = run_with_endpoint(
+        temporary.path(),
+        &[
+            "label",
+            ".",
+            "--backend",
+            "ollama",
+            "--model",
+            "local-model",
+        ],
+        &endpoint,
+    );
+    assert!(!result.status.success());
+    let stderr = output_text(&result.stderr);
+    assert!(stderr.contains("HTTP 307"), "{stderr}");
+    redirected.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(!target_contacted
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap());
+    redirect_server.join().unwrap();
+    target_server.join().unwrap();
+    assert_eq!(fs::read(graph_path).unwrap(), graph_before);
+    assert!(!output.join(".graphoxide_labels.json").exists());
 }
 
 #[test]

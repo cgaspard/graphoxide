@@ -434,7 +434,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "API base URL for AI community labeling. HTTP is permitted only for a loopback endpoint."
+          "description": "API base URL for AI community labeling. Ollama may use an explicitly configured LAN HTTP endpoint; other non-loopback endpoints require HTTPS."
         },
         "graphoxide.llm.model": {
           "type": "string",

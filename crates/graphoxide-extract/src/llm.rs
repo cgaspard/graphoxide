@@ -417,6 +417,15 @@ pub struct OllamaUrlValidation {
     pub warning: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OllamaConnectionPlan {
+    pub warning: Option<String>,
+    /// Canonical host used for both policy validation and request DNS pinning.
+    pub canonical_host: String,
+    /// Every address admitted by the one authoritative resolution.
+    pub resolved_addresses: Vec<IpAddr>,
+}
+
 /// Reject cloud-metadata/link-local targets even when reached through a DNS
 /// alias. General LAN Ollama hosts remain supported but produce an explicit
 /// corpus-disclosure warning unless `warn` is false.
@@ -437,17 +446,55 @@ pub fn validate_ollama_base_url_with_resolver<F>(
 where
     F: FnOnce(&str, u16) -> Vec<IpAddr>,
 {
+    let plan = plan_ollama_connection_with_resolver(base_url, warn, resolver)?;
+    Ok(OllamaUrlValidation {
+        warning: plan.warning,
+    })
+}
+
+pub fn plan_ollama_connection(base_url: &str, warn: bool) -> anyhow::Result<OllamaConnectionPlan> {
+    plan_ollama_connection_with_resolver(base_url, warn, |host, port| {
+        (host, port)
+            .to_socket_addrs()
+            .map(|addresses| addresses.map(|address| address.ip()).collect())
+            .unwrap_or_default()
+    })
+}
+
+pub fn plan_ollama_connection_with_resolver<F>(
+    base_url: &str,
+    warn: bool,
+    resolver: F,
+) -> anyhow::Result<OllamaConnectionPlan>
+where
+    F: FnOnce(&str, u16) -> Vec<IpAddr>,
+{
+    const MAX_OLLAMA_BASE_URL_BYTES: usize = 2048;
+    anyhow::ensure!(
+        base_url.len() <= MAX_OLLAMA_BASE_URL_BYTES,
+        "Ollama base URL exceeds the {MAX_OLLAMA_BASE_URL_BYTES}-byte limit"
+    );
     let parsed = reqwest::Url::parse(base_url)
         .map_err(|error| anyhow::anyhow!("invalid Ollama base URL: {error}"))?;
     anyhow::ensure!(
         matches!(parsed.scheme(), "http" | "https"),
         "Ollama base URL must use http or https"
     );
+    anyhow::ensure!(
+        !raw_url_authority_contains_userinfo(base_url)
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "Ollama base URL may not contain credentials, a query string, or a fragment"
+    );
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("Ollama base URL has no host"))?
         .trim_matches(['[', ']'])
+        .trim_end_matches('.')
         .to_ascii_lowercase();
+    anyhow::ensure!(!host.is_empty(), "Ollama base URL has no host");
     anyhow::ensure!(
         host != "metadata.google.internal" && !host.ends_with(".metadata.google.internal"),
         "Ollama base URL may not target a cloud metadata service"
@@ -457,25 +504,59 @@ where
         addresses = resolver(&host, parsed.port_or_known_default().unwrap_or(11434));
     }
     anyhow::ensure!(
+        !addresses.is_empty(),
+        "Ollama base URL host could not be resolved"
+    );
+    let mut seen = BTreeSet::new();
+    addresses.retain(|address| seen.insert(*address));
+    anyhow::ensure!(
         !addresses.iter().copied().any(forbidden_ollama_ip),
         "Ollama base URL resolves to a link-local, metadata, or unspecified address"
     );
     let loopback =
         host == "localhost" || (!addresses.is_empty() && addresses.iter().all(IpAddr::is_loopback));
-    Ok(OllamaUrlValidation {
+    Ok(OllamaConnectionPlan {
         warning: (warn && !loopback).then(|| {
             format!(
                 "Ollama base URL {host:?} is non-loopback; source files will be sent to that host"
             )
         }),
+        canonical_host: host,
+        resolved_addresses: addresses,
     })
+}
+
+fn raw_url_authority_contains_userinfo(value: &str) -> bool {
+    let Some((_, tail)) = value.split_once(':') else {
+        return false;
+    };
+    let tail = tail.trim_start_matches(['/', '\\']);
+    let authority_end = tail.find(['/', '\\', '?', '#']).unwrap_or(tail.len());
+    tail[..authority_end].contains('@')
 }
 
 fn forbidden_ollama_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => address.is_link_local() || address.is_unspecified(),
         IpAddr::V6(address) => {
-            address.is_unspecified() || (address.segments()[0] & 0xffc0) == 0xfe80
+            let segments = address.segments();
+            let aws_metadata = segments == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254];
+            let nat64_embedded = (segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0]).then(|| {
+                std::net::Ipv4Addr::new(
+                    (segments[6] >> 8) as u8,
+                    segments[6] as u8,
+                    (segments[7] >> 8) as u8,
+                    segments[7] as u8,
+                )
+            });
+            address.is_unspecified()
+                || (address.segments()[0] & 0xffc0) == 0xfe80
+                || aws_metadata
+                || nat64_embedded
+                    .is_some_and(|embedded| embedded.is_link_local() || embedded.is_unspecified())
+                || address
+                    .to_ipv4()
+                    .is_some_and(|mapped| mapped.is_link_local() || mapped.is_unspecified())
         }
     }
 }
