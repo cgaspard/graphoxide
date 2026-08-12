@@ -84,6 +84,60 @@ graphoxide-out/
 
 The walker honors `.gitignore` and `.graphoxideignore`. It skips dependencies, build artifacts, credential files, and its own `graphoxide-out/` directory.
 
+#### Exclude generated or low-value files
+
+Add a `.graphoxideignore` file when generated sources, bundles, source maps, or
+other supported inputs would add noise to the graph. Rules are relative to the
+directory containing the ignore file and use Graphoxide's bounded Git-style
+syntax: blank lines and lines beginning with `#` are ignored, `*`, `?`, and
+character classes match within one path component, `**` crosses directories, a
+trailing `/` selects directories, and a leading `!` negates a rule. Matching is
+last-rule-wins.
+
+```gitignore
+# Generated bundles and source maps
+*.min.js
+*.map
+**/generated/**
+
+# Keep one reviewed fixture from an otherwise ignored generated directory
+!fixtures/generated/
+!fixtures/generated/approved.ts
+```
+
+A negation cannot restore a file while one of its parent directories is still
+excluded. Re-include each excluded parent directory first, as in the example
+above, and then re-include the file.
+
+Graphoxide reads ignore files from the repository boundary through the scan
+root and from nested directories as it walks them. Rules are applied in this
+order, with later matching rules taking precedence:
+
+1. `.git/info/exclude`, when present.
+2. In each directory from parent to child: `.gitignore`, the legacy
+   `.graphifyignore`, then `.graphoxideignore`.
+3. CLI `--exclude` rules after the scan-root rules. Ignore files in nested
+   directories are encountered later and apply only beneath their own directory.
+
+Pass `--no-gitignore` to ignore `.gitignore` and `.git/info/exclude` while still
+honoring `.graphoxideignore` and the legacy `.graphifyignore`. Repeated
+`--exclude` flags use the same pattern syntax and replace the persisted CLI
+exclude set for that managed graph:
+
+```bash
+graphoxide index . --exclude '*.snap' --exclude 'vendor/**'
+```
+
+The CLI and VS Code continuous watcher snapshot ignore rules when the watcher
+starts. After editing an ignore file, stop the watcher, run a full rebuild so
+the existing graph reflects both newly ignored and newly included files, and
+then start the watcher again. For example:
+
+```bash
+graphoxide index . --force
+graphoxide watch .
+```
+
 `graphoxide extract` remains compatible for scripts that only want the graph
 build. `graphoxide index` uses the same graph path and adds the associated
 coverage artifact.

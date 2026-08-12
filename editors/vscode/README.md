@@ -174,6 +174,14 @@ must end in `graph.json` and place that file in a dedicated output directory; th
 extension refuses to use the workspace root or one of its ancestors as that
 output directory.
 
+Place a `.graphoxideignore` file in the workspace or a nested directory to keep
+generated or low-value files out of builds. It uses bounded Git-style patterns,
+including `!` negation, and remains active when Git ignore handling is disabled.
+Continuous watch snapshots ignore rules when it starts, so after changing an
+ignore file, run **Graphoxide: Rebuild Graph (Full)** and start the watcher again.
+The full syntax, precedence, and examples are documented in the repository
+[`README`](../../README.md#exclude-generated-or-low-value-files).
+
 For smaller projects, **Graphoxide: Update On Save** can run a debounced update whenever a source document is saved. It is disabled by default. Watch mode is more efficient for sustained editing sessions.
 
 Graph build and update commands require a trusted workspace. All spawned commands
