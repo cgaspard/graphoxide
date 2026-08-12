@@ -108,7 +108,7 @@ interface VisualizerSnapshotV1 {
 }
 
 interface PersistedState {
-  readonly version: 1;
+  readonly version: 2;
   readonly mode: GraphMode;
   readonly selectedId: string | null;
   readonly focusId: string | null;
@@ -127,6 +127,7 @@ interface PersistedState {
   readonly historyIndex: number;
   readonly expandedIncoming: boolean;
   readonly expandedOutgoing: boolean;
+  readonly layoutFingerprint: string | null;
 }
 
 interface RendererState {
@@ -144,11 +145,52 @@ interface RendererState {
 type ClientMessage =
   | { readonly type: 'ready' }
   | { readonly type: 'reveal' | 'explain'; readonly id: string }
-  | { readonly type: 'rendererState'; readonly state: RendererState };
+  | { readonly type: 'rendererState'; readonly state: RendererState }
+  | { readonly type: 'geometryDiagnostics'; readonly diagnostics: GeometryDiagnostics };
 
 interface Point {
   readonly x: number;
   readonly y: number;
+}
+
+interface ScreenRect {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+interface GlyphRect extends ScreenRect {
+  readonly id: string;
+}
+
+interface GeometryGlyph extends ScreenRect {
+  readonly nodeIndex: number;
+  readonly emphasized: boolean;
+}
+
+interface GeometryLabel extends ScreenRect {
+  readonly kind: 'community' | 'node';
+  readonly itemIndex: number;
+}
+
+interface GeometryDiagnostics {
+  readonly viewport: { readonly width: number; readonly height: number; readonly dpr: number };
+  readonly scale: number;
+  readonly fittedScale: number;
+  readonly glyphs: readonly GeometryGlyph[];
+  readonly labels: readonly GeometryLabel[];
+  readonly visibleNodes: number;
+  readonly visibleEdges: number;
+  readonly positions: number;
+  readonly spatialCells: number;
+  readonly layoutMilliseconds: number;
+  readonly drawMilliseconds: number;
+}
+
+interface DrawGeometry {
+  readonly glyphs: readonly GlyphRect[];
+  readonly labels: readonly GeometryLabel[];
 }
 
 interface MutablePoint {
@@ -162,6 +204,22 @@ interface CommunityLayout {
   readonly color: string;
   readonly center: Point;
   readonly hull: readonly Point[];
+  readonly radius: number;
+  readonly nodeCount: number;
+}
+
+interface CommunityLayoutDraft {
+  readonly id: string | null;
+  readonly name: string;
+  readonly color: string;
+  readonly nodes: readonly VisualizerNodeV1[];
+  readonly localPositions: ReadonlyMap<string, Point>;
+  readonly radius: number;
+}
+
+interface PackedCommunity {
+  readonly center: Point;
+  readonly radius: number;
 }
 
 interface LensEntry {
@@ -223,16 +281,23 @@ const MAX_STRING_CODE_UNITS = 16_384;
 const MAX_SNAPSHOT_STRING_CODE_UNITS = 8_000_000;
 const MAX_SEARCH_RESULTS = 20;
 const MAX_LABELS = 120;
+const MAX_FILTER_OPTIONS = 500;
 const MAX_HISTORY = 20;
 const LENS_INITIAL_PER_SIDE = 6;
 const LENS_MAX_PER_SIDE = 72;
 const EDGE_BUDGETS: Readonly<Record<Density, number>> = Object.freeze({ focus: 260, balanced: 1_200, complete: 2_800 });
 const UNASSIGNED_LAYOUT_SEED = '\u0000unassigned';
 const POSITION_CELL = 180;
+const NODE_SPACING_WORLD = 72;
+const COMMUNITY_PADDING_WORLD = 58;
+const COMMUNITY_GAP_WORLD = 34;
+const COMMUNITY_SPIRAL_STEP = 106;
+const COMMUNITY_PACK_CELL = 256;
+const MIN_CAMERA_SCALE = 0.02;
 const COMMUNITY_COLORS = Object.freeze(['#8B5CF6', '#7BC3E8', '#55C8BE', '#C9B8FF', '#6D8FE8', '#D19A66', '#D274A7', '#77B879']);
 
 const defaultState: PersistedState = Object.freeze({
-  version: 1,
+  version: 2,
   mode: 'global',
   selectedId: null,
   focusId: null,
@@ -251,6 +316,7 @@ const defaultState: PersistedState = Object.freeze({
   historyIndex: -1,
   expandedIncoming: false,
   expandedOutgoing: false,
+  layoutFingerprint: null,
 });
 
 const vscode = acquireVsCodeApi();
@@ -267,10 +333,12 @@ let communityOptions = new Map<string, { readonly all: boolean; readonly id: str
 let relationOptions = new Map<string, { readonly all: boolean; readonly relation: string | null }>();
 let canonicalCommunityNames = new Map<string | null, string>();
 let nodeById = new Map<string, VisualizerNodeV1>();
+let nodeIndexById = new Map<string, number>();
 let incoming = new Map<string, VisualizerEdgeV1[]>();
 let outgoing = new Map<string, VisualizerEdgeV1[]>();
 let positions = new Map<string, Point>();
 let spatialGrid = new Map<string, VisualizerNodeV1[]>();
+let nodeClearances = new Map<string, number>();
 let communityLayouts: readonly CommunityLayout[] = [];
 let communityColors = new Map<string | null, string>();
 let renderCache: RenderCache = { nodes: [], edges: [], edgeEntries: [] };
@@ -283,6 +351,7 @@ let searchOpen = false;
 let pointer: { id: number; startX: number; startY: number; lastX: number; lastY: number; moved: boolean } | null = null;
 let reducedMotion = globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches;
 let forcedColors = globalThis.matchMedia('(forced-colors: active)').matches;
+let lastLayoutMilliseconds = 0;
 
 bindEvents();
 setHostStatus('loading', 'Loading graph', 'Waiting for the workspace graph…');
@@ -722,6 +791,7 @@ function installGraph(snapshot: VisualizerSnapshotV1): void {
   graph = snapshot;
   canonicalCommunityNames = new Map(snapshot.communities.map((facet) => [facet.id, domainDisplayName(facet.id, facet.name)]));
   nodeById = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  nodeIndexById = new Map(snapshot.nodes.map((node, index) => [node.id, index]));
   incoming = new Map(snapshot.nodes.map((node) => [node.id, []]));
   outgoing = new Map(snapshot.nodes.map((node) => [node.id, []]));
   for (const edge of snapshot.edges) {
@@ -732,12 +802,25 @@ function installGraph(snapshot: VisualizerSnapshotV1): void {
   for (const values of outgoing.values()) values.sort(compareEdges);
 
   state = sanitizeStateForGraph(state, snapshot);
+  const fingerprint = graphLayoutFingerprint(snapshot.nodes);
+  if (state.layoutFingerprint !== fingerprint) {
+    state = {
+      ...state,
+      scale: 1,
+      offsetX: 0,
+      offsetY: 0,
+      cameraInitialized: false,
+      layoutFingerprint: fingerprint,
+    };
+  }
   if (state.selectedId === null && snapshot.selectedNodeId !== null) {
     state = { ...state, selectedId: snapshot.selectedNodeId, keyboardId: snapshot.selectedNodeId };
   }
   if (state.focusId === null && state.selectedId !== null) state = { ...state, focusId: state.selectedId };
   sanitizeViewIdsForFilters();
+  const layoutStarted = performance.now();
   buildLayout();
+  lastLayoutMilliseconds = performance.now() - layoutStarted;
   populateFilters();
   updateControlStates();
   updateView();
@@ -753,10 +836,12 @@ function installGraph(snapshot: VisualizerSnapshotV1): void {
 function clearGraphForStatus(): void {
   graph = null;
   nodeById = new Map();
+  nodeIndexById = new Map();
   incoming = new Map();
   outgoing = new Map();
   positions = new Map();
   spatialGrid = new Map();
+  nodeClearances = new Map();
   communityLayouts = [];
   communityColors = new Map();
   canonicalCommunityNames = new Map();
@@ -873,13 +958,14 @@ function parseSnapshot(value: unknown): VisualizerSnapshotV1 | null {
 }
 
 function sanitizePersistedState(value: unknown): PersistedState {
-  if (!isRecord(value) || value.version !== 1) return defaultState;
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2)) return defaultState;
+  const retainCamera = value.version === 2;
   const history = Array.isArray(value.history)
     ? value.history.filter((entry): entry is string => isBoundedString(entry, 16_384)).slice(-MAX_HISTORY)
     : [];
   const historyIndex = clampInteger(value.historyIndex, -1, history.length - 1, history.length - 1);
   return {
-    version: 1,
+    version: 2,
     mode: value.mode === 'focus' ? 'focus' : 'global',
     selectedId: nullableBoundedString(value.selectedId, 16_384),
     focusId: nullableBoundedString(value.focusId, 16_384),
@@ -890,14 +976,17 @@ function sanitizePersistedState(value: unknown): PersistedState {
     relationFilter: nullableBoundedString(value.relationFilter, MAX_STRING_CODE_UNITS),
     density: isDensity(value.density) ? value.density : 'balanced',
     traceActive: value.traceActive === true,
-    scale: clampNumber(value.scale, 0.08, 5, 1),
-    offsetX: clampNumber(value.offsetX, -10_000_000, 10_000_000, 0),
-    offsetY: clampNumber(value.offsetY, -10_000_000, 10_000_000, 0),
-    cameraInitialized: value.cameraInitialized === true,
+    scale: retainCamera ? clampNumber(value.scale, MIN_CAMERA_SCALE, 5, 1) : 1,
+    offsetX: retainCamera ? clampNumber(value.offsetX, -10_000_000, 10_000_000, 0) : 0,
+    offsetY: retainCamera ? clampNumber(value.offsetY, -10_000_000, 10_000_000, 0) : 0,
+    cameraInitialized: retainCamera && value.cameraInitialized === true,
     history,
     historyIndex,
     expandedIncoming: value.expandedIncoming === true,
     expandedOutgoing: value.expandedOutgoing === true,
+    layoutFingerprint: retainCamera && typeof value.layoutFingerprint === 'string' && value.layoutFingerprint.length <= 32
+      ? value.layoutFingerprint
+      : null,
   };
 }
 
@@ -1284,24 +1373,47 @@ function populateFilters(): void {
   }
   communityOptions = new Map([['community-all', { all: true, id: null }]]);
   ui.community.replaceChildren(option('community-all', 'All domains'));
-  const communities = [...communityCounts].sort((left, right) => compareText(left[1].name, right[1].name)
+  const communities = [...communityCounts].sort((left, right) => right[1].count - left[1].count
+    || compareText(left[1].name, right[1].name)
     || compareText(left[0] ?? '', right[0] ?? ''));
-  communities.forEach(([id, entry], index) => {
+  const visibleCommunities = boundedFilterOptions(communities, ([id]) => state.communityFilterUnassigned
+    ? id === null
+    : state.communityFilter !== null && id === state.communityFilter);
+  visibleCommunities.forEach(([id, entry], index) => {
     const token = `community-${index}`;
     communityOptions.set(token, { all: false, id });
     ui.community.append(option(token, `${entry.name} · ${entry.count}`));
   });
+  appendOmittedFilterOption(ui.community, communities.length - visibleCommunities.length, 'domains');
 
   const relationCounts = new Map<string, number>();
   for (const edge of graph.edges) relationCounts.set(edge.relation, (relationCounts.get(edge.relation) ?? 0) + 1);
   relationOptions = new Map([['relation-all', { all: true, relation: null }]]);
   ui.relation.replaceChildren(option('relation-all', 'All relationships'));
-  [...relationCounts].sort((left, right) => compareText(left[0], right[0])).forEach(([relation, count], index) => {
+  const relations = [...relationCounts].sort((left, right) => right[1] - left[1] || compareText(left[0], right[0]));
+  const visibleRelations = boundedFilterOptions(relations, ([relation]) => relation === state.relationFilter);
+  visibleRelations.forEach(([relation, count], index) => {
     const token = `relation-${index}`;
     relationOptions.set(token, { all: false, relation });
     ui.relation.append(option(token, `${relation || 'Unspecified relationship'} · ${count}`));
   });
+  appendOmittedFilterOption(ui.relation, relations.length - visibleRelations.length, 'relationships');
   updateFilterSelectValues();
+}
+
+function boundedFilterOptions<T>(entries: readonly T[], isActive: (entry: T) => boolean): readonly T[] {
+  if (entries.length <= MAX_FILTER_OPTIONS) return entries;
+  const retained = entries.slice(0, MAX_FILTER_OPTIONS);
+  const active = entries.find(isActive);
+  if (active && !retained.includes(active)) retained[MAX_FILTER_OPTIONS - 1] = active;
+  return retained;
+}
+
+function appendOmittedFilterOption(select: HTMLSelectElement, omitted: number, noun: string): void {
+  if (omitted <= 0) return;
+  const notice = option(`${select.id}-omitted`, `… ${omitted.toLocaleString()} more ${noun}`);
+  notice.disabled = true;
+  select.append(notice);
 }
 
 function option(value: string, label: string): HTMLOptionElement {
@@ -1913,6 +2025,7 @@ function renderInspector(): void {
 function buildLayout(): void {
   positions = new Map();
   spatialGrid = new Map();
+  nodeClearances = new Map();
   communityColors = new Map();
   if (!graph || graph.nodes.length === 0) {
     communityLayouts = [];
@@ -1930,45 +2043,172 @@ function buildLayout(): void {
     const rightName = canonicalDomainName(right[0], right[1][0]?.communityName ?? null);
     return right[1].length - left[1].length || compareText(leftName, rightName) || compareText(left[0] ?? '', right[0] ?? '');
   });
-  const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
-  const rows = Math.ceil(ordered.length / columns);
-  const layouts: CommunityLayout[] = [];
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-  ordered.forEach(([key, rawNodes], groupIndex) => {
-    const column = groupIndex % columns;
-    const row = Math.floor(groupIndex / columns);
-    const center = {
-      x: (column - (columns - 1) / 2) * 760,
-      y: (row - (rows - 1) / 2) * 620,
-    };
+  const drafts = ordered.map(([key, rawNodes], groupIndex): CommunityLayoutDraft => {
     const nodes = [...rawNodes].sort(compareNodes);
     const seed = stableHash(key ?? UNASSIGNED_LAYOUT_SEED);
+    const localPositions = new Map<string, Point>();
     nodes.forEach((node, index) => {
-      const angle = index * goldenAngle + (seed % 628) / 100;
-      const radius = index === 0 ? 0 : 54 + Math.sqrt(index) * 39;
-      const compression = 0.78 + ((seed >>> 8) % 19) / 100;
-      const point = {
-        x: center.x + Math.cos(angle) * radius,
-        y: center.y + Math.sin(angle) * radius * compression,
-      };
-      positions.set(node.id, point);
-      const cell = spatialKey(point.x, point.y);
-      const values = spatialGrid.get(cell);
-      if (values) values.push(node);
-      else spatialGrid.set(cell, [node]);
+      localPositions.set(node.id, localNodePosition(index, nodes.length, seed));
     });
-    const points = nodes.map((node) => positions.get(node.id)).filter((point): point is Point => point !== undefined);
-    const hull = paddedHull(points, center, 74);
-    layouts.push({
+    const localRadius = nodes.reduce((maximum, node) => {
+      const point = localPositions.get(node.id);
+      return point ? Math.max(maximum, Math.hypot(point.x, point.y)) : maximum;
+    }, 0);
+    return {
       id: key,
       name: canonicalDomainName(key, nodes[0]?.communityName ?? null),
       color: COMMUNITY_COLORS[groupIndex % COMMUNITY_COLORS.length] ?? '#8B5CF6',
+      nodes,
+      localPositions,
+      radius: localRadius + COMMUNITY_PADDING_WORLD,
+    };
+  });
+  const centers = packCommunities(drafts);
+  const layouts = drafts.map((draft, index): CommunityLayout => {
+    const center = centers[index] ?? { x: 0, y: 0 };
+    for (const node of draft.nodes) {
+      const local = draft.localPositions.get(node.id) ?? { x: 0, y: 0 };
+      positions.set(node.id, { x: center.x + local.x, y: center.y + local.y });
+    }
+    const points = draft.nodes.map((node) => positions.get(node.id)).filter((point): point is Point => point !== undefined);
+    return {
+      id: draft.id,
+      name: draft.name,
+      color: draft.color,
       center,
-      hull,
-    });
+      hull: paddedHull(points, center, COMMUNITY_PADDING_WORLD),
+      radius: draft.radius,
+      nodeCount: draft.nodes.length,
+    };
   });
   communityLayouts = layouts;
   communityColors = new Map(layouts.map((layout) => [layout.id, layout.color]));
+  rebuildNodeSpatialIndex(graph.nodes);
+}
+
+function localNodePosition(index: number, nodeCount: number, seed: number): Point {
+  if (index === 0) return { x: 0, y: 0 };
+  let ring = 1;
+  let ringStart = 1;
+  while (index >= ringStart + ring * 6) {
+    ringStart += ring * 6;
+    ring += 1;
+  }
+  const count = Math.min(ring * 6, nodeCount - ringStart);
+  const slot = index - ringStart;
+  const rotation = (seed % 6_283) / 1_000 + ring * 0.37;
+  const angle = rotation + slot / Math.max(1, count) * Math.PI * 2;
+  const radius = ring * NODE_SPACING_WORLD;
+  return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+}
+
+function packCommunities(drafts: readonly CommunityLayoutDraft[]): readonly Point[] {
+  if (drafts.length === 0) return [];
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const placements: PackedCommunity[] = [];
+  const grid = new Map<string, number[]>();
+  const nextCandidateByRadius = new Map<number, number>();
+  const centers: Point[] = [];
+  drafts.forEach((draft, index) => {
+    let center: Point | undefined;
+    if (index === 0) {
+      center = { x: 0, y: 0 };
+    } else {
+      const bucket = Math.round(draft.radius / NODE_SPACING_WORLD);
+      let candidateIndex = nextCandidateByRadius.get(bucket) ?? 1;
+      const maximumAttempts = Math.max(2_048, drafts.length * 8);
+      for (let attempt = 0; attempt < maximumAttempts; attempt += 1, candidateIndex += 1) {
+        const distanceFromCenter = COMMUNITY_SPIRAL_STEP * Math.sqrt(candidateIndex);
+        const angle = candidateIndex * goldenAngle;
+        const candidate = {
+          x: Math.cos(angle) * distanceFromCenter,
+          y: Math.sin(angle) * distanceFromCenter,
+        };
+        if (communityPositionAvailable(candidate, draft.radius, placements, grid)) {
+          center = candidate;
+          nextCandidateByRadius.set(bucket, candidateIndex + 1);
+          break;
+        }
+      }
+    }
+    if (!center) {
+      const outerRadius = placements.reduce((maximum, placement) =>
+        Math.max(maximum, Math.hypot(placement.center.x, placement.center.y) + placement.radius), 0);
+      const angle = index * goldenAngle;
+      const distanceFromCenter = outerRadius + draft.radius + COMMUNITY_GAP_WORLD;
+      center = { x: Math.cos(angle) * distanceFromCenter, y: Math.sin(angle) * distanceFromCenter };
+    }
+    const placement = { center, radius: draft.radius };
+    const placementIndex = placements.length;
+    placements.push(placement);
+    centers.push(center);
+    for (const key of communityPackKeys(center, draft.radius + COMMUNITY_GAP_WORLD / 2)) {
+      const values = grid.get(key);
+      if (values) values.push(placementIndex);
+      else grid.set(key, [placementIndex]);
+    }
+  });
+  return centers;
+}
+
+function communityPositionAvailable(
+  center: Point,
+  radius: number,
+  placements: readonly PackedCommunity[],
+  grid: ReadonlyMap<string, readonly number[]>,
+): boolean {
+  const candidates = new Set<number>();
+  for (const key of communityPackKeys(center, radius + COMMUNITY_GAP_WORLD / 2)) {
+    for (const index of grid.get(key) ?? []) candidates.add(index);
+  }
+  for (const index of candidates) {
+    const other = placements[index];
+    if (!other) continue;
+    if (distance(center, other.center) < radius + other.radius + COMMUNITY_GAP_WORLD) return false;
+  }
+  return true;
+}
+
+function communityPackKeys(center: Point, radius: number): readonly string[] {
+  const keys: string[] = [];
+  const minimumX = Math.floor((center.x - radius) / COMMUNITY_PACK_CELL);
+  const maximumX = Math.floor((center.x + radius) / COMMUNITY_PACK_CELL);
+  const minimumY = Math.floor((center.y - radius) / COMMUNITY_PACK_CELL);
+  const maximumY = Math.floor((center.y + radius) / COMMUNITY_PACK_CELL);
+  for (let x = minimumX; x <= maximumX; x += 1) {
+    for (let y = minimumY; y <= maximumY; y += 1) keys.push(`${x},${y}`);
+  }
+  return keys;
+}
+
+function rebuildNodeSpatialIndex(nodes: readonly VisualizerNodeV1[]): void {
+  spatialGrid = new Map();
+  nodeClearances = new Map(nodes.map((node) => [node.id, POSITION_CELL]));
+  for (const node of nodes) {
+    const point = positions.get(node.id);
+    if (!point) continue;
+    const cellX = Math.floor(point.x / POSITION_CELL);
+    const cellY = Math.floor(point.y / POSITION_CELL);
+    for (let x = cellX - 1; x <= cellX + 1; x += 1) {
+      for (let y = cellY - 1; y <= cellY + 1; y += 1) {
+        for (const other of spatialGrid.get(`${x},${y}`) ?? []) {
+          const otherPoint = positions.get(other.id);
+          if (!otherPoint) continue;
+          // The renderer and collision audit reserve each semantic shape's full
+          // screen-space bounding box. Chebyshev separation is therefore the
+          // conservative clearance: diagonal points must not claim the larger
+          // Euclidean gap while their projected boxes still overlap on both axes.
+          const separation = Math.max(Math.abs(point.x - otherPoint.x), Math.abs(point.y - otherPoint.y));
+          nodeClearances.set(node.id, Math.min(nodeClearances.get(node.id) ?? POSITION_CELL, separation));
+          nodeClearances.set(other.id, Math.min(nodeClearances.get(other.id) ?? POSITION_CELL, separation));
+        }
+      }
+    }
+    const key = spatialKey(point.x, point.y);
+    const values = spatialGrid.get(key);
+    if (values) values.push(node);
+    else spatialGrid.set(key, [node]);
+  }
 }
 
 function stableHash(value: string): number {
@@ -1980,18 +2220,28 @@ function stableHash(value: string): number {
   return hash >>> 0;
 }
 
+function graphLayoutFingerprint(nodes: readonly VisualizerNodeV1[]): string {
+  let hash = 2166136261;
+  const ordered = [...nodes].sort((left, right) => compareText(left.id, right.id) || compareText(left.community ?? '', right.community ?? ''));
+  for (const node of ordered) {
+    for (const value of [node.id, node.community ?? UNASSIGNED_LAYOUT_SEED]) {
+      for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      hash ^= 0;
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return `2:${nodes.length}:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 function spatialKey(x: number, y: number): string {
   return `${Math.floor(x / POSITION_CELL)},${Math.floor(y / POSITION_CELL)}`;
 }
 
 function paddedHull(points: readonly Point[], center: Point, padding: number): readonly Point[] {
-  if (points.length < 3) {
-    const radius = points.length === 2 ? Math.max(115, distance(points[0] ?? center, points[1] ?? center) / 2 + padding) : 120;
-    return Array.from({ length: 12 }, (_, index) => ({
-      x: center.x + Math.cos(index / 12 * Math.PI * 2) * radius,
-      y: center.y + Math.sin(index / 12 * Math.PI * 2) * radius,
-    }));
-  }
+  if (points.length < 3) return circularHull(points, center, padding);
   const sorted = [...points].sort((left, right) => left.x - right.x || left.y - right.y);
   const cross = (origin: Point, left: Point, right: Point): number =>
     (left.x - origin.x) * (right.y - origin.y) - (left.y - origin.y) * (right.x - origin.x);
@@ -2008,6 +2258,7 @@ function paddedHull(points: readonly Point[], center: Point, padding: number): r
     upper.push(point);
   }
   const hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
+  if (hull.length < 3) return circularHull(points, center, padding);
   const centroid: MutablePoint = hull.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }), { x: 0, y: 0 });
   centroid.x /= hull.length;
   centroid.y /= hull.length;
@@ -2018,6 +2269,14 @@ function paddedHull(points: readonly Point[], center: Point, padding: number): r
       y: point.y + (point.y - centroid.y) / magnitude * padding,
     };
   });
+}
+
+function circularHull(points: readonly Point[], center: Point, padding: number): readonly Point[] {
+  const radius = points.reduce((maximum, point) => Math.max(maximum, distance(point, center)), 0) + padding;
+  return Array.from({ length: 12 }, (_, index) => ({
+    x: center.x + Math.cos(index / 12 * Math.PI * 2) * radius,
+    y: center.y + Math.sin(index / 12 * Math.PI * 2) * radius,
+  }));
 }
 
 function resizeCanvas(): void {
@@ -2037,6 +2296,7 @@ function requestDraw(): void {
 }
 
 function draw(timestamp: number): void {
+  const drawStarted = performance.now();
   drawFrame = null;
   const animateTrace = state.traceActive && !reducedMotion && state.mode === 'global';
   if (animateTrace && timestamp - lastAnimationFrame < 34) {
@@ -2055,8 +2315,9 @@ function draw(timestamp: number): void {
   context.scale(state.scale, state.scale);
   drawCommunityHulls(bounds);
   drawEdges(bounds, timestamp);
-  drawNodes(bounds);
+  const geometry = drawNodes(bounds);
   context.restore();
+  if (testMode) publishGeometryDiagnostics(bounds, geometry, performance.now() - drawStarted);
   if (animateTrace) drawFrame = globalThis.requestAnimationFrame(draw);
 }
 
@@ -2065,10 +2326,14 @@ function drawCommunityHulls(bounds: DOMRect): void {
   const selectedCommunity = state.selectedId ? nodeById.get(state.selectedId)?.community : undefined;
   const layouts = communityLayouts
     .filter((layout) => visibleCommunities.has(layout.id))
-    .sort((left, right) => Number(right.id === selectedCommunity) - Number(left.id === selectedCommunity) || compareText(left.name, right.name))
+    .sort((left, right) => Number(right.id === selectedCommunity) - Number(left.id === selectedCommunity)
+      || right.nodeCount - left.nodeCount
+      || compareText(left.name, right.name))
     .slice(0, 64);
   for (const layout of layouts) {
     if (layout.hull.length === 0 || !isWorldVisible(layout.center, bounds, 560)) continue;
+    context.save();
+    context.globalAlpha = state.traceActive && layout.id !== selectedCommunity ? 0.22 : 1;
     context.beginPath();
     layout.hull.forEach((point, index) => index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y));
     context.closePath();
@@ -2078,11 +2343,7 @@ function drawCommunityHulls(bounds: DOMRect): void {
     context.setLineDash([]);
     context.fill();
     context.stroke();
-    context.fillStyle = forcedColors ? 'CanvasText' : '#C9B8FF';
-    context.font = `${Math.max(11, 13 / Math.sqrt(state.scale))}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillText(layout.name.toLocaleUpperCase('en'), layout.center.x, Math.min(...layout.hull.map((point) => point.y)) + 24 / state.scale);
+    context.restore();
   }
 }
 
@@ -2096,6 +2357,9 @@ function drawEdges(bounds: DOMRect, timestamp: number): void {
     if (!source || !target || !isSegmentVisible(source, target, bounds)) continue;
     const traced = state.traceActive && state.selectedId !== null && edge.target === state.selectedId;
     const selected = state.selectedId !== null && (edge.source === state.selectedId || edge.target === state.selectedId);
+    const selfLoop = edge.source === edge.target;
+    const selfLoopNodeRadius = selfLoop ? nodeScreenRadius(requiredNode(edge.source)) : 0;
+    if (selfLoop && selfLoopNodeRadius < 3.5 && !selected && !traced) continue;
     const confidence = confidencePresentation(edge.confidence);
     context.save();
     context.globalAlpha = state.traceActive && !traced ? 0.075 : selected ? 0.9 : 0.28;
@@ -2107,8 +2371,13 @@ function drawEdges(bounds: DOMRect, timestamp: number): void {
       : confidence.className === 'gx-dotted' || confidence.className === 'gx-unknown'
         ? [2 / state.scale, 5 / state.scale]
         : []);
-    if (edge.source === edge.target) drawSelfLoop(source);
-    else drawArrow(source, target, 12 / state.scale);
+    if (selfLoop) drawSelfLoop(source, selfLoopNodeRadius);
+    else drawArrow(
+      source,
+      target,
+      nodeEdgeExtent(requiredNode(edge.source)) / state.scale,
+      nodeEdgeExtent(requiredNode(edge.target)) / state.scale,
+    );
     if (edge.source !== edge.target && traced && !reducedMotion && animatedParticles < 96) {
       drawTraceParticle(source, target, timestamp, edge);
       animatedParticles += 1;
@@ -2119,14 +2388,14 @@ function drawEdges(bounds: DOMRect, timestamp: number): void {
   context.globalAlpha = 1;
 }
 
-function drawArrow(source: Point, target: Point, nodePadding: number): void {
+function drawArrow(source: Point, target: Point, sourcePadding: number, targetPadding: number): void {
   const dx = target.x - source.x;
   const dy = target.y - source.y;
   const length = Math.max(1, Math.hypot(dx, dy));
   const unitX = dx / length;
   const unitY = dy / length;
-  const start = { x: source.x + unitX * nodePadding, y: source.y + unitY * nodePadding };
-  const end = { x: target.x - unitX * nodePadding, y: target.y - unitY * nodePadding };
+  const start = { x: source.x + unitX * sourcePadding, y: source.y + unitY * sourcePadding };
+  const end = { x: target.x - unitX * targetPadding, y: target.y - unitY * targetPadding };
   context.beginPath();
   context.moveTo(start.x, start.y);
   context.lineTo(end.x, end.y);
@@ -2140,9 +2409,9 @@ function drawArrow(source: Point, target: Point, nodePadding: number): void {
   context.fill();
 }
 
-function drawSelfLoop(point: Point): void {
-  const radius = 20 / state.scale;
-  const center = { x: point.x, y: point.y - 24 / state.scale };
+function drawSelfLoop(point: Point, nodeRadius: number): void {
+  const radius = Math.max(6, nodeRadius + 5) / state.scale;
+  const center = { x: point.x, y: point.y - (nodeRadius + 7) / state.scale };
   const startAngle = Math.PI * 0.38;
   const endAngle = Math.PI * 2.52;
   context.beginPath();
@@ -2181,7 +2450,7 @@ function drawTraceParticle(source: Point, target: Point, timestamp: number, edge
   context.restore();
 }
 
-function drawNodes(bounds: DOMRect): void {
+function drawNodes(bounds: DOMRect): DrawGeometry {
   const candidates: VisualizerNodeV1[] = [];
   const tracedSources = new Set<string>();
   if (state.traceActive && state.selectedId !== null) {
@@ -2194,16 +2463,16 @@ function drawNodes(bounds: DOMRect): void {
     const selected = node.id === state.selectedId;
     const keyboard = node.id === state.keyboardId;
     const traced = tracedSources.has(node.id);
-    const radius = Math.min(17, 5.5 + Math.log2(node.degree + 1) * 1.65);
+    const radius = nodeScreenRadius(node);
     context.save();
     context.globalAlpha = state.traceActive && !selected && !traced ? 0.18 : 1;
-    const shape = canonicalNodeShape(node.kind);
+    const shape = state.scale < 0.12 ? 'code' : canonicalNodeShape(node.kind);
     context.fillStyle = forcedColors
       ? (selected ? 'Highlight' : shape === 'unknown' ? 'Canvas' : 'CanvasText')
       : selected ? '#8B5CF6' : traced ? '#7BC3E8' : shape === 'unknown' ? '#0B0D14' : communityColor(node.community);
     context.strokeStyle = forcedColors ? 'Canvas' : '#0B0D14';
     if (shape === 'unknown') context.strokeStyle = forcedColors ? 'CanvasText' : communityColor(node.community);
-    context.lineWidth = 2.1 / state.scale;
+    context.lineWidth = nodeStrokeWidth(radius) / state.scale;
     nodeShapePath(point, radius / state.scale, shape);
     context.fill();
     context.stroke();
@@ -2224,7 +2493,7 @@ function drawNodes(bounds: DOMRect): void {
     }
     context.restore();
   }
-  drawLabels(candidates);
+  return drawLabels(candidates, bounds);
 }
 
 function nodeShapePath(point: Point, radius: number, shape: ReturnType<typeof canonicalNodeShape>): void {
@@ -2255,38 +2524,205 @@ function nodeShapePath(point: Point, radius: number, shape: ReturnType<typeof ca
   context.arc(point.x, point.y, radius, 0, Math.PI * 2);
 }
 
-function drawLabels(nodes: readonly VisualizerNodeV1[]): void {
+function drawLabels(nodes: readonly VisualizerNodeV1[], viewport: DOMRect): DrawGeometry {
   const labels = [...nodes]
     .sort((left, right) => {
       const leftPriority = left.id === state.selectedId || left.id === state.keyboardId ? 0 : 1;
       const rightPriority = right.id === state.selectedId || right.id === state.keyboardId ? 0 : 1;
       return leftPriority - rightPriority || compareNodes(left, right);
     });
-  context.font = `${12 / state.scale}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
-  context.textAlign = 'center';
+  const fittedScale = fitScaleForViewport(viewport);
+  const zoomRatio = state.scale / Math.max(MIN_CAMERA_SCALE, fittedScale);
+  const labelBudget = Math.min(MAX_LABELS, Math.max(16, Math.floor(
+    viewport.width * viewport.height / (zoomRatio < 1.3 ? 18_000 : zoomRatio < 2.2 ? 13_000 : 9_000),
+  )));
+  const glyphs: GlyphRect[] = nodes.flatMap((node) => {
+    const point = positions.get(node.id);
+    if (!point) return [];
+    const extent = glyphScreenExtent(node);
+    const x = point.x * state.scale + state.offsetX;
+    const y = point.y * state.scale + state.offsetY;
+    return [{ id: node.id, left: x - extent, top: y - extent, right: x + extent, bottom: y + extent }];
+  });
+  const occupied: ScreenRect[] = [];
+  const acceptedLabels = drawCommunityLabels(glyphs, occupied, viewport, zoomRatio);
+  context.font = `${11 / state.scale}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
   context.textBaseline = 'top';
-  const occupied: Array<{ readonly left: number; readonly top: number; readonly right: number; readonly bottom: number }> = [];
   let drawn = 0;
   for (const node of labels) {
-    if (drawn >= MAX_LABELS) break;
+    if (drawn >= labelBudget) break;
     const point = positions.get(node.id);
     if (!point) continue;
-    const label = boundedText(node.label, 52);
-    const offset = (12 + Math.min(17, 5.5 + Math.log2(node.degree + 1) * 1.65)) / state.scale;
-    const width = context.measureText(label).width * state.scale + 16;
-    const screenX = point.x * state.scale + state.offsetX;
-    const screenY = (point.y + offset) * state.scale + state.offsetY;
-    const bounds = { left: screenX - width / 2, top: screenY - 4, right: screenX + width / 2, bottom: screenY + 22 };
     const priority = node.id === state.selectedId || node.id === state.keyboardId;
-    if (!priority && occupied.some((entry) => rectanglesOverlap(entry, bounds))) continue;
-    occupied.push(bounds);
+    if (!priority && zoomRatio < 0.72) continue;
+    const label = fittedCanvasLabel(boundedText(node.label, 52), Math.min(220, viewport.width * 0.44));
+    const width = context.measureText(label).width * state.scale + 10;
+    const height = 17;
+    const extent = nodeShapeExtent(nodeScreenRadius(node));
+    const screenPoint = { x: point.x * state.scale + state.offsetX, y: point.y * state.scale + state.offsetY };
+    const anchors = labelAnchors(screenPoint, extent, width, height);
+    let accepted: { readonly bounds: ScreenRect; readonly x: number; readonly y: number; readonly align: CanvasTextAlign } | undefined;
+    for (const anchor of anchors) {
+      const padded = inflateRectangle(anchor.bounds, 2);
+      if (!rectangleInsideViewport(padded, viewport, 5)) continue;
+      if (occupied.some((entry) => rectanglesOverlap(entry, padded))) continue;
+      if (glyphs.some((glyph) => glyph.id !== node.id && rectanglesOverlap(glyph, padded))) continue;
+      accepted = anchor;
+      break;
+    }
+    if (!accepted) continue;
+    occupied.push(inflateRectangle(accepted.bounds, 2));
+    acceptedLabels.push({
+      ...accepted.bounds,
+      kind: 'node',
+      itemIndex: nodeIndexById.get(node.id) ?? -1,
+    });
     drawn += 1;
-    context.lineWidth = 4 / state.scale;
+    context.textAlign = accepted.align;
+    context.lineWidth = 3 / state.scale;
     context.strokeStyle = forcedColors ? 'Canvas' : 'rgba(9, 11, 17, .94)';
     context.fillStyle = forcedColors ? 'CanvasText' : node.id === state.selectedId ? '#FFFFFF' : '#D9DDEA';
-    context.strokeText(label, point.x, point.y + offset);
-    context.fillText(label, point.x, point.y + offset);
+    const worldX = (accepted.x - state.offsetX) / state.scale;
+    const worldY = (accepted.y - state.offsetY) / state.scale;
+    context.strokeText(label, worldX, worldY);
+    context.fillText(label, worldX, worldY);
   }
+  return { glyphs, labels: acceptedLabels };
+}
+
+function drawCommunityLabels(
+  glyphs: readonly GlyphRect[],
+  occupied: ScreenRect[],
+  viewport: DOMRect,
+  zoomRatio: number,
+): GeometryLabel[] {
+  const acceptedLabels: GeometryLabel[] = [];
+  if (zoomRatio < 0.7) return acceptedLabels;
+  const visibleCommunities = new Set(renderCache.nodes.map((node) => node.community));
+  const selectedCommunity = state.selectedId ? nodeById.get(state.selectedId)?.community : undefined;
+  const budget = Math.min(28, Math.max(4, Math.floor(viewport.width * viewport.height / 46_000)));
+  const layouts = communityLayouts
+    .filter((layout) => visibleCommunities.has(layout.id))
+    .sort((left, right) => Number(right.id === selectedCommunity) - Number(left.id === selectedCommunity)
+      || right.nodeCount - left.nodeCount
+      || compareText(left.name, right.name));
+  context.font = `${10 / state.scale}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  context.textBaseline = 'top';
+  context.textAlign = 'center';
+  let drawn = 0;
+  for (const [layoutIndex, layout] of layouts.entries()) {
+    if (drawn >= budget || layout.hull.length === 0) break;
+    const label = fittedCanvasLabel(layout.name.toLocaleUpperCase('en'), Math.min(210, viewport.width * 0.38));
+    const width = context.measureText(label).width * state.scale + 12;
+    const height = 16;
+    const screenX = layout.center.x * state.scale + state.offsetX;
+    const screenY = Math.min(...layout.hull.map((point) => point.y)) * state.scale + state.offsetY + 7;
+    const bounds = { left: screenX - width / 2, top: screenY, right: screenX + width / 2, bottom: screenY + height };
+    const padded = inflateRectangle(bounds, 2);
+    if (!rectangleInsideViewport(padded, viewport, 5)
+      || occupied.some((entry) => rectanglesOverlap(entry, padded))
+      || glyphs.some((glyph) => rectanglesOverlap(glyph, padded))) continue;
+    occupied.push(padded);
+    acceptedLabels.push({ ...bounds, kind: 'community', itemIndex: layoutIndex });
+    drawn += 1;
+    context.fillStyle = forcedColors ? 'CanvasText' : '#C9B8FF';
+    context.globalAlpha = forcedColors ? 1 : 0.78;
+    context.fillText(label, layout.center.x, (screenY - state.offsetY) / state.scale);
+    context.globalAlpha = 1;
+  }
+  return acceptedLabels;
+}
+
+function labelAnchors(
+  point: Point,
+  extent: number,
+  width: number,
+  height: number,
+): readonly { readonly bounds: ScreenRect; readonly x: number; readonly y: number; readonly align: CanvasTextAlign }[] {
+  const gap = 6;
+  return [
+    {
+      bounds: { left: point.x - width / 2, top: point.y + extent + gap, right: point.x + width / 2, bottom: point.y + extent + gap + height },
+      x: point.x,
+      y: point.y + extent + gap,
+      align: 'center',
+    },
+    {
+      bounds: { left: point.x + extent + gap, top: point.y - height / 2, right: point.x + extent + gap + width, bottom: point.y + height / 2 },
+      x: point.x + extent + gap + 5,
+      y: point.y - height / 2,
+      align: 'left',
+    },
+    {
+      bounds: { left: point.x - extent - gap - width, top: point.y - height / 2, right: point.x - extent - gap, bottom: point.y + height / 2 },
+      x: point.x - extent - gap - 5,
+      y: point.y - height / 2,
+      align: 'right',
+    },
+    {
+      bounds: { left: point.x - width / 2, top: point.y - extent - gap - height, right: point.x + width / 2, bottom: point.y - extent - gap },
+      x: point.x,
+      y: point.y - extent - gap - height,
+      align: 'center',
+    },
+  ];
+}
+
+function fittedCanvasLabel(value: string, maximumScreenWidth: number): string {
+  if (context.measureText(value).width * state.scale <= maximumScreenWidth) return value;
+  let length = Math.min(value.length, 48);
+  while (length > 1) {
+    const candidate = `${value.slice(0, length).trimEnd()}…`;
+    if (context.measureText(candidate).width * state.scale <= maximumScreenWidth) return candidate;
+    length -= 1;
+  }
+  return '…';
+}
+
+function inflateRectangle(rectangle: ScreenRect, amount: number): ScreenRect {
+  return {
+    left: rectangle.left - amount,
+    top: rectangle.top - amount,
+    right: rectangle.right + amount,
+    bottom: rectangle.bottom + amount,
+  };
+}
+
+function rectangleInsideViewport(rectangle: ScreenRect, viewport: DOMRect, margin: number): boolean {
+  return rectangle.left >= margin
+    && rectangle.top >= margin
+    && rectangle.right <= viewport.width - margin
+    && rectangle.bottom <= viewport.height - margin;
+}
+
+function publishGeometryDiagnostics(viewport: DOMRect, geometry: DrawGeometry, drawMilliseconds: number): void {
+  const diagnostics: GeometryDiagnostics = {
+    viewport: {
+      width: viewport.width,
+      height: viewport.height,
+      dpr: Math.min(2, Math.max(1, globalThis.devicePixelRatio || 1)),
+    },
+    scale: state.scale,
+    fittedScale: fitScaleForViewport(viewport),
+    glyphs: geometry.glyphs.map((glyph) => ({
+      left: glyph.left,
+      top: glyph.top,
+      right: glyph.right,
+      bottom: glyph.bottom,
+      nodeIndex: nodeIndexById.get(glyph.id) ?? -1,
+      emphasized: glyph.id === state.selectedId || glyph.id === state.keyboardId,
+    })),
+    labels: geometry.labels,
+    visibleNodes: renderCache.nodes.length,
+    visibleEdges: renderCache.edgeEntries.length,
+    positions: positions.size,
+    spatialCells: spatialGrid.size,
+    layoutMilliseconds: lastLayoutMilliseconds,
+    drawMilliseconds,
+  };
+  Reflect.set(globalThis, '__graphoxideVisualizerDiagnostics', diagnostics);
+  document.documentElement.dataset.graphoxideDiagnostics = String(diagnostics.glyphs.length);
+  vscode.postMessage({ type: 'geometryDiagnostics', diagnostics });
 }
 
 function rectanglesOverlap(
@@ -2298,6 +2734,36 @@ function rectanglesOverlap(
 
 function communityColor(id: string | null): string {
   return communityColors.get(id) ?? '#8B5CF6';
+}
+
+function nodeScreenRadius(node: VisualizerNodeV1): number {
+  const base = Math.min(9.8, Math.max(3.3, 3.2 + Math.sqrt(Math.max(0, node.degree)) * 1.15));
+  const projected = Math.min(10, Math.max(1.5, base * Math.sqrt(Math.max(MIN_CAMERA_SCALE, state.scale))));
+  const clearance = (nodeClearances.get(node.id) ?? NODE_SPACING_WORLD) * state.scale;
+  const collisionSafe = Math.max(0.25, (clearance - 5) / (2 * 1.45));
+  return Math.min(projected, collisionSafe);
+}
+
+function nodeShapeExtent(radius: number): number {
+  // At overview scales every semantic shape is intentionally rendered as a
+  // circle. Reserve diamond/hexagon corners only once those shapes are visible;
+  // otherwise the conservative box itself can force microscopic glyphs.
+  return radius * (state.scale < 0.12 ? 1 : 1.45);
+}
+
+function nodeStrokeWidth(radius: number): number {
+  return state.scale < 0.12
+    ? Math.min(1.25, Math.max(0.75, radius * 0.9))
+    : Math.min(2.1, Math.max(1.15, radius * 0.9));
+}
+
+function nodeEdgeExtent(node: VisualizerNodeV1): number {
+  const radius = nodeScreenRadius(node);
+  return nodeShapeExtent(radius) + nodeStrokeWidth(radius) / 2;
+}
+
+function glyphScreenExtent(node: VisualizerNodeV1): number {
+  return nodeEdgeExtent(node) + 0.75;
 }
 
 function colorWithAlpha(color: string, alpha: number): string {
@@ -2327,7 +2793,7 @@ function zoomAt(factor: number, screenX?: number, screenY?: number): void {
   const anchorX = screenX ?? bounds.width / 2;
   const anchorY = screenY ?? bounds.height / 2;
   const previousScale = state.scale;
-  const scale = clampNumber(previousScale * factor, 0.08, 5, previousScale);
+  const scale = clampNumber(previousScale * factor, MIN_CAMERA_SCALE, 5, previousScale);
   const worldX = (anchorX - state.offsetX) / previousScale;
   const worldY = (anchorY - state.offsetY) / previousScale;
   state = {
@@ -2342,27 +2808,54 @@ function zoomAt(factor: number, screenX?: number, screenY?: number): void {
 }
 
 function fitView(announceChange = false): void {
-  const points = renderCache.nodes.map((node) => positions.get(node.id)).filter((point): point is Point => point !== undefined);
-  if (points.length === 0) return;
+  const worldBounds = visibleWorldBounds();
+  if (!worldBounds) return;
   const bounds = ui.canvas.getBoundingClientRect();
   if (bounds.width <= 0 || bounds.height <= 0) return;
-  const minimumX = Math.min(...points.map((point) => point.x));
-  const maximumX = Math.max(...points.map((point) => point.x));
-  const minimumY = Math.min(...points.map((point) => point.y));
-  const maximumY = Math.max(...points.map((point) => point.y));
-  const worldWidth = Math.max(220, maximumX - minimumX + 230);
-  const worldHeight = Math.max(180, maximumY - minimumY + 200);
-  const scale = clampNumber(Math.min(bounds.width / worldWidth, bounds.height / worldHeight), 0.08, 2.2, 1);
+  const scale = fitScaleForViewport(bounds);
   state = {
     ...state,
     scale,
-    offsetX: bounds.width / 2 - (minimumX + maximumX) / 2 * scale,
-    offsetY: bounds.height / 2 - (minimumY + maximumY) / 2 * scale,
+    offsetX: bounds.width / 2 - (worldBounds.minimumX + worldBounds.maximumX) / 2 * scale,
+    offsetY: bounds.height / 2 - (worldBounds.minimumY + worldBounds.maximumY) / 2 * scale,
     cameraInitialized: true,
   };
   requestDraw();
   persist();
   if (announceChange) announce('Graph fitted to the viewport.');
+}
+
+function fitScaleForViewport(viewport: DOMRect): number {
+  const worldBounds = visibleWorldBounds();
+  if (!worldBounds || viewport.width <= 0 || viewport.height <= 0) return 1;
+  const margin = 38;
+  const availableWidth = Math.max(1, viewport.width - margin * 2);
+  const availableHeight = Math.max(1, viewport.height - margin * 2);
+  const worldWidth = Math.max(120, worldBounds.maximumX - worldBounds.minimumX);
+  const worldHeight = Math.max(100, worldBounds.maximumY - worldBounds.minimumY);
+  return clampNumber(Math.min(availableWidth / worldWidth, availableHeight / worldHeight), MIN_CAMERA_SCALE, 2.2, 1);
+}
+
+function visibleWorldBounds(): {
+  readonly minimumX: number;
+  readonly maximumX: number;
+  readonly minimumY: number;
+  readonly maximumY: number;
+} | null {
+  const visibleCommunities = new Set(renderCache.nodes.map((node) => node.community));
+  const hullPoints = communityLayouts
+    .filter((layout) => visibleCommunities.has(layout.id))
+    .flatMap((layout) => layout.hull);
+  const points = hullPoints.length > 0
+    ? hullPoints
+    : renderCache.nodes.map((node) => positions.get(node.id)).filter((point): point is Point => point !== undefined);
+  if (points.length === 0) return null;
+  return {
+    minimumX: Math.min(...points.map((point) => point.x)),
+    maximumX: Math.max(...points.map((point) => point.x)),
+    minimumY: Math.min(...points.map((point) => point.y)),
+    maximumY: Math.max(...points.map((point) => point.y)),
+  };
 }
 
 function centerNode(id: string): void {
@@ -2419,7 +2912,7 @@ function hitTest(clientX: number, clientY: number): VisualizerNodeV1 | null {
   };
   const cellX = Math.floor(world.x / POSITION_CELL);
   const cellY = Math.floor(world.y / POSITION_CELL);
-  const cellRadius = Math.max(1, Math.min(2, Math.ceil(25 / state.scale / POSITION_CELL)));
+  const cellRadius = Math.max(1, Math.min(8, Math.ceil(25 / state.scale / POSITION_CELL)));
   const visibleIds = new Set(renderCache.nodes.map((node) => node.id));
   let best: { node: VisualizerNodeV1; distance: number } | null = null;
   for (let x = cellX - cellRadius; x <= cellX + cellRadius; x += 1) {
@@ -2429,8 +2922,8 @@ function hitTest(clientX: number, clientY: number): VisualizerNodeV1 | null {
         const point = positions.get(node.id);
         if (!point) continue;
         const nodeDistance = distance(world, point) * state.scale;
-        const radius = Math.min(17, 5.5 + Math.log2(node.degree + 1) * 1.65) + 8;
-        if (nodeDistance <= radius && (!best || nodeDistance < best.distance)) best = { node, distance: nodeDistance };
+        const hitRadius = Math.max(12, nodeShapeExtent(nodeScreenRadius(node)) + 8);
+        if (nodeDistance <= hitRadius && (!best || nodeDistance < best.distance)) best = { node, distance: nodeDistance };
       }
     }
   }

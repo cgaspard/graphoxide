@@ -12,6 +12,7 @@
   --gx-panel-raised: #202534;
   --gx-line: rgba(201, 184, 255, 0.16);
   --gx-line-strong: rgba(201, 184, 255, 0.3);
+  --gx-grid: rgba(201, 184, 255, 0.045);
   --gx-purple-wash: rgba(139, 92, 246, 0.14);
   --gx-cyan-wash: rgba(123, 195, 232, 0.12);
   --gx-error: #FF8C9B;
@@ -520,8 +521,8 @@ select {
   min-height: 0;
   overflow: hidden;
   background:
-    linear-gradient(var(--gx-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--gx-line) 1px, transparent 1px),
+    linear-gradient(var(--gx-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--gx-grid) 1px, transparent 1px),
     radial-gradient(circle at 50% 45%, rgba(27, 31, 43, 0.24), var(--gx-canvas) 74%);
   background-size: 52px 52px, 52px 52px, auto;
 }
@@ -1252,6 +1253,7 @@ select {
     --gx-panel-raised: Canvas;
     --gx-line: ButtonBorder;
     --gx-line-strong: CanvasText;
+    --gx-grid: ButtonBorder;
     --gx-purple-wash: Canvas;
     --gx-cyan-wash: Canvas;
     --gx-error: Mark;
@@ -1270,6 +1272,11 @@ select {
   .gx-status,
   .gx-viewport-tools {
     background: Canvas;
+  }
+
+  .gx-eyebrow,
+  .gx-field-heading {
+    color: CanvasText;
   }
 
   button[aria-pressed="true"],
