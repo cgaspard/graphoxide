@@ -1,7 +1,8 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { automaticGraphUpdateArguments, graphBuildDecision, GraphBuildOperation, workspaceGraphMutationAllowed } from './build';
-import { GraphoxideCli } from './cli';
+import { LatestBuildSummary } from './build-progress';
+import { BuildProgressSnapshot, GraphoxideCli } from './cli';
 import { GraphCodeLensProvider } from './codelens';
 import { ControlCenterPanel } from './control-center';
 import { GraphNode } from './graph';
@@ -50,6 +51,12 @@ export interface GraphoxideWatchRestartBarrier {
   release(): void;
 }
 
+export interface GraphoxideBuildProgressObservation {
+  readonly sequence: number;
+  readonly progress: BuildProgressSnapshot | null;
+  readonly statusBarText: string;
+}
+
 export interface GraphoxideExtensionApi {
   readonly version: 1;
   readonly test?: {
@@ -61,7 +68,13 @@ export interface GraphoxideExtensionApi {
     waitForWatchRestart(previousGeneration: number): Promise<GraphoxideWatchLifecycleStatus>;
     restartWatchConcurrently(): Promise<GraphoxideWatchLifecycleStatus>;
     mutationLifecycle(): GraphMutationSnapshot;
+    buildProgress(): BuildProgressSnapshot | undefined;
+    takeBuildProgressObservations(): readonly GraphoxideBuildProgressObservation[];
+    statusBarText(): string;
+    latestBuildSummary(): Promise<LatestBuildSummary | undefined>;
     runUpdateConcurrently(): Promise<GraphMutationSnapshot>;
+    runCancelledProgressBuild(): Promise<boolean>;
+    runFailingProgressBuild(): Promise<boolean>;
     staleEnableFailurePreservesDisable(): Promise<boolean>;
     resumeManagedBehindMutation(): Promise<{
       readonly mutationBefore: GraphMutationSnapshot;
@@ -83,7 +96,7 @@ export interface GraphoxideExtensionApi {
 
 export async function activate(context: vscode.ExtensionContext): Promise<GraphoxideExtensionApi> {
   const store = new GraphStore();
-  const cli = new GraphoxideCli(context.extensionUri);
+  const cli = new GraphoxideCli(context.extensionUri, context.workspaceState);
   const explorer = new GraphExplorerProvider(store);
   const results = new ResultsProvider();
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 40);
@@ -105,6 +118,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   const codeLens = new GraphCodeLensProvider(store);
   let graphPathReload = Promise.resolve();
   let graphPathRestartBarrier: TestGraphPathRestartBarrier | undefined;
+  const buildProgressObservations: GraphoxideBuildProgressObservation[] = [];
+  let buildProgressObservationSequence = 0;
+  const observeBuildProgress = (): void => {
+    const progress = cli.buildProgress;
+    updateStatusBar(
+      statusBar,
+      store.state?.model?.snapshot.nodes.length,
+      store.state?.model?.snapshot.edges.length,
+      store.state?.error,
+      cli.watching,
+      progress,
+    );
+    if (context.extensionMode !== vscode.ExtensionMode.Production) {
+      buildProgressObservations.push({
+        sequence: ++buildProgressObservationSequence,
+        progress: progress ?? null,
+        statusBarText: statusBar.text,
+      });
+      if (buildProgressObservations.length > 256) buildProgressObservations.shift();
+    }
+  };
 
   context.subscriptions.push(
     store,
@@ -120,10 +154,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
     vscode.window.registerTreeDataProvider('graphoxide.results', results),
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, codeLens),
     store.onDidChange((state) => {
-      updateStatusBar(statusBar, state?.model?.snapshot.nodes.length, state?.model?.snapshot.edges.length, state?.error, cli.watching);
+      updateStatusBar(statusBar, state?.model?.snapshot.nodes.length, state?.model?.snapshot.edges.length, state?.error, cli.watching, cli.buildProgress);
       visualizer.refresh(state?.model, state?.error);
     }),
-    cli.onDidChangeWatch(() => updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, cli.watching)),
+    cli.onDidChangeWatch(() => updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, cli.watching, cli.buildProgress)),
+    cli.onDidChangeBuildProgress(observeBuildProgress),
     managed.onDidChangeEnablement(() => mcpProvider.refresh()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       const folder = store.state?.folder;
@@ -149,7 +184,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   await vscode.commands.executeCommand('setContext', 'graphoxide.watching', false);
   await vscode.commands.executeCommand('setContext', 'graphoxide.hasGraphFile', false);
   await store.initialize();
-  updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, false);
+  updateStatusBar(statusBar, store.state?.model?.snapshot.nodes.length, store.state?.model?.snapshot.edges.length, store.state?.error, false, cli.buildProgress);
   statusBar.show();
   void managed.start();
   void repairRegistrations(context, cli);
@@ -203,6 +238,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
           return observeWatchLifecycle(store, cli, output);
         },
         mutationLifecycle: () => cli.mutationLifecycle(),
+        buildProgress: () => cli.buildProgress,
+        takeBuildProgressObservations: () => buildProgressObservations.splice(0),
+        statusBarText: () => statusBar.text,
+        latestBuildSummary: async () => {
+          const folder = store.state?.folder ?? await store.preferredFolder(false);
+          if (!folder) return undefined;
+          const output = store.managedOutput(folder);
+          return cli.latestBuildSummary(output.outputDirectory, output.graphUri);
+        },
         runUpdateConcurrently: async () => {
           const before = cli.mutationLifecycle();
           if (before.phase !== 'idle') throw new Error(`Cannot exercise concurrent updates while mutation phase is ${before.phase}.`);
@@ -220,6 +264,66 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
           }
           await first;
           return cli.mutationLifecycle();
+        },
+        runCancelledProgressBuild: async () => {
+          const folder = store.state?.folder ?? await store.preferredFolder(false);
+          if (!folder) throw new Error('Cannot exercise progress cancellation without a workspace folder.');
+          const output = store.managedOutput(folder);
+          const cancellation = new vscode.CancellationTokenSource();
+          let sawActiveProgress = false;
+          const subscription = cli.onDidChangeBuildProgress((progress) => {
+            if (!progress || sawActiveProgress) return;
+            sawActiveProgress = true;
+            cancellation.cancel();
+          });
+          try {
+            await cli.runMutation({
+              title: 'Graphoxide: cancellation lifecycle test…',
+              folder,
+              args: automaticGraphUpdateArguments(folder.uri.fsPath),
+              showProgress: false,
+              cancellable: true,
+              cancellationToken: cancellation.token,
+              environment: output.environment,
+              mutationTarget: output.outputDirectory,
+              mutationOrigin: 'interactive',
+              mutationLabel: 'testing progress cancellation',
+              suppressAutomaticOnFailure: false,
+            });
+          } catch (error) {
+            if (!(error instanceof vscode.CancellationError)) throw error;
+            return sawActiveProgress && cli.buildProgress === undefined;
+          } finally {
+            subscription.dispose();
+            cancellation.dispose();
+          }
+          return false;
+        },
+        runFailingProgressBuild: async () => {
+          const folder = store.state?.folder ?? await store.preferredFolder(false);
+          if (!folder) throw new Error('Cannot exercise progress failure without a workspace folder.');
+          const managedOutput = store.managedOutput(folder);
+          const outputDirectory = path.join(managedOutput.outputDirectory, 'e2e-progress-failure');
+          const reportDirectory = path.join(outputDirectory, 'report-is-a-directory');
+          await vscode.workspace.fs.createDirectory(vscode.Uri.file(reportDirectory));
+          try {
+            await cli.runMutation({
+              title: 'Graphoxide: failure lifecycle test…',
+              folder,
+              args: ['update', folder.uri.fsPath, '--no-cluster', '--runtime-report', reportDirectory],
+              showProgress: false,
+              cancellable: false,
+              environment: { GRAPHOXIDE_OUT: outputDirectory },
+              mutationTarget: outputDirectory,
+              mutationOrigin: 'interactive',
+              mutationLabel: 'testing progress failure',
+              suppressAutomaticOnFailure: false,
+            });
+          } catch (error) {
+            if (error instanceof vscode.CancellationError) throw error;
+            return cli.buildProgress === undefined;
+          }
+          return false;
         },
         staleEnableFailurePreservesDisable: async () => {
           const folder = store.state?.folder ?? await store.preferredFolder(false);
@@ -865,8 +969,19 @@ function safeRelativePath(root: string, file: string): string | undefined {
   return relative.startsWith('..') || path.isAbsolute(relative) ? undefined : relative.split(path.sep).join('/');
 }
 
-function updateStatusBar(item: vscode.StatusBarItem, nodes?: number, edges?: number, error?: string, watching = false): void {
-  if (error) {
+function updateStatusBar(
+  item: vscode.StatusBarItem,
+  nodes?: number,
+  edges?: number,
+  error?: string,
+  watching = false,
+  progress?: BuildProgressSnapshot,
+): void {
+  if (progress?.presentation === 'status') {
+    item.text = `$(sync~spin) Graphoxide: ${progress.message.replace(/…$/u, '')}`;
+    item.tooltip = `Graphoxide ${progress.operation}: ${progress.message}`;
+    item.backgroundColor = undefined;
+  } else if (error) {
     item.text = '$(error) Graphoxide';
     item.tooltip = `Graphoxide could not load graph.json: ${error}`;
     item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');

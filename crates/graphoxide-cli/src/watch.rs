@@ -185,6 +185,19 @@ fn validate_open_rebuild_lock(file: &File, path: &Path) -> anyhow::Result<()> {
 
 impl RebuildLockGuard {
     pub fn acquire(out: &Path, blocking: bool) -> anyhow::Result<Option<Self>> {
+        Self::acquire_with_contention(out, blocking, || {})
+    }
+
+    /// Acquire the rebuild lock and report only an observed contention, not
+    /// every fast blocking-mode acquisition.
+    pub fn acquire_with_contention<F>(
+        out: &Path,
+        blocking: bool,
+        mut on_contention: F,
+    ) -> anyhow::Result<Option<Self>>
+    where
+        F: FnMut(),
+    {
         validate_rebuild_output_directory(out)?;
         let path = out.join(REBUILD_LOCK);
         match fs::symlink_metadata(&path) {
@@ -214,7 +227,14 @@ impl RebuildLockGuard {
         let mut file = options.open(&path)?;
         validate_open_rebuild_lock(&file, &path)?;
         let locked = if blocking {
-            file.lock_exclusive().map(|_| true)
+            match file.try_lock_exclusive() {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    on_contention();
+                    file.lock_exclusive().map(|_| true)
+                }
+                Err(error) => Err(error),
+            }
         } else {
             match file.try_lock_exclusive() {
                 Ok(()) => Ok(true),
@@ -1125,6 +1145,29 @@ pub struct RebuildTimings {
     pub total_ms: u64,
 }
 
+/// Source-safe phase observations from the retired rebuild executor.
+///
+/// The legacy extractor cannot expose per-worker counters without changing
+/// its execution model, so it reports truthful extraction boundaries (0/N
+/// and N/N) while all other phases remain indeterminate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildProgressPhase {
+    Waiting,
+    Scanning,
+    Extracting,
+    Building,
+    Clustering,
+    Publishing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebuildProgress {
+    pub pass: usize,
+    pub phase: RebuildProgressPhase,
+    pub processed: Option<usize>,
+    pub total: Option<usize>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RebuildFileSets {
     current: BTreeSet<PathBuf>,
@@ -1465,6 +1508,27 @@ pub fn rebuild_project_with_observer<F>(
 where
     F: FnMut(usize, &Path),
 {
+    rebuild_project_with_observers(watch_path, options, &mut after_pass, &mut |_| {})
+}
+
+/// Rebuild with source-safe legacy phase observations.
+pub fn rebuild_project_with_progress_observer<F>(
+    watch_path: &Path,
+    options: &RebuildOptions,
+    mut progress: F,
+) -> anyhow::Result<RebuildResult>
+where
+    F: FnMut(RebuildProgress),
+{
+    rebuild_project_with_observers(watch_path, options, &mut |_, _| {}, &mut progress)
+}
+
+fn rebuild_project_with_observers(
+    watch_path: &Path,
+    options: &RebuildOptions,
+    after_pass: &mut dyn FnMut(usize, &Path),
+    progress: &mut dyn FnMut(RebuildProgress),
+) -> anyhow::Result<RebuildResult> {
     let total_started = Instant::now();
     let mut context = resolve_watch_context(
         watch_path,
@@ -1481,7 +1545,13 @@ where
     validate_watch_output_directory(&context.watch_root, &context.output)?;
     if !options.acquire_lock {
         graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&context.output)?;
-        let mut result = rebuild_once(&context, options, options.changed_paths.as_deref(), 1)?;
+        let mut result = rebuild_once(
+            &context,
+            options,
+            options.changed_paths.as_deref(),
+            1,
+            progress,
+        )?;
         result.result.timings.total_ms = elapsed_millis(total_started);
         return Ok(result.result);
     }
@@ -1490,7 +1560,16 @@ where
     {
         queue_pending(&context.output, changed)?;
     }
-    let Some(_guard) = RebuildLockGuard::acquire(&context.output, options.block_on_lock)? else {
+    let Some(_guard) =
+        RebuildLockGuard::acquire_with_contention(&context.output, options.block_on_lock, || {
+            progress(RebuildProgress {
+                pass: 1,
+                phase: RebuildProgressPhase::Waiting,
+                processed: None,
+                total: None,
+            });
+        })?
+    else {
         return Ok(RebuildResult {
             status: RebuildStatus::Queued,
             scope: requested_rebuild_scope(options),
@@ -1514,7 +1593,7 @@ where
         let _ = drain_pending(&context.output)?;
         None
     };
-    let mut result = rebuild_once(&context, options, merged.as_deref(), 1)?;
+    let mut result = rebuild_once(&context, options, merged.as_deref(), 1, progress)?;
     after_pass(1, &context.output);
     if merged.is_some() {
         for pass in 2..=PENDING_DRAIN_MAX_PASSES + 1 {
@@ -1522,7 +1601,7 @@ where
             if late.is_empty() {
                 break;
             }
-            let next = rebuild_once(&context, options, Some(&late), pass)?;
+            let next = rebuild_once(&context, options, Some(&late), pass, progress)?;
             result = merge_rebuild_results(result, next);
             after_pass(pass, &context.output);
         }
@@ -2079,6 +2158,7 @@ fn rebuild_once(
     options: &RebuildOptions,
     changed_paths: Option<&[PathBuf]>,
     pass: usize,
+    progress: &mut dyn FnMut(RebuildProgress),
 ) -> anyhow::Result<RebuildPass> {
     let total_started = Instant::now();
     let graph_path = context.output.join("graph.json");
@@ -2094,6 +2174,12 @@ fn rebuild_once(
         output_dir: Some(context.output.clone()),
         ..Default::default()
     };
+    progress(RebuildProgress {
+        pass,
+        phase: RebuildProgressPhase::Scanning,
+        processed: None,
+        total: None,
+    });
     let detect_started = Instant::now();
     let detection = detect::detect(&context.watch_root, &detect_options)?;
     if !detection.walk_errors.is_empty() {
@@ -2363,6 +2449,12 @@ fn rebuild_once(
     let mut admitted_source_kinds = BTreeMap::<PathBuf, String>::new();
     let mut exact_manifest_entries = graphoxide_extract::cache::Manifest::new();
     if !targets.is_empty() {
+        progress(RebuildProgress {
+            pass,
+            phase: RebuildProgressPhase::Extracting,
+            processed: Some(0),
+            total: Some(targets.len()),
+        });
         match graphoxide_extract::extract_files_deferred_manifest_with_output_and_previous(
             &targets,
             Some(&context.watch_root),
@@ -2402,6 +2494,12 @@ fn rebuild_once(
                 skipped = targets.clone();
             }
         }
+        progress(RebuildProgress {
+            pass,
+            phase: RebuildProgressPhase::Extracting,
+            processed: Some(targets.len()),
+            total: Some(targets.len()),
+        });
     }
     timings.extract_ms = elapsed_millis(extract_started);
     let failed_representation_candidates = skipped
@@ -2507,6 +2605,12 @@ fn rebuild_once(
         // With no verified structural work, retain the exact committed
         // manifest. Re-reading sources here could advance manifest evidence
         // without a corresponding graph publication.
+        progress(RebuildProgress {
+            pass,
+            phase: RebuildProgressPhase::Publishing,
+            processed: None,
+            total: None,
+        });
         clear_needs_update(&context.output)?;
         timings.write_ms = elapsed_millis(write_started);
         return Ok(finish_rebuild_result(
@@ -2538,6 +2642,12 @@ fn rebuild_once(
     for (chunk, target) in chunks.iter_mut().zip(&targets) {
         rewrite_extraction_source(chunk, target, &context.project_root);
     }
+    progress(RebuildProgress {
+        pass,
+        phase: RebuildProgressPhase::Building,
+        processed: None,
+        total: None,
+    });
     let build_started = Instant::now();
     let fresh = flatten(chunks);
     let merged = reconcile_graph(
@@ -2575,6 +2685,12 @@ fn rebuild_once(
         .is_some_and(|existing| same_topology(existing, &candidate))
     {
         let write_started = Instant::now();
+        progress(RebuildProgress {
+            pass,
+            phase: RebuildProgressPhase::Publishing,
+            processed: None,
+            total: None,
+        });
         pending_manifest.commit_strict()?;
         clear_needs_update(&context.output)?;
         timings.write_ms = elapsed_millis(write_started);
@@ -2597,6 +2713,12 @@ fn rebuild_once(
     let mut labels = BTreeMap::new();
     let mut signatures = BTreeMap::new();
     if !options.no_cluster {
+        progress(RebuildProgress {
+            pass,
+            phase: RebuildProgressPhase::Clustering,
+            processed: None,
+            total: None,
+        });
         let cluster_started = Instant::now();
         graphoxide_graph::cluster(&mut candidate)?;
         if let Some(existing) = &existing {
@@ -2610,6 +2732,12 @@ fn rebuild_once(
         .chain(&deleted_sources)
         .map(|identity| source_paths.stored(identity))
         .collect::<BTreeSet<_>>();
+    progress(RebuildProgress {
+        pass,
+        phase: RebuildProgressPhase::Publishing,
+        processed: None,
+        total: None,
+    });
     let write_started = Instant::now();
     let committed = commit_candidate(
         &context.output,

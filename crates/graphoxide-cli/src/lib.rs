@@ -1,6 +1,7 @@
 //! Reusable CLI services.
 
 pub mod build_guard;
+pub mod build_progress;
 pub mod build_telemetry;
 pub mod coverage;
 pub mod enrich;

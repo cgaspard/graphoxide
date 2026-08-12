@@ -30,6 +30,7 @@ ignore.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 regex.workspace = true
+rand.workspace = true
 tokio.workspace = true
 hex.workspace = true
 blake3 = "1"

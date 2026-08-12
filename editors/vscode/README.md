@@ -180,6 +180,19 @@ Graph build and update commands require a trusted workspace. All spawned command
 are argument-safe, run without a shell, support cancellation where applicable,
 and stream diagnostics to the Graphoxide output channel.
 
+Manual builds display their current phase and any real phase-local counters in a
+VS Code progress notification. Update-on-save and continuous-watch rebuilds use
+the status bar instead, so background maintenance does not repeatedly interrupt
+editing. Progress closes with the exact child process that owns the build.
+
+After an index or reindex succeeds, the Control Center's **Workspace graph** card
+shows the latest total runtime, actual full or incremental mode, indexed-input
+count, exact indexed source size when available, completion time, stage timings,
+and incremental changed/deleted counts. These aggregates come from the completed
+indexing pass; the extension does not pre-scan the workspace or reread source to
+calculate them. A failed or cancelled attempt does not create partial statistics
+and leaves the previous successful summary in place.
+
 ## Improve community names with an LLM
 
 Graphoxide can optionally ask an LLM to replace its deterministic community

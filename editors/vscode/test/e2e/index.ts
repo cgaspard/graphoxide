@@ -5,7 +5,7 @@ import * as http from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { GraphoxideExtensionApi } from '../../src/extension';
+import { GraphoxideBuildProgressObservation, GraphoxideExtensionApi } from '../../src/extension';
 import { parseGraphJson, sourceLine } from '../../src/graph';
 import { installerById } from '../../src/mcp/installers';
 
@@ -45,8 +45,21 @@ export async function run(): Promise<void> {
     'A stale failed Enable continuation overwrote the newer Disable choice.',
   );
   assert.equal((await api.status()).enabled, false);
+  assert.equal(
+    await testApi.latestBuildSummary(),
+    undefined,
+    'Fresh activation computed or backfilled index statistics before a successful build.',
+  );
 
+  testApi.takeBuildProgressObservations();
   await api.enableWorkspace('manual');
+  assertProgressLifecycle(
+    testApi.takeBuildProgressObservations(),
+    'notification',
+    'interactive initial build',
+    true,
+  );
+  assert.doesNotMatch(testApi.statusBarText(), /sync~spin/u, 'Initial child close left progress active.');
   const enabled = await api.status();
   assert.equal(enabled.enabled, true);
   assert.equal(enabled.freshness, 'manual');
@@ -54,12 +67,51 @@ export async function run(): Promise<void> {
   assert.ok((enabled.edges ?? 0) >= 50, `Expected graph relationships, got ${enabled.edges ?? 0} edges.`);
   assert.deepEqual(enabled.mcp?.args.slice(-1), ['serve']);
   assert.equal(enabled.mcp?.cwd, folder.uri.fsPath);
+  const initialSummary = await testApi.latestBuildSummary();
+  assert.ok(initialSummary, 'The successful initial build did not retain its bounded summary.');
+  assert.equal(initialSummary.mode, 'full');
+  assert.ok(initialSummary.elapsedMs >= 0);
+  assert.ok(initialSummary.files.indexed > 0);
+  assert.ok((initialSummary.sourceBytes ?? 0) > 0, 'The isolated initial build omitted selected source bytes.');
 
+  testApi.takeBuildProgressObservations();
   const mutationBefore = testApi.mutationLifecycle();
   const mutationAfter = await testApi.runUpdateConcurrently();
   assert.equal(mutationAfter.phase, 'idle');
   assert.equal(mutationAfter.generation, mutationBefore.generation + 1, 'Concurrent update callers launched more than one graph child.');
   assert.equal(mutationAfter.lastCompletedGeneration, mutationAfter.generation);
+  const updateSummary = await testApi.latestBuildSummary();
+  assert.ok(updateSummary, 'The successful update did not retain its bounded summary.');
+  assert.equal(updateSummary.operation, 'update');
+  assert.equal(updateSummary.mode, 'incremental');
+  assert.ok(updateSummary.completedAt >= initialSummary.completedAt);
+  assertProgressLifecycle(
+    testApi.takeBuildProgressObservations(),
+    'notification',
+    'interactive incremental update',
+  );
+
+  testApi.takeBuildProgressObservations();
+  assert.equal(await testApi.runCancelledProgressBuild(), true, 'Cancellation did not close its owned progress generation.');
+  assertCancelledProgressLifecycle(testApi.takeBuildProgressObservations());
+  assert.deepEqual(
+    await testApi.latestBuildSummary(),
+    updateSummary,
+    'A cancelled mutation replaced the latest successful summary.',
+  );
+
+  testApi.takeBuildProgressObservations();
+  assert.equal(await testApi.runFailingProgressBuild(), true, 'Failure did not close its owned progress generation.');
+  assertProgressLifecycle(
+    testApi.takeBuildProgressObservations(),
+    'status',
+    'failed background-style update',
+  );
+  assert.deepEqual(
+    await testApi.latestBuildSummary(),
+    updateSummary,
+    'A failed mutation replaced the latest successful summary.',
+  );
 
   await verifyMcpProtocol(enabled.mcp!);
   await verifyGraphPlacement(api, folder, enabled.graphPath!);
@@ -447,12 +499,20 @@ async function verifySaveAndWatchUpdates(api: GraphoxideExtensionApi, folder: vs
   const testApi = api.test;
   assert.ok(testApi, 'Mutation lifecycle controls must be available in Extension Development mode.');
   await api.configureFreshness('save');
+  testApi.takeBuildProgressObservations();
   await appendAndSave(vscode.Uri.joinPath(folder.uri, 'cartograph', 'domain.py'), '\n\ndef e2e_save_refresh_marker() -> str:\n    return "save"\n');
   await poll(() => graphContains(graphPath, 'e2e_save_refresh_marker'), 'save-triggered graph update', 30000);
   await poll(
     () => testApi.mutationLifecycle().phase === 'idle',
     'save-triggered graph process to release mutation ownership',
   );
+  assertProgressLifecycle(
+    testApi.takeBuildProgressObservations(),
+    'status',
+    'save-triggered automatic update',
+    true,
+  );
+  assert.doesNotMatch(testApi.statusBarText(), /sync~spin/u, 'Save child close left status progress active.');
 
   await api.configureFreshness('watch');
   await poll(async () => (await api.status()).watching, 'watch process to start');
@@ -478,8 +538,17 @@ async function verifySaveAndWatchUpdates(api: GraphoxideExtensionApi, folder: vs
     'Managed resume did not join one intervening writer and retry watch exactly once.',
   );
   assert.equal(raced.mutationAfter.phase, 'idle');
+  testApi.takeBuildProgressObservations();
   await appendAndSave(vscode.Uri.joinPath(folder.uri, 'cartograph', 'notifications.py'), '\n\ndef e2e_watch_refresh_marker() -> str:\n    return "watch"\n');
   await poll(() => graphContains(graphPath, 'e2e_watch_refresh_marker'), 'watch-triggered graph update', 30000);
+  await poll(() => testApi.buildProgress() === undefined, 'watch pass progress to reach its terminal');
+  assertProgressLifecycle(
+    testApi.takeBuildProgressObservations(),
+    'status',
+    'watch-triggered update pass',
+    true,
+  );
+  assert.doesNotMatch(testApi.statusBarText(), /sync~spin/u, 'Watch pass terminal left status progress active.');
   await api.configureFreshness('manual');
   await poll(async () => !(await api.status()).watching, 'watch process to stop');
 }
@@ -585,6 +654,71 @@ async function verifyCustomOutputMaintenance(api: GraphoxideExtensionApi, folder
   const finalWatch = testApi.watchLifecycle();
   assert.equal(finalWatch.phase, 'stopped');
   assert.ok(finalWatch.lastExitedGeneration >= concurrentGeneration);
+}
+
+function assertProgressLifecycle(
+  observations: readonly GraphoxideBuildProgressObservation[],
+  presentation: 'notification' | 'status',
+  label: string,
+  expectCounter = false,
+): void {
+  assert.ok(observations.length >= 2, `${label} emitted no bounded progress lifecycle.`);
+  for (let index = 1; index < observations.length; index += 1) {
+    assert.ok(
+      observations[index]!.sequence > observations[index - 1]!.sequence,
+      `${label} observations regressed sequence order.`,
+    );
+  }
+  const activeObservations = observations.filter(
+    (observation): observation is GraphoxideBuildProgressObservation & { readonly progress: NonNullable<GraphoxideBuildProgressObservation['progress']> } => observation.progress !== null,
+  );
+  const active = activeObservations.map((observation) => observation.progress);
+  assert.ok(active.length > 0, `${label} never exposed an active phase.`);
+  assert.ok(
+    active.every((progress) => progress.presentation === presentation),
+    `${label} used the wrong VS Code progress surface: ${JSON.stringify(active)}.`,
+  );
+  assert.equal(
+    new Set(active.map((progress) => progress.generation)).size,
+    1,
+    `${label} was split across multiple child generations.`,
+  );
+  assert.ok(
+    active.some((progress) => /Scanning|Extracting|Building|Clustering|Publishing/iu.test(progress.message)),
+    `${label} did not expose a real build phase: ${JSON.stringify(active)}.`,
+  );
+  if (expectCounter) {
+    assert.ok(
+      active.some((progress) => /\(\d+\/\d+\)/u.test(progress.message)),
+      `${label} did not expose a known processed/total counter: ${JSON.stringify(active)}.`,
+    );
+  }
+  assert.ok(active.every((progress) => !progress.message.includes('%')), `${label} invented an overall percentage.`);
+  if (presentation === 'status') {
+    assert.ok(
+      activeObservations.every((observation) => /sync~spin/u.test(observation.statusBarText)),
+      `${label} was not exposed in the status bar while active.`,
+    );
+  } else {
+    assert.ok(
+      activeObservations.every((observation) => !/sync~spin/u.test(observation.statusBarText)),
+      `${label} leaked notification progress into the status bar.`,
+    );
+  }
+  assert.equal(observations.at(-1)?.progress, null, `${label} did not clear on its owning terminal/close.`);
+  assert.doesNotMatch(observations.at(-1)?.statusBarText ?? '', /sync~spin/u);
+}
+
+function assertCancelledProgressLifecycle(observations: readonly GraphoxideBuildProgressObservation[]): void {
+  const activeObservations = observations.filter((observation) => observation.progress !== null);
+  const active = activeObservations.map((observation) => observation.progress!);
+  assert.ok(active.length > 0, 'Cancelled build never became active.');
+  assert.ok(active.every((progress) => progress.presentation === 'status'));
+  assert.equal(new Set(active.map((progress) => progress.generation)).size, 1);
+  assert.ok(active.every((progress) => !progress.message.includes('%')));
+  assert.ok(activeObservations.every((observation) => /sync~spin/u.test(observation.statusBarText)));
+  assert.equal(observations.at(-1)?.progress, null, 'Cancelled child close did not clear its owned progress.');
+  assert.doesNotMatch(observations.at(-1)?.statusBarText ?? '', /sync~spin/u);
 }
 
 async function appendAndSave(uri: vscode.Uri, text: string): Promise<void> {

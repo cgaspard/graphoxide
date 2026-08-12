@@ -494,6 +494,33 @@ fn test_watch_raises_without_watchdog() {
 }
 
 #[test]
+fn legacy_rebuild_progress_uses_real_phase_boundaries_and_paired_counters() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join("main.rs"), "pub fn indexed() {}\n");
+    let mut events = Vec::new();
+    let result =
+        rebuild_project_with_progress_observer(temp.path(), &options(temp.path(), true), |event| {
+            events.push(event)
+        })
+        .unwrap();
+    assert!(result.succeeded());
+    let phases = events.iter().map(|event| event.phase).collect::<Vec<_>>();
+    assert_eq!(
+        phases,
+        vec![
+            RebuildProgressPhase::Scanning,
+            RebuildProgressPhase::Extracting,
+            RebuildProgressPhase::Extracting,
+            RebuildProgressPhase::Building,
+            RebuildProgressPhase::Publishing,
+        ]
+    );
+    assert_eq!((events[1].processed, events[1].total), (Some(0), Some(1)));
+    assert_eq!((events[2].processed, events[2].total), (Some(1), Some(1)));
+    assert!(events.iter().all(|event| event.pass == 1));
+}
+
+#[test]
 fn test_rebuild_lock_writes_pid_with_newline() {
     let temp = tempfile::tempdir().unwrap();
     let guard = RebuildLockGuard::acquire(temp.path(), false)
@@ -503,6 +530,38 @@ fn test_rebuild_lock_writes_pid_with_newline() {
         fs::read_to_string(guard.path()).unwrap(),
         format!("{}\n", std::process::id())
     );
+}
+
+#[test]
+fn rebuild_lock_contention_callback_is_truthful() {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut fast_contentions = 0;
+    drop(
+        RebuildLockGuard::acquire_with_contention(temp.path(), true, || {
+            fast_contentions += 1;
+        })
+        .unwrap()
+        .unwrap(),
+    );
+    assert_eq!(fast_contentions, 0, "an immediate lock is not waiting");
+
+    let holder = RebuildLockGuard::acquire(temp.path(), false)
+        .unwrap()
+        .unwrap();
+    let output = temp.path().to_path_buf();
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        RebuildLockGuard::acquire_with_contention(&output, true, || {
+            waiting_tx.send(()).unwrap();
+        })
+        .unwrap()
+        .unwrap()
+    });
+    waiting_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    drop(holder);
+    drop(waiter.join().unwrap());
 }
 
 #[cfg(unix)]
