@@ -166,6 +166,15 @@ jobs:
           toolchain: "1.97.1"
       - run: npm ci
       - run: npm run check
+      - run: npm run test:visualizer:browser
+        env:
+          GRAPHOXIDE_VISUALIZER_ARTIFACTS: ${{ runner.temp }}/graphoxide-visualizer
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: graphoxide-visualizer-browser
+          path: ${{ runner.temp }}/graphoxide-visualizer
+          if-no-files-found: ignore
       - run: cargo build --release --locked --bin graphoxide
         working-directory: ${{ github.workspace }}
       - run: xvfb-run -a npm run test:e2e

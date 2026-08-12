@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "description": "Sanitized scale profile for the 750-symbol production overlap report.",
+  "nodeCount": 750,
+  "edgeCount": 1500,
+  "communityGroups": [
+    { "count": 1, "size": 35 },
+    { "count": 1, "size": 19 },
+    { "count": 1, "size": 18 },
+    { "count": 1, "size": 14 },
+    { "count": 1, "size": 13 },
+    { "count": 15, "size": 7 },
+    { "count": 66, "size": 6 },
+    { "count": 150, "size": 1 }
+  ]
+}
