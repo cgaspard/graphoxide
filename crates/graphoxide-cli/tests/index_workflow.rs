@@ -1,4 +1,5 @@
 use graphoxide_cli::{
+    build_progress::{BUILD_PROGRESS_NONCE_ENV, BUILD_PROGRESS_PREFIX},
     index::{graph_file_sha256, COVERAGE_ARTIFACT, MAX_INDEX_MANIFEST_BYTES},
     watch::RebuildLockGuard,
 };
@@ -13,6 +14,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::{fs::File, io::Read as _, os::fd::FromRawFd as _};
 
 fn graphoxide(current_directory: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_graphoxide"));
@@ -49,6 +53,75 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {
 }
 
 #[cfg(unix)]
+const TERMINAL_RETAIN_LIMIT: usize = 64 * 1024;
+
+#[cfg(unix)]
+fn read_terminal(mut terminal: File) -> (Vec<u8>, bool) {
+    let mut output = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match terminal.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let retained = TERMINAL_RETAIN_LIMIT.saturating_sub(output.len()).min(read);
+                output.extend_from_slice(&buffer[..retained]);
+                truncated |= retained != read;
+            }
+            // Linux PTY masters report EIO after the final slave descriptor
+            // closes; other Unix implementations report a normal EOF.
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+            Err(error) => panic!("read terminal stderr: {error}"),
+        }
+    }
+    (output, truncated)
+}
+
+#[cfg(unix)]
+fn run_with_terminal_stderr(mut command: Command, timeout: Duration) -> (Output, Vec<u8>) {
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    // SAFETY: openpty initializes both descriptors on success. Null terminal
+    // attributes and window size request the platform defaults.
+    let result = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(
+        result,
+        0,
+        "create terminal pair: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: successful openpty returned two newly owned descriptors.
+    let terminal = unsafe { File::from_raw_fd(master_fd) };
+    // SAFETY: this is the other newly owned descriptor from openpty.
+    let child_stderr = unsafe { File::from_raw_fd(slave_fd) };
+
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(child_stderr));
+    let child = command
+        .spawn()
+        .expect("spawn graphoxide with terminal stderr");
+    // Command no longer needs to retain any parent-side stdio configuration.
+    drop(command);
+    let terminal_reader = thread::spawn(move || read_terminal(terminal));
+    let output = wait_with_timeout(child, timeout);
+    let (terminal_output, truncated) = terminal_reader.join().expect("join terminal stderr reader");
+    assert!(
+        !truncated,
+        "terminal progress exceeded {TERMINAL_RETAIN_LIMIT} bytes"
+    );
+    (output, terminal_output)
+}
+
+#[cfg(unix)]
 struct PermissionRestore {
     path: PathBuf,
     mode: u32,
@@ -76,6 +149,485 @@ fn run_build(project: &Path, command: &str, output_root: &Path, extra: &[&str]) 
         .arg("--json");
     process.args(extra);
     process.output().expect("run graphoxide build")
+}
+
+#[test]
+fn opt_in_progress_is_bounded_source_safe_stderr_and_keeps_json_stdout() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("private-project-name");
+    let output_root = fixture.path().join("output");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("main.rs"), "pub fn answer() -> u8 { 42 }\n").expect("Rust");
+
+    let output = graphoxide(&project)
+        .arg("index")
+        .arg(&project)
+        .arg("--out")
+        .arg(&output_root)
+        .arg("--force")
+        .arg("--no-cluster")
+        .arg("--json")
+        .arg("--progress=json")
+        .output()
+        .expect("index with progress stream");
+    assert!(output.status.success(), "{}", output_text(&output));
+    let stdout: Value = serde_json::from_slice(&output.stdout).expect("one unchanged JSON report");
+    assert_eq!(stdout["build"]["operation"], "index");
+
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    let events = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(BUILD_PROGRESS_PREFIX))
+        .map(|payload| {
+            assert!(payload.len() <= 4096, "wire payload exceeded its byte cap");
+            assert!(!payload.contains("private-project-name"));
+            assert!(!payload.contains("output_path"));
+            assert!(!payload.contains("warnings"));
+            serde_json::from_str::<Value>(payload).expect("progress JSON")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.first().and_then(|event| event["type"].as_str()),
+        Some("started")
+    );
+    assert!(events.iter().any(|event| event["type"] == "phase"));
+    assert!(events.iter().any(|event| {
+        event["type"] == "phase"
+            && event["phase"] == "extracting"
+            && event["processed"].as_u64().is_some()
+            && event["total"].as_u64().is_some()
+    }));
+    let phases = events
+        .iter()
+        .filter(|event| event["type"] == "phase")
+        .filter_map(|event| event["phase"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "auditing",
+        "scanning",
+        "extracting",
+        "building",
+        "publishing",
+    ] {
+        assert!(phases.contains(&expected), "missing {expected}: {phases:?}");
+    }
+    let phase_rank = |phase: &str| match phase {
+        "waiting" => 0,
+        "auditing" => 1,
+        "scanning" => 2,
+        "extracting" => 3,
+        "building" => 4,
+        "clustering" => 5,
+        "publishing" => 6,
+        other => panic!("unknown phase {other}"),
+    };
+    assert!(phases
+        .windows(2)
+        .all(|pair| { pair[0] == pair[1] || phase_rank(pair[0]) < phase_rank(pair[1]) }));
+    let extracting = events
+        .iter()
+        .filter(|event| event["type"] == "phase" && event["phase"] == "extracting")
+        .collect::<Vec<_>>();
+    assert!(extracting.windows(2).all(|pair| {
+        pair[0]["total"] == pair[1]["total"]
+            && pair[0]["processed"].as_u64() <= pair[1]["processed"].as_u64()
+    }));
+    let run_nonce = events
+        .first()
+        .and_then(|event| event["run_nonce"].as_str())
+        .expect("generated progress nonce");
+    assert_eq!(run_nonce.len(), 32);
+    assert!(
+        run_nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "nonce must be lowercase hexadecimal"
+    );
+    assert!(events.iter().all(|event| event["run_nonce"] == run_nonce));
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "completed")
+        .expect("successful completion envelope");
+    assert_eq!(completed["operation"], "index");
+    assert_eq!(completed["mode"], "full");
+    assert_eq!(completed["status"], "rebuilt");
+    assert_eq!(completed["files"]["indexed"], 1);
+    assert!(completed["source_bytes"].as_u64().is_some());
+
+    let default_output = graphoxide(&project)
+        .arg("update")
+        .arg(&project)
+        .arg("--json")
+        .env("GRAPHOXIDE_OUT", output_root.join("graphoxide-out"))
+        .output()
+        .expect("default non-TTY update");
+    assert!(
+        default_output.status.success(),
+        "{}",
+        output_text(&default_output)
+    );
+    assert!(!String::from_utf8_lossy(&default_output.stderr).contains(BUILD_PROGRESS_PREFIX));
+    serde_json::from_slice::<Value>(&default_output.stdout).expect("default stdout remains JSON");
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_progress_uses_terminal_stderr_and_preserves_json_stdout() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("main.rs"), "pub fn answer() -> u8 { 42 }\n").expect("Rust");
+
+    for (case, progress) in [("default", None), ("explicit", Some("--progress=auto"))] {
+        let output_root = fixture.path().join(format!("{case}-output"));
+        let mut command = graphoxide(&project);
+        command
+            .arg("index")
+            .arg(&project)
+            .arg("--out")
+            .arg(&output_root)
+            .arg("--force")
+            .arg("--no-cluster")
+            .arg("--json");
+        if let Some(progress) = progress {
+            command.arg(progress);
+        }
+
+        let (output, terminal_stderr) = run_with_terminal_stderr(command, Duration::from_secs(20));
+        let terminal_stderr = String::from_utf8(terminal_stderr).expect("UTF-8 terminal stderr");
+        assert!(
+            output.status.success(),
+            "{case} auto progress failed\n{}\nterminal stderr:\n{terminal_stderr}",
+            output_text(&output)
+        );
+        let stdout: Value =
+            serde_json::from_slice(&output.stdout).expect("stdout remains one JSON document");
+        assert_eq!(stdout["build"]["operation"], "index", "{case}");
+        assert!(
+            terminal_stderr.contains("[graphoxide] index full build started"),
+            "{case} did not enable human progress on a terminal:\n{terminal_stderr}"
+        );
+        assert!(
+            terminal_stderr.contains("[graphoxide] Scanning inputs"),
+            "{case} omitted a human phase update:\n{terminal_stderr}"
+        );
+        assert!(
+            terminal_stderr.contains("[graphoxide] build complete in"),
+            "{case} omitted the human terminal state:\n{terminal_stderr}"
+        );
+        assert!(
+            !terminal_stderr.contains(BUILD_PROGRESS_PREFIX),
+            "{case} auto mode leaked the JSON protocol onto human stderr:\n{terminal_stderr}"
+        );
+    }
+}
+
+#[test]
+fn explicit_never_is_silent_and_invalid_json_nonce_fails_before_mutation() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output_root = fixture.path().join("output");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("main.rs"), "pub fn answer() -> u8 { 42 }\n").expect("Rust");
+
+    let never = graphoxide(&project)
+        .arg("extract")
+        .arg(&project)
+        .arg("--out")
+        .arg(&output_root)
+        .arg("--force")
+        .arg("--progress=never")
+        .output()
+        .expect("extract with progress disabled");
+    assert!(never.status.success(), "{}", output_text(&never));
+    assert!(!String::from_utf8_lossy(&never.stderr).contains(BUILD_PROGRESS_PREFIX));
+
+    let rejected_root = fixture.path().join("rejected-output");
+    let rejected = graphoxide(&project)
+        .arg("index")
+        .arg(&project)
+        .arg("--out")
+        .arg(&rejected_root)
+        .arg("--force")
+        .arg("--progress=json")
+        .env(BUILD_PROGRESS_NONCE_ENV, "source-controlled")
+        .output()
+        .expect("reject malformed progress nonce");
+    assert!(!rejected.status.success(), "{}", output_text(&rejected));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("32 lowercase hexadecimal"));
+    assert!(
+        !managed(&rejected_root).exists(),
+        "nonce validation mutated output"
+    );
+
+    let watch_rejected = graphoxide(&project)
+        .arg("watch")
+        .arg(&project)
+        .arg("--progress=json")
+        .env(BUILD_PROGRESS_NONCE_ENV, "still-invalid")
+        .output()
+        .expect("watch rejects nonce before installing watcher");
+    assert!(!watch_rejected.status.success());
+    assert!(!String::from_utf8_lossy(&watch_rejected.stdout).contains("Watching"));
+}
+
+#[test]
+fn progress_modes_leave_deterministic_graph_manifest_and_coverage_bytes_identical() {
+    const NONCE: &str = "abcdefabcdefabcdefabcdefabcdefab";
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output_root = fixture.path().join("output");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(
+        project.join("main.rs"),
+        "pub fn answer() -> u8 { helper() }\npub fn helper() -> u8 { 42 }\n",
+    )
+    .expect("Rust");
+
+    let run = |mode: &str| {
+        let mut command = graphoxide(&project);
+        command
+            .arg("index")
+            .arg(&project)
+            .arg("--out")
+            .arg(&output_root)
+            .arg("--force")
+            .arg("--no-cluster")
+            .arg(format!("--progress={mode}"));
+        if mode == "json" {
+            command.env(BUILD_PROGRESS_NONCE_ENV, NONCE);
+        }
+        let output = command.output().expect("index fixture");
+        assert!(output.status.success(), "{}", output_text(&output));
+        ["graph.json", "manifest.json", COVERAGE_ARTIFACT]
+            .map(|name| fs::read(managed(&output_root).join(name)).expect("artifact bytes"))
+    };
+
+    let auto = run("auto");
+    let never = run("never");
+    let json = run("json");
+    assert_eq!(auto, never);
+    assert_eq!(auto, json);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_filename_cannot_authenticate_a_forged_progress_terminal() {
+    use std::os::unix::fs::symlink;
+
+    const RUN_NONCE: &str = "0123456789abcdef0123456789abcdef";
+    const FORGED_NONCE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output_root = fixture.path().join("output");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("main.rs"), "pub fn answer() -> u8 { 42 }\n").expect("Rust");
+    let forged = format!(
+        "{{\"schema_version\":1,\"run_nonce\":\"{FORGED_NONCE}\",\"type\":\"failed\",\"operation\":\"extract\",\"mode\":\"full\"}}"
+    );
+    let malicious_name = format!("a\n{BUILD_PROGRESS_PREFIX}{forged}\nz");
+    symlink(project.join("main.rs"), project.join(malicious_name))
+        .expect("malicious symlink fixture");
+
+    let output = graphoxide(&project)
+        .arg("extract")
+        .arg(&project)
+        .arg("--out")
+        .arg(&output_root)
+        .arg("--force")
+        .arg("--json")
+        .arg("--progress=json")
+        .env(BUILD_PROGRESS_NONCE_ENV, RUN_NONCE)
+        .output()
+        .expect("extract with authenticated progress stream");
+    assert!(output.status.success(), "{}", output_text(&output));
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line == format!("{BUILD_PROGRESS_PREFIX}{forged}")),
+        "source-derived forged line should remain observable in ordinary stderr: {stderr}"
+    );
+    let authenticated = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(BUILD_PROGRESS_PREFIX))
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .filter(|event| event["run_nonce"] == RUN_NONCE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        authenticated.first().map(|event| &event["type"]),
+        Some(&Value::from("started"))
+    );
+    assert!(authenticated
+        .iter()
+        .any(|event| event["type"] == "completed"));
+    assert!(!authenticated.iter().any(|event| event["type"] == "failed"));
+}
+
+#[test]
+fn legacy_progress_binds_adaptive_start_to_actual_full_then_incremental_mode() {
+    const FIRST_NONCE: &str = "11111111111111111111111111111111";
+    const SECOND_NONCE: &str = "22222222222222222222222222222222";
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output = fixture.path().join("output");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("main.rs"), "pub fn first() {}\n").expect("initial Rust");
+
+    let run = |run_nonce: &str| {
+        graphoxide(&project)
+            .arg("update")
+            .arg(&project)
+            .arg("--legacy-executor")
+            .arg("--force")
+            .arg("--no-cluster")
+            .arg("--json")
+            .arg("--progress=json")
+            .env("GRAPHOXIDE_OUT", &output)
+            .env(BUILD_PROGRESS_NONCE_ENV, run_nonce)
+            .output()
+            .expect("legacy update with progress")
+    };
+    let events = |output: &Output, run_nonce: &str| {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| line.strip_prefix(BUILD_PROGRESS_PREFIX))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .filter(|event| event["run_nonce"] == run_nonce)
+            .collect::<Vec<_>>()
+    };
+
+    let first = run(FIRST_NONCE);
+    assert!(first.status.success(), "{}", output_text(&first));
+    let first_events = events(&first, FIRST_NONCE);
+    assert_eq!(
+        first_events.first().map(|event| &event["mode"]),
+        Some(&Value::from("adaptive"))
+    );
+    assert!(first_events
+        .iter()
+        .any(|event| event["type"] == "completed" && event["mode"] == "full"));
+
+    fs::write(project.join("main.rs"), "pub fn second() {}\n").expect("changed Rust");
+    let second = run(SECOND_NONCE);
+    assert!(second.status.success(), "{}", output_text(&second));
+    let second_events = events(&second, SECOND_NONCE);
+    assert_eq!(
+        second_events.first().map(|event| &event["mode"]),
+        Some(&Value::from("adaptive"))
+    );
+    assert!(second_events
+        .iter()
+        .any(|event| event["type"] == "completed" && event["mode"] == "incremental"));
+    for events in [&first_events, &second_events] {
+        let phases = events
+            .iter()
+            .filter(|event| event["type"] == "phase")
+            .filter_map(|event| event["phase"].as_str())
+            .collect::<Vec<_>>();
+        assert!(phases.contains(&"scanning"), "{phases:?}");
+        assert!(phases.contains(&"extracting"), "{phases:?}");
+        assert!(phases.contains(&"building"), "{phases:?}");
+        assert!(phases.contains(&"publishing"), "{phases:?}");
+        let extracting = events
+            .iter()
+            .filter(|event| event["type"] == "phase" && event["phase"] == "extracting")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            extracting.first().map(|event| &event["processed"]),
+            Some(&Value::from(0))
+        );
+        assert_eq!(
+            extracting.last().map(|event| &event["processed"]),
+            extracting.last().map(|event| &event["total"])
+        );
+    }
+}
+
+#[test]
+fn isolated_update_reports_full_without_baseline_then_incremental_with_baseline() {
+    const FIRST_NONCE: &str = "33333333333333333333333333333333";
+    const SECOND_NONCE: &str = "44444444444444444444444444444444";
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output = fixture.path().join("output");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("main.rs"), "pub fn first() {}\n").expect("initial Rust");
+
+    let run = |nonce: &str| {
+        graphoxide(&project)
+            .arg("update")
+            .arg(&project)
+            .arg("--no-cluster")
+            .arg("--json")
+            .arg("--progress=json")
+            .env("GRAPHOXIDE_OUT", &output)
+            .env(BUILD_PROGRESS_NONCE_ENV, nonce)
+            .output()
+            .expect("isolated update")
+    };
+    let completed_mode = |output: &Output, nonce: &str| {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| line.strip_prefix(BUILD_PROGRESS_PREFIX))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .find(|event| event["run_nonce"] == nonce && event["type"] == "completed")
+            .and_then(|event| event["mode"].as_str().map(str::to_owned))
+            .expect("completed mode")
+    };
+
+    let first = run(FIRST_NONCE);
+    assert!(first.status.success(), "{}", output_text(&first));
+    assert_eq!(completed_mode(&first, FIRST_NONCE), "full");
+
+    fs::write(project.join("main.rs"), "pub fn second() {}\n").expect("changed Rust");
+    let second = run(SECOND_NONCE);
+    assert!(second.status.success(), "{}", output_text(&second));
+    assert_eq!(completed_mode(&second, SECOND_NONCE), "incremental");
+}
+
+#[test]
+fn progress_fails_instead_of_completing_when_post_commit_runtime_report_fails() {
+    const NONCE: &str = "55555555555555555555555555555555";
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output = fixture.path().join("output");
+    let report_destination = fixture.path().join("report-is-a-directory");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&report_destination).unwrap();
+    fs::write(project.join("main.rs"), "pub fn indexed() {}\n").unwrap();
+
+    let result = graphoxide(&project)
+        .arg("update")
+        .arg(&project)
+        .arg("--no-cluster")
+        .arg("--runtime-report")
+        .arg(&report_destination)
+        .arg("--progress=json")
+        .env("GRAPHOXIDE_OUT", &output)
+        .env(BUILD_PROGRESS_NONCE_ENV, NONCE)
+        .output()
+        .expect("update with failing report destination");
+    assert!(!result.status.success(), "{}", output_text(&result));
+    assert!(
+        output.join("graph.json").is_file(),
+        "graph commit precedes report"
+    );
+    let event_types = String::from_utf8_lossy(&result.stderr)
+        .lines()
+        .filter_map(|line| line.strip_prefix(BUILD_PROGRESS_PREFIX))
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .filter(|event| event["run_nonce"] == NONCE)
+        .filter_map(|event| event["type"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(
+        event_types.contains(&"failed".to_owned()),
+        "{event_types:?}"
+    );
+    assert!(
+        !event_types.contains(&"completed".to_owned()),
+        "{event_types:?}"
+    );
 }
 
 fn coverage(output_root: &Path) -> CoverageReport {
@@ -913,6 +1465,48 @@ fn incomplete_index_requires_allow_partial_and_reports_it_truthfully() {
         "{}",
         output_text(&human)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_never_is_silent_while_waiting_for_the_build_lock() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let output_root = fixture.path().join("output");
+    let output = managed(&output_root);
+    fs::create_dir_all(&project).expect("project directory");
+    fs::create_dir_all(&output).expect("managed output");
+    fs::write(project.join("main.rs"), "fn main() {}\n").expect("source");
+    let guard = RebuildLockGuard::acquire(&output, false)
+        .expect("lock acquisition")
+        .expect("uncontended lock");
+
+    let mut child = graphoxide(&project)
+        .arg("index")
+        .arg(&project)
+        .arg("--out")
+        .arg(&output_root)
+        .arg("--force")
+        .arg("--json")
+        .arg("--progress=never")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn waiting index");
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        child.try_wait().expect("poll contended child").is_none(),
+        "index unexpectedly completed while the rebuild lock was held"
+    );
+    assert!(!output.join("graph.json").exists());
+    drop(guard);
+    let result = wait_with_timeout(child, Duration::from_secs(5));
+
+    assert!(result.status.success(), "{}", output_text(&result));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!stderr.contains("waiting for the rebuild lock at"));
+    assert!(!stderr.contains(BUILD_PROGRESS_PREFIX));
+    assert!(output.join("graph.json").is_file());
 }
 
 #[cfg(unix)]

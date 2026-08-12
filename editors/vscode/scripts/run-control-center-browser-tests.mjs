@@ -1,12 +1,10 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
+import { executeBrowserProcess } from './browser-process.mjs';
 
-const execute = promisify(execFile);
 const extensionRoot = process.cwd();
 const chrome = await locateChrome();
 const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'graphoxide-control-center-browser-'));
@@ -216,14 +214,12 @@ async function captureScreenshot(url, scenario) {
 }
 
 async function executeChrome(arguments_) {
-  try {
-    return await execute(chrome, arguments_, { maxBuffer: 8 * 1024 * 1024, timeout: 8_000, killSignal: 'SIGKILL' });
-  } catch (error) {
-    if (error && typeof error === 'object' && error.killed === true && typeof error.stdout === 'string') {
-      return { stdout: error.stdout, stderr: typeof error.stderr === 'string' ? error.stderr : '' };
-    }
-    throw error;
-  }
+  return executeBrowserProcess(chrome, arguments_, {
+    maxBuffer: 8 * 1024 * 1024,
+    acceptTimedOutStdout: arguments_.includes('--dump-dom')
+      ? (stdout) => /<output[^>]*id="layout-result"[^>]*>[\s\S]*\S[\s\S]*<\/output>/u.test(stdout)
+      : () => true,
+  });
 }
 
 function chromeArguments(profile, scenario, url, additions) {
@@ -287,7 +283,7 @@ async function locateChrome() {
   ].filter(Boolean);
   for (const candidate of candidates) {
     try {
-      await execute(candidate, ['--version']);
+      await executeBrowserProcess(candidate, ['--version'], { maxBuffer: 1024 * 1024 });
       return candidate;
     } catch {
       // Continue through the fixed local browser candidates.

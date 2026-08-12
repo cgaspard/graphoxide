@@ -72,6 +72,8 @@ export class ControlCenterPanel implements vscode.Disposable {
   private readonly allowedPaths = new Set<string>();
   private busy = false;
   private refreshing = false;
+  private refreshPending = false;
+  private refreshPendingReload = false;
 
   static show(context: vscode.ExtensionContext, services: ControlCenterServices): void {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
@@ -102,6 +104,7 @@ export class ControlCenterPanel implements vscode.Disposable {
       this.panel.webview.onDidReceiveMessage((message: ControlCenterMessage) => this.handleMessage(message)),
       services.store.onDidChange(() => void this.refresh()),
       services.cli.onDidChangeWatch(() => void this.refresh()),
+      services.cli.onDidChangeBuildSummary(() => void this.refresh()),
       services.managed.onDidChangeEnablement(() => void this.refresh()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('graphoxide')) void this.refresh();
@@ -189,7 +192,11 @@ export class ControlCenterPanel implements vscode.Disposable {
   }
 
   private async refresh(reloadGraph = false): Promise<void> {
-    if (this.refreshing) return;
+    if (this.refreshing) {
+      this.refreshPending = true;
+      this.refreshPendingReload ||= reloadGraph;
+      return;
+    }
     this.refreshing = true;
     try {
       const folder = this.services.store.state?.folder ?? await this.services.store.preferredFolder(false);
@@ -212,6 +219,12 @@ export class ControlCenterPanel implements vscode.Disposable {
       }
 
       const model = graphState?.model;
+      const latestIndex = folder && graphState?.model
+        ? await this.services.cli.latestBuildSummary(
+            this.services.store.managedOutput(folder).outputDirectory,
+            graphState.graphUri,
+          )
+        : undefined;
       const enabled = folder ? this.services.managed.isEnabled(folder) : false;
       const configuredFreshness: FreshnessMode = folder ? this.services.managed.freshness(folder) : 'manual';
       const configuredScopes = rows.flatMap((row) => row.scopes).filter((scope) => scope.configured).length;
@@ -230,6 +243,7 @@ export class ControlCenterPanel implements vscode.Disposable {
           communities: model?.communities().length ?? 0,
           modified: graphState?.modified ?? null,
           builtAtCommit: model?.snapshot.builtAtCommit ?? null,
+          latestIndex: latestIndex ?? null,
         },
         managed: {
           enabled,
@@ -249,6 +263,12 @@ export class ControlCenterPanel implements vscode.Disposable {
       this.post({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     } finally {
       this.refreshing = false;
+      if (this.refreshPending) {
+        const pendingReload = this.refreshPendingReload;
+        this.refreshPending = false;
+        this.refreshPendingReload = false;
+        await this.refresh(pendingReload);
+      }
     }
   }
 
@@ -391,6 +411,9 @@ export class ControlCenterPanel implements vscode.Disposable {
     function badge(text, state) { return '<span class="badge ' + state + '">' + escapeHtml(text) + '</span>'; }
     function chip(text, state) { return '<span class="chip ' + state + '"><span class="dot" aria-hidden="true"></span>' + escapeHtml(text) + '</span>'; }
     function command(id, label, secondary, disabled) { return '<button ' + (secondary ? 'class="secondary" ' : '') + 'data-command="' + escapeHtml(id) + '"' + (disabled ? ' disabled' : '') + '>' + escapeHtml(label) + '</button>'; }
+    function formatDuration(milliseconds) { if (milliseconds < 1000) return milliseconds + ' ms'; const seconds = milliseconds / 1000; return (seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)) + ' s'; }
+    function formatBytes(bytes) { if (bytes < 1024) return bytes + ' B'; const units = ['KiB', 'MiB', 'GiB', 'TiB']; let value = bytes; let unit = -1; do { value /= 1024; unit += 1; } while (value >= 1024 && unit < units.length - 1); return value.toFixed(value < 10 ? 1 : 0) + ' ' + units[unit]; }
+    function formatStages(stages) { const labels = { scan_extract: 'scan/extract', detect: 'detect', extract: 'extract', build: 'build', cluster: 'cluster', write: 'write' }; return Object.keys(labels).filter(key => stages[key] > 0).map(key => labels[key] + ' ' + formatDuration(stages[key])).join(' · '); }
     function showError(value) { const element = document.getElementById('error'); element.textContent = 'Could not refresh status: ' + value; element.hidden = false; }
     function render(state) {
       document.getElementById('error').hidden = true;
@@ -414,6 +437,9 @@ export class ControlCenterPanel implements vscode.Disposable {
       const status = ready ? badge('Ready', 'good') : graph.status === 'error' ? badge('Error', 'bad') : badge('Not built', 'warn');
       const path = graph.path ? '<button class="link" data-path="' + escapeHtml(graph.path) + '" title="Open graph file">' + escapeHtml(graph.path) + '</button>' : 'No workspace';
       const updated = graph.modified ? new Date(graph.modified).toLocaleString() : 'Not available';
+      const latest = graph.latestIndex;
+      const latestStages = latest ? formatStages(latest.stagesMs) : '';
+      const latestIndex = latest ? '<h3>Latest index</h3><dl><dt>Total time</dt><dd>' + escapeHtml(formatDuration(latest.elapsedMs)) + '</dd><dt>Operation</dt><dd>' + (latest.mode === 'full' ? 'Full rebuild' : 'Incremental update') + '</dd><dt>Indexed inputs</dt><dd>' + latest.files.indexed + '</dd>' + (latest.sourceBytes == null ? '' : '<dt>Indexed source size</dt><dd>' + escapeHtml(formatBytes(latest.sourceBytes)) + '</dd>') + (latest.mode === 'incremental' ? '<dt>Changed / deleted</dt><dd>' + latest.files.changed + ' / ' + latest.files.deleted + '</dd>' : '') + '<dt>Completed</dt><dd>' + escapeHtml(new Date(latest.completedAt).toLocaleString()) + '</dd>' + (latestStages ? '<dt>Stages</dt><dd>' + escapeHtml(latestStages) + '</dd>' : '') + '</dl>' : '';
       const problem = graph.error ? '<div class="error" role="status">' + escapeHtml(graph.error) + '</div>' : '';
       const actions = ready
         ? command('graphoxide.update', 'Update incrementally', false, false) + command('graphoxide.rebuild', 'Full rebuild…', true, false) + command('graphoxide.openGraph', 'Open graph', true, false) + command('graphoxide.openGraphFile', 'Open graph.json', true, false)
@@ -422,7 +448,7 @@ export class ControlCenterPanel implements vscode.Disposable {
           : command('graphoxide.initialize', 'Build graph', false, !state.workspace);
       return '<section class="card" aria-labelledby="graph-heading"><div class="card-head"><div><h2 id="graph-heading">Workspace graph</h2><p class="muted">' + escapeHtml(state.workspace ? state.workspace.name : 'Open a workspace to get started') + '</p></div>' + status + '</div>' + problem
         + '<div class="metrics"><div class="metric"><strong>' + graph.nodes + '</strong><span>Nodes</span></div><div class="metric"><strong>' + graph.edges + '</strong><span>Edges</span></div><div class="metric"><strong>' + graph.communities + '</strong><span>Communities</span></div></div>'
-        + '<dl><dt>Graph path</dt><dd>' + path + '</dd><dt>Last updated</dt><dd>' + escapeHtml(updated) + '</dd>' + (graph.builtAtCommit ? '<dt>Source commit</dt><dd>' + escapeHtml(graph.builtAtCommit) + '</dd>' : '') + '</dl>'
+        + '<dl><dt>Graph path</dt><dd>' + path + '</dd><dt>Last updated</dt><dd>' + escapeHtml(updated) + '</dd>' + (graph.builtAtCommit ? '<dt>Source commit</dt><dd>' + escapeHtml(graph.builtAtCommit) + '</dd>' : '') + '</dl>' + latestIndex
         + '<p class="detail">Incremental update refreshes the existing graph. Full rebuild rescans every supported input and replaces the generated graph.</p><div class="actions">' + actions + '</div></section>';
     }
     function managedCard(state) {

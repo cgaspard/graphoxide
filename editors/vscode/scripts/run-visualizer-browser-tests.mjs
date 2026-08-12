@@ -1,13 +1,11 @@
-import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { inflateSync } from 'node:zlib';
+import { executeBrowserProcess } from './browser-process.mjs';
 
-const execute = promisify(execFile);
 const extensionRoot = process.cwd();
 const chrome = await locateChrome();
 const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'graphoxide-visualizer-browser-'));
@@ -289,14 +287,12 @@ async function runScenarioAudit(origin, fixture, nodes, width, height, scenario,
 }
 
 async function executeChrome(arguments_, maxBuffer) {
-  try {
-    return await execute(chrome, arguments_, { maxBuffer, timeout: 8_000, killSignal: 'SIGKILL' });
-  } catch (error) {
-    if (error && typeof error === 'object' && error.killed === true && typeof error.stdout === 'string') {
-      return { stdout: error.stdout, stderr: typeof error.stderr === 'string' ? error.stderr : '' };
-    }
-    throw error;
-  }
+  return executeBrowserProcess(chrome, arguments_, {
+    maxBuffer,
+    acceptTimedOutStdout: arguments_.includes('--dump-dom')
+      ? (stdout) => /<pre[^>]*id="gx-result"[^>]*>[\s\S]*\S[\s\S]*<\/pre>/u.test(stdout)
+      : () => true,
+  });
 }
 
 function chromeArguments(profile, width, height, url, additions) {
@@ -454,7 +450,7 @@ async function locateChrome() {
   ].filter(Boolean);
   for (const candidate of candidates) {
     try {
-      await execute(candidate, ['--version']);
+      await executeBrowserProcess(candidate, ['--version'], { maxBuffer: 1024 * 1024 });
       return candidate;
     } catch {
       // Continue through the fixed local browser candidates.

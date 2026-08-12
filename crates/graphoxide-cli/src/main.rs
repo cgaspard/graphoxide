@@ -7,6 +7,9 @@ mod site;
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use graphoxide_cli::build_progress::{
+    BuildProgressFactory, BuildProgressMode, BuildProgressPhase, BuildProgressReporter,
+};
 use graphoxide_cli::watch as watch_service;
 use std::{
     fs,
@@ -57,6 +60,24 @@ enum RuntimeIoBackendArg {
     Auto,
     Threaded,
     IoUring,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum ProgressModeArg {
+    #[default]
+    Auto,
+    Never,
+    Json,
+}
+
+impl From<ProgressModeArg> for BuildProgressMode {
+    fn from(value: ProgressModeArg) -> Self {
+        match value {
+            ProgressModeArg::Auto => Self::Auto,
+            ProgressModeArg::Never => Self::Never,
+            ProgressModeArg::Json => Self::Json,
+        }
+    }
 }
 
 impl RuntimeOptions {
@@ -177,6 +198,9 @@ enum Command {
         /// Emit one machine-readable build report to stdout.
         #[arg(long)]
         json: bool,
+        /// Progress rendering on stderr; JSON is a prefixed protocol for integrations.
+        #[arg(long, value_enum, default_value = "auto")]
+        progress: ProgressModeArg,
         /// Atomically write additive runtime telemetry to this JSON sidecar.
         ///
         /// This never changes stdout, including the stable `--json` build
@@ -406,6 +430,9 @@ enum Command {
         /// Atomically write additive runtime telemetry after each rebuild.
         #[arg(long)]
         runtime_report: Option<PathBuf>,
+        /// Progress rendering for each admitted rebuild pass.
+        #[arg(long, value_enum, default_value = "auto")]
+        progress: ProgressModeArg,
         /// Use the retired path-based/Rayon rebuild executor instead of the
         /// default dedicated I/O and CPU execution runtime.
         #[arg(long)]
@@ -568,6 +595,9 @@ struct ProjectBuildOptions {
     /// Emit one machine-readable workflow report to stdout.
     #[arg(long)]
     json: bool,
+    /// Progress rendering on stderr; JSON is a prefixed protocol for integrations.
+    #[arg(long, value_enum, default_value = "auto")]
+    progress: ProgressModeArg,
     /// Atomically write additive runtime telemetry to this JSON sidecar.
     ///
     /// This never changes stdout, including the stable `--json` report. The
@@ -1301,6 +1331,7 @@ fn run_project_build(
 fn acquire_project_build_lock(
     output_directory: &std::path::Path,
     cancellation: &graphoxide_index_runtime::RuntimeCancellation,
+    progress: &mut BuildProgressReporter,
 ) -> anyhow::Result<watch_service::RebuildLockGuard> {
     const RETRY_INTERVAL: Duration = Duration::from_millis(25);
     let mut announced_wait = false;
@@ -1313,10 +1344,15 @@ fn acquire_project_build_lock(
             return Ok(lock);
         }
         if !announced_wait {
-            eprintln!(
-                "[graphoxide] waiting for the rebuild lock at {}",
-                output_directory.display()
-            );
+            if progress.emits_legacy_wait_diagnostic() {
+                // Preserve the established actionable diagnostic for default
+                // piped stderr. Other enabled modes own their path-free phase.
+                eprintln!(
+                    "[graphoxide] waiting for the rebuild lock at {}",
+                    output_directory.display()
+                );
+            }
+            progress.phase(BuildProgressPhase::Waiting);
             announced_wait = true;
         }
         thread::sleep(RETRY_INTERVAL);
@@ -1337,6 +1373,7 @@ fn run_project_build_with_cancellation(
         allow_partial,
         timing,
         json,
+        progress,
         runtime_report,
         runtime,
         out,
@@ -1364,6 +1401,16 @@ fn run_project_build_with_cancellation(
     let output_directory = managed_output_directory(&path, out.as_deref());
     let output = output_directory.join("graph.json");
     let manifest_path = output_directory.join("manifest.json");
+    let mut progress_reporter = if effective_force {
+        BuildProgressReporter::new(
+            workflow.operation(),
+            graphoxide_cli::build_telemetry::BuildMode::Full,
+            progress.into(),
+        )?
+    } else {
+        BuildProgressReporter::new_adaptive(workflow.operation(), progress.into())?
+    };
+    progress_reporter.start();
     if let Some(runtime_report) = runtime_report.as_deref() {
         graphoxide_cli::index::validate_runtime_report_destination(
             runtime_report,
@@ -1377,7 +1424,8 @@ fn run_project_build_with_cancellation(
     // Both writers share one coherent view of prior state through graph,
     // manifest, coverage, and build-policy publication. A non-index extract
     // must not replace graph.json while index hashes it for association.
-    let _build_lock = acquire_project_build_lock(&output_directory, &cancellation)?;
+    let _build_lock =
+        acquire_project_build_lock(&output_directory, &cancellation, &mut progress_reporter)?;
     graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&output_directory)
         .with_context(|| {
             format!(
@@ -1453,6 +1501,7 @@ fn run_project_build_with_cancellation(
         ..Default::default()
     };
     let mut coverage_report = if workflow.is_index() {
+        progress_reporter.phase(BuildProgressPhase::Auditing);
         let mut coverage_options =
             graphoxide_extract::coverage::CoverageOptions::from(&detect_options);
         coverage_options.code_only = code_only;
@@ -1466,10 +1515,32 @@ fn run_project_build_with_cancellation(
     } else {
         None
     };
-    let (scan, runtime_extraction_telemetry) = if let Some(runtime_config) = runtime_config {
-        if runtime_report.is_some() {
-            let scan = if workflow.is_index() {
-                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry(
+    progress_reporter.phase(BuildProgressPhase::Scanning);
+    let extraction_progress = progress_reporter.counter_emitter(BuildProgressPhase::Extracting);
+    let (scan, runtime_extraction_telemetry, indexed_source_bytes) = if let Some(runtime_config) =
+        runtime_config
+    {
+        match (runtime_report.is_some(), extraction_progress) {
+            (true, Some(progress)) => {
+                let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry_and_progress(
+                    &path,
+                    effective_force,
+                    &output_directory,
+                    code_only,
+                    &detect_options,
+                    runtime_config,
+                    cancellation.clone(),
+                    progress,
+                )?;
+                (
+                    scan.result,
+                    Some(scan.telemetry),
+                    Some(scan.indexed_source_bytes),
+                )
+            }
+            (true, None) => {
+                let scan = if workflow.is_index() {
+                    graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry(
                         &path,
                         effective_force,
                         &output_directory,
@@ -1478,21 +1549,20 @@ fn run_project_build_with_cancellation(
                         runtime_config,
                         cancellation.clone(),
                     )?
-            } else {
-                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
-                    &path,
-                    effective_force,
-                    &output_directory,
-                    code_only,
-                    &detect_options,
-                    runtime_config,
-                )?
-            };
-            let runtime_telemetry = scan.telemetry;
-            (scan.result, Some(runtime_telemetry))
-        } else {
-            let scan = if workflow.is_index() {
-                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+                } else {
+                    graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                        &path,
+                        effective_force,
+                        &output_directory,
+                        code_only,
+                        &detect_options,
+                        runtime_config,
+                    )?
+                };
+                (scan.result, Some(scan.telemetry), None)
+            }
+            (false, Some(progress)) => {
+                let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_progress(
                     &path,
                     effective_force,
                     &output_directory,
@@ -1500,31 +1570,67 @@ fn run_project_build_with_cancellation(
                     &detect_options,
                     runtime_config,
                     cancellation.clone(),
-                )?
-            } else {
-                graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+                    progress,
+                )?;
+                (
+                    scan.result,
+                    Some(scan.telemetry),
+                    Some(scan.indexed_source_bytes),
+                )
+            }
+            (false, None) => {
+                let scan = if workflow.is_index() {
+                    graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation(
+                        &path,
+                        effective_force,
+                        &output_directory,
+                        code_only,
+                        &detect_options,
+                        runtime_config,
+                        cancellation.clone(),
+                    )?
+                } else {
+                    graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+                        &path,
+                        effective_force,
+                        &output_directory,
+                        code_only,
+                        &detect_options,
+                        runtime_config,
+                    )?
+                };
+                (scan, None, None)
+            }
+        }
+    } else {
+        if let Some(progress) = extraction_progress {
+            (
+                graphoxide_extract::extract_project_with_scan_options_deferred_manifest_with_progress(
                     &path,
                     effective_force,
                     &output_directory,
                     code_only,
                     &detect_options,
-                    runtime_config,
-                )?
-            };
-            (scan, None)
+                    progress,
+                )?,
+                None,
+                None,
+            )
+        } else {
+            (
+                graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
+                    &path,
+                    effective_force,
+                    &output_directory,
+                    code_only,
+                    &detect_options,
+                )?,
+                None,
+                None,
+            )
         }
-    } else {
-        (
-            graphoxide_extract::extract_project_with_scan_options_deferred_manifest(
-                &path,
-                effective_force,
-                &output_directory,
-                code_only,
-                &detect_options,
-            )?,
-            None,
-        )
     };
+    progress_reporter.set_indexed_inputs(scan.progress.succeeded);
     let runtime_telemetry = runtime_config
         .map(|config| isolated_runtime_configuration(config, scan.detection.total_files));
     let runtime_cache_telemetry = runtime_extraction_telemetry.map(|runtime| {
@@ -1671,6 +1777,7 @@ fn run_project_build_with_cancellation(
         .unwrap_or_default();
     prune_sources.sort();
     prune_sources.dedup();
+    progress_reporter.phase(BuildProgressPhase::Building);
     let build_started = std::time::Instant::now();
     if no_cluster {
         graphoxide_graph::disambiguate_file_labels_in_extractions(&mut extractions);
@@ -1698,6 +1805,7 @@ fn run_project_build_with_cancellation(
         // graph again. Release the inspected baseline first so that
         // check cannot create a second retained whole-graph copy.
         drop(previous);
+        progress_reporter.phase(BuildProgressPhase::Publishing);
         let write_started = std::time::Instant::now();
         let mut published_coverage = None;
         let outcome = if workflow.is_index() {
@@ -1730,6 +1838,11 @@ fn run_project_build_with_cancellation(
             )?
         };
         if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+            telemetry.stages_ms.write =
+                graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+            telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(total_started);
+            telemetry.status = graphoxide_cli::build_telemetry::BuildStatus::RefusedShrink;
+            progress_reporter.complete(&telemetry, indexed_source_bytes);
             anyhow::bail!("{outcome}");
         }
         let nodes: usize = extractions.iter().map(|e| e.nodes.len()).sum();
@@ -1767,13 +1880,15 @@ fn run_project_build_with_cancellation(
             runtime_work_telemetry,
             runtime_cache_telemetry,
         )?;
-        return emit_project_build_report(
+        emit_project_build_report(
             &telemetry,
             json,
             timing,
             &human,
             published_coverage.as_ref(),
-        );
+        )?;
+        progress_reporter.complete(&telemetry, indexed_source_bytes);
+        return Ok(());
     }
     let (staged_extractions, build_options, normalization_root) = if incremental_mode {
         let fresh = flatten_extractions(extractions);
@@ -1813,6 +1928,7 @@ fn run_project_build_with_cancellation(
             .into_parts()
             .0;
     telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+    progress_reporter.phase(BuildProgressPhase::Clustering);
     let cluster_started = std::time::Instant::now();
     cluster_with_resource_gate(&mut graph)?;
     if let Some(previous) = &previous {
@@ -1820,6 +1936,7 @@ fn run_project_build_with_cancellation(
     }
     drop(previous);
     telemetry.stages_ms.cluster = graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
+    progress_reporter.phase(BuildProgressPhase::Publishing);
     let write_started = std::time::Instant::now();
     let mut published_coverage = None;
     let outcome = if workflow.is_index() {
@@ -1852,6 +1969,10 @@ fn run_project_build_with_cancellation(
         )?
     };
     if outcome == graphoxide_cli::build_guard::BuildCommitOutcome::RefusedShrink {
+        telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
+        telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(total_started);
+        telemetry.status = graphoxide_cli::build_telemetry::BuildStatus::RefusedShrink;
+        progress_reporter.complete(&telemetry, indexed_source_bytes);
         anyhow::bail!("{outcome}");
     }
     if workflow.is_index() {
@@ -1895,7 +2016,9 @@ fn run_project_build_with_cancellation(
         timing,
         &human,
         published_coverage.as_ref(),
-    )
+    )?;
+    progress_reporter.complete(&telemetry, indexed_source_bytes);
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -2112,6 +2235,7 @@ fn main() -> anyhow::Result<()> {
             force,
             no_cluster,
             json,
+            progress,
             runtime_report,
             legacy_executor,
             runtime,
@@ -2120,6 +2244,7 @@ fn main() -> anyhow::Result<()> {
             no_cluster,
             force,
             json,
+            progress,
             runtime_report.as_deref(),
             legacy_executor,
             runtime,
@@ -2301,6 +2426,7 @@ fn main() -> anyhow::Result<()> {
             force,
             no_cluster,
             runtime_report,
+            progress,
             legacy_executor,
             runtime,
         } => watch(
@@ -2308,6 +2434,7 @@ fn main() -> anyhow::Result<()> {
             force,
             no_cluster,
             runtime_report.as_deref(),
+            progress,
             legacy_executor,
             runtime,
         ),
@@ -2981,10 +3108,12 @@ fn watch(
     force: bool,
     no_cluster: bool,
     runtime_report: Option<&std::path::Path>,
+    progress: ProgressModeArg,
     legacy_executor: bool,
     runtime: RuntimeOptions,
 ) -> anyhow::Result<()> {
     use notify::{RecursiveMode, Watcher};
+    let progress_factory = BuildProgressFactory::new(progress.into())?;
     let runtime_config = runtime.resolve_for_executor(legacy_executor)?;
     let output_directory = managed_output_directory(&path, None);
     watch_service::validate_watch_output_directory(&path, &output_directory)?;
@@ -3061,7 +3190,13 @@ fn watch(
                 block_on_lock: false,
                 ..Default::default()
             };
-            let rebuild = rebuild_watch_project(&path, &options, runtime_config, runtime_report);
+            let rebuild = rebuild_watch_project_with_progress_factory(
+                &path,
+                &options,
+                runtime_config,
+                runtime_report,
+                &progress_factory,
+            );
             match rebuild {
                 Ok(result) => {
                     for warning in result.warnings {
@@ -3100,9 +3235,58 @@ fn rebuild_watch_project(
     options: &watch_service::RebuildOptions,
     runtime_config: Option<graphoxide_index_runtime::IndexRuntimeConfig>,
     runtime_report: Option<&std::path::Path>,
+    progress: ProgressModeArg,
+) -> anyhow::Result<watch_service::RebuildResult> {
+    let progress_factory = BuildProgressFactory::new(progress.into())?;
+    rebuild_watch_project_with_progress_factory(
+        path,
+        options,
+        runtime_config,
+        runtime_report,
+        &progress_factory,
+    )
+}
+
+fn rebuild_watch_project_with_progress_factory(
+    path: &std::path::Path,
+    options: &watch_service::RebuildOptions,
+    runtime_config: Option<graphoxide_index_runtime::IndexRuntimeConfig>,
+    runtime_report: Option<&std::path::Path>,
+    progress_factory: &BuildProgressFactory,
 ) -> anyhow::Result<watch_service::RebuildResult> {
     if let Some(runtime_config) = runtime_config {
-        watch_service::rebuild_project_with_executor(path, options, |request| {
+        let mut first_progress = Some(
+            if options.changed_paths.is_none() && options.scope == watch_service::RebuildScope::Full
+            {
+                progress_factory.reporter(
+                    graphoxide_cli::build_telemetry::BuildOperation::Update,
+                    graphoxide_cli::build_telemetry::BuildMode::Full,
+                )
+            } else {
+                progress_factory
+                    .adaptive_reporter(graphoxide_cli::build_telemetry::BuildOperation::Update)
+            },
+        );
+        first_progress
+            .as_mut()
+            .expect("first watch progress reporter exists")
+            .start();
+        let result = watch_service::rebuild_project_with_executor(path, options, |request| {
+            let progress_reporter = if let Some(reporter) = first_progress.take() {
+                reporter
+            } else {
+                let mut reporter = if request.scope == watch_service::RebuildScope::Full {
+                    progress_factory.reporter(
+                        graphoxide_cli::build_telemetry::BuildOperation::Update,
+                        graphoxide_cli::build_telemetry::BuildMode::Full,
+                    )
+                } else {
+                    progress_factory
+                        .adaptive_reporter(graphoxide_cli::build_telemetry::BuildOperation::Update)
+                };
+                reporter.start();
+                reporter
+            };
             let mut outcome = rebuild_isolated_pass(IsolatedRebuildRequest {
                 path: &request.watch_root,
                 output_directory: &request.output_directory,
@@ -3113,6 +3297,7 @@ fn rebuild_watch_project(
                 pass: request.pass,
                 runtime_config,
                 collect_runtime_telemetry: runtime_report.is_some(),
+                progress_reporter,
             })?;
             if runtime_report.is_some() {
                 hydrate_unchanged_graph_report(&mut outcome)?;
@@ -3125,18 +3310,36 @@ fn rebuild_watch_project(
                 Some(outcome.runtime_work),
                 Some(outcome.runtime_cache),
             )?;
+            outcome.complete_progress();
             Ok(outcome.result)
-        })
+        })?;
+        if let Some(mut reporter) = first_progress {
+            let telemetry = legacy_rebuild_telemetry(&result);
+            reporter.set_indexed_inputs(result.stats.detected_files);
+            reporter.complete(&telemetry, None);
+        }
+        Ok(result)
     } else {
-        let result = watch_service::rebuild_project(path, options)?;
-        write_runtime_report_if_requested(
-            &legacy_rebuild_telemetry(&result),
-            runtime_report,
-            None,
-            None,
-            None,
-            None,
-        )?;
+        let mut progress_reporter = if options.changed_paths.is_none()
+            && options.scope == watch_service::RebuildScope::Full
+        {
+            progress_factory.reporter(
+                graphoxide_cli::build_telemetry::BuildOperation::Update,
+                graphoxide_cli::build_telemetry::BuildMode::Full,
+            )
+        } else {
+            progress_factory
+                .adaptive_reporter(graphoxide_cli::build_telemetry::BuildOperation::Update)
+        };
+        progress_reporter.start();
+        let result =
+            watch_service::rebuild_project_with_progress_observer(path, options, |event| {
+                report_legacy_rebuild_progress(&mut progress_reporter, event)
+            })?;
+        let telemetry = legacy_rebuild_telemetry(&result);
+        progress_reporter.set_indexed_inputs(result.stats.detected_files);
+        write_runtime_report_if_requested(&telemetry, runtime_report, None, None, None, None)?;
+        progress_reporter.complete(&telemetry, None);
         Ok(result)
     }
 }
@@ -3887,6 +4090,7 @@ fn rebuild_hook(
         },
         runtime_config,
         None,
+        ProgressModeArg::Never,
     )?;
     for warning in result.warnings {
         eprintln!("[graphoxide hook] {warning}");
@@ -3923,11 +4127,13 @@ fn hook_guard(mode: Option<&str>, strict: bool) -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild(
     path: &std::path::Path,
     no_cluster: bool,
     force: bool,
     json: bool,
+    progress: ProgressModeArg,
     runtime_report: Option<&std::path::Path>,
     legacy_executor: bool,
     runtime: RuntimeOptions,
@@ -3937,30 +4143,34 @@ fn rebuild(
         no_cluster,
         force,
         json,
+        progress,
         runtime_report,
         legacy_executor,
         runtime,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_with_executor(
     path: &std::path::Path,
     no_cluster: bool,
     force: bool,
     json: bool,
+    progress: ProgressModeArg,
     runtime_report: Option<&std::path::Path>,
     legacy_executor: bool,
     runtime: RuntimeOptions,
 ) -> anyhow::Result<()> {
     if legacy_executor {
         runtime.resolve_for_executor(true)?;
-        return rebuild_legacy(path, no_cluster, force, json, runtime_report);
+        return rebuild_legacy(path, no_cluster, force, json, progress, runtime_report);
     }
     rebuild_isolated(
         path,
         no_cluster,
         force,
         json,
+        progress,
         runtime_report,
         runtime.resolve()?,
     )
@@ -3971,9 +4181,15 @@ fn rebuild_legacy(
     no_cluster: bool,
     force: bool,
     json: bool,
+    progress: ProgressModeArg,
     runtime_report: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    let result = watch_service::rebuild_project(
+    let mut progress_reporter = BuildProgressReporter::new_adaptive(
+        graphoxide_cli::build_telemetry::BuildOperation::Update,
+        progress.into(),
+    )?;
+    progress_reporter.start();
+    let result = watch_service::rebuild_project_with_progress_observer(
         path,
         &watch_service::RebuildOptions {
             scope: watch_service::RebuildScope::Incremental,
@@ -3984,11 +4200,13 @@ fn rebuild_legacy(
             block_on_lock: true,
             ..Default::default()
         },
+        |event| report_legacy_rebuild_progress(&mut progress_reporter, event),
     )?;
     for warning in &result.warnings {
         eprintln!("[graphoxide update] {warning}");
     }
     let telemetry = legacy_rebuild_telemetry(&result);
+    progress_reporter.set_indexed_inputs(result.stats.detected_files);
     let elapsed = graphoxide_cli::build_telemetry::format_elapsed(telemetry.elapsed_ms);
     let human = match result.status {
         watch_service::RebuildStatus::Rebuilt => {
@@ -4015,11 +4233,39 @@ fn rebuild_legacy(
         if json {
             emit_build_report(&telemetry, true, false, "")?;
         }
+        progress_reporter.complete(&telemetry, None);
         anyhow::bail!(
             "refusing to overwrite a smaller graph because the loss is not explained by rebuilt or deleted sources; pass --force after verifying the reduction"
         )
     } else {
-        emit_build_report(&telemetry, json, false, &human)
+        emit_build_report(&telemetry, json, false, &human)?;
+        progress_reporter.complete(&telemetry, None);
+        Ok(())
+    }
+}
+
+fn report_legacy_rebuild_progress(
+    reporter: &mut BuildProgressReporter,
+    event: watch_service::RebuildProgress,
+) {
+    // One CLI invocation has one terminal envelope. Pending-journal drain
+    // passes remain part of that aggregate lifecycle, so later pass phases
+    // must not regress the first pass's monotonic wire sequence.
+    if event.pass != 1 {
+        return;
+    }
+    let phase = match event.phase {
+        watch_service::RebuildProgressPhase::Waiting => BuildProgressPhase::Waiting,
+        watch_service::RebuildProgressPhase::Scanning => BuildProgressPhase::Scanning,
+        watch_service::RebuildProgressPhase::Extracting => BuildProgressPhase::Extracting,
+        watch_service::RebuildProgressPhase::Building => BuildProgressPhase::Building,
+        watch_service::RebuildProgressPhase::Clustering => BuildProgressPhase::Clustering,
+        watch_service::RebuildProgressPhase::Publishing => BuildProgressPhase::Publishing,
+    };
+    match (event.processed, event.total) {
+        (Some(processed), Some(total)) => reporter.phase_progress(phase, processed, total),
+        (None, None) => reporter.phase(phase),
+        _ => debug_assert!(false, "legacy progress counters must be paired"),
     }
 }
 
@@ -4086,12 +4332,21 @@ fn rebuild_isolated(
     no_cluster: bool,
     force: bool,
     json: bool,
+    progress: ProgressModeArg,
     runtime_report: Option<&std::path::Path>,
     runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
 ) -> anyhow::Result<()> {
+    let mut progress_reporter = BuildProgressReporter::new_adaptive(
+        graphoxide_cli::build_telemetry::BuildOperation::Update,
+        progress.into(),
+    )?;
+    progress_reporter.start();
     let output_directory = managed_output_directory(path, None);
-    let _build_lock = watch_service::RebuildLockGuard::acquire(&output_directory, true)?
-        .ok_or_else(|| anyhow::anyhow!("failed to acquire the blocking rebuild lock"))?;
+    let _build_lock = acquire_project_build_lock(
+        &output_directory,
+        &graphoxide_index_runtime::RuntimeCancellation::new(),
+        &mut progress_reporter,
+    )?;
     graphoxide_extract::cache::prepare_structured_redaction_cache_schema(&output_directory)
         .with_context(|| {
             format!(
@@ -4109,6 +4364,7 @@ fn rebuild_isolated(
         pass: 1,
         runtime_config,
         collect_runtime_telemetry: runtime_report.is_some(),
+        progress_reporter,
     })?;
     if json || runtime_report.is_some() {
         hydrate_unchanged_graph_report(&mut outcome)?;
@@ -4125,6 +4381,7 @@ fn rebuild_isolated(
         if json {
             emit_build_report(&outcome.telemetry, true, false, "")?;
         }
+        outcome.complete_progress();
         anyhow::bail!(
             "refusing to overwrite a smaller graph because the loss is not explained by rebuilt or deleted sources; pass --force after verifying the reduction"
         );
@@ -4151,7 +4408,9 @@ fn rebuild_isolated(
         ),
         watch_service::RebuildStatus::RefusedShrink => unreachable!("handled above"),
     };
-    emit_build_report(&outcome.telemetry, json, false, &human)
+    emit_build_report(&outcome.telemetry, json, false, &human)?;
+    outcome.complete_progress();
+    Ok(())
 }
 
 struct IsolatedRebuildOutcome {
@@ -4161,6 +4420,15 @@ struct IsolatedRebuildOutcome {
     runtime_cache: graphoxide_cli::build_telemetry::RuntimeCacheTelemetryV2,
     runtime_io: graphoxide_index_runtime::RuntimeIoTelemetry,
     runtime_work: graphoxide_extract::RuntimeWorkTelemetry,
+    progress_reporter: BuildProgressReporter,
+    indexed_source_bytes: Option<u64>,
+}
+
+impl IsolatedRebuildOutcome {
+    fn complete_progress(&mut self) {
+        self.progress_reporter
+            .complete(&self.telemetry, self.indexed_source_bytes);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4290,6 +4558,7 @@ struct IsolatedRebuildRequest<'a> {
     pass: usize,
     runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
     collect_runtime_telemetry: bool,
+    progress_reporter: BuildProgressReporter,
 }
 
 fn telemetry_status(
@@ -4340,6 +4609,7 @@ fn rebuild_isolated_pass(
         pass,
         runtime_config,
         collect_runtime_telemetry,
+        mut progress_reporter,
     } = request;
     let started = std::time::Instant::now();
     let output = output_directory.join("graph.json");
@@ -4352,29 +4622,95 @@ fn rebuild_isolated_pass(
         honor_gitignore: persisted.honor_gitignore,
         ..Default::default()
     };
-    let (scan, runtime_extraction_telemetry) = if collect_runtime_telemetry {
-        let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
-            path,
-            force,
-            output_directory,
-            false,
-            &detect_options,
-            runtime_config,
-        )?;
-        (scan.result, scan.telemetry)
-    } else {
-        (
-            graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest(
+    progress_reporter.phase(BuildProgressPhase::Scanning);
+    let extraction_progress = progress_reporter.counter_emitter(BuildProgressPhase::Extracting);
+    let (scan, runtime_extraction_telemetry, indexed_source_bytes, baseline_eligible) = match (
+        collect_runtime_telemetry,
+        extraction_progress,
+    ) {
+        (true, Some(progress)) => {
+            let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry_and_progress(
+                    path,
+                    force,
+                    output_directory,
+                    false,
+                    &detect_options,
+                    runtime_config,
+                    graphoxide_index_runtime::RuntimeCancellation::new(),
+                    progress,
+                )?;
+            (
+                scan.result,
+                scan.telemetry,
+                Some(scan.indexed_source_bytes),
+                scan.incremental_baseline_eligible,
+            )
+        }
+        (true, None) => {
+            let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry_and_build_evidence(
+                    path,
+                    force,
+                    output_directory,
+                    false,
+                    &detect_options,
+                    runtime_config,
+                    graphoxide_index_runtime::RuntimeCancellation::new(),
+                )?;
+            (
+                scan.result,
+                scan.telemetry,
+                Some(scan.indexed_source_bytes),
+                scan.incremental_baseline_eligible,
+            )
+        }
+        (false, Some(progress)) => {
+            let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_progress(
+                    path,
+                    force,
+                    output_directory,
+                    false,
+                    &detect_options,
+                    runtime_config,
+                    graphoxide_index_runtime::RuntimeCancellation::new(),
+                    progress,
+                )?;
+            (
+                scan.result,
+                scan.telemetry,
+                Some(scan.indexed_source_bytes),
+                scan.incremental_baseline_eligible,
+            )
+        }
+        (false, None) => {
+            let scan = graphoxide_extract::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_build_evidence(
                 path,
                 force,
                 output_directory,
                 false,
                 &detect_options,
                 runtime_config,
-            )?,
-            graphoxide_extract::RuntimeExtractionTelemetry::default(),
-        )
+                graphoxide_index_runtime::RuntimeCancellation::new(),
+            )?;
+            (
+                scan.result,
+                scan.telemetry,
+                Some(scan.indexed_source_bytes),
+                scan.incremental_baseline_eligible,
+            )
+        }
     };
+    let scope = if scope == watch_service::RebuildScope::Full || !baseline_eligible {
+        watch_service::RebuildScope::Full
+    } else {
+        watch_service::RebuildScope::Incremental
+    };
+    let mode = match scope {
+        watch_service::RebuildScope::Full => graphoxide_cli::build_telemetry::BuildMode::Full,
+        watch_service::RebuildScope::Incremental => {
+            graphoxide_cli::build_telemetry::BuildMode::Incremental
+        }
+    };
+    progress_reporter.set_indexed_inputs(scan.progress.succeeded);
     if !scan.detection.walk_errors.is_empty() {
         let preview = scan
             .detection
@@ -4402,12 +4738,7 @@ fn rebuild_isolated_pass(
     let runtime_work = runtime_extraction_telemetry.work;
     let mut telemetry = graphoxide_cli::build_telemetry::BuildTelemetry::new(
         graphoxide_cli::build_telemetry::BuildOperation::Update,
-        match scope {
-            watch_service::RebuildScope::Full => graphoxide_cli::build_telemetry::BuildMode::Full,
-            watch_service::RebuildScope::Incremental => {
-                graphoxide_cli::build_telemetry::BuildMode::Incremental
-            }
-        },
+        mode,
         graphoxide_cli::build_telemetry::BuildStatus::Rebuilt,
         output.clone(),
     );
@@ -4461,7 +4792,8 @@ fn rebuild_isolated_pass(
     };
     let finish = |mut result: watch_service::RebuildResult,
                   mut telemetry: graphoxide_cli::build_telemetry::BuildTelemetry,
-                  runtime_telemetry: graphoxide_cli::build_telemetry::IndexRuntimeConfiguration|
+                  runtime_telemetry: graphoxide_cli::build_telemetry::IndexRuntimeConfiguration,
+                  progress_reporter: BuildProgressReporter|
      -> IsolatedRebuildOutcome {
         telemetry.status = telemetry_status(result.status);
         telemetry.elapsed_ms = graphoxide_cli::build_telemetry::elapsed_millis(started);
@@ -4477,6 +4809,8 @@ fn rebuild_isolated_pass(
             runtime_cache,
             runtime_io,
             runtime_work,
+            progress_reporter,
+            indexed_source_bytes,
         }
     };
     let mut unchanged_candidate = telemetry.files.changed == 0
@@ -4495,15 +4829,26 @@ fn rebuild_isolated_pass(
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
         });
     if unchanged_candidate && !needs_ambiguous_baseline_audit {
+        progress_reporter.phase(BuildProgressPhase::Publishing);
         pending_manifest.commit()?;
         watch_service::clear_needs_update(output_directory)?;
         result.status = watch_service::RebuildStatus::Unchanged;
-        return Ok(finish(result, telemetry, runtime_telemetry));
+        return Ok(finish(
+            result,
+            telemetry,
+            runtime_telemetry,
+            progress_reporter,
+        ));
     }
     if scan.progress.total == 0 && !output.is_file() {
         result.status = watch_service::RebuildStatus::NoTrackedChanges;
         result.clustered = false;
-        return Ok(finish(result, telemetry, runtime_telemetry));
+        return Ok(finish(
+            result,
+            telemetry,
+            runtime_telemetry,
+            progress_reporter,
+        ));
     }
     let build_progress = graphoxide_cli::build_guard::BuildProgress::new(
         scan.progress.total,
@@ -4550,10 +4895,16 @@ fn rebuild_isolated_pass(
             && output.is_file();
     }
     if unchanged_candidate {
+        progress_reporter.phase(BuildProgressPhase::Publishing);
         pending_manifest.commit()?;
         watch_service::clear_needs_update(output_directory)?;
         result.status = watch_service::RebuildStatus::Unchanged;
-        return Ok(finish(result, telemetry, runtime_telemetry));
+        return Ok(finish(
+            result,
+            telemetry,
+            runtime_telemetry,
+            progress_reporter,
+        ));
     }
     let mut prune_sources = previous
         .as_ref()
@@ -4561,6 +4912,7 @@ fn rebuild_isolated_pass(
         .unwrap_or_default();
     prune_sources.sort();
     prune_sources.dedup();
+    progress_reporter.phase(BuildProgressPhase::Building);
     let build_started = std::time::Instant::now();
     let (staged_extractions, build_options, normalization_root) = if let Some(baseline) = &previous
     {
@@ -4604,6 +4956,7 @@ fn rebuild_isolated_pass(
         telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
         result.stats.nodes = graph.nodes.len();
         result.stats.edges = graph.links.len();
+        progress_reporter.phase(BuildProgressPhase::Publishing);
         if previous
             .as_ref()
             .is_some_and(|existing| watch_service::same_topology(existing, &graph))
@@ -4615,7 +4968,12 @@ fn rebuild_isolated_pass(
                 graphoxide_cli::build_telemetry::elapsed_millis(write_started);
             result.status = watch_service::RebuildStatus::Unchanged;
             result.clustered = false;
-            return Ok(finish(result, telemetry, runtime_telemetry));
+            return Ok(finish(
+                result,
+                telemetry,
+                runtime_telemetry,
+                progress_reporter,
+            ));
         }
         drop(previous);
         let write_started = std::time::Instant::now();
@@ -4634,7 +4992,12 @@ fn rebuild_isolated_pass(
                 graphoxide_cli::build_telemetry::elapsed_millis(write_started);
             result.status = watch_service::RebuildStatus::RefusedShrink;
             result.clustered = false;
-            return Ok(finish(result, telemetry, runtime_telemetry));
+            return Ok(finish(
+                result,
+                telemetry,
+                runtime_telemetry,
+                progress_reporter,
+            ));
         }
         telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
         telemetry.graph.nodes = result.stats.nodes;
@@ -4642,7 +5005,12 @@ fn rebuild_isolated_pass(
         save_build_config_in(output_directory, true, None, None)?;
         watch_service::clear_needs_update(output_directory)?;
         result.clustered = false;
-        return Ok(finish(result, telemetry, runtime_telemetry));
+        return Ok(finish(
+            result,
+            telemetry,
+            runtime_telemetry,
+            progress_reporter,
+        ));
     }
     telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
     result.stats.nodes = graph.nodes.len();
@@ -4651,14 +5019,21 @@ fn rebuild_isolated_pass(
         .as_ref()
         .is_some_and(|existing| watch_service::same_topology(existing, &graph))
     {
+        progress_reporter.phase(BuildProgressPhase::Publishing);
         let write_started = std::time::Instant::now();
         pending_manifest.commit()?;
         watch_service::clear_needs_update(output_directory)?;
         telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
         result.status = watch_service::RebuildStatus::Unchanged;
         result.clustered = false;
-        return Ok(finish(result, telemetry, runtime_telemetry));
+        return Ok(finish(
+            result,
+            telemetry,
+            runtime_telemetry,
+            progress_reporter,
+        ));
     }
+    progress_reporter.phase(BuildProgressPhase::Clustering);
     let cluster_started = std::time::Instant::now();
     cluster_with_resource_gate(&mut graph)?;
     if let Some(previous) = &previous {
@@ -4666,6 +5041,7 @@ fn rebuild_isolated_pass(
     }
     drop(previous);
     telemetry.stages_ms.cluster = graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
+    progress_reporter.phase(BuildProgressPhase::Publishing);
     let write_started = std::time::Instant::now();
     let outcome = graphoxide_cli::build_guard::commit_build(
         &output,
@@ -4681,7 +5057,12 @@ fn rebuild_isolated_pass(
         telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
         result.status = watch_service::RebuildStatus::RefusedShrink;
         result.clustered = false;
-        return Ok(finish(result, telemetry, runtime_telemetry));
+        return Ok(finish(
+            result,
+            telemetry,
+            runtime_telemetry,
+            progress_reporter,
+        ));
     }
     save_build_config_in(output_directory, false, None, None)?;
     telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
@@ -4689,7 +5070,12 @@ fn rebuild_isolated_pass(
     telemetry.graph.edges = result.stats.edges;
     telemetry.graph.clustered = true;
     watch_service::clear_needs_update(output_directory)?;
-    Ok(finish(result, telemetry, runtime_telemetry))
+    Ok(finish(
+        result,
+        telemetry,
+        runtime_telemetry,
+        progress_reporter,
+    ))
 }
 
 fn save_build_config_in(
@@ -5408,10 +5794,11 @@ mod tests {
         optional_baseline_leaves_full_graph_headroom, read_incremental_baseline,
         relevant_watch_paths, resolve_label_transport_inputs, run_project_build_with_cancellation,
         stale_local_sources, watch_change_requires_structural_rebuild, Cli, Command,
-        IncrementalGraphBudget, ProjectBuildOptions, ProjectBuildWorkflow, RuntimeIoBackendArg,
-        RuntimeOptions,
+        IncrementalGraphBudget, ProgressModeArg, ProjectBuildOptions, ProjectBuildWorkflow,
+        RuntimeIoBackendArg, RuntimeOptions,
     };
     use clap::Parser;
+    use graphoxide_cli::build_progress::{BuildProgressMode, BuildProgressReporter};
     use std::path::{Path, PathBuf};
 
     fn god_test_graph() -> graphoxide_core::KnowledgeGraph {
@@ -5598,6 +5985,51 @@ mod tests {
         let cli = Cli::try_parse_from(["graphoxide", "update", ".", "--force"])
             .expect("parse update --force");
         assert!(matches!(cli.command, Command::Update { force: true, .. }));
+    }
+
+    #[test]
+    fn build_commands_accept_explicit_progress_modes_and_default_to_auto() {
+        let extract = Cli::try_parse_from(["graphoxide", "extract", ".", "--progress=json"])
+            .expect("parse extract progress");
+        assert!(matches!(
+            extract.command,
+            Command::Extract {
+                build: ProjectBuildOptions {
+                    progress: ProgressModeArg::Json,
+                    ..
+                },
+                ..
+            }
+        ));
+        let index = Cli::try_parse_from(["graphoxide", "index", ".", "--progress", "never"])
+            .expect("parse index progress");
+        assert!(matches!(
+            index.command,
+            Command::Index {
+                build: ProjectBuildOptions {
+                    progress: ProgressModeArg::Never,
+                    ..
+                }
+            }
+        ));
+        let update = Cli::try_parse_from(["graphoxide", "update", "."])
+            .expect("parse default update progress");
+        assert!(matches!(
+            update.command,
+            Command::Update {
+                progress: ProgressModeArg::Auto,
+                ..
+            }
+        ));
+        let watch = Cli::try_parse_from(["graphoxide", "watch", ".", "--progress=json"])
+            .expect("parse watch progress");
+        assert!(matches!(
+            watch.command,
+            Command::Watch {
+                progress: ProgressModeArg::Json,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -5835,6 +6267,7 @@ mod tests {
                 allow_partial: false,
                 timing: false,
                 json: false,
+                progress: ProgressModeArg::Never,
                 runtime_report: None,
                 runtime: RuntimeOptions::default(),
                 out: Some(output_root),
@@ -5964,11 +6397,25 @@ mod tests {
             pass: 1,
             runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
             collect_runtime_telemetry: false,
+            progress_reporter: BuildProgressReporter::new_adaptive(
+                graphoxide_cli::build_telemetry::BuildOperation::Update,
+                BuildProgressMode::Never,
+            )
+            .expect("silent progress reporter"),
         })
         .expect("isolated watch pass");
         assert_eq!(
             first.result.status,
             graphoxide_cli::watch::RebuildStatus::Rebuilt
+        );
+        assert_eq!(
+            first.result.scope,
+            graphoxide_cli::watch::RebuildScope::Full,
+            "a missing committed baseline requires a truthful full pass"
+        );
+        assert_eq!(
+            first.telemetry.mode,
+            graphoxide_cli::build_telemetry::BuildMode::Full
         );
         assert_eq!(
             first.runtime_telemetry.execution_model,
@@ -5992,11 +6439,24 @@ mod tests {
             pass: 2,
             runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
             collect_runtime_telemetry: false,
+            progress_reporter: BuildProgressReporter::new_adaptive(
+                graphoxide_cli::build_telemetry::BuildOperation::Update,
+                BuildProgressMode::Never,
+            )
+            .expect("silent progress reporter"),
         })
         .expect("unchanged isolated watch pass");
         assert_eq!(
             second.result.status,
             graphoxide_cli::watch::RebuildStatus::Unchanged
+        );
+        assert_eq!(
+            second.result.scope,
+            graphoxide_cli::watch::RebuildScope::Incremental
+        );
+        assert_eq!(
+            second.telemetry.mode,
+            graphoxide_cli::build_telemetry::BuildMode::Incremental
         );
     }
 
@@ -6122,6 +6582,11 @@ mod tests {
             pass: 1,
             runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
             collect_runtime_telemetry: false,
+            progress_reporter: BuildProgressReporter::new_adaptive(
+                graphoxide_cli::build_telemetry::BuildOperation::Update,
+                BuildProgressMode::Never,
+            )
+            .expect("silent progress reporter"),
         })
         .expect("initial isolated pass");
 
@@ -6160,6 +6625,11 @@ mod tests {
                 read_batch_bytes: 4 * 1024,
             },
             collect_runtime_telemetry: false,
+            progress_reporter: BuildProgressReporter::new_adaptive(
+                graphoxide_cli::build_telemetry::BuildOperation::Update,
+                BuildProgressMode::Never,
+            )
+            .expect("silent progress reporter"),
         }) {
             Ok(_) => panic!("oversized baseline must fail"),
             Err(error) => error,
@@ -6199,6 +6669,11 @@ mod tests {
                 pass: 1,
                 runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
                 collect_runtime_telemetry: false,
+                progress_reporter: BuildProgressReporter::new_adaptive(
+                    graphoxide_cli::build_telemetry::BuildOperation::Update,
+                    BuildProgressMode::Never,
+                )
+                .expect("silent progress reporter"),
             };
             super::rebuild_isolated_pass(request(false)).expect("initial Code baseline");
             let manifest_path = output.join("manifest.json");
@@ -6347,6 +6822,11 @@ mod tests {
                 pass: 1,
                 runtime_config: graphoxide_index_runtime::IndexRuntimeConfig::default(),
                 collect_runtime_telemetry: false,
+                progress_reporter: BuildProgressReporter::new_adaptive(
+                    graphoxide_cli::build_telemetry::BuildOperation::Update,
+                    BuildProgressMode::Never,
+                )
+                .expect("silent progress reporter"),
             };
             super::rebuild_isolated_pass(request(false)).expect("initial Code baseline");
             let graph_path = output.join("graph.json");
@@ -6526,6 +7006,7 @@ mod tests {
             &options,
             Some(graphoxide_index_runtime::IndexRuntimeConfig::default()),
             Some(&isolated_report),
+            ProgressModeArg::Never,
         )
         .expect("isolated watch dispatch");
         assert_eq!(
@@ -6544,9 +7025,14 @@ mod tests {
         )
         .expect("update source");
         let legacy_report = project.path().join("legacy-runtime.json");
-        let legacy =
-            super::rebuild_watch_project(project.path(), &options, None, Some(&legacy_report))
-                .expect("legacy watch dispatch");
+        let legacy = super::rebuild_watch_project(
+            project.path(),
+            &options,
+            None,
+            Some(&legacy_report),
+            ProgressModeArg::Never,
+        )
+        .expect("legacy watch dispatch");
         assert!(legacy.succeeded());
         let legacy_value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&legacy_report).expect("legacy runtime report"))

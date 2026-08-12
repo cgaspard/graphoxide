@@ -173,6 +173,16 @@ single build-report object; `index --json` adds an outer object containing that
 build report and the coverage path and graph digest. Timing is never written
 into `graph.json`, so telemetry does not affect deterministic graph output.
 
+`extract`, `index`, `update`, and `watch` accept
+`--progress=auto|never|json`. The default `auto` mode writes concise phase and
+real phase-local counter updates to stderr only when stderr is an interactive
+terminal. `never` disables progress rendering. `json` writes
+`[graphoxide-progress]`-prefixed,
+source-safe JSONL envelopes to stderr; each envelope carries a per-run nonce
+that an embedding process can set with `GRAPHOXIDE_PROGRESS_NONCE` and validate
+before trusting it. Progress is always separate from command output, so
+selecting any progress mode does not change a command's stdout schema.
+
 The default executor separates filesystem I/O from CPU extraction behind
 bounded queues and a resolved managed-memory budget. `--memory-budget-bytes`,
 `--io-workers`, `--compute-workers`, `--read-batch-bytes`, and `--io-backend`

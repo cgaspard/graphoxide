@@ -837,6 +837,7 @@ dependencies = [
  "ignore",
  "libc",
  "notify",
+ "rand 0.10.2",
  "rayon",
  "regex",
  "reqwest",

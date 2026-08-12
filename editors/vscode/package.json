@@ -49,8 +49,9 @@
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"webview/**/*.ts\"",
     "test": "npm run compile && node --test dist/test/**/*.test.js",
     "test:control-center:browser": "node scripts/run-control-center-browser-tests.mjs",
-    "test:e2e": "npm run compile && node scripts/run-e2e.mjs",
+    "test:control-center:build-summary:browser": "node scripts/run-control-center-build-summary-browser-tests.mjs",
     "test:visualizer:browser": "npm run compile && node scripts/run-visualizer-browser-tests.mjs",
+    "test:e2e": "npm run compile && node scripts/run-e2e.mjs",
     "check": "npm run clean && npm run compile && npm run lint && npm test",
     "package": "node scripts/package.mjs"
   },

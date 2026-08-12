@@ -530,6 +530,38 @@ pub struct DeferredProjectExtractionWithTelemetry {
     pub telemetry: RuntimeExtractionTelemetry,
 }
 
+/// Progress-aware extraction evidence kept separate from the established
+/// telemetry DTO. The indexed byte count covers only dispatched indexed
+/// inputs, excluding resolver-only metadata contexts.
+#[derive(Debug)]
+#[must_use = "the pending manifest must be committed or deliberately discarded"]
+pub struct DeferredProjectExtractionWithProgress {
+    pub result: DeferredProjectExtractionResult,
+    pub telemetry: RuntimeExtractionTelemetry,
+    pub indexed_source_bytes: u64,
+    /// Whether the committed graph and admitted manifest can authorize an
+    /// incremental graph delta for this pass.
+    pub incremental_baseline_eligible: bool,
+}
+
+#[derive(Debug)]
+struct DeferredProjectExtractionInternal {
+    extraction: DeferredProjectExtractionWithTelemetry,
+    indexed_source_bytes: u64,
+    incremental_baseline_eligible: bool,
+}
+
+impl DeferredProjectExtractionInternal {
+    fn into_progress(self) -> DeferredProjectExtractionWithProgress {
+        DeferredProjectExtractionWithProgress {
+            result: self.extraction.result,
+            telemetry: self.extraction.telemetry,
+            indexed_source_bytes: self.indexed_source_bytes,
+            incremental_baseline_eligible: self.incremental_baseline_eligible,
+        }
+    }
+}
+
 impl std::ops::Deref for DeferredProjectExtractionWithTelemetry {
     type Target = DeferredProjectExtractionResult;
 
@@ -545,6 +577,165 @@ impl std::ops::Deref for DeferredProjectExtractionWithTelemetry {
 /// can record the failure and continue with the rest of the corpus.
 type ProjectExtractionRow = (String, graphoxide_core::Extraction, f64, String);
 type DetectionTestHook<'a> = &'a mut dyn FnMut(&detect::DetectResult) -> anyhow::Result<()>;
+
+#[derive(Default)]
+struct LegacyExtractionHooks<'a> {
+    before_extraction: Option<DetectionTestHook<'a>>,
+    after_extraction: Option<DetectionTestHook<'a>>,
+    progress: Option<ProjectExtractionProgressObserver>,
+}
+
+/// Source-safe aggregate progress produced from the already-dispatched indexed
+/// inputs. Worker threads update atomics only; a single bounded monitor invokes
+/// this callback at most ten times per second plus the initial/final state.
+pub type ProjectExtractionProgressObserver =
+    std::sync::Arc<dyn Fn(usize, usize) + Send + Sync + 'static>;
+
+struct ProjectExtractionProgressState {
+    processed: std::sync::atomic::AtomicUsize,
+    done: std::sync::atomic::AtomicBool,
+    wake: std::sync::Condvar,
+    gate: std::sync::Mutex<()>,
+    total: usize,
+}
+
+impl ProjectExtractionProgressState {
+    fn complete_one(&self) {
+        let _ = self.processed.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| Some(current.saturating_add(1).min(self.total)),
+        );
+    }
+
+    fn complete_many(&self, count: usize) {
+        let _ = self.processed.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| Some(current.saturating_add(count).min(self.total)),
+        );
+    }
+}
+
+struct ProjectExtractionCompletion {
+    state: Option<std::sync::Arc<ProjectExtractionProgressState>>,
+}
+
+impl ProjectExtractionCompletion {
+    fn new(state: Option<std::sync::Arc<ProjectExtractionProgressState>>, indexed: bool) -> Self {
+        Self {
+            state: indexed.then_some(state).flatten(),
+        }
+    }
+}
+
+impl Drop for ProjectExtractionCompletion {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.as_ref() {
+            state.complete_one();
+        }
+    }
+}
+
+struct ProjectExtractionProgressMonitor {
+    state: Option<std::sync::Arc<ProjectExtractionProgressState>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProjectExtractionProgressMonitor {
+    fn start(total: usize, observer: Option<ProjectExtractionProgressObserver>) -> Self {
+        let Some(observer) = observer else {
+            return Self {
+                state: None,
+                thread: None,
+            };
+        };
+        observer(0, total);
+        if total == 0 {
+            return Self {
+                state: None,
+                thread: None,
+            };
+        }
+        let state = std::sync::Arc::new(ProjectExtractionProgressState {
+            processed: std::sync::atomic::AtomicUsize::new(0),
+            done: std::sync::atomic::AtomicBool::new(false),
+            wake: std::sync::Condvar::new(),
+            gate: std::sync::Mutex::new(()),
+            total,
+        });
+        let monitor_state = std::sync::Arc::clone(&state);
+        let thread = std::thread::spawn(move || {
+            let mut last = 0;
+            let interval = std::time::Duration::from_millis(100);
+            let mut next_emit = std::time::Instant::now() + interval;
+            loop {
+                let guard = monitor_state
+                    .gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let timeout = next_emit.saturating_duration_since(std::time::Instant::now());
+                let _ = monitor_state
+                    .wake
+                    .wait_timeout(guard, timeout)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let processed = monitor_state
+                    .processed
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .min(monitor_state.total);
+                let done = monitor_state
+                    .done
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let now = std::time::Instant::now();
+                if processed != last && (done || now >= next_emit) {
+                    observer(processed, monitor_state.total);
+                    last = processed;
+                }
+                if done {
+                    break;
+                }
+                if now >= next_emit {
+                    next_emit = now + interval;
+                }
+            }
+        });
+        Self {
+            state: Some(state),
+            thread: Some(thread),
+        }
+    }
+
+    fn counter(&self) -> Option<std::sync::Arc<ProjectExtractionProgressState>> {
+        self.state.as_ref().map(std::sync::Arc::clone)
+    }
+
+    fn finish(mut self) {
+        if let Some(state) = self.state.as_ref() {
+            debug_assert_eq!(
+                state.processed.load(std::sync::atomic::Ordering::Relaxed),
+                state.total,
+                "every dispatched indexed input must reach a terminal extraction attempt"
+            );
+        }
+        self.stop();
+    }
+
+    fn stop(&mut self) {
+        if let Some(state) = self.state.as_ref() {
+            state.done.store(true, std::sync::atomic::Ordering::Release);
+            state.wake.notify_all();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for ProjectExtractionProgressMonitor {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 fn extract_one_project_file(
     path: &std::path::Path,
@@ -1670,8 +1861,66 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         cancellation,
         false,
         None,
+        None,
     )
-    .map(|extraction| extraction.result)
+    .map(|extraction| extraction.extraction.result)
+}
+
+/// Cancellation-aware extraction with build-mode and indexed-byte evidence,
+/// but without starting a progress monitor or requiring strict telemetry.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_build_evidence(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+) -> anyhow::Result<DeferredProjectExtractionWithProgress> {
+    extract_project_with_runtime_scan_options_deferred_manifest_impl(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        cancellation,
+        false,
+        None,
+        None,
+    )
+    .map(DeferredProjectExtractionInternal::into_progress)
+}
+
+/// Cancellation-aware extraction with best-effort aggregate runtime evidence
+/// and source-safe phase observations. Unlike the runtime-report entry point,
+/// this does not make cache telemetry barriers strict merely because progress
+/// is enabled.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_progress(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+    progress: ProjectExtractionProgressObserver,
+) -> anyhow::Result<DeferredProjectExtractionWithProgress> {
+    extract_project_with_runtime_scan_options_deferred_manifest_impl(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        cancellation,
+        false,
+        None,
+        Some(progress),
+    )
+    .map(DeferredProjectExtractionInternal::into_progress)
 }
 
 /// Cancellation-aware production indexing entry point with additive runtime
@@ -1696,7 +1945,63 @@ pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancella
         cancellation,
         true,
         None,
+        None,
     )
+    .map(|extraction| extraction.extraction)
+}
+
+/// Strict telemetry-aware extraction with build-mode and indexed-byte
+/// evidence, but without starting a progress monitor.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry_and_build_evidence(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+) -> anyhow::Result<DeferredProjectExtractionWithProgress> {
+    extract_project_with_runtime_scan_options_deferred_manifest_impl(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        cancellation,
+        true,
+        None,
+        None,
+    )
+    .map(DeferredProjectExtractionInternal::into_progress)
+}
+
+/// Strict telemetry-aware extraction with the same source-safe phase seam.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_telemetry_and_progress(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    config: graphoxide_index_runtime::IndexRuntimeConfig,
+    cancellation: graphoxide_index_runtime::RuntimeCancellation,
+    progress: ProjectExtractionProgressObserver,
+) -> anyhow::Result<DeferredProjectExtractionWithProgress> {
+    extract_project_with_runtime_scan_options_deferred_manifest_impl(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        config,
+        cancellation,
+        true,
+        None,
+        Some(progress),
+    )
+    .map(DeferredProjectExtractionInternal::into_progress)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1710,7 +2015,8 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     cancellation: graphoxide_index_runtime::RuntimeCancellation,
     require_telemetry: bool,
     mut post_request_test_hook: Option<DetectionTestHook<'_>>,
-) -> anyhow::Result<DeferredProjectExtractionWithTelemetry> {
+    progress_observer: Option<ProjectExtractionProgressObserver>,
+) -> anyhow::Result<DeferredProjectExtractionInternal> {
     use graphoxide_index_runtime::{
         read_files_concurrently_with_cancellation_and_telemetry, FileReadRequest, InputIdentity,
     };
@@ -1751,6 +2057,9 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     let total_work = indexed_paths
         .len()
         .saturating_add(detection.walk_errors.len());
+    let extraction_progress =
+        ProjectExtractionProgressMonitor::start(indexed_paths.len(), progress_observer);
+    let extraction_progress_counter = extraction_progress.counter();
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let detected_kinds = detected_source_kinds(&detection, &resolved_root, root)?;
     // Metadata needed by JS/TS/SFC resolution is admitted by I/O owners even
@@ -1938,6 +2247,16 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     let mut source_bytes_selected = all_requests.iter().fold(0_u64, |total, request| {
         total.saturating_add(request.selected_source_bytes().unwrap_or(0))
     });
+    let mut indexed_source_bytes = all_requests
+        .iter()
+        .filter(|request| {
+            contexts
+                .get(request.identity.normalized_path.as_ref())
+                .is_some_and(|context| context.indexed)
+        })
+        .fold(0_u64, |total, request| {
+            total.saturating_add(request.selected_source_bytes().unwrap_or(0))
+        });
     let mut source_bytes_avoided = 0_u64;
     // Resolver source bytes remain live while sibling workers may still parse.
     // Give each phase a disjoint portion of the shared CPU-arena partition.
@@ -2031,6 +2350,9 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             ]))
         })?;
         source_bytes_selected = source_bytes_selected.saturating_add(evidence.byte_length);
+        if context.indexed {
+            indexed_source_bytes = indexed_source_bytes.saturating_add(evidence.byte_length);
+        }
         streaming_media_sources_read = streaming_media_sources_read.saturating_add(1);
         streaming_media_source_bytes_read =
             streaming_media_source_bytes_read.saturating_add(evidence.byte_length);
@@ -2070,6 +2392,11 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             runtime_cache_diagnostics: Vec::new(),
             parses: 0,
         });
+        if context.indexed
+            && let Some(progress) = extraction_progress_counter.as_ref()
+        {
+            progress.complete_one();
+        }
     }
 
     // Probe metadata-authorized entries in stable request order. Only sources
@@ -2170,6 +2497,9 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                                     runtime_cache_diagnostics: Vec::new(),
                                     parses: 0,
                                 });
+                                if let Some(progress) = extraction_progress_counter.as_ref() {
+                                    progress.complete_one();
+                                }
                             }
                             Err(RuntimeCacheHitUseError::Rejected(rejection)) => {
                                 runtime_cache.stale_or_corrupt =
@@ -2231,6 +2561,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
     let parser_admission_for_compute = Arc::clone(&parser_admission);
     let cache_client_for_compute = cache_client.clone();
     let compute_cancellation = cancellation.clone();
+    let extraction_progress_for_compute = extraction_progress_counter.clone();
     let completed = read_files_concurrently_with_cancellation_and_telemetry(
         config,
         requests,
@@ -2244,6 +2575,10 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         let context = contexts_for_compute
             .get(relative.as_str())
             .expect("runtime ticket context must exist");
+        let _progress_completion = ProjectExtractionCompletion::new(
+            extraction_progress_for_compute.clone(),
+            context.indexed,
+        );
         let path = &context.path;
         let indexed = context.indexed;
         anyhow::ensure!(
@@ -2554,6 +2889,18 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
 
     let mut runtime_io = completed.telemetry;
     let completed = completed.result;
+    if let Some(progress) = extraction_progress_counter.as_ref() {
+        let indexed_failures = completed
+            .failures
+            .iter()
+            .filter(|failure| {
+                contexts
+                    .get(failure.identity.normalized_path.as_ref())
+                    .is_some_and(|context| context.indexed)
+            })
+            .count();
+        progress.complete_many(indexed_failures);
+    }
     runtime_io.sources_selected = selected_sources;
     runtime_io.source_bytes_selected = source_bytes_selected;
     runtime_io.sources_read = runtime_io
@@ -3015,36 +3362,41 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         config.memory_budget_bytes
     );
     debug_assert!(output_admission.retained_bytes() <= output_budget);
-    Ok(DeferredProjectExtractionWithTelemetry {
-        result: DeferredProjectExtractionResult {
-            extractions,
-            retained_output_bytes,
-            pending_manifest_retained_bytes,
-            detection,
-            progress: ProjectExtractionProgress {
-                total: total_work,
-                succeeded,
+    extraction_progress.finish();
+    Ok(DeferredProjectExtractionInternal {
+        extraction: DeferredProjectExtractionWithTelemetry {
+            result: DeferredProjectExtractionResult {
+                extractions,
+                retained_output_bytes,
+                pending_manifest_retained_bytes,
+                detection,
+                progress: ProjectExtractionProgress {
+                    total: total_work,
+                    succeeded,
+                },
+                warnings,
+                rebuilt_sources,
+                verified_representation_sources,
+                ownership_prune_sources,
+                changed_sources,
+                unchanged_sources,
+                deleted_sources,
+                runtime_cache,
+                runtime_cache_diagnostics,
+                resolution_snapshot_diagnostics,
+                pending_manifest: PendingProjectManifest {
+                    output_directory: managed_output_dir,
+                    entries: manifest,
+                },
             },
-            warnings,
-            rebuilt_sources,
-            verified_representation_sources,
-            ownership_prune_sources,
-            changed_sources,
-            unchanged_sources,
-            deleted_sources,
-            runtime_cache,
-            runtime_cache_diagnostics,
-            resolution_snapshot_diagnostics,
-            pending_manifest: PendingProjectManifest {
-                output_directory: managed_output_dir,
-                entries: manifest,
+            telemetry: RuntimeExtractionTelemetry {
+                io: runtime_io,
+                work: runtime_work,
+                cache_io: runtime_cache_io,
             },
         },
-        telemetry: RuntimeExtractionTelemetry {
-            io: runtime_io,
-            work: runtime_work,
-            cache_io: runtime_cache_io,
-        },
+        indexed_source_bytes,
+        incremental_baseline_eligible: committed_baseline_eligible,
     })
 }
 
@@ -3088,6 +3440,28 @@ pub fn extract_project_with_scan_options_deferred_manifest(
     )
 }
 
+/// Legacy extraction with source-safe aggregate phase observations.
+pub fn extract_project_with_scan_options_deferred_manifest_with_progress(
+    root: &std::path::Path,
+    force: bool,
+    managed_output_dir: &std::path::Path,
+    code_only: bool,
+    detect_options: &detect::DetectOptions,
+    progress: ProjectExtractionProgressObserver,
+) -> anyhow::Result<DeferredProjectExtractionResult> {
+    extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
+        root,
+        force,
+        managed_output_dir,
+        code_only,
+        detect_options,
+        LegacyExtractionHooks {
+            progress: Some(progress),
+            ..LegacyExtractionHooks::default()
+        },
+    )
+}
+
 fn extract_project_with_scan_options_deferred_manifest_impl(
     root: &std::path::Path,
     force: bool,
@@ -3102,8 +3476,10 @@ fn extract_project_with_scan_options_deferred_manifest_impl(
         managed_output_dir,
         code_only,
         detect_options,
-        None,
-        after_extraction_hook,
+        LegacyExtractionHooks {
+            after_extraction: after_extraction_hook,
+            ..LegacyExtractionHooks::default()
+        },
     )
 }
 
@@ -3113,10 +3489,14 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
     managed_output_dir: &std::path::Path,
     code_only: bool,
     detect_options: &detect::DetectOptions,
-    mut before_extraction_hook: Option<DetectionTestHook<'_>>,
-    mut after_extraction_hook: Option<DetectionTestHook<'_>>,
+    hooks: LegacyExtractionHooks<'_>,
 ) -> anyhow::Result<DeferredProjectExtractionResult> {
     use rayon::prelude::*;
+    let LegacyExtractionHooks {
+        mut before_extraction,
+        mut after_extraction,
+        progress: progress_observer,
+    } = hooks;
     let managed_output_dir = if managed_output_dir.is_absolute() {
         managed_output_dir.to_path_buf()
     } else {
@@ -3139,9 +3519,12 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
     files.sort();
     files.dedup();
     let total_work = files.len().saturating_add(detection.walk_errors.len());
+    if let Some(observer) = progress_observer.as_ref() {
+        observer(0, files.len());
+    }
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let detected_kinds = detected_source_kinds(&detection, &resolved_root, root)?;
-    if let Some(hook) = before_extraction_hook.as_mut() {
+    if let Some(hook) = before_extraction.as_mut() {
         hook(&detection)?;
     }
     // One unreadable or unextractable file must not abort the scan. Each
@@ -3225,7 +3608,7 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
             })
         })
         .collect::<std::collections::BTreeSet<_>>();
-    if let Some(hook) = after_extraction_hook.as_mut() {
+    if let Some(hook) = after_extraction.as_mut() {
         hook(&detection)?;
     }
     let current_mpeg_keys = detected_kinds
@@ -3429,6 +3812,9 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
     );
     let retained_output_bytes = extractions_retained_bytes(&extractions)?;
     let pending_manifest_retained_bytes = pending_manifest_retained_charge(&manifest);
+    if let Some(observer) = progress_observer.as_ref() {
+        observer(files.len(), files.len());
+    }
     Ok(DeferredProjectExtractionResult {
         extractions,
         retained_output_bytes,
@@ -4042,6 +4428,37 @@ mod tests {
     }
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn central_progress_monitor_is_live_monotonic_and_rate_bounded() {
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_for_callback = std::sync::Arc::clone(&observed);
+        let observer: super::ProjectExtractionProgressObserver =
+            std::sync::Arc::new(move |processed, total| {
+                observed_for_callback
+                    .lock()
+                    .expect("progress observations")
+                    .push((std::time::Instant::now(), processed, total));
+            });
+        let monitor = super::ProjectExtractionProgressMonitor::start(12, Some(observer));
+        let counter = monitor.counter().expect("live progress counter");
+        for _ in 0..12 {
+            counter.complete_one();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        monitor.finish();
+
+        let observed = observed.lock().expect("progress observations");
+        assert_eq!(observed.first().map(|(_, value, _)| *value), Some(0));
+        assert_eq!(observed.last().map(|(_, value, _)| *value), Some(12));
+        assert!(observed.iter().any(|(_, value, _)| (1..12).contains(value)));
+        assert!(observed.windows(2).all(|pair| pair[0].1 < pair[1].1));
+        assert!(observed.iter().all(|(_, _, total)| *total == 12));
+        assert!(
+            observed.len() <= 5,
+            "100 ms throttling emitted too many observations: {observed:?}"
+        );
+    }
 
     struct Fixture {
         root: PathBuf,
@@ -5902,6 +6319,57 @@ mod tests {
     }
 
     #[test]
+    fn build_evidence_counts_only_indexed_source_bytes_and_baseline_eligibility() {
+        let fixture = Fixture::new();
+        let main = "import { shared } from './shared'; export const run = shared;\n";
+        let shared = "export const shared = 1;\n";
+        let resolver_metadata = "packages:\n  - 'packages/*'\n";
+        fixture.write("main.ts", main);
+        fixture.write("shared.ts", shared);
+        fixture.write("pnpm-workspace.yaml", resolver_metadata);
+        let output = fixture.root.join("graphoxide-out");
+        let runtime = runtime_config(32 * 1024 * 1024);
+
+        let first = super::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_build_evidence(
+            &fixture.root,
+            true,
+            &output,
+            true,
+            &super::detect::DetectOptions::default(),
+            runtime,
+            graphoxide_index_runtime::RuntimeCancellation::new(),
+        )
+        .expect("progress build evidence");
+        assert_eq!(
+            first.indexed_source_bytes,
+            (main.len() + shared.len()) as u64,
+            "resolver-only workspace metadata must not be labeled indexed source size"
+        );
+        assert!(
+            first.telemetry.io.source_bytes_selected > first.indexed_source_bytes,
+            "runtime I/O telemetry should retain its broader metadata semantics"
+        );
+        assert!(!first.incremental_baseline_eligible);
+        commit_runtime_baseline(first.result, &fixture.root, &output);
+
+        let second = super::extract_project_with_runtime_scan_options_deferred_manifest_with_cancellation_and_build_evidence(
+            &fixture.root,
+            false,
+            &output,
+            true,
+            &super::detect::DetectOptions::default(),
+            runtime,
+            graphoxide_index_runtime::RuntimeCancellation::new(),
+        )
+        .expect("warm build evidence");
+        assert!(second.incremental_baseline_eligible);
+        assert_eq!(
+            second.indexed_source_bytes,
+            (main.len() + shared.len()) as u64
+        );
+    }
+
+    #[test]
     fn isolated_runtime_skips_one_bad_source_with_a_warning() {
         let fixture = Fixture::new();
         fixture.write("app.py", "def app():\n    return 1\n");
@@ -6998,6 +7466,7 @@ mod tests {
             graphoxide_index_runtime::RuntimeCancellation::new(),
             false,
             Some(&mut replace_after_detection),
+            None,
         )
         .expect_err("unverified transition must abort before publication");
         assert!(error
@@ -7797,8 +8266,11 @@ mod tests {
             &output,
             false,
             &super::detect::DetectOptions::default(),
-            Some(&mut remove_before_extraction),
-            Some(&mut restore_after_extraction),
+            super::LegacyExtractionHooks {
+                before_extraction: Some(&mut remove_before_extraction),
+                after_extraction: Some(&mut restore_after_extraction),
+                ..super::LegacyExtractionHooks::default()
+            },
         )
         .expect_err("a missing transition row must abort the entire deferred build");
         assert!(
@@ -7853,6 +8325,7 @@ mod tests {
             graphoxide_index_runtime::RuntimeCancellation::new(),
             false,
             Some(&mut remove_after_requests),
+            None,
         )
         .expect_err("every nominated MPEG source must be verified before publication");
         assert!(
