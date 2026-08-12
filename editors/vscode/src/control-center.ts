@@ -354,7 +354,7 @@ export class ControlCenterPanel implements vscode.Disposable {
   <style>
     * { box-sizing: border-box; }
     :root { color-scheme: light dark; }
-    body { max-width: 1120px; margin: 0 auto; padding: 28px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
+    body { width: 100%; max-width: 1280px; margin: 0 auto; padding: 28px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
     h1, h2, h3, p { margin-top: 0; } h1 { margin-bottom: 4px; font-size: 25px; } h2 { margin-bottom: 5px; font-size: 18px; } h3 { margin-bottom: 3px; font-size: 14px; }
     .muted, .lead, .detail, .path, dt { color: var(--vscode-descriptionForeground); } .lead { margin-bottom: 0; }
     .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
@@ -362,17 +362,18 @@ export class ControlCenterPanel implements vscode.Disposable {
     .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 12px; background: var(--vscode-editorWidget-background); }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
     .good .dot { background: var(--vscode-testing-iconPassed); } .warn .dot { background: var(--vscode-editorWarning-foreground); } .bad .dot { background: var(--vscode-errorForeground); }
-    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .dashboard { display: grid; gap: 14px; }
+    .dashboard-secondary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; }
     .card { min-width: 0; padding: 17px; border: 1px solid var(--vscode-panel-border); border-radius: 9px; background: var(--vscode-editorWidget-background); }
-    .wide { grid-column: 1 / -1; }
     .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .card-head > :first-child, .native > :first-child, .scope-head > :first-child { min-width: 0; }
     .badge { flex: none; padding: 2px 8px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
     .badge.good { color: var(--vscode-testing-iconPassed); } .badge.warn { color: var(--vscode-editorWarning-foreground); } .badge.bad { color: var(--vscode-errorForeground); }
     dl { display: grid; grid-template-columns: minmax(92px, auto) minmax(0, 1fr); gap: 7px 12px; margin: 15px 0 0; font-size: 12px; } dt, dd { margin: 0; } dd { min-width: 0; overflow-wrap: anywhere; }
-    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 15px; }
+    .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 15px; }
     .metric { padding: 10px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; text-align: center; } .metric strong { display: block; font-size: 18px; } .metric span { color: var(--vscode-descriptionForeground); font-size: 11px; }
     .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
-    button { min-height: 28px; padding: 5px 11px; border: 1px solid transparent; border-radius: 3px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font: inherit; cursor: pointer; }
+    button { max-width: 100%; min-height: 28px; padding: 5px 11px; border: 1px solid transparent; border-radius: 3px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font: inherit; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
     button.secondary { border-color: var(--vscode-button-border, transparent); color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
     button.link { min-height: 0; padding: 0; border: 0; color: var(--vscode-textLink-foreground); background: transparent; text-align: left; overflow-wrap: anywhere; }
     button:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); } button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); } button.link:hover:not(:disabled) { color: var(--vscode-textLink-activeForeground); background: transparent; text-decoration: underline; }
@@ -387,7 +388,8 @@ export class ControlCenterPanel implements vscode.Disposable {
     .scope-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; } .scope .detail { min-height: 17px; margin: 5px 0 0; font-size: 11px; }
     .scope .path { margin: 7px 0 0; font: 11px var(--vscode-editor-font-family); overflow-wrap: anywhere; }
     .loading { padding: 34px; text-align: center; color: var(--vscode-descriptionForeground); }
-    @media (max-width: 720px) { body { padding: 18px; } .header { align-items: stretch; flex-direction: column; gap: 12px; } .header button { align-self: flex-start; } .grid, .scope-grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
+    @media (max-width: 760px) { body { padding: 18px; } .header { align-items: stretch; flex-direction: column; gap: 12px; } .header button { align-self: flex-start; } .dashboard-secondary { grid-template-columns: 1fr; } }
+    @media (max-width: 420px) { body { padding: 14px; } dl { grid-template-columns: 1fr; gap: 3px; } dd + dt { margin-top: 6px; } }
     @media (forced-colors: active) { .card, .integration, .scope, .native, .chip { border-color: CanvasText; } }
   </style>
 </head>
@@ -427,7 +429,7 @@ export class ControlCenterPanel implements vscode.Disposable {
         + chip(mcpLabel, mcpTone)
         + '</div>';
       document.getElementById('content').className = '';
-      document.getElementById('content').innerHTML = overview + '<main class="grid">' + graphCard(state) + managedCard(state) + aiCard(state) + mcpCard(state) + '</main>';
+      document.getElementById('content').innerHTML = overview + '<main class="dashboard">' + graphCard(state) + '<div class="dashboard-secondary">' + managedCard(state) + aiCard(state) + '</div>' + mcpCard(state) + '</main>';
       bindActions(); updateDisabled();
     }
     function graphCard(state) {
@@ -473,7 +475,7 @@ export class ControlCenterPanel implements vscode.Disposable {
     function mcpCard(state) {
       const nativeState = state.mcp.nativeEnabled ? badge('Active', 'good') : badge('Inactive', '');
       const rows = state.mcp.rows.map(integrationCard).join('');
-      return '<section class="card wide" aria-labelledby="mcp-heading"><div class="card-head"><div><h2 id="mcp-heading">MCP integrations</h2><p class="muted">Connect this workspace’s Graphoxide graph to coding assistants.</p></div>' + badge(state.mcp.configuredScopes + ' installed', state.mcp.configuredScopes ? 'good' : '') + '</div>'
+      return '<section class="card" aria-labelledby="mcp-heading"><div class="card-head"><div><h2 id="mcp-heading">MCP integrations</h2><p class="muted">Connect this workspace’s Graphoxide graph to coding assistants.</p></div>' + badge(state.mcp.configuredScopes + ' installed', state.mcp.configuredScopes ? 'good' : '') + '</div>'
         + '<p class="section-intro">Each project registration starts a local stdio server in this workspace, so it reads this project’s graphoxide-out/graph.json. All-project installation is no longer offered. A legacy global entry appears only so you can remove it safely.</p>'
         + '<div class="native"><div><h3>VS Code native MCP</h3><p class="detail">Provided directly by this extension when managed workspace mode is enabled. No config file is edited.</p><p class="path">' + escapeHtml(state.mcp.invocation) + '</p></div>' + nativeState + '</div>'
         + '<div class="integrations">' + rows + '</div></section>';

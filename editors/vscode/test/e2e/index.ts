@@ -275,6 +275,40 @@ async function verifyAiProviders(api: GraphoxideExtensionApi, graphPath: string)
     await assertGeneratedLabels(graphPath, 'LM Studio', lmKey);
     await lmStudio.close();
 
+    const remoteOllamaUrl = 'http://192.0.2.10:11434/v1';
+    const remoteOllamaOrigin = new URL(remoteOllamaUrl).origin;
+    const originalFetch = globalThis.fetch;
+    let remoteDiscoveryAttempts = 0;
+    globalThis.fetch = (async (...arguments_: Parameters<typeof fetch>) => {
+      const input = arguments_[0];
+      const requestUrl = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      if (new URL(requestUrl).origin === remoteOllamaOrigin) {
+        remoteDiscoveryAttempts += 1;
+        throw new Error('remote Ollama model discovery must remain disabled');
+      }
+      return originalFetch(...arguments_);
+    }) as typeof fetch;
+    try {
+      const remoteModels = await api.test.configureAi({
+        provider: 'ollama',
+        baseUrl: remoteOllamaUrl,
+        model: 'manual-remote-ollama:latest',
+        timeoutSeconds: 600,
+      });
+      assert.deepEqual(remoteModels, []);
+      assert.equal(remoteDiscoveryAttempts, 0);
+      const settings = vscode.workspace.getConfiguration('graphoxide');
+      assert.equal(settings.get<string>('llm.provider'), 'ollama');
+      assert.equal(settings.get<string>('llm.baseUrl'), remoteOllamaUrl);
+      assert.equal(settings.get<string>('llm.model'), 'manual-remote-ollama:latest');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
     await ollama.start();
     const ollamaModels = await api.test.configureAi({
       provider: 'ollama',

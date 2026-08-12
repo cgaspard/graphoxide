@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import * as fs from 'node:fs';
 import { isIP } from 'node:net';
 import * as path from 'node:path';
@@ -53,7 +54,7 @@ export const AI_PROVIDER_PROFILES: readonly AiProviderProfile[] = [
   {
     id: 'ollama',
     label: 'Ollama',
-    description: 'Local Ollama server · key optional',
+    description: 'Local or remote Ollama server · key optional',
     backend: 'ollama',
     defaultBaseUrl: 'http://127.0.0.1:11434/v1',
     defaultModel: 'qwen2.5-coder:7b',
@@ -107,6 +108,8 @@ const PROVIDER_ENVIRONMENT = [
   'GRAPHIFY_API_TIMEOUT',
 ] as const;
 
+const MAX_PROVIDER_BASE_URL_BYTES = 2048;
+
 export function aiProviderById(value: unknown): AiProviderProfile | undefined {
   return typeof value === 'string'
     ? AI_PROVIDER_PROFILES.find((profile) => profile.id === value)
@@ -116,6 +119,9 @@ export function aiProviderById(value: unknown): AiProviderProfile | undefined {
 export function normalizeProviderBaseUrl(profile: AiProviderProfile, configured: string): string {
   const raw = profile.editableEndpoint ? configured.trim() || profile.defaultBaseUrl : profile.defaultBaseUrl;
   if (!raw) throw new Error(`${profile.label} requires a base URL.`);
+  if (profile.id === 'ollama' && Buffer.byteLength(raw, 'utf8') > MAX_PROVIDER_BASE_URL_BYTES) {
+    throw new Error(`${profile.label} base URL exceeds the ${MAX_PROVIDER_BASE_URL_BYTES}-byte limit.`);
+  }
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -125,14 +131,21 @@ export function normalizeProviderBaseUrl(profile: AiProviderProfile, configured:
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`${profile.label} base URL must use http or https.`);
   }
-  if (parsed.username || parsed.password) {
+  if (rawAuthorityContainsUserinfo(raw) || parsed.username || parsed.password) {
     throw new Error(`${profile.label} credentials must use VS Code Secret Storage, not the base URL.`);
   }
   if (parsed.search || parsed.hash) {
     throw new Error(`${profile.label} base URL may not contain a query string or fragment.`);
   }
-  if (parsed.protocol === 'http:' && !isLoopbackUrl(parsed.toString())) {
+  if (parsed.protocol === 'http:' && !isLoopbackUrl(parsed.toString()) && profile.id !== 'ollama') {
     throw new Error(`${profile.label} must use https unless the endpoint is on this computer.`);
+  }
+  if (profile.id === 'ollama') {
+    const canonicalHostname = parsed.hostname.replace(/\.+$/u, '');
+    if (!canonicalHostname || isForbiddenOllamaHost(canonicalHostname)) {
+      throw new Error('Ollama base URL may not target a link-local, metadata, or unspecified address.');
+    }
+    parsed.hostname = canonicalHostname;
   }
   let pathname = parsed.pathname.replace(/\/+$/u, '');
   if (profile.localPreset && !/\/v\d+$/u.test(pathname)) pathname += '/v1';
@@ -153,7 +166,33 @@ export function isLoopbackUrl(value: string): boolean {
 }
 
 export function apiKeyRequired(profile: AiProviderProfile, baseUrl: string): boolean {
-  return profile.id === 'openai' || profile.id === 'anthropic' || !isLoopbackUrl(baseUrl);
+  return profile.id === 'openai'
+    || profile.id === 'anthropic'
+    || (profile.id !== 'ollama' && !isLoopbackUrl(baseUrl));
+}
+
+export function labelingTransportWarning(profile: AiProviderProfile, baseUrl: string): string | undefined {
+  if (profile.id !== 'ollama' || !isPlaintextRemoteUrl(baseUrl)) return undefined;
+  return 'Transport warning: this Ollama endpoint uses plaintext HTTP on another host. Graph-derived labels and any optional API key will be sent without TLS encryption.';
+}
+
+export function labelingConfirmationDetail(
+  configuration: Pick<AiLabelingConfiguration, 'profile' | 'baseUrl' | 'model' | 'timeoutSeconds'>,
+  graphPath: string,
+  executable: string,
+): string {
+  const transportWarning = labelingTransportWarning(configuration.profile, configuration.baseUrl);
+  return [
+    `Endpoint: ${configuration.baseUrl}`,
+    `Model: ${configuration.model}`,
+    `Request timeout: ${configuration.timeoutSeconds} seconds`,
+    `Graph: ${graphPath}`,
+    `Executable: ${executable}`,
+    ...(transportWarning ? ['', transportWarning] : []),
+    '',
+    'Graphoxide sends up to 12 graph node labels per community. Labels can include source-derived identifiers, filenames, and truncated comments or docstrings. Full files and source_file metadata are not included.',
+    'This replaces community names in graph.json, writes the label sidecar, and regenerates GRAPH_REPORT.md beside the graph.',
+  ].join('\n');
 }
 
 export function aiSecretKey(profile: AiProviderProfile): string {
@@ -228,6 +267,58 @@ export function modelDiscoveryUrl(profile: AiProviderProfile, baseUrl: string): 
     return new URL('models', `${baseUrl.replace(/\/$/u, '')}/`).toString();
   }
   return undefined;
+}
+
+function isPlaintextRemoteUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' && !isLoopbackUrl(parsed.toString());
+  } catch {
+    return false;
+  }
+}
+
+function rawAuthorityContainsUserinfo(value: string): boolean {
+  const schemeEnd = value.indexOf(':');
+  if (schemeEnd < 0) return false;
+  const tail = value.slice(schemeEnd + 1).replace(/^[\\/]+/u, '');
+  const authorityEnd = tail.search(/[\\/?#]/u);
+  const authority = authorityEnd < 0 ? tail : tail.slice(0, authorityEnd);
+  return authority.includes('@');
+}
+
+function isForbiddenOllamaHost(value: string): boolean {
+  const hostname = value.replace(/^\[|\]$/gu, '').replace(/\.+$/u, '').toLocaleLowerCase('en-US');
+  if (hostname === 'metadata.google.internal' || hostname.endsWith('.metadata.google.internal')) return true;
+  if (hostname === 'fd00:ec2::254') return true;
+  const octets = isIP(hostname) === 4 ? hostname.split('.').map(Number) : embeddedIpv4Octets(hostname);
+  if (octets) return octets.every((octet) => octet === 0) || (octets[0] === 169 && octets[1] === 254);
+  return isIP(hostname) === 6 && (hostname === '::' || /^fe[89ab]/u.test(hostname));
+}
+
+function embeddedIpv4Octets(hostname: string): number[] | undefined {
+  if (isIP(hostname) !== 6) return undefined;
+  const [left = '', right = '', ...extra] = hostname.split('::');
+  if (extra.length > 0) return undefined;
+  const leftSegments = left ? left.split(':') : [];
+  const rightSegments = right ? right.split(':') : [];
+  const omitted = 8 - leftSegments.length - rightSegments.length;
+  if (omitted < 0 || (!hostname.includes('::') && omitted !== 0)) return undefined;
+  const segments = [
+    ...leftSegments,
+    ...Array.from({ length: omitted }, () => '0'),
+    ...rightSegments,
+  ].map((segment) => Number.parseInt(segment || '0', 16));
+  if (segments.length !== 8 || segments.some((segment) => !Number.isInteger(segment) || segment < 0 || segment > 0xffff)) {
+    return undefined;
+  }
+  const compatiblePrefix = segments.slice(0, 5).every((segment) => segment === 0)
+    && (segments[5] === 0 || segments[5] === 0xffff);
+  const nat64Prefix = segments[0] === 0x64
+    && segments[1] === 0xff9b
+    && segments.slice(2, 6).every((segment) => segment === 0);
+  if (!compatiblePrefix && !nat64Prefix) return undefined;
+  return [segments[6]! >> 8, segments[6]! & 0xff, segments[7]! >> 8, segments[7]! & 0xff];
 }
 
 export function parseDiscoveredModels(profile: AiProviderProfile, value: unknown): string[] {

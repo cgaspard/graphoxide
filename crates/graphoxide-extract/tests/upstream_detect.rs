@@ -666,6 +666,81 @@ fn test_graphifyignore_excludes_file() {
 }
 
 #[test]
+fn test_graphoxideignore_documented_generated_file_example() {
+    let fixture = fixture();
+    write(
+        fixture.path(),
+        ".graphoxideignore",
+        "*.min.js\n*.map\n**/generated/**\n!fixtures/generated/\n!fixtures/generated/approved.ts\n",
+    );
+    write(fixture.path(), "src/app.ts", "export const app = true;\n");
+    write(
+        fixture.path(),
+        "dist/app.min.js",
+        "export const generated = true;\n",
+    );
+    write(fixture.path(), "dist/app.map", "{}\n");
+    write(
+        fixture.path(),
+        "fixtures/generated/rejected.ts",
+        "export const rejected = true;\n",
+    );
+    write(
+        fixture.path(),
+        "fixtures/generated/approved.ts",
+        "export const approved = true;\n",
+    );
+
+    let result = scan(fixture.path());
+
+    assert!(has(&result, "src/app.ts"));
+    assert!(has(&result, "fixtures/generated/approved.ts"));
+    assert!(!has(&result, "dist/app.min.js"));
+    assert!(!has(&result, "dist/app.map"));
+    assert!(!has(&result, "fixtures/generated/rejected.ts"));
+    assert_eq!(result.graphifyignore_patterns, 5);
+}
+
+#[test]
+fn test_graphoxideignore_takes_precedence_over_legacy_and_git_rules() {
+    let fixture = fixture();
+    init_git_marker(fixture.path());
+    write(fixture.path(), ".gitignore", "*.py\n");
+    write(fixture.path(), ".graphifyignore", "!legacy.py\n");
+    write(fixture.path(), ".graphoxideignore", "legacy.py\n!keep.py\n");
+    write(fixture.path(), "main.py", "x = 1\n");
+    write(fixture.path(), "legacy.py", "x = 2\n");
+    write(fixture.path(), "keep.py", "x = 3\n");
+
+    let result = scan(fixture.path());
+
+    assert!(!has(&result, "main.py"));
+    assert!(!has(&result, "legacy.py"));
+    assert!(has(&result, "keep.py"));
+    assert_eq!(result.graphifyignore_patterns, 4);
+}
+
+#[test]
+fn test_no_gitignore_still_honors_graphoxideignore() {
+    let fixture = fixture();
+    init_git_marker(fixture.path());
+    write(fixture.path(), ".gitignore", "git-ignored.py\n");
+    write(
+        fixture.path(),
+        ".graphoxideignore",
+        "graphoxide-ignored.py\n",
+    );
+    write(fixture.path(), "git-ignored.py", "x = 1\n");
+    write(fixture.path(), "graphoxide-ignored.py", "x = 2\n");
+
+    let result = scan_with(fixture.path(), |options| options.honor_gitignore = false);
+
+    assert!(has(&result, "git-ignored.py"));
+    assert!(!has(&result, "graphoxide-ignored.py"));
+    assert_eq!(result.graphifyignore_patterns, 1);
+}
+
+#[test]
 fn test_graphifyignore_missing_is_fine() {
     let fixture = fixture();
     write(fixture.path(), "main.py", "x=1");

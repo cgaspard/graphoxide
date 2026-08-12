@@ -174,6 +174,14 @@ must end in `graph.json` and place that file in a dedicated output directory; th
 extension refuses to use the workspace root or one of its ancestors as that
 output directory.
 
+Place a `.graphoxideignore` file in the workspace or a nested directory to keep
+generated or low-value files out of builds. It uses bounded Git-style patterns,
+including `!` negation, and remains active when Git ignore handling is disabled.
+Continuous watch snapshots ignore rules when it starts, so after changing an
+ignore file, run **Graphoxide: Rebuild Graph (Full)** and start the watcher again.
+The full syntax, precedence, and examples are documented in the repository
+[`README`](../../README.md#exclude-generated-or-low-value-files).
+
 For smaller projects, **Graphoxide: Update On Save** can run a debounced update whenever a source document is saved. It is disabled by default. Watch mode is more efficient for sustained editing sessions.
 
 Graph build and update commands require a trusted workspace. All spawned commands
@@ -200,7 +208,8 @@ names with concise architecture-oriented labels. Run **Graphoxide: Configure AI
 Community Labeling…** and choose OpenAI, LM Studio, Ollama, a custom
 OpenAI-compatible endpoint, or Anthropic. LM Studio defaults to
 `http://127.0.0.1:1234/v1`, Ollama defaults to
-`http://127.0.0.1:11434/v1`, and both can run without a key on loopback. Local
+`http://127.0.0.1:11434/v1`. Ollama can also use an explicitly configured LAN
+HTTP endpoint, and it remains key-optional there. Local
 model discovery uses LM Studio's OpenAI-compatible models endpoint or Ollama's
 native tags endpoint; the model ID can always be entered manually.
 LM Studio and Ollama also accept optional API keys. Each provider uses a
@@ -221,8 +230,12 @@ community names in the selected `graph.json`, updates the adjacent label sidecar
 and regenerates `GRAPH_REPORT.md`; it does not perform semantic source extraction.
 
 API keys are kept in VS Code Secret Storage, not settings. Provider, endpoint,
-model, concurrency, batch size, and timeout are machine-scoped settings. Remote endpoints
-must use HTTPS. For this labeling command, the extension ignores Binary Path,
+model, concurrency, batch size, and timeout are machine-scoped settings. Remote
+endpoints must use HTTPS except for an explicitly configured Ollama endpoint.
+Before labeling through non-loopback Ollama HTTP, the confirmation warns that
+graph-derived labels and any optional key will travel without TLS. Remote model
+discovery remains disabled, so enter the model ID manually. For this labeling
+command, the extension ignores Binary Path,
 Additional Arguments, `PATH`, and `GRAPHOXIDE_BINARY`, and invokes only its
 packaged executable (or this repository's own build in an Extension Development
 Host). Use **Graphoxide: Clear Stored AI Credential…** to delete a key.

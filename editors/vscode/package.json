@@ -48,8 +48,10 @@
     "watch": "tsc -b -w tsconfig.json tsconfig.webview.json",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"webview/**/*.ts\"",
     "test": "npm run compile && node --test dist/test/**/*.test.js",
-    "test:e2e": "npm run compile && node scripts/run-e2e.mjs",
+    "test:control-center:browser": "node scripts/run-control-center-browser-tests.mjs",
     "test:control-center:build-summary:browser": "node scripts/run-control-center-build-summary-browser-tests.mjs",
+    "test:visualizer:browser": "npm run compile && node scripts/run-visualizer-browser-tests.mjs",
+    "test:e2e": "npm run compile && node scripts/run-e2e.mjs",
     "check": "npm run clean && npm run compile && npm run lint && npm test",
     "package": "node scripts/package.mjs"
   },
@@ -435,7 +437,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "API base URL for AI community labeling. HTTP is permitted only for a loopback endpoint."
+          "description": "API base URL for AI community labeling. Ollama may use an explicitly configured LAN HTTP endpoint; other non-loopback endpoints require HTTPS."
         },
         "graphoxide.llm.model": {
           "type": "string",

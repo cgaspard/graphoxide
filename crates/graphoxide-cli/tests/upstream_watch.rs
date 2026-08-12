@@ -1514,6 +1514,20 @@ fn test_watch_handler_honors_graphifyignore() {
 }
 
 #[test]
+fn test_watch_handler_honors_graphoxideignore_when_git_rules_are_disabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("corpus");
+    write(root.join(".gitignore"), "git-ignored.py\n");
+    write(root.join(".graphoxideignore"), "graphoxide-ignored.py\n");
+    write(root.join("git-ignored.py"), "x = 1\n");
+    write(root.join("graphoxide-ignored.py"), "x = 2\n");
+    let filter = WatchEventFilter::new(&root, false);
+
+    assert!(filter.accepts(&root.join("git-ignored.py"), false));
+    assert!(!filter.accepts(&root.join("graphoxide-ignored.py"), false));
+}
+
+#[test]
 fn test_watch_handler_ignores_a_custom_output_directory() {
     let temp = tempfile::tempdir().unwrap();
     let output = temp.path().join("custom-output");
@@ -1712,6 +1726,24 @@ fn test_watch_loads_graphifyignore_once() {
         assert!(!filter.accepts(&temp.path().join(format!("ignored/f{index}.py")), false));
     }
     assert!(filter.accepts(&temp.path().join("newly_ignored/f.py"), false));
+}
+
+#[test]
+fn test_watch_restart_reloads_graphoxideignore_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    write(temp.path().join(".graphoxideignore"), "old-generated/\n");
+    write(temp.path().join("old-generated/old.py"), "x = 1\n");
+    write(temp.path().join("new-generated/new.py"), "x = 2\n");
+    let running_filter = WatchEventFilter::new(temp.path(), true);
+
+    write(temp.path().join(".graphoxideignore"), "new-generated/\n");
+
+    assert!(!running_filter.accepts(&temp.path().join("old-generated/old.py"), false));
+    assert!(running_filter.accepts(&temp.path().join("new-generated/new.py"), false));
+
+    let restarted_filter = WatchEventFilter::new(temp.path(), true);
+    assert!(restarted_filter.accepts(&temp.path().join("old-generated/old.py"), false));
+    assert!(!restarted_filter.accepts(&temp.path().join("new-generated/new.py"), false));
 }
 
 fn shrink_graph(count: usize, source: &str) -> KnowledgeGraph {
