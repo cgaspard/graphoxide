@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -45,8 +45,9 @@ const server = createServer(async (request, response) => {
         : file.endsWith('.js') ? 'text/javascript; charset=utf-8'
           : 'application/octet-stream';
     respond(response, 200, type, content);
-  } catch (error) {
-    respond(response, 500, 'text/plain', error instanceof Error ? error.message : String(error));
+  } catch {
+    process.stderr.write('Visualizer browser harness request failed.\n');
+    respond(response, 500, 'text/plain', 'Internal server error.');
   }
 });
 
@@ -134,10 +135,8 @@ async function captureScreenshot(origin, name, fixture, nodes, width, height, sc
     ...flags,
   ]), 4 * 1024 * 1024);
   if (stderr && /(?:uncaught|fatal error)/iu.test(stderr)) throw new Error(stderr);
-  const metadata = await stat(target);
-  if (!metadata.isFile() || metadata.size === 0) throw new Error(`Chrome did not create ${name}.png.`);
-  if (metadata.size > 24 * 1024 * 1024) throw new Error(`${name}.png exceeded the bounded screenshot size.`);
-  await assertScreenshotPainted(target, width, height, name);
+  const bytes = await readBoundedScreenshot(target, name);
+  await assertScreenshotPainted(bytes, width, height, name);
 }
 
 function assertScenario(report, name, scenario) {
@@ -147,8 +146,8 @@ function assertScenario(report, name, scenario) {
   if (scenario === 'filtered' && report.rendererState?.communityFilter === null) throw new Error(`${name}: community filter did not activate.`);
 }
 
-async function assertScreenshotPainted(target, expectedWidth, expectedHeight, name) {
-  const png = decodeChromePng(await readFile(target));
+async function assertScreenshotPainted(bytes, expectedWidth, expectedHeight, name) {
+  const png = decodeChromePng(bytes);
   if (png.width !== expectedWidth || png.height !== expectedHeight) {
     throw new Error(`${name}.png has ${png.width}x${png.height} pixels; expected ${expectedWidth}x${expectedHeight}.`);
   }
@@ -401,7 +400,31 @@ function summarize(report) {
 }
 
 function decodeHtmlText(value) {
-  return value.replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>');
+  return value.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&');
+}
+
+async function readBoundedScreenshot(target, name) {
+  const handle = await open(target, 'r');
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size === 0) throw new Error(`Chrome did not create ${name}.png.`);
+    if (metadata.size > 24 * 1024 * 1024) throw new Error(`${name}.png exceeded the bounded screenshot size.`);
+    const bytes = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) throw new Error(`${name}.png changed while its screenshot was read.`);
+      offset += bytesRead;
+    }
+    const trailing = Buffer.alloc(1);
+    const { bytesRead: trailingBytes } = await handle.read(trailing, 0, 1, bytes.length);
+    if (trailingBytes !== 0 || (await handle.stat()).size !== metadata.size) {
+      throw new Error(`${name}.png changed while its screenshot was read.`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 }
 
 function respond(response, status, type, body) {
