@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.4 — 2026-08-12
+
+- Added conditional build summary card to the Control Center after each successful
+  index, showing exact node/edge counts, graph identity, and shrink authorization
+  with bounded formatting and no filesystem paths.
+- Reported indexed phases, node/edge counters, and completion evidence during managed
+  builds and watch restarts through the bounded build-progress channel without
+  inventing percentages or blocking the structural path.
+- Accepted explicit LAN Ollama HTTP endpoints under opt-in confirmation that discloses
+  the plaintext transport risk while rejecting link-local, metadata-range, and
+  unspecified addresses automatically.
+- Collapsed the Control Center into a focused dashboard flow with explicit card
+  ordering, bounded content truncation, and semantic screen-reader sections.
+- Repaired graph visualizer node overlap and edge routing in dense clusters by
+  clamping layout iterations, reserving incident edges for selected nodes, and
+  preserving cycle structure through deterministic passes.
+- Replaced ad-hoc browser-test timeouts with a shared bounded process helper (45 s
+  wall clock, completion-marker validation, diagnostic bounding) across all visualizer
+  and Control Center harnesses.
+
 ## 0.10.3 — 2026-08-11
 
 - Applied native macOS and Windows memory ceilings to the bounded automatic

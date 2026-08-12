@@ -1,0 +1,14 @@
+version: 0.10.4
+date: 2026-08-12
+highlights:
+  - Display indexing progress through bounded phase updates and post-build summaries in the Control Center while preserving deterministic graph output and safe mutation coordination.
+added:
+  - Render a build summary card in the Control Center after each successful index, showing exact node/edge counts, graph identity, and shrink authorization with bounded formatting and no filesystem paths.
+  - Accept explicit LAN Ollama HTTP endpoints (10.x, 172.16–31.x, 192.168.x) through an opt-in confirmation that discloses the plaintext transport risk; reject link-local, metadata-range, and unspecified addresses automatically.
+changed:
+  - Report indexed phases, node/edge counters, and completion evidence during managed builds and watch restarts through the bounded build-progress channel without inventing percentages or blocking the structural path.
+  - Collapse the Control Center into a focused dashboard flow with explicit card ordering, bounded content truncation, and semantic screen-reader sections while retaining the fixed purple-led palette and forced-color borders.
+  - Repair graph visualizer node overlap and edge routing in dense clusters by clamping layout iterations, reserving incident edges for selected nodes, and preserving cycle structure through deterministic passes.
+fixed:
+  - Replace ad-hoc browser-test timeouts with a shared bounded process helper (45 s wall clock, completion-marker validation, and diagnostic bounding) to eliminate cold-start flakes across all three visualizer and Control Center harnesses.
+removed: []

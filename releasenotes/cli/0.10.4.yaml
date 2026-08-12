@@ -1,0 +1,14 @@
+version: 0.10.4
+date: 2026-08-12
+highlights:
+  - Report indexing progress and build summaries through CLI watch restarts and VS Code Control Center, letting callers observe structured phase updates, monotonic counters, and conditional post-build summaries without blocking the structural work path.
+added:
+  - Publish bounded build-progress messages during managed builds and watch restarts, carrying phased labels and explicit node/edge/node-by-kind counters while refusing to invent percentages or unverified estimates.
+  - Render a conditional build summary in the VS Code Control Center with the latest successful index outcome, path-free artifact references, and exact graph identity invalidation on change.
+  - Validate LAN Ollama HTTP endpoints (10.x.x.x, 172.16–31.x.x, 192.168.x.x) under explicit labeling that discloses the plaintext transport risk while rejecting link-local, metadata-range, and unspecified addresses.
+changed:
+  - Document `.graphoxideignore` behavior in the README with exact scope rules, inheritance semantics, and the bounded rejection policy for adversarial patterns.
+fixed:
+  - Repair graph visualizer node overlap and edge routing in dense graphs by clamping force-layout iterations and preserving cycle edges through explicit layout passes.
+  - Collapse the Control Center into an explicit dashboard flow without stretching unrelated cards, using a fixed purple-led palette with accessible solid-action text and forced-color borders.
+removed: []
