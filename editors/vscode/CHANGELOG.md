@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.5 — 2026-08-13
+
+- Fixed a stuck status-bar spinner during watch mode where terminal build events
+  were dropped by the state machine, leaving progress visible indefinitely.
+  Progress now clears unconditionally on every authenticated terminal event even
+  when the state machine rejects it for mode mismatch after an adaptive start.
+
 ## 0.10.4 — 2026-08-12
 
 - Added conditional build summary card to the Control Center after each successful

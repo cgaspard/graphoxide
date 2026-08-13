@@ -1,0 +1,9 @@
+version: 0.10.5
+date: 2026-08-13
+highlights:
+  - Fix a stuck status-bar spinner in watch mode where terminal build events (completed, failed, not completed) were silently dropped by the state machine, leaving progress visible indefinitely.
+added: []
+changed: []
+fixed:
+  - Clear watch-mode progress unconditionally on every authenticated terminal event, even when the BuildProgressRun state machine rejects it for mode mismatch after an adaptive start. Summary persistence remains conditional; a stale spinner is worse than missing build stats.
+removed: []
