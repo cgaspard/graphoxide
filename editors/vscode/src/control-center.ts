@@ -105,6 +105,7 @@ export class ControlCenterPanel implements vscode.Disposable {
       services.store.onDidChange(() => void this.refresh()),
       services.cli.onDidChangeWatch(() => void this.refresh()),
       services.cli.onDidChangeBuildSummary(() => void this.refresh()),
+      services.cli.onDidChangeBuildProgress(() => void this.postBuildProgress()),
       services.managed.onDidChangeEnablement(() => void this.refresh()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('graphoxide')) void this.refresh();
@@ -123,6 +124,10 @@ export class ControlCenterPanel implements vscode.Disposable {
       if (!this.busy) await this.refresh(true);
       return;
     }
+    if (message.type === 'cancelBuild') {
+      this.services.cli.cancelActiveBuild();
+      return;
+    }
     if (message.type === 'openPath' && typeof message.path === 'string') {
       if (this.allowedPaths.has(message.path)) await this.openConfig(message.path);
       return;
@@ -136,7 +141,7 @@ export class ControlCenterPanel implements vscode.Disposable {
     }
     if (message.type !== 'install' && message.type !== 'uninstall') return;
     if (typeof message.id !== 'string' || (message.scope !== 'user' && message.scope !== 'project')) return;
-    await this.manageIntegration(message.type, message.id, message.scope);
+    await this.manageIntegration(message.type as 'install' | 'uninstall', message.id, message.scope as InstallScope);
   }
 
   private async manageIntegration(action: 'install' | 'uninstall', id: string, scope: InstallScope): Promise<void> {
@@ -156,7 +161,7 @@ export class ControlCenterPanel implements vscode.Disposable {
         ? 'Update'
         : 'Install';
     const detail = scope === 'user'
-      ? `${scopeStatus.configPath}\n\nThis removes only the legacy Graphoxide entry. Other configuration is preserved.`
+      ? `${scopeStatus.configPath}\n\nThis removes only the Graphoxide entry. Other configuration is preserved.`
       : `${scopeStatus.configPath}\n\nCommand: ${formatInvocation(invocation)}\n\nOnly Graphoxide's MCP entry is changed; other configuration is preserved.`;
     const choice = await (action === 'uninstall'
       ? vscode.window.showWarningMessage(
@@ -337,6 +342,15 @@ export class ControlCenterPanel implements vscode.Disposable {
     }
   }
 
+  private postBuildProgress(): void {
+    const progress = this.services.cli.buildProgress;
+    if (!progress) {
+      this.post({ type: 'buildProgress', message: undefined });
+    } else {
+      this.post({ type: 'buildProgress', message: progress.message });
+    }
+  }
+
   private post(message: unknown): void {
     void this.panel.webview.postMessage(message);
   }
@@ -350,159 +364,155 @@ export class ControlCenterPanel implements vscode.Disposable {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="${csp}">
-  <title>Graphoxide Control Center</title>
+  <title>Graphoxide</title>
   <style>
     * { box-sizing: border-box; }
     :root { color-scheme: light dark; }
-    body { width: 100%; max-width: 1280px; margin: 0 auto; padding: 28px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
-    h1, h2, h3, p { margin-top: 0; } h1 { margin-bottom: 4px; font-size: 25px; } h2 { margin-bottom: 5px; font-size: 18px; } h3 { margin-bottom: 3px; font-size: 14px; }
-    .muted, .lead, .detail, .path, dt { color: var(--vscode-descriptionForeground); } .lead { margin-bottom: 0; }
-    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
-    .overview { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
-    .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 12px; background: var(--vscode-editorWidget-background); }
-    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
-    .good .dot { background: var(--vscode-testing-iconPassed); } .warn .dot { background: var(--vscode-editorWarning-foreground); } .bad .dot { background: var(--vscode-errorForeground); }
-    .dashboard { display: grid; gap: 14px; }
-    .dashboard-secondary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; }
-    .card { min-width: 0; padding: 17px; border: 1px solid var(--vscode-panel-border); border-radius: 9px; background: var(--vscode-editorWidget-background); }
-    .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-    .card-head > :first-child, .native > :first-child, .scope-head > :first-child { min-width: 0; }
-    .badge { flex: none; padding: 2px 8px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
+    body { width: 100%; max-width: 960px; margin: 0 auto; padding: 24px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
+    h1, h2, h3, p { margin-top: 0; } h1 { margin-bottom: 0; font-size: 20px; } h2 { margin-bottom: 4px; font-size: 15px; } h3 { margin-bottom: 2px; font-size: 12px; }
+    .muted, .detail, .path, dt { color: var(--vscode-descriptionForeground); }
+    .header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+    .card { min-width: 0; padding: 15px; border: 1px solid var(--vscode-panel-border); border-radius: 9px; background: var(--vscode-editorWidget-background); }
+    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .badge { flex: none; padding: 2px 7px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
     .badge.good { color: var(--vscode-testing-iconPassed); } .badge.warn { color: var(--vscode-editorWarning-foreground); } .badge.bad { color: var(--vscode-errorForeground); }
-    dl { display: grid; grid-template-columns: minmax(92px, auto) minmax(0, 1fr); gap: 7px 12px; margin: 15px 0 0; font-size: 12px; } dt, dd { margin: 0; } dd { min-width: 0; overflow-wrap: anywhere; }
-    .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 15px; }
-    .metric { padding: 10px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; text-align: center; } .metric strong { display: block; font-size: 18px; } .metric span { color: var(--vscode-descriptionForeground); font-size: 11px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
-    button { max-width: 100%; min-height: 28px; padding: 5px 11px; border: 1px solid transparent; border-radius: 3px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font: inherit; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
+    dl { display: grid; grid-template-columns: minmax(92px, auto) minmax(0, 1fr); gap: 6px 10px; margin: 12px 0 0; font-size: 12px; } dt, dd { margin: 0; } dd { min-width: 0; overflow-wrap: anywhere; }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin: 12px 0 0; }
+    .metric { padding: 8px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; text-align: center; } .metric strong { display: block; font-size: 15px; } .metric span { color: var(--vscode-descriptionForeground); font-size: 10px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+    button { max-width: 100%; min-height: 26px; padding: 4px 10px; border: 1px solid transparent; border-radius: 3px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font: inherit; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
     button.secondary { border-color: var(--vscode-button-border, transparent); color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
     button.link { min-height: 0; padding: 0; border: 0; color: var(--vscode-textLink-foreground); background: transparent; text-align: left; overflow-wrap: anywhere; }
     button:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); } button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); } button.link:hover:not(:disabled) { color: var(--vscode-textLink-activeForeground); background: transparent; text-decoration: underline; }
     button:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; } button:disabled { opacity: .45; cursor: default; }
-    .error { margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--vscode-inputValidation-errorBorder); background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-inputValidation-errorForeground); }
-    .section-intro { margin-bottom: 14px; color: var(--vscode-descriptionForeground); font-size: 12px; }
-    .native { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 13px; padding: 13px; border: 1px solid var(--vscode-panel-border); border-radius: 7px; }
-    .integrations { display: grid; gap: 11px; }
-    .integration { padding: 14px; border: 1px solid var(--vscode-panel-border); border-radius: 7px; }
-    .scope-grid { display: grid; grid-template-columns: 1fr; gap: 9px; margin-top: 12px; }
-    .scope { min-width: 0; padding: 11px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; background: var(--vscode-sideBar-background); }
-    .scope-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; } .scope .detail { min-height: 17px; margin: 5px 0 0; font-size: 11px; }
-    .scope .path { margin: 7px 0 0; font: 11px var(--vscode-editor-font-family); overflow-wrap: anywhere; }
+    .error { margin-bottom: 12px; padding: 8px 10px; border: 1px solid var(--vscode-inputValidation-errorBorder); background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-inputValidation-errorForeground); font-size: 12px; }
+    .dashboard { display: grid; gap: 12px; }
+    /* Status line */
+    .status-line { display: flex; align-items: center; gap: 8px; padding: 9px 12px; margin-bottom: 12px; border-radius: 7px; font-size: 13px; }
+    .status-line.ready { background: var(--vscode-testing-iconPassedBackground, transparent); border: 1px solid var(--vscode-testing-iconPassed, transparent); }
+    .status-line.error { background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
+    .status-line.missing { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-panel-border); }
+    .status-line .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .status-line.ready .dot { background: var(--vscode-testing-iconPassed); }
+    .status-line.error .dot { background: var(--vscode-errorForeground); }
+    .status-line.missing .dot { background: var(--vscode-descriptionForeground); }
+    .status-line .meta { color: var(--vscode-descriptionForeground); margin-left: auto; font-size: 11px; }
+    /* Build progress banner */
+    .build-progress { display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 10px; border-radius: 6px; background: rgba(139,92,246,0.08); border: 1px solid rgba(139,92,246,0.25); font-size: 12px; }
+    .build-progress .spinner { width: 14px; height: 14px; border: 2px solid rgba(139,92,246,0.25); border-top-color: #8b5cf6; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .build-progress .phase { color: #8b5cf6; white-space: nowrap; }
+    .build-progress .counters { color: var(--vscode-descriptionForeground); margin-left: auto; font-size: 11px; white-space: nowrap; }
+    .build-progress button.cancel { margin-left: 4px; padding: 2px 8px; min-height: 22px; font-size: 11px; }
+    /* Settings cards */
+    .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .settings-card h2 { font-size: 13px; margin-bottom: 6px; }
+    .settings-card .inline-status { display: flex; align-items: center; gap: 7px; font-size: 12px; margin-bottom: 8px; }
+    .dot-green { width: 6px; height: 6px; border-radius: 50%; background: var(--vscode-testing-iconPassed); flex-shrink: 0; }
+    /* MCP compact */
+    .mcp-pills { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 6px; }
+    .mcp-pill { padding: 3px 9px; border-radius: 999px; font-size: 11px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); display: inline-flex; align-items: center; gap: 5px; }
+    .mcp-pill .state { width: 6px; height: 6px; border-radius: 50%; }
+    .mcp-pill .state.green { background: var(--vscode-testing-iconPassed); }
+    .mcp-pill .state.yellow { background: var(--vscode-editorWarning-foreground); }
     .loading { padding: 34px; text-align: center; color: var(--vscode-descriptionForeground); }
-    @media (max-width: 760px) { body { padding: 18px; } .header { align-items: stretch; flex-direction: column; gap: 12px; } .header button { align-self: flex-start; } .dashboard-secondary { grid-template-columns: 1fr; } }
-    @media (max-width: 420px) { body { padding: 14px; } dl { grid-template-columns: 1fr; gap: 3px; } dd + dt { margin-top: 6px; } }
-    @media (forced-colors: active) { .card, .integration, .scope, .native, .chip { border-color: CanvasText; } }
+    @media (max-width: 760px) { body { padding: 18px; } .settings-row { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (forced-colors: active) { .card, .mcp-pill, .build-progress, .status-line { border-color: CanvasText; } }
   </style>
 </head>
 <body>
-  <header class="header"><div><h1>Graphoxide Control Center</h1><p class="lead">Manage and monitor this workspace's graph, automation, AI labeling, and MCP connections.</p></div><button class="secondary" id="refresh">Refresh status</button></header>
+  <header class="header"><h1>Graphoxide</h1><button class="secondary" id="refresh">Refresh status</button></header>
   <div id="error" class="error" role="alert" hidden></div>
-  <div id="content" class="loading" aria-live="polite">Loading Graphoxide status…</div>
+  <div id="content" class="loading" aria-live="polite">Loading…</div>
   <script nonce="${nonce}">
     const api = acquireVsCodeApi();
     let busy = false;
+    let buildProgressMsg = undefined;
     document.getElementById('refresh').addEventListener('click', () => api.postMessage({ type: 'refresh' }));
     window.addEventListener('message', event => {
       const message = event.data;
       if (message.type === 'busy') { busy = Boolean(message.busy); updateDisabled(); }
       if (message.type === 'error') showError(message.message);
       if (message.type === 'state') render(message);
+      if (message.type === 'buildProgress') { buildProgressMsg = message.message; updateBuildProgress(); }
     });
     function escapeHtml(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char])); }
     function badge(text, state) { return '<span class="badge ' + state + '">' + escapeHtml(text) + '</span>'; }
-    function chip(text, state) { return '<span class="chip ' + state + '"><span class="dot" aria-hidden="true"></span>' + escapeHtml(text) + '</span>'; }
     function command(id, label, secondary, disabled) { return '<button ' + (secondary ? 'class="secondary" ' : '') + 'data-command="' + escapeHtml(id) + '"' + (disabled ? ' disabled' : '') + '>' + escapeHtml(label) + '</button>'; }
     function formatDuration(milliseconds) { if (milliseconds < 1000) return milliseconds + ' ms'; const seconds = milliseconds / 1000; return (seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)) + ' s'; }
-    function formatBytes(bytes) { if (bytes < 1024) return bytes + ' B'; const units = ['KiB', 'MiB', 'GiB', 'TiB']; let value = bytes; let unit = -1; do { value /= 1024; unit += 1; } while (value >= 1024 && unit < units.length - 1); return value.toFixed(value < 10 ? 1 : 0) + ' ' + units[unit]; }
+    function formatBytes(bytes) { if (bytes < 1024) return bytes + ' B'; const units = ['KiB', 'MiB', 'GiB']; let value = bytes; let unit = -1; do { value /= 1024; unit += 1; } while (value >= 1024 && unit < units.length - 1); return value.toFixed(value < 10 ? 1 : 0) + ' ' + units[unit]; }
     function formatStages(stages) { const labels = { scan_extract: 'scan/extract', detect: 'detect', extract: 'extract', build: 'build', cluster: 'cluster', write: 'write' }; return Object.keys(labels).filter(key => stages[key] > 0).map(key => labels[key] + ' ' + formatDuration(stages[key])).join(' · '); }
-    function showError(value) { const element = document.getElementById('error'); element.textContent = 'Could not refresh status: ' + value; element.hidden = false; }
+    function abbrevNumber(n) { if (n >= 10000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'K'; return String(n); }
+    function showError(value) { const element = document.getElementById('error'); element.textContent = value; element.hidden = false; }
+    function updateBuildProgress() {
+      var banner = document.getElementById('build-progress-banner');
+      if (!banner) return;
+      if (buildProgressMsg === undefined) { banner.style.display = 'none'; }
+      else { banner.style.display = 'flex'; banner.querySelector('.phase').textContent = escapeHtml(buildProgressMsg); }
+    }
     function render(state) {
       document.getElementById('error').hidden = true;
-      const graphReady = state.graph.status === 'ready';
-      const graphLabel = graphReady ? 'Graph ready' : state.graph.status === 'error' ? 'Graph error' : 'Graph not built';
-      const graphTone = graphReady ? 'good' : state.graph.status === 'error' ? 'bad' : 'warn';
-      const mcpLabel = state.mcp.staleScopes ? state.mcp.staleScopes + ' MCP update' + (state.mcp.staleScopes === 1 ? '' : 's') : state.mcp.configuredScopes + ' MCP scope' + (state.mcp.configuredScopes === 1 ? '' : 's');
-      const mcpTone = state.mcp.staleScopes ? 'warn' : state.mcp.configuredScopes ? 'good' : '';
-      const overview = '<div class="overview" aria-label="Integration overview">'
-        + chip(graphLabel, graphTone)
-        + chip(state.managed.enabled ? 'Managed workspace' : 'Manual workspace', state.managed.enabled ? 'good' : '')
-        + chip(state.ai.enabled ? 'AI · ' + state.ai.provider : 'AI disabled', state.ai.enabled ? 'good' : '')
-        + chip(mcpLabel, mcpTone)
-        + '</div>';
-      document.getElementById('content').className = '';
-      document.getElementById('content').innerHTML = overview + '<main class="dashboard">' + graphCard(state) + '<div class="dashboard-secondary">' + managedCard(state) + aiCard(state) + '</div>' + mcpCard(state) + '</main>';
-      bindActions(); updateDisabled();
-    }
-    function graphCard(state) {
-      const graph = state.graph; const ready = graph.status === 'ready'; const exists = graph.exists;
-      const status = ready ? badge('Ready', 'good') : graph.status === 'error' ? badge('Error', 'bad') : badge('Not built', 'warn');
-      const path = graph.path ? '<button class="link" data-path="' + escapeHtml(graph.path) + '" title="Open graph file">' + escapeHtml(graph.path) + '</button>' : 'No workspace';
-      const updated = graph.modified ? new Date(graph.modified).toLocaleString() : 'Not available';
-      const latest = graph.latestIndex;
-      const latestStages = latest ? formatStages(latest.stagesMs) : '';
-      const latestIndex = latest ? '<h3>Latest index</h3><dl><dt>Total time</dt><dd>' + escapeHtml(formatDuration(latest.elapsedMs)) + '</dd><dt>Operation</dt><dd>' + (latest.mode === 'full' ? 'Full rebuild' : 'Incremental update') + '</dd><dt>Indexed inputs</dt><dd>' + latest.files.indexed + '</dd>' + (latest.sourceBytes == null ? '' : '<dt>Indexed source size</dt><dd>' + escapeHtml(formatBytes(latest.sourceBytes)) + '</dd>') + (latest.mode === 'incremental' ? '<dt>Changed / deleted</dt><dd>' + latest.files.changed + ' / ' + latest.files.deleted + '</dd>' : '') + '<dt>Completed</dt><dd>' + escapeHtml(new Date(latest.completedAt).toLocaleString()) + '</dd>' + (latestStages ? '<dt>Stages</dt><dd>' + escapeHtml(latestStages) + '</dd>' : '') + '</dl>' : '';
-      const problem = graph.error ? '<div class="error" role="status">' + escapeHtml(graph.error) + '</div>' : '';
-      const actions = ready
-        ? command('graphoxide.update', 'Update incrementally', false, false) + command('graphoxide.rebuild', 'Full rebuild…', true, false) + command('graphoxide.openGraph', 'Open graph', true, false) + command('graphoxide.openGraphFile', 'Open graph.json', true, false)
+      var graphReady = state.graph.status === 'ready';
+      var statusTone = graphReady ? 'ready' : state.graph.status === 'error' ? 'error' : 'missing';
+      var statusLabel = graphReady ? 'Graph ready' : state.graph.status === 'error' ? 'Graph error' : 'Graph not built';
+      var managedLabel = state.managed.watching ? 'Watch running' : state.managed.enabled ? 'Managed' : 'Manual';
+      var aiLabel = state.ai.enabled ? state.ai.provider + ' configured' : 'AI off';
+      var mcpCount = state.mcp.configuredScopes;
+      var metaParts = [managedLabel, aiLabel];
+      if (mcpCount) metaParts.push(mcpCount + ' MCP');
+      var statusLine = '<div class="status-line ' + statusTone + '" aria-label="' + escapeHtml(statusLabel) + '"><span class="dot" aria-hidden="true"></span><span>' + escapeHtml(statusLabel) + '</span><span class="meta">' + (state.workspace ? escapeHtml(state.workspace.name) : '') + '</span></div>';
+      var progressBanner = '<div class="build-progress" id="build-progress-banner"' + (buildProgressMsg === undefined ? ' style="display:none"' : '') + '><div class="spinner" aria-hidden="true"></div><span class="phase">' + escapeHtml(buildProgressMsg || '') + '</span><button class="secondary cancel" data-action="cancelBuild">Cancel</button></div>';
+      var graph = state.graph;
+      var pathLink = graph.path ? '<button class="link" data-path="' + escapeHtml(graph.path) + '" title="Open">' + escapeHtml(graph.path) + '</button>' : '—';
+      var updated = graph.modified ? new Date(graph.modified).toLocaleString() : '—';
+      var latest = graph.latestIndex;
+      var sourceBytesStr = latest && latest.sourceBytes != null ? '<div class="metric"><strong>' + abbrevNumber(latest.sourceBytes) + '</strong><span>Source</span></div>' : '';
+      var problem = graph.error ? '<div class="error">' + escapeHtml(graph.error) + '</div>' : '';
+      var ready = graph.status === 'ready';
+      var exists = graph.exists;
+      var actions = ready
+        ? command('graphoxide.update', 'Update incrementally', false, false) + command('graphoxide.rebuild', 'Full rebuild…', true, false) + command('graphoxide.openGraph', 'Open graph', true, false)
         : exists
-          ? command('graphoxide.rebuild', 'Full rebuild…', false, !state.workspace) + command('graphoxide.openGraphFile', 'Open graph.json', true, false)
+          ? command('graphoxide.rebuild', 'Full rebuild…', false, !state.workspace)
           : command('graphoxide.initialize', 'Build graph', false, !state.workspace);
-      return '<section class="card" aria-labelledby="graph-heading"><div class="card-head"><div><h2 id="graph-heading">Workspace graph</h2><p class="muted">' + escapeHtml(state.workspace ? state.workspace.name : 'Open a workspace to get started') + '</p></div>' + status + '</div>' + problem
-        + '<div class="metrics"><div class="metric"><strong>' + graph.nodes + '</strong><span>Nodes</span></div><div class="metric"><strong>' + graph.edges + '</strong><span>Edges</span></div><div class="metric"><strong>' + graph.communities + '</strong><span>Communities</span></div></div>'
-        + '<dl><dt>Graph path</dt><dd>' + path + '</dd><dt>Last updated</dt><dd>' + escapeHtml(updated) + '</dd>' + (graph.builtAtCommit ? '<dt>Source commit</dt><dd>' + escapeHtml(graph.builtAtCommit) + '</dd>' : '') + '</dl>' + latestIndex
-        + '<p class="detail">Incremental update refreshes the existing graph. Full rebuild rescans every supported input and replaces the generated graph.</p><div class="actions">' + actions + '</div></section>';
-    }
-    function managedCard(state) {
-      const value = state.managed; const label = value.enabled ? 'Enabled' : 'Disabled';
-      const mode = value.freshness === 'watch' ? 'Continuous watch' : value.freshness === 'save' ? 'Update on save' : 'Manual updates';
-      const actions = value.enabled
-        ? command('graphoxide.configureFreshness', 'Change update mode', false, false) + command(value.watching ? 'graphoxide.stopWatch' : 'graphoxide.startWatch', value.watching ? 'Stop watcher' : 'Start watcher', true, !state.workspace) + command('graphoxide.disableWorkspace', 'Disable management', true, false)
-        : command('graphoxide.enableWorkspace', 'Enable managed workspace', false, !state.workspace);
-      return '<section class="card" aria-labelledby="managed-heading"><div class="card-head"><div><h2 id="managed-heading">Workspace management</h2><p class="muted">Keep graph data current while you work.</p></div>' + badge(label, value.enabled ? 'good' : '') + '</div><dl><dt>Update mode</dt><dd>' + escapeHtml(mode) + '</dd><dt>Watcher</dt><dd>' + (value.watching ? 'Running' : 'Stopped') + '</dd><dt>Workspace trust</dt><dd>' + (state.workspace ? state.workspace.trusted ? 'Trusted' : 'Restricted' : 'No workspace') + '</dd></dl><div class="actions">' + actions + '</div></section>';
-    }
-    function aiCard(state) {
-      const ai = state.ai; const keyState = ai.credentialPresent ? 'Stored for this endpoint' : ai.credentialRequired ? 'Required · not stored' : 'Not stored · optional';
-      const missingCredential = ai.enabled && ai.credentialRequired && !ai.credentialPresent;
-      const issue = ai.configurationError || ai.executableError || (missingCredential ? 'An API key is required for this endpoint.' : '');
-      const status = ai.enabled ? (issue ? badge('Needs attention', 'bad') : badge('Configured', 'good')) : badge('Disabled', '');
-      const actions = command('graphoxide.configureAiLabeling', ai.enabled ? 'Change AI configuration' : 'Configure AI labeling', false, false)
-        + (ai.enabled ? command('graphoxide.improveCommunityLabels', 'Improve community names', true, state.graph.status !== 'ready' || Boolean(issue)) : '')
-        + (ai.credentialPresent ? command('graphoxide.clearAiCredential', 'Clear credential', true, false) : '')
-        + command('graphoxide.openSettings', 'Advanced settings', true, false);
-      return '<section class="card" aria-labelledby="ai-heading"><div class="card-head"><div><h2 id="ai-heading">AI community labeling</h2><p class="muted">Provider credentials stay in VS Code Secret Storage.</p></div>' + status + '</div>'
-        + (issue ? '<div class="error" role="status">' + escapeHtml(issue) + '</div>' : '')
-        + '<dl><dt>Provider</dt><dd>' + escapeHtml(ai.provider || 'None') + '</dd><dt>Model</dt><dd>' + escapeHtml(ai.model || 'Not configured') + '</dd><dt>Endpoint</dt><dd>' + escapeHtml(ai.endpoint || 'Not configured') + '</dd><dt>Credential</dt><dd>' + escapeHtml(keyState) + '</dd><dt>Request timeout</dt><dd>' + escapeHtml(ai.timeoutSeconds) + ' seconds</dd><dt>Trusted executable</dt><dd>' + escapeHtml(ai.executable || 'Not available') + '</dd></dl><div class="actions">' + actions + '</div></section>';
-    }
-    function mcpCard(state) {
-      const nativeState = state.mcp.nativeEnabled ? badge('Active', 'good') : badge('Inactive', '');
-      const rows = state.mcp.rows.map(integrationCard).join('');
-      return '<section class="card" aria-labelledby="mcp-heading"><div class="card-head"><div><h2 id="mcp-heading">MCP integrations</h2><p class="muted">Connect this workspace’s Graphoxide graph to coding assistants.</p></div>' + badge(state.mcp.configuredScopes + ' installed', state.mcp.configuredScopes ? 'good' : '') + '</div>'
-        + '<p class="section-intro">Each project registration starts a local stdio server in this workspace, so it reads this project’s graphoxide-out/graph.json. All-project installation is no longer offered. A legacy global entry appears only so you can remove it safely.</p>'
-        + '<div class="native"><div><h3>VS Code native MCP</h3><p class="detail">Provided directly by this extension when managed workspace mode is enabled. No config file is edited.</p><p class="path">' + escapeHtml(state.mcp.invocation) + '</p></div>' + nativeState + '</div>'
-        + '<div class="integrations">' + rows + '</div></section>';
-    }
-    function integrationCard(row) {
-      const scopes = [...row.scopes].sort((left, right) => left.scope === right.scope ? 0 : left.scope === 'project' ? -1 : 1);
-      return '<article class="integration"><div class="card-head"><div><h3>' + escapeHtml(row.name) + '</h3><p class="detail">' + escapeHtml(row.description) + '</p></div>' + badge(row.detected ? 'Detected' : 'Not detected', row.detected ? 'good' : '') + '</div><div class="scope-grid">' + scopes.map(scope => scopeCard(row, scope)).join('') + '</div></article>';
-    }
-    function scopeCard(row, scope) {
-      const legacy = scope.scope === 'user';
-      const title = legacy ? 'Legacy all-project registration' : 'This project';
-      const subtitle = legacy ? 'Removal only' : 'Project scope';
-      const state = legacy ? 'Remove recommended' : scope.stale ? 'Update needed' : scope.configured ? 'Installed' : 'Not installed';
-      const tone = legacy || scope.stale ? 'warn' : scope.configured ? 'good' : '';
-      let actions = '';
-      if (scope.configured) {
-        if (!legacy && scope.stale) actions += '<button data-action="install" data-id="' + escapeHtml(row.id) + '" data-scope="' + scope.scope + '"' + (!row.detected ? ' disabled' : '') + '>Update</button>';
-        actions += '<button class="secondary" data-action="uninstall" data-id="' + escapeHtml(row.id) + '" data-scope="' + scope.scope + '">Remove</button>';
-        actions += '<button class="secondary" data-path="' + escapeHtml(scope.configPath) + '">Open config</button>';
-      } else if (!legacy) {
-        actions = '<button data-action="install" data-id="' + escapeHtml(row.id) + '" data-scope="' + scope.scope + '"' + (!row.detected ? ' disabled' : '') + '>Install</button>';
+      var watcherStatus = state.managed.watching ? '<span class="dot-green"></span>Running' : 'Stopped';
+      var modeLabel = state.managed.freshness === 'watch' ? 'Continuous watch' : state.managed.freshness === 'save' ? 'Update on save' : 'Manual';
+      var mcpPills = state.mcp.rows.map(row => {
+        var pillClass = row.scopes.some(s => s.configured && !s.stale) ? 'green' : 'yellow';
+        return '<span class="mcp-pill"><span class="state ' + pillClass + '"></span>' + escapeHtml(row.name) + '</span>';
+      }).join('');
+      var latestIndexHtml = '';
+      if (latest) {
+        var latestStages = formatStages(latest.stagesMs);
+        var sourceSizeLine = latest.sourceBytes != null ? '<dt>Indexed source size</dt><dd>' + escapeHtml(formatBytes(latest.sourceBytes)) + '</dd>' : '';
+        var changedLine = latest.mode === 'incremental' ? '<dt>Changed / deleted</dt><dd>' + latest.files.changed + ' / ' + latest.files.deleted + '</dd>' : '';
+        latestIndexHtml = '<h3 style="font-size:12px;margin-top:14px;color:var(--vscode-descriptionForeground)">Latest index</h3><dl><dt>Total time</dt><dd>' + escapeHtml(formatDuration(latest.elapsedMs)) + '</dd><dt>Operation</dt><dd>' + (latest.mode === 'full' ? 'Full rebuild' : 'Incremental update') + '</dd><dt>Indexed inputs</dt><dd>' + latest.files.indexed + '</dd>' + sourceSizeLine + changedLine + '<dt>Completed</dt><dd>' + escapeHtml(new Date(latest.completedAt).toLocaleString()) + '</dd>' + (latestStages ? '<dt>Stages</dt><dd>' + escapeHtml(latestStages) + '</dd>' : '') + '</dl>';
       }
-      return '<div class="scope"><div class="scope-head"><div><h3>' + title + '</h3><span class="detail">' + subtitle + '</span></div>' + badge(state, tone) + '</div><p class="path">' + escapeHtml(scope.configPath) + '</p><p class="detail">' + escapeHtml(scope.detail || '') + '</p><div class="actions">' + actions + '</div></div>';
+      document.getElementById('content').className = '';
+      document.getElementById('content').innerHTML =
+        statusLine +
+        problem +
+        '<main class="dashboard">' +
+        '<section class="card">' + progressBanner +
+        '<div class="metrics"><div class="metric"><strong>' + abbrevNumber(graph.nodes) + '</strong><span>Nodes</span></div><div class="metric"><strong>' + abbrevNumber(graph.edges) + '</strong><span>Edges</span></div><div class="metric"><strong>' + abbrevNumber(graph.communities) + '</strong><span>Communities</span></div>' + sourceBytesStr + '</div>' +
+        '<dl><dt>Graph path</dt><dd>' + pathLink + '</dd><dt>Last updated</dt><dd>' + escapeHtml(updated) + '</dd></dl>' +
+        latestIndexHtml +
+        '<div class="actions">' + actions + '</div></section>' +
+        '<div class="settings-row">' +
+        '<div class="card settings-card"><h2>Workspace</h2><div class="inline-status"><span class="' + (state.managed.enabled ? 'dot-green' : '') + '" style="width:6px;height:6px;border-radius:50%;background:' + (state.managed.enabled ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-descriptionForeground)') + ';"></span><span>' + escapeHtml(modeLabel) + ' · ' + watcherStatus + '</span></div>' +
+        '<div class="actions" style="margin-top:6px;">' + command('graphoxide.configureFreshness', 'Change mode', true, false) + (state.managed.watching ? command('graphoxide.stopWatch', 'Stop watcher', true, !state.workspace) : command('graphoxide.startWatch', 'Start watcher', true, !state.workspace)) + '</div></div>' +
+        '<div class="card settings-card"><h2>AI Labeling</h2><div class="inline-status"><span style="color:' + (state.ai.enabled ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-descriptionForeground)') + ';font-size:12px;">' + escapeHtml(state.ai.enabled ? state.ai.provider : 'Disabled') + '</span></div>' +
+        '<div class="actions" style="margin-top:6px;">' + command('graphoxide.configureAiLabeling', state.ai.enabled ? 'Configure' : 'Set up', true, false) + (state.ai.enabled ? command('graphoxide.improveCommunityLabels', 'Improve names', true, !ready) : '') + '</div></div>' +
+        '</div>' +
+        (state.mcp.rows.length > 0 ? '<div class="card"><h2>MCP Integrations</h2><div class="mcp-pills">' + mcpPills + '</div></div>' : '') +
+        '</main>';
+      bindActions(); updateDisabled();
     }
     function bindActions() {
       document.querySelectorAll('[data-command]').forEach(button => button.addEventListener('click', () => api.postMessage({ type: 'command', command: button.dataset.command })));
-      document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => api.postMessage({ type: button.dataset.action, id: button.dataset.id, scope: button.dataset.scope })));
+      document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
+        if (button.dataset.action === 'cancelBuild') api.postMessage({ type: 'cancelBuild' });
+      }));
       document.querySelectorAll('[data-path]').forEach(button => button.addEventListener('click', () => api.postMessage({ type: 'openPath', path: button.dataset.path })));
     }
     function updateDisabled() { document.querySelectorAll('button').forEach(button => { if (busy) button.disabled = true; }); document.getElementById('refresh').disabled = busy; }

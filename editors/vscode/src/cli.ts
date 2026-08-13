@@ -155,6 +155,12 @@ export class GraphoxideCli implements vscode.Disposable {
     return typeof error === 'object' && error !== null && this.reportedErrors.has(error);
   }
 
+  /** Cancel any active finite build by sending SIGTERM to tracked child processes. */
+  cancelActiveBuild(): void {
+    if (this.disposed) return;
+    this.activeRunProcesses.terminateAll();
+  }
+
   holdNextMutationStart(): MutationStartBarrierControl {
     if (this.nextMutationBarrier) throw new Error('A mutation start barrier is already armed.');
     const barrier = new MutationStartBarrier();
