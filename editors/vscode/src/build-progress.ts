@@ -222,6 +222,11 @@ export class BuildProgressRun {
       || event.type === 'started') return false;
 
     if (event.type === 'phase') return this.acceptPhase(event);
+    // completed/not_completed use BuildMode (full|incremental) while started/failed
+    // use BuildProgressRunMode (full|incremental|adaptive). When the run started
+    // as adaptive, the effective mode is resolved only at completion time, so we
+    // cannot require an exact match for those terminal events. For failed events,
+    // which share the same type system as started, enforce consistency.
     if (event.type === 'failed') {
       if (event.mode !== this.mode) return false;
     } else if (this.mode !== 'adaptive' && event.mode !== this.mode) {

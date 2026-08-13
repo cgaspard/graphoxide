@@ -668,15 +668,24 @@ export class GraphoxideCli implements vscode.Disposable {
     }
     if (event.type === 'completed') {
       const session = this.watchBuildProgress;
-      if (!session || !session.run.accept(event)) return false;
+      if (!session) return false;
+      // Accept for summary persistence, but always clear progress on a terminal
+      // event even when the state machine rejects (e.g., mode mismatch after
+      // adaptive start). A stale spinner is worse than missing summary data.
       this.finishWatchBuildProgress(ownerGeneration);
-      void this.persistBuildSummary(outputTarget, event);
+      if (session.run.accept(event)) {
+        void this.persistBuildSummary(outputTarget, event);
+      }
       return true;
     }
-    const session = this.watchBuildProgress;
-    if (!session?.run.accept(event)) return false;
-    this.finishWatchBuildProgress(ownerGeneration);
-    return true;
+    if (event.type === 'failed' || event.type === 'not_completed') {
+      const session = this.watchBuildProgress;
+      if (!session) return false;
+      // Same rationale as completed: always clear progress on terminal events.
+      this.finishWatchBuildProgress(ownerGeneration);
+      return true;
+    }
+    return false;
   }
 
   private finishWatchBuildProgress(ownerGeneration?: number): void {
