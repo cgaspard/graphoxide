@@ -1,0 +1,11 @@
+version: 0.10.6
+date: 2026-08-13
+highlights:
+  - Compact Control Center redesign with live build progress banner, cancellation support, and simplified layout.
+added: []
+changed:
+  - Redesigned the Control Center to a compact status-first layout replacing the chip overview with a single status line showing graph state, workspace mode, AI provider, and MCP count.
+  - Added inline build progress banner inside the graph card with spinner, phase label identical to the status bar, and Cancel button that terminates tracked child processes.
+  - Collapsed MCP integrations display into inline pills; moved settings to side-by-side cards.
+fixed: []
+removed: []

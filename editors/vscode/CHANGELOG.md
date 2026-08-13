@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.6 — 2026-08-13
+
+- Redesigned the Control Center to a compact status-first layout replacing the chip
+  overview with a single status line showing graph state, workspace mode, AI provider,
+  and MCP count at a glance.
+- Added inline build progress banner inside the graph card with spinner, phase label
+  matching the status bar exactly, and Cancel button that terminates tracked child
+  processes.
+- Collapsed MCP integrations into inline pills; moved settings to side-by-side cards.
+
 ## 0.10.5 — 2026-08-13
 
 - Fixed a stuck status-bar spinner during watch mode where terminal build events
