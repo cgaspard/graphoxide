@@ -1,0 +1,10 @@
+version: 0.10.7
+date: 2026-08-14
+highlights:
+  - Cancel button in build progress banner is now right-aligned and phase text truncates cleanly with ellipsis.
+added: []
+changed: []
+fixed:
+  - Fixed Cancel button alignment in Control Center build progress banner so it pushes to the right edge instead of sitting next to the phase label.
+  - Long phase text now truncates with ellipsis instead of pushing the Cancel button off-screen.
+removed: []

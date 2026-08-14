@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.7 — 2026-08-14
+
+- Fixed Cancel button alignment in the Control Center build progress banner so it
+  pushes to the right edge instead of sitting next to the phase label. Long phase
+  text now truncates with ellipsis.
+
 ## 0.10.6 — 2026-08-13
 
 - Redesigned the Control Center to a compact status-first layout replacing the chip
