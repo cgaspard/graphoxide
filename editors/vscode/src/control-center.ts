@@ -401,9 +401,8 @@ export class ControlCenterPanel implements vscode.Disposable {
     .build-progress { display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 10px; border-radius: 6px; background: rgba(139,92,246,0.08); border: 1px solid rgba(139,92,246,0.25); font-size: 12px; }
     .build-progress .spinner { width: 14px; height: 14px; border: 2px solid rgba(139,92,246,0.25); border-top-color: #8b5cf6; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .build-progress .phase { color: #8b5cf6; white-space: nowrap; }
-    .build-progress .counters { color: var(--vscode-descriptionForeground); margin-left: auto; font-size: 11px; white-space: nowrap; }
-    .build-progress button.cancel { margin-left: 4px; padding: 2px 8px; min-height: 22px; font-size: 11px; }
+    .build-progress .phase { color: #8b5cf6; white-space: nowrap; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .build-progress button.cancel { margin-left: 8px; padding: 2px 8px; min-height: 22px; font-size: 11px; flex-shrink: 0; }
     /* Settings cards */
     .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .settings-card h2 { font-size: 13px; margin-bottom: 6px; }
