@@ -55,6 +55,7 @@ export interface BuildCompletedEvent {
   readonly status: BuildSuccessStatus;
   readonly elapsed_ms: number;
   readonly stages_ms: BuildStageDurations;
+  readonly build_substages_ms?: BuildSubStageDurations;
   readonly files: BuildFileStats;
   readonly source_bytes?: number;
 }
@@ -92,6 +93,13 @@ export interface BuildStageDurations {
   readonly write: number;
 }
 
+export interface BuildSubStageDurations {
+  readonly reconcile_ms: number;
+  readonly merge_ms: number;
+  readonly dedup_ms: number;
+  readonly topology_ms: number;
+}
+
 export interface BuildFileStats {
   readonly indexed: number;
   readonly changed: number;
@@ -104,6 +112,7 @@ export interface LatestBuildSummary {
   readonly status: BuildSuccessStatus;
   readonly elapsedMs: number;
   readonly stagesMs: BuildStageDurations;
+  readonly buildSubstagesMs?: BuildSubStageDurations;
   readonly files: BuildFileStats;
   readonly sourceBytes?: number;
   readonly completedAt: number;
@@ -520,6 +529,7 @@ function persistedRecord(
     status: event.status,
     elapsedMs: event.elapsed_ms,
     stagesMs: event.stages_ms,
+    ...(event.build_substages_ms === undefined ? {} : { buildSubstagesMs: event.build_substages_ms }),
     files: event.files,
     ...(event.source_bytes === undefined ? {} : { sourceBytes: event.source_bytes }),
     completedAt,
@@ -535,10 +545,15 @@ function isPersistedBuildSummary(value: unknown): value is PersistedBuildSummary
     || !validCount(value.elapsedMs) || !isStageDurations(value.stagesMs) || !isFileStats(value.files)
     || (value.sourceBytes !== undefined && !validCount(value.sourceBytes)) || !validCount(value.completedAt)
     || !validCount(value.graphMtime) || !validCount(value.graphSize)) return false;
-  const keys = value.sourceBytes === undefined
-    ? ['targetFingerprint', 'operation', 'mode', 'status', 'elapsedMs', 'stagesMs', 'files', 'completedAt', 'graphMtime', 'graphSize']
-    : ['targetFingerprint', 'operation', 'mode', 'status', 'elapsedMs', 'stagesMs', 'files', 'sourceBytes', 'completedAt', 'graphMtime', 'graphSize'];
-  return exactKeys(value, keys);
+  const hasSubstages = 'buildSubstagesMs' in value;
+  const hasSource = value.sourceBytes !== undefined;
+  const base = ['targetFingerprint', 'operation', 'mode', 'status', 'elapsedMs', 'stagesMs'];
+  const optional: string[] = [];
+  if (hasSubstages) optional.push('buildSubstagesMs');
+  optional.push('files');
+  if (hasSource) optional.push('sourceBytes');
+  optional.push('completedAt', 'graphMtime', 'graphSize');
+  return exactKeys(value, [...base, ...optional]);
 }
 
 function outputTargetFingerprint(value: string): string {

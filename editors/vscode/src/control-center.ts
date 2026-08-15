@@ -498,13 +498,23 @@ export class ControlCenterPanel implements vscode.Disposable {
           }
           return '<div class="mcp-row"><span class="' + dotClass + '"></span><span class="mcp-row-name">' + escapeHtml(row.name) + '</span><span class="mcp-row-status">' + statusText + '</span><span class="mcp-row-actions">' + actions + '</span></div>';
         }).join('');
-      var latestIndexHtml = '';
-      if (latest) {
-        var latestStages = formatStages(latest.stagesMs);
-        var sourceSizeLine = latest.sourceBytes != null ? '<dt>Indexed source size</dt><dd>' + escapeHtml(formatBytes(latest.sourceBytes)) + '</dd>' : '';
-        var changedLine = latest.mode === 'incremental' ? '<dt>Changed / deleted</dt><dd>' + latest.files.changed + ' / ' + latest.files.deleted + '</dd>' : '';
-        latestIndexHtml = '<h3 style="font-size:12px;margin-top:14px;color:var(--vscode-descriptionForeground)">Latest index</h3><dl><dt>Total time</dt><dd>' + escapeHtml(formatDuration(latest.elapsedMs)) + '</dd><dt>Operation</dt><dd>' + (latest.mode === 'full' ? 'Full rebuild' : 'Incremental update') + '</dd><dt>Indexed inputs</dt><dd>' + latest.files.indexed + '</dd>' + sourceSizeLine + changedLine + '<dt>Completed</dt><dd>' + escapeHtml(new Date(latest.completedAt).toLocaleString()) + '</dd>' + (latestStages ? '<dt>Stages</dt><dd>' + escapeHtml(latestStages) + '</dd>' : '') + '</dl>';
-      }
+       var latestIndexHtml = '';
+       if (latest) {
+         var latestStages = formatStages(latest.stagesMs);
+         var subStageLine = '';
+         if (latest.buildSubstagesMs) {
+           var ss = latest.buildSubstagesMs;
+           var parts = [];
+           if (ss.reconcile_ms > 0) parts.push('reconcile ' + formatDuration(ss.reconcile_ms));
+           if (ss.merge_ms > 0) parts.push('merge ' + formatDuration(ss.merge_ms));
+           if (ss.dedup_ms > 0) parts.push('dedup ' + formatDuration(ss.dedup_ms));
+           if (ss.topology_ms > 0) parts.push('topology ' + formatDuration(ss.topology_ms));
+           if (parts.length > 0) subStageLine = '<dt>Build detail</dt><dd>' + escapeHtml(parts.join(' · ')) + '</dd>';
+         }
+         var sourceSizeLine = latest.sourceBytes != null ? '<dt>Indexed source size</dt><dd>' + escapeHtml(formatBytes(latest.sourceBytes)) + '</dd>' : '';
+         var changedLine = latest.mode === 'incremental' ? '<dt>Changed / deleted</dt><dd>' + latest.files.changed + ' / ' + latest.files.deleted + '</dd>' : '';
+         latestIndexHtml = '<h3 style="font-size:12px;margin-top:14px;color:var(--vscode-descriptionForeground)">Latest index</h3><dl><dt>Total time</dt><dd>' + escapeHtml(formatDuration(latest.elapsedMs)) + '</dd><dt>Operation</dt><dd>' + (latest.mode === 'full' ? 'Full rebuild' : 'Incremental update') + '</dd><dt>Indexed inputs</dt><dd>' + latest.files.indexed + '</dd>' + sourceSizeLine + changedLine + '<dt>Completed</dt><dd>' + escapeHtml(new Date(latest.completedAt).toLocaleString()) + '</dd>' + (latestStages ? '<dt>Stages</dt><dd>' + escapeHtml(latestStages) + '</dd>' : '') + subStageLine + '</dl>';
+       }
       document.getElementById('content').className = '';
       document.getElementById('content').innerHTML =
         statusLine +
