@@ -408,15 +408,19 @@ export class ControlCenterPanel implements vscode.Disposable {
     .settings-card h2 { font-size: 13px; margin-bottom: 6px; }
     .settings-card .inline-status { display: flex; align-items: center; gap: 7px; font-size: 12px; margin-bottom: 8px; }
     .dot-green { width: 6px; height: 6px; border-radius: 50%; background: var(--vscode-testing-iconPassed); flex-shrink: 0; }
-    /* MCP compact */
-    .mcp-pills { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 6px; }
-    .mcp-pill { padding: 3px 9px; border-radius: 999px; font-size: 11px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); display: inline-flex; align-items: center; gap: 5px; }
-    .mcp-pill .state { width: 6px; height: 6px; border-radius: 50%; }
-    .mcp-pill .state.green { background: var(--vscode-testing-iconPassed); }
-    .mcp-pill .state.yellow { background: var(--vscode-editorWarning-foreground); }
+    /* MCP integrations */
+    .mcp-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .mcp-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--vscode-widget-border, #444); border-radius: 6px; font-size: 12px; }
+    .mcp-row .dot-green, .mcp-row .dot-yellow, .mcp-row .dot-gray { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .mcp-row .dot-yellow { background: var(--vscode-editorWarning-foreground); }
+    .mcp-row .dot-gray { background: var(--vscode-descriptionForeground); }
+    .mcp-row-name { font-weight: 600; min-width: 90px; }
+    .mcp-row-status { color: var(--vscode-descriptionForeground); flex: 1; }
+    .mcp-row-actions { display: flex; gap: 6px; }
+    .mcp-row-actions button { min-height: 0; padding: 2px 8px; font-size: 11px; }
     .loading { padding: 34px; text-align: center; color: var(--vscode-descriptionForeground); }
     @media (max-width: 760px) { body { padding: 18px; } .settings-row { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    @media (forced-colors: active) { .card, .mcp-pill, .build-progress, .status-line { border-color: CanvasText; } }
+    @media (forced-colors: active) { .card, .mcp-row, .build-progress, .status-line { border-color: CanvasText; } }
   </style>
 </head>
 <body>
@@ -476,10 +480,24 @@ export class ControlCenterPanel implements vscode.Disposable {
           : command('graphoxide.initialize', 'Build graph', false, !state.workspace);
       var watcherStatus = state.managed.watching ? '<span class="dot-green"></span>Running' : 'Stopped';
       var modeLabel = state.managed.freshness === 'watch' ? 'Continuous watch' : state.managed.freshness === 'save' ? 'Update on save' : 'Manual';
-      var mcpPills = state.mcp.rows.map(row => {
-        var pillClass = row.scopes.some(s => s.configured && !s.stale) ? 'green' : 'yellow';
-        return '<span class="mcp-pill"><span class="state ' + pillClass + '"></span>' + escapeHtml(row.name) + '</span>';
-      }).join('');
+        var mcpRows = state.mcp.rows.map(row => {
+          var projectScope = row.scopes.find(function(s) { return s.scope === 'project'; });
+          var legacyScope = row.scopes.find(function(s) { return s.scope === 'user'; });
+          var dotClass = projectScope && projectScope.configured && !projectScope.stale ? 'dot-green' : projectScope && projectScope.configured ? 'dot-yellow' : 'dot-gray';
+          var statusText = projectScope && projectScope.stale ? 'Update needed' : projectScope && projectScope.configured ? 'Installed' : row.detected ? 'Available' : 'Not detected';
+          if (legacyScope && legacyScope.configured) statusText += ' · legacy global';
+          var actions = '';
+          if (projectScope && projectScope.configured) {
+            if (projectScope.stale) actions += '<button data-action="install" data-id="' + escapeHtml(row.id) + '" data-scope="project">Update</button>';
+            actions += '<button class="secondary" data-action="uninstall" data-id="' + escapeHtml(row.id) + '" data-scope="project">Remove</button>';
+          } else if (projectScope) {
+            actions += '<button data-action="install" data-id="' + escapeHtml(row.id) + '" data-scope="project"' + (!row.detected ? ' disabled' : '') + '>Install</button>';
+          }
+          if (legacyScope && legacyScope.configured) {
+            actions += '<button class="secondary" data-action="uninstall" data-id="' + escapeHtml(row.id) + '" data-scope="user" title="Remove legacy global registration">Remove legacy</button>';
+          }
+          return '<div class="mcp-row"><span class="' + dotClass + '"></span><span class="mcp-row-name">' + escapeHtml(row.name) + '</span><span class="mcp-row-status">' + statusText + '</span><span class="mcp-row-actions">' + actions + '</span></div>';
+        }).join('');
       var latestIndexHtml = '';
       if (latest) {
         var latestStages = formatStages(latest.stagesMs);
@@ -503,14 +521,20 @@ export class ControlCenterPanel implements vscode.Disposable {
         '<div class="card settings-card"><h2>AI Labeling</h2><div class="inline-status"><span style="color:' + (state.ai.enabled ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-descriptionForeground)') + ';font-size:12px;">' + escapeHtml(state.ai.enabled ? state.ai.provider : 'Disabled') + '</span></div>' +
         '<div class="actions" style="margin-top:6px;">' + command('graphoxide.configureAiLabeling', state.ai.enabled ? 'Configure' : 'Set up', true, false) + (state.ai.enabled ? command('graphoxide.improveCommunityLabels', 'Improve names', true, !ready) : '') + '</div></div>' +
         '</div>' +
-        (state.mcp.rows.length > 0 ? '<div class="card"><h2>MCP Integrations</h2><div class="mcp-pills">' + mcpPills + '</div></div>' : '') +
+        (state.mcp.rows.length > 0 ? '<div class="card"><h2>MCP Integrations</h2><p class="detail" style="margin:0 0 8px">Connect this workspace&rsquo;s graph to coding assistants. Each project registration starts a local stdio server in this workspace.</p><div class="mcp-list">' + mcpRows + '</div></div>' : '') +
         '</main>';
       bindActions(); updateDisabled();
     }
     function bindActions() {
       document.querySelectorAll('[data-command]').forEach(button => button.addEventListener('click', () => api.postMessage({ type: 'command', command: button.dataset.command })));
-      document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
-        if (button.dataset.action === 'cancelBuild') api.postMessage({ type: 'cancelBuild' });
+      document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', (e) => {
+        var action = button.dataset.action;
+        if (action === 'cancelBuild') { api.postMessage({ type: 'cancelBuild' }); return; }
+        if (action === 'install' || action === 'uninstall') {
+          e.stopPropagation();
+          api.postMessage({ type: action, id: button.dataset.id, scope: button.dataset.scope });
+          return;
+        }
       }));
       document.querySelectorAll('[data-path]').forEach(button => button.addEventListener('click', () => api.postMessage({ type: 'openPath', path: button.dataset.path })));
     }
