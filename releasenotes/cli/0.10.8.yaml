@@ -1,0 +1,10 @@
+version: 0.10.8
+date: 2026-08-15
+highlights:
+  - Full builds now report live sub-stage progress (reconciling, merging nodes, resolving edges, deduplicating entities) and record per-sub-stage durations in the build report.
+added:
+  - The build pipeline emits sub-stage progress events (Reconciling baseline, Merging nodes, Resolving edges, Deduplicating entities) so the Control Center status bar tracks fine-grained progress during graph construction.
+  - Build telemetry now records wall-clock durations for each sub-stage (reconcile, merge, dedup, topology) alongside the existing stage timings.
+changed: []
+fixed: []
+removed: []

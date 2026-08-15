@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.10.8 — 2026-08-15
+
+- Builds now run silently with a live percentage in the status bar instead of modal
+  progress popups. After a full rebuild completes while in watch mode, the watch
+  process restarts automatically so incremental updates resume.
+- The status bar now shows fine-grained sub-stage labels (Reconciling baseline,
+  Merging nodes, Resolving edges, Deduplicating entities) during graph construction,
+  and the Control Center "Latest index" card shows a "Build detail" line with
+  per-sub-stage durations (reconcile, merge, dedup, topology).
+- Restored the MCP install/update/remove UI in the Control Center, which was removed
+  during the status-first redesign.
+- Migrated the extension to TypeScript 6 with node16 module resolution.
+
 ## 0.10.7 — 2026-08-14
 
 - Fixed Cancel button alignment in the Control Center build progress banner so it
