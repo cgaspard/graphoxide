@@ -1919,12 +1919,20 @@ fn run_project_build_with_cancellation(
         (extractions, graphoxide_graph::BuildOptions::default(), None)
     };
     let build_emitter = progress_reporter.counter_emitter(BuildProgressPhase::Building);
+    let sub_stage_timer = std::sync::Arc::new(std::sync::Mutex::new(
+        graphoxide_cli::build_telemetry::SubStageTimer::new(),
+    ));
+    let sub_stage_timer_cb = sub_stage_timer.clone();
     let sub_stage_emitter: Option<
         std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync>,
     > = progress_reporter.phase_emitter().map(
         |emit: std::sync::Arc<dyn Fn(BuildProgressPhase) + Send + Sync>| {
+            let timer = sub_stage_timer_cb.clone();
             let adapter: std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync> =
                 std::sync::Arc::new(move |stage: graphoxide_graph::BuildSubStage| {
+                    if let Ok(mut t) = timer.lock() {
+                        t.tick(stage);
+                    }
                     let phase = match stage {
                         graphoxide_graph::BuildSubStage::Normalizing => {
                             BuildProgressPhase::Building
@@ -1972,6 +1980,9 @@ fn run_project_build_with_cancellation(
             .into_parts()
             .0;
     telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+    if let Ok(mut timer_guard) = sub_stage_timer.lock() {
+        telemetry.build_substages_ms = std::mem::take(&mut *timer_guard).finish();
+    }
     progress_reporter.phase(BuildProgressPhase::Clustering);
     let cluster_started = std::time::Instant::now();
     cluster_with_resource_gate(&mut graph)?;
@@ -4985,12 +4996,20 @@ fn rebuild_isolated_pass(
         (extractions, graphoxide_graph::BuildOptions::default(), None)
     };
     let build_emitter = progress_reporter.counter_emitter(BuildProgressPhase::Building);
+    let sub_stage_timer = std::sync::Arc::new(std::sync::Mutex::new(
+        graphoxide_cli::build_telemetry::SubStageTimer::new(),
+    ));
+    let sub_stage_timer_cb = sub_stage_timer.clone();
     let sub_stage_emitter: Option<
         std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync>,
     > = progress_reporter.phase_emitter().map(
         |emit: std::sync::Arc<dyn Fn(BuildProgressPhase) + Send + Sync>| {
+            let timer = sub_stage_timer_cb.clone();
             let adapter: std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync> =
                 std::sync::Arc::new(move |stage: graphoxide_graph::BuildSubStage| {
+                    if let Ok(mut t) = timer.lock() {
+                        t.tick(stage);
+                    }
                     let phase = match stage {
                         graphoxide_graph::BuildSubStage::Normalizing => {
                             BuildProgressPhase::Building
@@ -5101,6 +5120,9 @@ fn rebuild_isolated_pass(
         ));
     }
     telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
+    if let Ok(mut timer_guard) = sub_stage_timer.lock() {
+        telemetry.build_substages_ms = std::mem::take(&mut *timer_guard).finish();
+    }
     result.stats.nodes = graph.nodes.len();
     result.stats.edges = graph.links.len();
     if previous

@@ -58,6 +58,31 @@ pub struct BuildStageDurations {
     pub write: u64,
 }
 
+/// Sub-stage durations within the build phase, in integer milliseconds.
+///
+/// These fields are a refinement of [`BuildStageDurations::build`]. Consumers
+/// that read `stages_ms.build` still get the aggregate total; these fields
+/// identify which sub-step dominates on large corpora. Fields that do not
+/// apply (e.g. `reconcile_ms` on a full build) remain zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BuildSubStageDurations {
+    /// Incremental baseline merge (reconcile prunes, tiering, clone).
+    pub reconcile_ms: u64,
+    /// Fact staging, node merge, edge/hyperedge resolution.
+    pub merge_ms: u64,
+    /// Semantic fuzzy deduplication (the hotspot on large repos).
+    pub dedup_ms: u64,
+    /// Same-topology comparison (watch service fast-path).
+    pub topology_ms: u64,
+}
+
+impl BuildSubStageDurations {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct BuildFileStats {
     pub detected: usize,
@@ -86,6 +111,8 @@ pub struct BuildTelemetry {
     pub output_path: String,
     pub elapsed_ms: u64,
     pub stages_ms: BuildStageDurations,
+    #[serde(skip_serializing_if = "BuildSubStageDurations::is_default")]
+    pub build_substages_ms: BuildSubStageDurations,
     pub files: BuildFileStats,
     pub graph: BuildGraphStats,
     pub passes: usize,
@@ -107,6 +134,7 @@ impl BuildTelemetry {
             output_path: output_path.to_string_lossy().into_owned(),
             elapsed_ms: 0,
             stages_ms: BuildStageDurations::default(),
+            build_substages_ms: BuildSubStageDurations::default(),
             files: BuildFileStats::default(),
             graph: BuildGraphStats::default(),
             passes: 1,
@@ -645,6 +673,114 @@ pub fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Records wall-clock durations for build sub-stages using the
+/// [`BuildSubStage`](graphoxide_graph::BuildSubStage) transition callback.
+///
+/// The timer is single-threaded (the build pipeline is sequential) and uses
+/// `Instant` so it is unaffected by system clock adjustments.
+pub struct SubStageTimer {
+    last_stage: Option<graphoxide_graph::BuildSubStage>,
+    last_instant: Instant,
+    reconcile_ms: u64,
+    merge_ms: u64,
+    dedup_ms: u64,
+    topology_ms: u64,
+}
+
+impl SubStageTimer {
+    pub fn new() -> Self {
+        Self {
+            last_stage: None,
+            last_instant: Instant::now(),
+            reconcile_ms: 0,
+            merge_ms: 0,
+            dedup_ms: 0,
+            topology_ms: 0,
+        }
+    }
+
+    /// Create a callback suitable for the build sub-stage channel.
+    pub fn callback(&self) -> impl Fn(graphoxide_graph::BuildSubStage) + '_ {
+        move |stage: graphoxide_graph::BuildSubStage| {
+            // The timer is mutated through &mut in the owning context; this
+            // method is only used to document the expected signature.
+            let _ = stage;
+        }
+    }
+
+    /// Record a sub-stage transition and accumulate the elapsed time into the
+    /// appropriate bucket. Call this from the sub-stage callback.
+    pub fn tick(&mut self, stage: graphoxide_graph::BuildSubStage) {
+        if self.last_stage == Some(stage) {
+            return;
+        }
+        let elapsed = self.last_instant.elapsed().as_millis() as u64;
+        match self.last_stage {
+            Some(graphoxide_graph::BuildSubStage::MergingNodes)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingEdges)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingSemanticIds)
+            | Some(graphoxide_graph::BuildSubStage::Normalizing)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingTwins)
+            | Some(graphoxide_graph::BuildSubStage::IndexingAliases)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingHyperedges) => {
+                self.merge_ms = self.merge_ms.saturating_add(elapsed);
+            }
+            Some(graphoxide_graph::BuildSubStage::Deduplicating) => {
+                self.dedup_ms = self.dedup_ms.saturating_add(elapsed);
+            }
+            _ => {}
+        }
+        self.last_stage = Some(stage);
+        self.last_instant = Instant::now();
+    }
+
+    /// Record the final stage (build complete) and return the accumulated
+    /// sub-stage durations.
+    pub fn finish(mut self) -> BuildSubStageDurations {
+        let elapsed = self.last_instant.elapsed().as_millis() as u64;
+        match self.last_stage {
+            Some(graphoxide_graph::BuildSubStage::MergingNodes)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingEdges)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingSemanticIds)
+            | Some(graphoxide_graph::BuildSubStage::Normalizing)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingTwins)
+            | Some(graphoxide_graph::BuildSubStage::IndexingAliases)
+            | Some(graphoxide_graph::BuildSubStage::ResolvingHyperedges)
+            | Some(graphoxide_graph::BuildSubStage::DisambiguatingLabels) => {
+                self.merge_ms = self.merge_ms.saturating_add(elapsed);
+            }
+            Some(graphoxide_graph::BuildSubStage::Deduplicating) => {
+                self.dedup_ms = self.dedup_ms.saturating_add(elapsed);
+            }
+            None => {}
+        }
+        BuildSubStageDurations {
+            reconcile_ms: self.reconcile_ms,
+            merge_ms: self.merge_ms,
+            dedup_ms: self.dedup_ms,
+            topology_ms: self.topology_ms,
+        }
+    }
+
+    /// Record a reconcile-phase duration (set externally since reconcile
+    /// happens before the build sub-stage callback is active).
+    pub fn set_reconcile_ms(&mut self, ms: u64) {
+        self.reconcile_ms = ms;
+    }
+
+    /// Record a topology-comparison duration (set externally since the
+    /// same-topology check happens after the build).
+    pub fn set_topology_ms(&mut self, ms: u64) {
+        self.topology_ms = ms;
+    }
+}
+
+impl Default for SubStageTimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn format_elapsed(milliseconds: u64) -> String {
     format!("{:.3}s", milliseconds as f64 / 1_000.0)
 }
@@ -679,6 +815,58 @@ mod tests {
         assert_eq!(value["files"]["unclassified"], 0);
         assert_eq!(value["files"]["sensitive"], 0);
         assert_eq!(value["graph"]["nodes"], 3);
+        // build_substages_ms is omitted when all-zero (skip_serializing_if)
+        assert!(value.get("build_substages_ms").is_none());
+    }
+
+    #[test]
+    fn build_substages_appear_in_json_when_populated() {
+        let mut report = BuildTelemetry::new(
+            BuildOperation::Extract,
+            BuildMode::Full,
+            BuildStatus::Rebuilt,
+            PathBuf::from("graphoxide-out/graph.json"),
+        );
+        report.stages_ms.build = 200;
+        report.build_substages_ms = BuildSubStageDurations {
+            reconcile_ms: 0,
+            merge_ms: 120,
+            dedup_ms: 75,
+            topology_ms: 5,
+        };
+
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["build_substages_ms"]["reconcile_ms"], 0);
+        assert_eq!(value["build_substages_ms"]["merge_ms"], 120);
+        assert_eq!(value["build_substages_ms"]["dedup_ms"], 75);
+        assert_eq!(value["build_substages_ms"]["topology_ms"], 5);
+        // The aggregate build stage is still present and unchanged.
+        assert_eq!(value["stages_ms"]["build"], 200);
+    }
+
+    #[test]
+    fn sub_stage_timer_accumulates_merge_and_dedup() {
+        use graphoxide_graph::BuildSubStage;
+        let mut timer = SubStageTimer::new();
+        timer.tick(BuildSubStage::MergingNodes);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        timer.tick(BuildSubStage::ResolvingEdges);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        timer.tick(BuildSubStage::Deduplicating);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let durations = timer.finish();
+        assert!(
+            durations.merge_ms >= 5,
+            "merge_ms should be >= 5ms, got {}",
+            durations.merge_ms
+        );
+        assert!(
+            durations.dedup_ms >= 2,
+            "dedup_ms should be >= 2ms, got {}",
+            durations.dedup_ms
+        );
+        assert_eq!(durations.reconcile_ms, 0);
+        assert_eq!(durations.topology_ms, 0);
     }
 
     #[test]
