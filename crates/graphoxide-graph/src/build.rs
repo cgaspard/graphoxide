@@ -7,6 +7,35 @@ use graphoxide_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Build sub-stages for progress reporting. These are purely informational
+/// side-channel labels and never influence graph construction decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildSubStage {
+    /// Normalizing source paths and container representations.
+    Normalizing,
+    /// Resolving semantic ID remaps (stale per-file stems → full-path stems).
+    ResolvingSemanticIds,
+    /// Merging duplicate nodes across extractions.
+    MergingNodes,
+    /// Resolving document twins and ghost nodes.
+    ResolvingTwins,
+    /// Building alias indexes.
+    IndexingAliases,
+    /// Resolving and repairing edge endpoints.
+    ResolvingEdges,
+    /// Resolving hyperedge members.
+    ResolvingHyperedges,
+    /// Semantic deduplication (exact + fuzzy label merging).
+    Deduplicating,
+    /// Disambiguating file-level labels.
+    DisambiguatingLabels,
+}
+
+/// Callback for reporting build sub-stage transitions. The closure receives a
+/// [`BuildSubStage`] and must be a pure side effect (no state fed back into
+/// the build). Safe to call sequentially from the build thread.
+pub type BuildSubStageCallback<'a> = dyn Fn(BuildSubStage) + Send + Sync + 'a;
+
 /// Why an input node was discarded before it could enter the built graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -364,9 +393,18 @@ pub fn build_graph_with_report_and_options_and_root(
     root: impl AsRef<std::path::Path>,
     options: BuildOptions,
 ) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
+    build_graph_with_report_and_options_and_root_with_callback(extractions, root, options, None)
+}
+
+pub fn build_graph_with_report_and_options_and_root_with_callback(
+    extractions: &[Extraction],
+    root: impl AsRef<std::path::Path>,
+    options: BuildOptions,
+    on_sub_stage: Option<&BuildSubStageCallback<'_>>,
+) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
     let root = root.as_ref();
     let normalized = normalize_extractions(extractions, Some(root));
-    build_graph_with_report_normalized(&normalized, options)
+    build_graph_with_report_normalized(&normalized, options, on_sub_stage)
 }
 
 fn relativize_source_file(value: &str, root: &std::path::Path) -> String {
@@ -518,12 +556,13 @@ pub fn build_graph_with_report_and_options(
     options: BuildOptions,
 ) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
     let normalized = normalize_extractions(extractions, None);
-    build_graph_with_report_normalized(&normalized, options)
+    build_graph_with_report_normalized(&normalized, options, None)
 }
 
 fn build_graph_with_report_normalized(
     extractions: &[Extraction],
     options: BuildOptions,
+    on_sub_stage: Option<&BuildSubStageCallback<'_>>,
 ) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
     let mut report = BuildReport {
         input_extractions: extractions.len(),
@@ -532,7 +571,13 @@ fn build_graph_with_report_normalized(
         input_hyperedges: extractions.iter().map(|value| value.hyperedges.len()).sum(),
         ..BuildReport::default()
     };
+    if let Some(cb) = on_sub_stage {
+        cb(BuildSubStage::ResolvingSemanticIds);
+    }
     let mut remap = semantic_id_remap(extractions);
+    if let Some(cb) = on_sub_stage {
+        cb(BuildSubStage::MergingNodes);
+    }
     let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
     for extraction in extractions {
         for node in &extraction.nodes {
@@ -667,6 +712,9 @@ fn build_graph_with_report_normalized(
         .iter()
         .flat_map(|e| e.edges.iter().cloned())
         .collect();
+    if let Some(cb) = on_sub_stage {
+        cb(BuildSubStage::ResolvingEdges);
+    }
     all_edges.sort_by(|a, b| {
         (a.true_source(), a.true_target(), a.relation.as_str()).cmp(&(
             b.true_source(),
@@ -887,6 +935,9 @@ fn build_graph_with_report_normalized(
         hyperedges,
         extra: BTreeMap::from([("graph".into(), serde_json::json!({}))]),
     };
+    if let Some(cb) = on_sub_stage.filter(|_| options.deduplicate_semantic_nodes) {
+        cb(BuildSubStage::Deduplicating);
+    }
     let dedup = if options.deduplicate_semantic_nodes {
         crate::dedup::deduplicate_with_report(&mut graph)
     } else {

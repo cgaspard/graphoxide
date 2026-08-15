@@ -156,36 +156,36 @@ pub fn stage_graph_from_extractions_with_materialization_limit_and_root(
     root: Option<&Path>,
     on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
 ) -> anyhow::Result<StagedGraphOutput> {
+    stage_graph_from_extractions_with_materialization_limit_and_root_and_substage(
+        extractions,
+        output_directory,
+        options,
+        max_materialized_bytes,
+        root,
+        on_progress,
+        None,
+    )
+}
+
+pub fn stage_graph_from_extractions_with_materialization_limit_and_root_and_substage(
+    extractions: Vec<Extraction>,
+    output_directory: &Path,
+    options: BuildOptions,
+    max_materialized_bytes: usize,
+    root: Option<&Path>,
+    on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+    on_sub_stage: Option<&(dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync)>,
+) -> anyhow::Result<StagedGraphOutput> {
     let staging = create_fact_run_staging(output_directory)?;
-    let stage_result = (|| {
-        let batch_limits = FactBatchLimits::default();
-        let run_limits = FactBatchRunLimits::default();
-        let mut store = FactBatchRunStore::create(staging.path(), batch_limits, run_limits)?;
-        let mut builder = FactBatchRunBuilder::new(run_limits)?;
-        let total = extractions.len();
-        for (source_ordinal, extraction) in extractions.into_iter().enumerate() {
-            if let Some(cb) = on_progress {
-                cb(source_ordinal + 1, total);
-            }
-            let source_ordinal = u64::try_from(source_ordinal)
-                .map_err(|_| anyhow::anyhow!("source ordinal exceeds u64"))?;
-            for batch in FactBatch::split_extraction(source_ordinal, extraction, batch_limits)? {
-                if let Some(run) = builder.push(batch)? {
-                    store.append_run(run)?;
-                }
-            }
-        }
-        if let Some(run) = builder.finish()? {
-            store.append_run(run)?;
-        }
-        StagedGraphOutput::from_run_store_with_materialization_limit_and_root(
-            &mut store,
-            options,
-            FactBatchMergeLimits::default(),
-            max_materialized_bytes,
-            root,
-        )
-    })();
+    let stage_result = run_stage(
+        staging.path(),
+        extractions,
+        options,
+        max_materialized_bytes,
+        root,
+        on_progress,
+        on_sub_stage,
+    );
     let cleanup_result = staging.cleanup();
     match (stage_result, cleanup_result) {
         (Ok(staged), Ok(())) => Ok(staged),
@@ -195,6 +195,45 @@ pub fn stage_graph_from_extractions_with_materialization_limit_and_root(
             Err(error.context(format!("fact-run staging cleanup also failed: {cleanup:#}")))
         }
     }
+}
+
+fn run_stage(
+    staging_path: &Path,
+    extractions: Vec<Extraction>,
+    options: BuildOptions,
+    max_materialized_bytes: usize,
+    root: Option<&Path>,
+    on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+    on_sub_stage: Option<&(dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync)>,
+) -> anyhow::Result<StagedGraphOutput> {
+    let batch_limits = FactBatchLimits::default();
+    let run_limits = FactBatchRunLimits::default();
+    let mut store = FactBatchRunStore::create(staging_path, batch_limits, run_limits)?;
+    let mut builder = FactBatchRunBuilder::new(run_limits)?;
+    let total = extractions.len();
+    for (source_ordinal, extraction) in extractions.into_iter().enumerate() {
+        if let Some(cb) = on_progress {
+            cb(source_ordinal + 1, total);
+        }
+        let source_ordinal = u64::try_from(source_ordinal)
+            .map_err(|_| anyhow::anyhow!("source ordinal exceeds u64"))?;
+        for batch in FactBatch::split_extraction(source_ordinal, extraction, batch_limits)? {
+            if let Some(run) = builder.push(batch)? {
+                store.append_run(run)?;
+            }
+        }
+    }
+    if let Some(run) = builder.finish()? {
+        store.append_run(run)?;
+    }
+    StagedGraphOutput::from_run_store_with_materialization_limit_and_root_and_callback(
+        &mut store,
+        options,
+        FactBatchMergeLimits::default(),
+        max_materialized_bytes,
+        root,
+        on_sub_stage,
+    )
 }
 
 fn create_fact_run_staging(output_directory: &Path) -> anyhow::Result<FactRunStagingGuard> {

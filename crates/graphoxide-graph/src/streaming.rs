@@ -8,8 +8,8 @@
 //! materialization explicit at the staging boundary.
 
 use crate::{
-    build_graph_with_report_and_options, build_graph_with_report_and_options_and_root,
-    BuildOptions, BuildReport,
+    build_graph_with_report_and_options,
+    build_graph_with_report_and_options_and_root_with_callback, BuildOptions, BuildReport,
 };
 use crc32fast::Hasher as Crc32;
 use graphoxide_core::{write_graph_atomic, Edge, Extraction, KnowledgeGraph, Node};
@@ -997,6 +997,23 @@ impl FactBatchRunStore {
         max_materialized_bytes: usize,
         root: Option<&Path>,
     ) -> anyhow::Result<StagedGraphOutput> {
+        self.stage_graph_with_materialization_limit_and_root_and_callback(
+            options,
+            merge_limits,
+            max_materialized_bytes,
+            root,
+            None,
+        )
+    }
+
+    pub fn stage_graph_with_materialization_limit_and_root_and_callback(
+        &mut self,
+        options: BuildOptions,
+        merge_limits: FactBatchMergeLimits,
+        max_materialized_bytes: usize,
+        root: Option<&Path>,
+        on_sub_stage: Option<&crate::build::BuildSubStageCallback<'_>>,
+    ) -> anyhow::Result<StagedGraphOutput> {
         if max_materialized_bytes == 0 {
             return Err(FactBatchRunStoreError::InvalidMaterializationLimit.into());
         }
@@ -1034,7 +1051,12 @@ impl FactBatchRunStore {
         while let Some(batch) = merge.next_batch()? {
             batches.push(batch);
         }
-        StagedGraphOutput::from_fact_batches_with_root(batches, options, root)
+        StagedGraphOutput::from_fact_batches_with_root_and_callback(
+            batches,
+            options,
+            root,
+            on_sub_stage,
+        )
     }
 
     fn write_merged_group(
@@ -1535,6 +1557,15 @@ pub fn build_graph_from_fact_batches_with_root(
     options: BuildOptions,
     root: Option<&Path>,
 ) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
+    build_graph_from_fact_batches_with_root_and_callback(batches, options, root, None)
+}
+
+pub fn build_graph_from_fact_batches_with_root_and_callback(
+    batches: impl IntoIterator<Item = FactBatch>,
+    options: BuildOptions,
+    root: Option<&Path>,
+    on_sub_stage: Option<&crate::build::BuildSubStageCallback<'_>>,
+) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
     let mut batches: Vec<_> = batches.into_iter().collect();
     sort_fact_batches(&mut batches)?;
     let mut sources = BTreeMap::<u64, Extraction>::new();
@@ -1547,7 +1578,12 @@ pub fn build_graph_from_fact_batches_with_root(
     }
     let extractions = sources.into_values().collect::<Vec<_>>();
     if let Some(root) = root {
-        build_graph_with_report_and_options_and_root(&extractions, root, options)
+        build_graph_with_report_and_options_and_root_with_callback(
+            &extractions,
+            root,
+            options,
+            on_sub_stage,
+        )
     } else {
         build_graph_with_report_and_options(&extractions, options)
     }
@@ -1641,7 +1677,21 @@ impl StagedGraphOutput {
         options: BuildOptions,
         root: Option<&Path>,
     ) -> anyhow::Result<Self> {
-        let (graph, report) = build_graph_from_fact_batches_with_root(batches, options, root)?;
+        Self::from_fact_batches_with_root_and_callback(batches, options, root, None)
+    }
+
+    pub fn from_fact_batches_with_root_and_callback(
+        batches: impl IntoIterator<Item = FactBatch>,
+        options: BuildOptions,
+        root: Option<&Path>,
+        on_sub_stage: Option<&crate::build::BuildSubStageCallback<'_>>,
+    ) -> anyhow::Result<Self> {
+        let (graph, report) = build_graph_from_fact_batches_with_root_and_callback(
+            batches,
+            options,
+            root,
+            on_sub_stage,
+        )?;
         Ok(Self { graph, report })
     }
 
@@ -1685,6 +1735,23 @@ impl StagedGraphOutput {
             merge_limits,
             max_materialized_bytes,
             root,
+        )
+    }
+
+    pub fn from_run_store_with_materialization_limit_and_root_and_callback(
+        store: &mut FactBatchRunStore,
+        options: BuildOptions,
+        merge_limits: FactBatchMergeLimits,
+        max_materialized_bytes: usize,
+        root: Option<&Path>,
+        on_sub_stage: Option<&crate::build::BuildSubStageCallback<'_>>,
+    ) -> anyhow::Result<Self> {
+        store.stage_graph_with_materialization_limit_and_root_and_callback(
+            options,
+            merge_limits,
+            max_materialized_bytes,
+            root,
+            on_sub_stage,
         )
     }
 

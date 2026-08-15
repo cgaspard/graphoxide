@@ -21,6 +21,10 @@ export type BuildProgressPhase =
   | 'scanning'
   | 'extracting'
   | 'building'
+  | 'reconciling'
+  | 'merging_nodes'
+  | 'resolving_edges'
+  | 'deduplicating'
   | 'clustering'
   | 'publishing';
 
@@ -389,6 +393,10 @@ export function phaseProgressMessage(event: BuildPhaseEvent): string {
       case 'scanning': return 'Scanning inputs';
       case 'extracting': return 'Extracting inputs';
       case 'building': return 'Building graph';
+      case 'reconciling': return 'Reconciling baseline';
+      case 'merging_nodes': return 'Merging nodes';
+      case 'resolving_edges': return 'Resolving edges';
+      case 'deduplicating': return 'Deduplicating entities';
       case 'clustering': return 'Clustering communities';
       case 'publishing': return 'Publishing graph';
     }
@@ -475,6 +483,10 @@ const PHASES: readonly BuildProgressPhase[] = [
   'scanning',
   'extracting',
   'building',
+  'reconciling',
+  'merging_nodes',
+  'resolving_edges',
+  'deduplicating',
   'clustering',
   'publishing',
 ];
