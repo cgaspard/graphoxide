@@ -25,9 +25,11 @@ test('uses a compact status-first layout with inline build progress and cancel',
   assert.match(source, /\.settings-row \{ display: grid; grid-template-columns: 1fr 1fr/u);
   assert.match(source, /\.settings-card/u);
 
-  // MCP compact pills
-  assert.match(source, /\.mcp-pill \{/u);
-  assert.match(source, /\.mcp-pills \{/u);
+  // MCP integration rows with install/remove actions
+  assert.match(source, /\.mcp-row \{/u);
+  assert.match(source, /\.mcp-list \{/u);
+  assert.match(source, /data-action="install"/u);
+  assert.match(source, /data-action="uninstall"/u);
 
   // Number abbreviation
   assert.match(source, /function abbrevNumber/u);
