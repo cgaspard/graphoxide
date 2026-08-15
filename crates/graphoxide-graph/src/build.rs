@@ -935,10 +935,8 @@ fn build_graph_with_report_normalized(
         hyperedges,
         extra: BTreeMap::from([("graph".into(), serde_json::json!({}))]),
     };
-    if options.deduplicate_semantic_nodes {
-        if let Some(cb) = on_sub_stage {
-            cb(BuildSubStage::Deduplicating);
-        }
+    if let Some(cb) = on_sub_stage.filter(|_| options.deduplicate_semantic_nodes) {
+        cb(BuildSubStage::Deduplicating);
     }
     let dedup = if options.deduplicate_semantic_nodes {
         crate::dedup::deduplicate_with_report(&mut graph)
