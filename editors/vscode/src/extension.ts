@@ -796,6 +796,7 @@ async function runGraphBuild(operation: GraphBuildOperation, services: Extension
     return;
   }
 
+  let watchWasStopped = false;
   if (operation === 'rebuild') {
     const confirmation = await vscode.window.showWarningMessage(
       `Fully rebuild the Graphoxide graph for “${folder.name}”?`,
@@ -806,10 +807,7 @@ async function runGraphBuild(operation: GraphBuildOperation, services: Extension
       'Full Rebuild',
     );
     if (confirmation !== 'Full Rebuild') return;
-    const stoppedWatch = await services.cli.stopWatchAndWait();
-    if (stoppedWatch) {
-      void vscode.window.showInformationMessage('Graphoxide watch mode was stopped before the full rebuild. Restart it when you are ready.');
-    }
+    watchWasStopped = await services.cli.stopWatchAndWait();
   }
 
   const outcome = await services.cli.runMutation({
@@ -824,7 +822,9 @@ async function runGraphBuild(operation: GraphBuildOperation, services: Extension
   });
   if (outcome.kind !== 'completed') return;
   await services.store.load(folder);
-  void vscode.window.showInformationMessage(decision.completionMessage);
+  if (watchWasStopped) {
+    await services.cli.startWatch(folder, environment);
+  }
 }
 
 function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
@@ -977,8 +977,11 @@ function updateStatusBar(
   watching = false,
   progress?: BuildProgressSnapshot,
 ): void {
-  if (progress?.presentation === 'status') {
-    item.text = `$(sync~spin) Graphoxide: ${progress.message.replace(/…$/u, '')}`;
+  if (progress) {
+    const counterMatch = progress.message.match(/\((\d+)\/(\d+)\)\s*$/u);
+    const pct = counterMatch ? Math.round((Number(counterMatch[1]) / Number(counterMatch[2])) * 100) : undefined;
+    const label = progress.message.replace(/…\s*(\(\d+\/\d+\))?$/u, '').replace(/…$/u, '');
+    item.text = pct !== undefined ? `$(sync~spin) Graphoxide: ${label} ${pct}%` : `$(sync~spin) Graphoxide: ${label}`;
     item.tooltip = `Graphoxide ${progress.operation}: ${progress.message}`;
     item.backgroundColor = undefined;
   } else if (error) {

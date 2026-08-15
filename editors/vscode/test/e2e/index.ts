@@ -728,17 +728,10 @@ function assertProgressLifecycle(
     );
   }
   assert.ok(active.every((progress) => !progress.message.includes('%')), `${label} invented an overall percentage.`);
-  if (presentation === 'status') {
-    assert.ok(
-      activeObservations.every((observation) => /sync~spin/u.test(observation.statusBarText)),
-      `${label} was not exposed in the status bar while active.`,
-    );
-  } else {
-    assert.ok(
-      activeObservations.every((observation) => !/sync~spin/u.test(observation.statusBarText)),
-      `${label} leaked notification progress into the status bar.`,
-    );
-  }
+  assert.ok(
+    activeObservations.every((observation) => /sync~spin/u.test(observation.statusBarText)),
+    `${label} was not exposed in the status bar while active.`,
+  );
   assert.equal(observations.at(-1)?.progress, null, `${label} did not clear on its owning terminal/close.`);
   assert.doesNotMatch(observations.at(-1)?.statusBarText ?? '', /sync~spin/u);
 }
