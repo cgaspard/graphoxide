@@ -1051,7 +1051,12 @@ impl FactBatchRunStore {
         while let Some(batch) = merge.next_batch()? {
             batches.push(batch);
         }
-        StagedGraphOutput::from_fact_batches_with_root_and_callback(batches, options, root, on_sub_stage)
+        StagedGraphOutput::from_fact_batches_with_root_and_callback(
+            batches,
+            options,
+            root,
+            on_sub_stage,
+        )
     }
 
     fn write_merged_group(
@@ -1573,7 +1578,12 @@ pub fn build_graph_from_fact_batches_with_root_and_callback(
     }
     let extractions = sources.into_values().collect::<Vec<_>>();
     if let Some(root) = root {
-        build_graph_with_report_and_options_and_root_with_callback(&extractions, root, options, on_sub_stage)
+        build_graph_with_report_and_options_and_root_with_callback(
+            &extractions,
+            root,
+            options,
+            on_sub_stage,
+        )
     } else {
         build_graph_with_report_and_options(&extractions, options)
     }
@@ -1676,8 +1686,12 @@ impl StagedGraphOutput {
         root: Option<&Path>,
         on_sub_stage: Option<&crate::build::BuildSubStageCallback<'_>>,
     ) -> anyhow::Result<Self> {
-        let (graph, report) =
-            build_graph_from_fact_batches_with_root_and_callback(batches, options, root, on_sub_stage)?;
+        let (graph, report) = build_graph_from_fact_batches_with_root_and_callback(
+            batches,
+            options,
+            root,
+            on_sub_stage,
+        )?;
         Ok(Self { graph, report })
     }
 

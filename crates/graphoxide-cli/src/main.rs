@@ -1919,25 +1919,46 @@ fn run_project_build_with_cancellation(
         (extractions, graphoxide_graph::BuildOptions::default(), None)
     };
     let build_emitter = progress_reporter.counter_emitter(BuildProgressPhase::Building);
-    let sub_stage_emitter: Option<std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync>> =
-        progress_reporter.phase_emitter().map(|emit: std::sync::Arc<dyn Fn(BuildProgressPhase) + Send + Sync>| {
+    let sub_stage_emitter: Option<
+        std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync>,
+    > = progress_reporter.phase_emitter().map(
+        |emit: std::sync::Arc<dyn Fn(BuildProgressPhase) + Send + Sync>| {
             let adapter: std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync> =
                 std::sync::Arc::new(move |stage: graphoxide_graph::BuildSubStage| {
                     let phase = match stage {
-                        graphoxide_graph::BuildSubStage::Normalizing => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::ResolvingSemanticIds => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::MergingNodes => BuildProgressPhase::MergingNodes,
-                        graphoxide_graph::BuildSubStage::ResolvingTwins => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::IndexingAliases => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::ResolvingEdges => BuildProgressPhase::ResolvingEdges,
-                        graphoxide_graph::BuildSubStage::ResolvingHyperedges => BuildProgressPhase::ResolvingEdges,
-                        graphoxide_graph::BuildSubStage::Deduplicating => BuildProgressPhase::Deduplicating,
-                        graphoxide_graph::BuildSubStage::DisambiguatingLabels => BuildProgressPhase::Building,
+                        graphoxide_graph::BuildSubStage::Normalizing => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingSemanticIds => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::MergingNodes => {
+                            BuildProgressPhase::MergingNodes
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingTwins => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::IndexingAliases => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingEdges => {
+                            BuildProgressPhase::ResolvingEdges
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingHyperedges => {
+                            BuildProgressPhase::ResolvingEdges
+                        }
+                        graphoxide_graph::BuildSubStage::Deduplicating => {
+                            BuildProgressPhase::Deduplicating
+                        }
+                        graphoxide_graph::BuildSubStage::DisambiguatingLabels => {
+                            BuildProgressPhase::Building
+                        }
                     };
                     (emit)(phase);
                 });
             adapter
-        });
+        },
+    );
     let sub_stage_ref = sub_stage_emitter.as_deref();
     let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root_and_substage(
                 staged_extractions,
@@ -4964,25 +4985,46 @@ fn rebuild_isolated_pass(
         (extractions, graphoxide_graph::BuildOptions::default(), None)
     };
     let build_emitter = progress_reporter.counter_emitter(BuildProgressPhase::Building);
-    let sub_stage_emitter: Option<std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync>> =
-        progress_reporter.phase_emitter().map(|emit: std::sync::Arc<dyn Fn(BuildProgressPhase) + Send + Sync>| {
+    let sub_stage_emitter: Option<
+        std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync>,
+    > = progress_reporter.phase_emitter().map(
+        |emit: std::sync::Arc<dyn Fn(BuildProgressPhase) + Send + Sync>| {
             let adapter: std::sync::Arc<dyn Fn(graphoxide_graph::BuildSubStage) + Send + Sync> =
                 std::sync::Arc::new(move |stage: graphoxide_graph::BuildSubStage| {
                     let phase = match stage {
-                        graphoxide_graph::BuildSubStage::Normalizing => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::ResolvingSemanticIds => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::MergingNodes => BuildProgressPhase::MergingNodes,
-                        graphoxide_graph::BuildSubStage::ResolvingTwins => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::IndexingAliases => BuildProgressPhase::Building,
-                        graphoxide_graph::BuildSubStage::ResolvingEdges => BuildProgressPhase::ResolvingEdges,
-                        graphoxide_graph::BuildSubStage::ResolvingHyperedges => BuildProgressPhase::ResolvingEdges,
-                        graphoxide_graph::BuildSubStage::Deduplicating => BuildProgressPhase::Deduplicating,
-                        graphoxide_graph::BuildSubStage::DisambiguatingLabels => BuildProgressPhase::Building,
+                        graphoxide_graph::BuildSubStage::Normalizing => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingSemanticIds => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::MergingNodes => {
+                            BuildProgressPhase::MergingNodes
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingTwins => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::IndexingAliases => {
+                            BuildProgressPhase::Building
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingEdges => {
+                            BuildProgressPhase::ResolvingEdges
+                        }
+                        graphoxide_graph::BuildSubStage::ResolvingHyperedges => {
+                            BuildProgressPhase::ResolvingEdges
+                        }
+                        graphoxide_graph::BuildSubStage::Deduplicating => {
+                            BuildProgressPhase::Deduplicating
+                        }
+                        graphoxide_graph::BuildSubStage::DisambiguatingLabels => {
+                            BuildProgressPhase::Building
+                        }
                     };
                     (emit)(phase);
                 });
             adapter
-        });
+        },
+    );
     let sub_stage_ref = sub_stage_emitter.as_deref();
     let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root_and_substage(
         staged_extractions,

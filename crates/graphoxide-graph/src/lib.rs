@@ -33,8 +33,8 @@ pub use build::{
     build_graph_with_root, disambiguate_file_labels_in_extractions,
     disambiguate_file_labels_in_nodes, graph_has_legacy_ids, is_file_node_label, semantic_id_remap,
     shortest_unique_suffix, source_file_stem, BuildOptions, BuildReport, BuildSubStage,
-    BuildSubStageCallback, EdgeDropReason,
-    EdgeRepairReason, HyperedgeDropReason, HyperedgeRepairReason, NodeDropReason, NodeMergeReason,
+    BuildSubStageCallback, EdgeDropReason, EdgeRepairReason, HyperedgeDropReason,
+    HyperedgeRepairReason, NodeDropReason, NodeMergeReason,
 };
 pub use cluster::{
     cluster, cohesion_score, communities, community_member_sigs, label_communities_by_hub,
