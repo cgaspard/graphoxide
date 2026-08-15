@@ -1918,12 +1918,14 @@ fn run_project_build_with_cancellation(
     } else {
         (extractions, graphoxide_graph::BuildOptions::default(), None)
     };
+    let build_emitter = progress_reporter.counter_emitter(BuildProgressPhase::Building);
     let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root(
                 staged_extractions,
                 &output_directory,
                 build_options,
                 graph_materialization_budget,
                 normalization_root,
+                build_emitter.as_ref().map(|e| e.as_ref()),
             )?
             .into_parts()
             .0;
@@ -4940,12 +4942,14 @@ fn rebuild_isolated_pass(
     } else {
         (extractions, graphoxide_graph::BuildOptions::default(), None)
     };
+    let build_emitter = progress_reporter.counter_emitter(BuildProgressPhase::Building);
     let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root(
         staged_extractions,
         output_directory,
         build_options,
         graph_materialization_budget,
         normalization_root,
+        build_emitter.as_ref().map(|e| e.as_ref()),
     )?
     .into_parts()
     .0;

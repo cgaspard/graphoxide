@@ -330,7 +330,7 @@ export class GraphoxideCli implements vscode.Disposable {
       if (options.showProgress === false) return await execute(options.cancellationToken);
       return await vscode.window.withProgress(
         {
-          location: vscode.ProgressLocation.Notification,
+          location: vscode.ProgressLocation.Window,
           title: options.title,
           cancellable: options.cancellable ?? true,
         },

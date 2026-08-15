@@ -140,18 +140,21 @@ pub fn stage_graph_from_extractions_with_materialization_limit(
         options,
         max_materialized_bytes,
         None,
+        None,
     )
 }
 
 /// As [`stage_graph_from_extractions_with_materialization_limit`], preserving
 /// a project root for deterministic source normalization during incremental
-/// compatibility graph construction.
+/// compatibility graph construction. `on_progress`, when provided, is called
+/// with `(processed, total)` after each extraction is staged.
 pub fn stage_graph_from_extractions_with_materialization_limit_and_root(
     extractions: Vec<Extraction>,
     output_directory: &Path,
     options: BuildOptions,
     max_materialized_bytes: usize,
     root: Option<&Path>,
+    on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
 ) -> anyhow::Result<StagedGraphOutput> {
     let staging = create_fact_run_staging(output_directory)?;
     let stage_result = (|| {
@@ -159,7 +162,11 @@ pub fn stage_graph_from_extractions_with_materialization_limit_and_root(
         let run_limits = FactBatchRunLimits::default();
         let mut store = FactBatchRunStore::create(staging.path(), batch_limits, run_limits)?;
         let mut builder = FactBatchRunBuilder::new(run_limits)?;
+        let total = extractions.len();
         for (source_ordinal, extraction) in extractions.into_iter().enumerate() {
+            if let Some(cb) = on_progress {
+                cb(source_ordinal + 1, total);
+            }
             let source_ordinal = u64::try_from(source_ordinal)
                 .map_err(|_| anyhow::anyhow!("source ordinal exceeds u64"))?;
             for batch in FactBatch::split_extraction(source_ordinal, extraction, batch_limits)? {
