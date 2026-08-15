@@ -855,8 +855,16 @@ mod tests {
         timer.tick(BuildSubStage::Deduplicating);
         std::thread::sleep(std::time::Duration::from_millis(2));
         let durations = timer.finish();
-        assert!(durations.merge_ms >= 5, "merge_ms should be >= 5ms, got {}", durations.merge_ms);
-        assert!(durations.dedup_ms >= 2, "dedup_ms should be >= 2ms, got {}", durations.dedup_ms);
+        assert!(
+            durations.merge_ms >= 5,
+            "merge_ms should be >= 5ms, got {}",
+            durations.merge_ms
+        );
+        assert!(
+            durations.dedup_ms >= 2,
+            "dedup_ms should be >= 2ms, got {}",
+            durations.dedup_ms
+        );
         assert_eq!(durations.reconcile_ms, 0);
         assert_eq!(durations.topology_ms, 0);
     }

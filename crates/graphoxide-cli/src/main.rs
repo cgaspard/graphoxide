@@ -1965,7 +1965,8 @@ fn run_project_build_with_cancellation(
                     (emit)(phase);
                 });
             adapter
-        });
+        },
+    );
     let sub_stage_ref = sub_stage_emitter.as_deref();
     let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root_and_substage(
                 staged_extractions,
@@ -5041,7 +5042,8 @@ fn rebuild_isolated_pass(
                     (emit)(phase);
                 });
             adapter
-        });
+        },
+    );
     let sub_stage_ref = sub_stage_emitter.as_deref();
     let mut graph = graphoxide_cli::build_guard::stage_graph_from_extractions_with_materialization_limit_and_root_and_substage(
         staged_extractions,
