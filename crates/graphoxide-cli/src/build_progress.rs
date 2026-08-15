@@ -35,6 +35,10 @@ pub enum BuildProgressPhase {
     Scanning,
     Extracting,
     Building,
+    Reconciling,
+    MergingNodes,
+    ResolvingEdges,
+    Deduplicating,
     Clustering,
     Publishing,
 }
@@ -387,6 +391,55 @@ impl BuildProgressReporter {
         }))
     }
 
+    /// Create a phase-transition emitter for build sub-stage reporting.
+    /// The closure emits a `Phase` event (no counters) when the phase changes.
+    /// Safe to call from a single thread (the build pipeline is sequential).
+    pub fn phase_emitter(
+        &self,
+    ) -> Option<std::sync::Arc<dyn Fn(BuildProgressPhase) + Send + Sync + 'static>> {
+        if !self.enabled() {
+            return None;
+        }
+        let json = self.json;
+        let human = self.human;
+        let operation = self.operation;
+        let run_nonce = self.run_nonce.clone();
+        let last_phase = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(u8::MAX));
+        Some(std::sync::Arc::new(move |phase| {
+            let discriminant = phase as u8;
+            if last_phase
+                .compare_exchange(
+                    discriminant,
+                    discriminant,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return;
+            }
+            last_phase.store(discriminant, std::sync::atomic::Ordering::Relaxed);
+            emit_json(
+                json,
+                &BuildProgressEvent::Phase {
+                    schema_version: BUILD_PROGRESS_SCHEMA_VERSION,
+                    run_nonce: &run_nonce,
+                    operation,
+                    phase,
+                    processed: None,
+                    total: None,
+                },
+            );
+            if human {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "[graphoxide] {}…",
+                    phase_label(phase),
+                );
+            }
+        }))
+    }
+
     fn phase_inner(&mut self, phase: BuildProgressPhase, progress: Option<(u64, u64)>) {
         if !self.started || self.finished || !self.enabled() {
             return;
@@ -598,6 +651,10 @@ const fn phase_label(phase: BuildProgressPhase) -> &'static str {
         BuildProgressPhase::Scanning => "Scanning inputs",
         BuildProgressPhase::Extracting => "Extracting inputs",
         BuildProgressPhase::Building => "Building graph",
+        BuildProgressPhase::Reconciling => "Reconciling baseline",
+        BuildProgressPhase::MergingNodes => "Merging nodes",
+        BuildProgressPhase::ResolvingEdges => "Resolving edges",
+        BuildProgressPhase::Deduplicating => "Deduplicating entities",
         BuildProgressPhase::Clustering => "Clustering communities",
         BuildProgressPhase::Publishing => "Publishing graph",
     }

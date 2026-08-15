@@ -28,10 +28,12 @@ pub use analyze::{
 pub use build::{
     attach_hyperedges, build_graph, build_graph_with_options, build_graph_with_options_and_root,
     build_graph_with_report, build_graph_with_report_and_options,
-    build_graph_with_report_and_options_and_root, build_graph_with_report_and_root,
+    build_graph_with_report_and_options_and_root,
+    build_graph_with_report_and_options_and_root_with_callback, build_graph_with_report_and_root,
     build_graph_with_root, disambiguate_file_labels_in_extractions,
     disambiguate_file_labels_in_nodes, graph_has_legacy_ids, is_file_node_label, semantic_id_remap,
-    shortest_unique_suffix, source_file_stem, BuildOptions, BuildReport, EdgeDropReason,
+    shortest_unique_suffix, source_file_stem, BuildOptions, BuildReport, BuildSubStage,
+    BuildSubStageCallback, EdgeDropReason,
     EdgeRepairReason, HyperedgeDropReason, HyperedgeRepairReason, NodeDropReason, NodeMergeReason,
 };
 pub use cluster::{
