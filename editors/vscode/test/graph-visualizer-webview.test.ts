@@ -135,11 +135,12 @@ test('gates the bounded Extension Host bridge and clears stale graphs on status 
 
 test('compiles as a dependency-free classic browser bundle', async () => {
   const config = JSON.parse(await readFile(tsconfigPath, 'utf8')) as {
-    compilerOptions?: { module?: string; outFile?: string; types?: unknown[]; lib?: string[] };
+    compilerOptions?: { module?: string; outDir?: string; rootDir?: string; types?: unknown[]; lib?: string[] };
     files?: string[];
   };
-  assert.equal(config.compilerOptions?.module, 'none');
-  assert.equal(config.compilerOptions?.outFile, 'dist/webview/graph-visualizer.js');
+  assert.equal(config.compilerOptions?.module, 'esnext');
+  assert.equal(config.compilerOptions?.outDir, 'dist/webview');
+  assert.equal(config.compilerOptions?.rootDir, 'webview');
   assert.deepEqual(config.compilerOptions?.types, []);
   assert.ok(config.compilerOptions?.lib?.includes('DOM.Iterable'));
   assert.deepEqual(config.files, ['webview/graph-visualizer.ts']);
