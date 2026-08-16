@@ -146,7 +146,7 @@ impl std::ops::Deref for RuntimeProjectExtractionWithTelemetry {
     }
 }
 
-const MAX_ISOLATED_PARSER_ALLOWANCE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_ISOLATED_PARSER_ALLOWANCE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Choose one per-file parser policy from the memory budget alone.
 ///

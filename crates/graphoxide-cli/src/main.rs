@@ -5822,8 +5822,13 @@ fn format_capability_output(json: bool) -> anyhow::Result<String> {
     let reports = graphoxide_extract::format_registry::format_registry()
         .capability_reports()
         .collect::<Vec<_>>();
+    let profile = graphoxide_extract::format_registry::default_runtime_admission_profile();
     if json {
-        return serde_json::to_string_pretty(&reports).map_err(Into::into);
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "formats": reports,
+            "runtime_admission": profile,
+        }))
+        .map_err(Into::into);
     }
 
     let mut output = String::new();
@@ -5840,6 +5845,31 @@ fn format_capability_output(json: bool) -> anyhow::Result<String> {
             report.adapter.as_str(),
             extensions,
             file_names,
+        )?;
+    }
+
+    // Distinguish the absolute parser ceilings above from the effective
+    // admission limits the default isolated-runtime profile actually enforces
+    // for adapters with an arena/byte-credit multiplier.
+    use std::fmt::Write as _;
+    writeln!(output)?;
+    writeln!(
+        output,
+        "runtime admission profile: {} (parser allowance {} bytes)",
+        profile.name, profile.parser_allowance_bytes
+    )?;
+    for admission in &profile.formats {
+        let effective_input = admission
+            .max_input_bytes
+            .effective
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "not admissible".to_owned());
+        writeln!(
+            output,
+            "  {}: input static {} / effective {}",
+            admission.id.as_str(),
+            admission.max_input_bytes.static_,
+            effective_input,
         )?;
     }
     Ok(output.trim_end_matches('\n').to_owned())
@@ -7172,14 +7202,30 @@ mod tests {
         assert!(text.contains("yaml\tstructural_partial\tnot_required\tstructured\tyaml,yml"));
 
         let json = format_capability_output(true).expect("render JSON contract");
-        let reports: Vec<serde_json::Value> =
+        let envelope: serde_json::Value =
             serde_json::from_str(&json).expect("deserialize format contract");
+        let reports: Vec<serde_json::Value> = envelope["formats"]
+            .as_array()
+            .expect("formats array")
+            .to_vec();
         assert_eq!(
             reports.len(),
             graphoxide_extract::format_registry::format_registry()
                 .specs()
                 .len()
         );
+        // The runtime admission profile must be present and identify the
+        // deterministic default profile and its parser allowance.
+        let admission = &envelope["runtime_admission"];
+        assert_eq!(admission["name"], "isolated-runtime-default");
+        assert_eq!(
+            admission["parser_allowance_bytes"],
+            graphoxide_extract::format_registry::DEFAULT_PROFILE_PARSER_ALLOWANCE_BYTES
+        );
+        assert!(!admission["formats"]
+            .as_array()
+            .expect("admission formats")
+            .is_empty());
         assert!(reports.iter().any(|report| {
             report["id"] == "openusd-ascii" && report["capability"] == "structural_partial"
         }));

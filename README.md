@@ -432,7 +432,10 @@ never traversed or executed; OCR and rendering remain explicit future
 enrichment work. The isolated runtime's shared parser arena applies an
 additional 16× source admission, so its current 16 MiB per-file policy admits
 semantic PDF parsing only below roughly 1 MiB even though the registry's
-absolute PDF input ceiling is 16 MiB.
+absolute PDF input ceiling is 16 MiB. `graphoxide formats --json` reports this
+distinction machine-readably: each format carries its absolute `limits` plus a
+`runtime_admission` profile listing the effective admission ceilings the
+default isolated runtime actually enforces for byte-credit-multiplied adapters.
 
 The walker honors `.gitignore` and `.graphoxideignore`, skips dependency/build/cache directories and sensitive credential files, and never re-ingests `graphoxide-out/`. The `outer!/member` source spelling is reserved for logical archive members, so physical directory names ending in `!` are skipped with a discovery diagnostic.
 
