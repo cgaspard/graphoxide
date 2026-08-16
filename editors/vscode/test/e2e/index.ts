@@ -115,6 +115,7 @@ export async function run(): Promise<void> {
 
   await verifyMcpProtocol(enabled.mcp!);
   await verifyGraphPlacement(api, folder, enabled.graphPath!);
+  await verifyArchiveSourceLinks(api, folder);
   await verifyProjectInstallers(folder, enabled.mcp!);
   await verifySaveAndWatchUpdates(api, folder, enabled.graphPath!);
   await verifyAiProviders(api, enabled.graphPath!);
@@ -409,6 +410,44 @@ async function verifyMcpProtocol(invocation: NonNullable<Awaited<ReturnType<Grap
   } finally {
     await client.close();
   }
+}
+
+async function verifyArchiveSourceLinks(api: GraphoxideExtensionApi, folder: vscode.WorkspaceFolder): Promise<void> {
+  const status = await api.status();
+  assert.ok(status.graphPath, 'The managed graph path was not available for the archive reveal check.');
+  const graph = parseGraphJson(await fs.readFile(status.graphPath, 'utf8'));
+  // The sample workspace ships fixtures/archive-sample.zip, which indexes an
+  // archive-embedded member (fixtures/archive-sample.zip!/sample_bundle/...).
+  const embedded = graph.nodes.find((node) => /\.zip!/u.test(node.sourceFile));
+  assert.ok(embedded, 'The sample workspace did not produce an archive-embedded graph node.');
+
+  // The "Open archive" action offered by the fix targets the outermost archive
+  // on disk, so that file must exist in the workspace.
+  await fs.access(path.join(folder.uri.fsPath, 'fixtures', 'archive-sample.zip'));
+
+  const editorBefore = vscode.window.activeTextEditor?.document.uri.toString();
+  // Core regression (issue #105): revealing an archive-embedded node must not
+  // reject with a raw "Could not open ... file:///...%21..." error. The old
+  // code threw from openTextDocument on the literal archive!/member path; the
+  // fix recognizes the archive source and reports it instead of failing.
+  let rejection: unknown;
+  try {
+    await vscode.commands.executeCommand('graphoxide.revealNode', embedded);
+  } catch (error) {
+    rejection = error;
+  }
+  assert.equal(
+    rejection,
+    undefined,
+    `revealNode rejected for an archive-embedded source: ${rejection instanceof Error ? rejection.message : String(rejection)}`,
+  );
+  // And it must not leave a bogus editor open for a path that is not a file.
+  const editorAfter = vscode.window.activeTextEditor?.document.uri.toString();
+  assert.equal(
+    editorAfter,
+    editorBefore,
+    'Revealing an archive-embedded node unexpectedly opened an editor for a non-file path.',
+  );
 }
 
 async function verifyGraphPlacement(
