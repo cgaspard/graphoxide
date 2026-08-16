@@ -1515,12 +1515,32 @@ fn test_extensionless_shebang_via_dispatch() {
 }
 
 #[test]
-fn test_extensionless_without_usable_shebang_stays_unsupported() {
+fn test_extensionless_without_usable_shebang_becomes_inventory() {
+    // Issue #34: extensionless, no-registered-language files no longer vanish
+    // with zero graph facts. Instead each in-scope regular file is emitted as a
+    // deterministic bounded inventory node so it is visible as graph evidence.
+    // A perl shebang with no registered extractor is *not* "usable" the way a
+    // bash/python shebang is: it has no extension and no extractor claims it,
+    // so it too becomes an inventory node rather than being dropped.
     let project = Project::new();
     project.write("LICENSE-COPY", "plain text\n");
     project.write("legacy", "#!/usr/bin/env perl\nprint 1;\n");
-    assert!(project.single("LICENSE-COPY").nodes.is_empty());
-    assert!(project.single("legacy").nodes.is_empty());
+
+    for name in ["LICENSE-COPY", "legacy"] {
+        let extraction = project.single(name);
+        assert_eq!(
+            extraction.nodes.len(),
+            1,
+            "{name} should be one inventory node"
+        );
+        let node = &extraction.nodes[0];
+        assert_eq!(node.file_type, "document");
+        assert_eq!(node.extra["type"], "format_inventory");
+        assert_eq!(node.extra["format"], "unsupported_file");
+        assert_eq!(node.extra["format_capability"], "inventory_only");
+        assert_eq!(node.extra["parse_status"], "inventory_only");
+        assert!(extraction.edges.is_empty());
+    }
 }
 
 #[test]
