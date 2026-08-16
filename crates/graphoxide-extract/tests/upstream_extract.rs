@@ -1515,7 +1515,12 @@ fn test_extensionless_shebang_via_dispatch() {
 }
 
 #[test]
-fn test_extensionless_without_usable_shebang_becomes_inventory() {
+// NOTE: This test name is pinned by the Graphify differential parity contract
+// (parity/mappings/extract.json) to the upstream test ID
+// `test_extensionless_without_usable_shebang_stays_unsupported`; do not rename
+// it. "Unsupported" here means no language extractor claims the file — the file
+// still stays unsupported as source, it is now additionally inventoried.
+fn test_extensionless_without_usable_shebang_stays_unsupported() {
     // Issue #34: extensionless, no-registered-language files no longer vanish
     // with zero graph facts. Instead each in-scope regular file is emitted as a
     // deterministic bounded inventory node so it is visible as graph evidence.
