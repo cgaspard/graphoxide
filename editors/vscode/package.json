@@ -411,6 +411,11 @@
           "default": true,
           "description": "Show graph connection counts above indexed symbols."
         },
+        "graphoxide.sourceLinks.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Make graph node source locations openable from the Results view, the graph explorer, and the graph visualizer. Disable to keep these views informational."
+        },
         "graphoxide.llm.provider": {
           "type": "string",
           "enum": [

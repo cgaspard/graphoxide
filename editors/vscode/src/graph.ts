@@ -223,3 +223,40 @@ export function sourceLine(node: GraphNode): number {
 export function basenameForNode(node: GraphNode): string {
   return node.sourceFile ? path.posix.basename(node.sourceFile) : node.fileType;
 }
+
+/**
+ * Container extensions Graphoxide indexes as archives, mirroring
+ * crates/graphoxide-extract/src/containers.rs.
+ */
+const ARCHIVE_EXTENSIONS = new Set([
+  'tar', 'tgz', 'gz', 'bz2', 'tbz', 'tbz2', 'xz', 'txz', 'zst', 'zstd', '7z', 'rar',
+  'zip', 'docx', 'xlsx', 'pptx', 'vsdx', 'odt', 'ods', 'odp', 'epub',
+]);
+
+export interface ArchiveEmbeddedSource {
+  /** Relative path of the outermost archive on disk. */
+  readonly outer: string;
+  /** Path of the file inside the archive chain. */
+  readonly member: string;
+}
+
+/**
+ * Graphoxide records files stored inside an archive with `<archive>!<member>`
+ * paths, repeating the separator for nested archives (for example
+ * `bundle.tgz!/bundle.tar!/design.dot`). Such paths do not exist on disk and
+ * cannot be opened directly in the editor. Returns the outer archive path and
+ * the embedded member path, or `undefined` for ordinary relative source paths
+ * (including on-disk files that merely contain a `!` character).
+ */
+export function archiveEmbeddedSource(sourceFile: string): ArchiveEmbeddedSource | undefined {
+  const normalized = sourceFile.replace(/\\/gu, '/');
+  const separator = normalized.indexOf('!');
+  if (separator <= 0) return undefined;
+  const outer = normalized.slice(0, separator);
+  const member = normalized.slice(separator + 1).replace(/^\//u, '');
+  if (!member) return undefined;
+  const dot = outer.lastIndexOf('.');
+  if (dot < 0) return undefined;
+  if (!ARCHIVE_EXTENSIONS.has(outer.slice(dot + 1).toLocaleLowerCase())) return undefined;
+  return { outer, member };
+}

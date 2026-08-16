@@ -133,6 +133,20 @@ test('gates the bounded Extension Host bridge and clears stale graphs on status 
   assert.match(host, /isNullableBoundedString\(state\.relationFilter, MAX_VISUALIZER_STRING_CODE_UNITS\)/u);
 });
 
+test('supports disabling node source links from the host', async () => {
+  const source = await readFile(visualizerPath, 'utf8');
+  const host = await readFile(hostPath, 'utf8');
+  // The host publishes the capability on every state publish.
+  assert.match(host, /type: 'sourceLinks',[\s\S]*?enabled: vscode\.workspace\.getConfiguration\('graphoxide'\)\.get<boolean>\('sourceLinks\.enabled', true\),/u);
+  // The webview accepts bounded boolean toggles and re-renders the views.
+  assert.match(source, /value\.type === 'sourceLinks' && typeof value\.enabled === 'boolean'\) \{[\s\S]*?sourceLinksEnabled = value\.enabled;[\s\S]*?updateView\(\);/u);
+  // Reveal requests are suppressed while source links are disabled.
+  assert.match(source, /if \(!nodeById\.has\(id\) \|\| !sourceLinksEnabled\) return;/u);
+  // "Open source" actions render only while source links are enabled.
+  assert.equal(source.match(/if \(sourceLinksEnabled\) \{/gu)?.length, 2);
+  assert.equal(source.match(/'Open source'/gu)?.length, 2);
+});
+
 test('compiles as a dependency-free classic browser bundle', async () => {
   const config = JSON.parse(await readFile(tsconfigPath, 'utf8')) as {
     compilerOptions?: { module?: string; outDir?: string; rootDir?: string; types?: unknown[]; lib?: string[] };

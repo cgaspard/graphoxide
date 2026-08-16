@@ -207,6 +207,10 @@ export class GraphVisualizer implements vscode.Disposable {
   private publishCurrentState(): void {
     const panel = this.panel;
     if (!panel || !this.webviewReady) return;
+    void panel.webview.postMessage({
+      type: 'sourceLinks',
+      enabled: vscode.workspace.getConfiguration('graphoxide').get<boolean>('sourceLinks.enabled', true),
+    });
     const model = this.model;
     if (!model) {
       void panel.webview.postMessage({ type: 'status', ...this.availability });

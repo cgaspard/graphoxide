@@ -5,7 +5,7 @@ import { LatestBuildSummary } from './build-progress';
 import { BuildProgressSnapshot, GraphoxideCli } from './cli';
 import { GraphCodeLensProvider } from './codelens';
 import { ControlCenterPanel } from './control-center';
-import { GraphNode } from './graph';
+import { archiveEmbeddedSource, GraphNode } from './graph';
 import { AiLabelingService, AiLabelingTestConfiguration } from './llm/service';
 import { ManagedWorkspaceService } from './managed';
 import { repairAbandonedRegistrations } from './mcp/installers';
@@ -171,6 +171,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
           .catch((error: unknown) => handleError(error));
       }
       if (event.affectsConfiguration('graphoxide.codeLens.enabled')) codeLens.refresh();
+      if (event.affectsConfiguration('graphoxide.sourceLinks.enabled')) {
+        explorer.refresh();
+        results.refresh();
+        visualizer.refresh(store.state?.model, store.state?.error);
+      }
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const folder = editor ? vscode.workspace.getWorkspaceFolder(editor.document.uri) : undefined;
@@ -933,15 +938,41 @@ async function revealNodeById(store: GraphStore, id: string): Promise<void> {
   if (node) await revealNode(store, node);
 }
 
+function sourceLinksEnabled(folderUri?: vscode.Uri): boolean {
+  return vscode.workspace.getConfiguration('graphoxide', folderUri).get<boolean>('sourceLinks.enabled', true);
+}
+
 async function revealNode(store: GraphStore, node: GraphNode): Promise<void> {
   const state = store.state;
   if (!state || !node.sourceFile) {
     void vscode.window.showInformationMessage(`${node.label} has no source location.`);
     return;
   }
+  if (!sourceLinksEnabled(state.folder.uri)) {
+    void vscode.window.showInformationMessage('Graphoxide source links are disabled. Set graphoxide.sourceLinks.enabled to true to open node sources.');
+    return;
+  }
   const relative = node.sourceFile.replace(/\\/gu, '/');
   if (path.posix.isAbsolute(relative) || relative.split('/').includes('..')) {
     void vscode.window.showErrorMessage(`Graphoxide refused an unsafe source path: ${node.sourceFile}`);
+    return;
+  }
+  const embedded = archiveEmbeddedSource(relative);
+  if (embedded) {
+    // Archive-embedded sources (archive.tgz!/member/...) have no on-disk path
+    // to open. Explain that, and offer the outermost archive itself.
+    void vscode.window.showInformationMessage(
+      `${node.label} is stored inside ${relative}, so it cannot be opened directly in the editor.`,
+      'Open archive',
+    ).then((choice) => {
+      if (choice !== 'Open archive') return;
+      void vscode.workspace
+        .openTextDocument(vscode.Uri.joinPath(state.folder.uri, ...embedded.outer.split('/')))
+        .then(
+          (document) => void vscode.window.showTextDocument(document, { preview: true }),
+          () => void vscode.window.showWarningMessage(`Could not open the archive ${embedded.outer}.`),
+        );
+    });
     return;
   }
   const uri = vscode.Uri.joinPath(state.folder.uri, ...relative.split('/'));
@@ -955,7 +986,8 @@ async function revealNode(store: GraphStore, node: GraphNode): Promise<void> {
     editor.selection = new vscode.Selection(range.start, range.start);
     editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
   } catch (error) {
-    throw new Error(`Could not open ${node.sourceFile}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showWarningMessage(`Could not open ${node.sourceFile}: ${message}. The file may have moved or been deleted; refresh the Graphoxide graph if this persists.`);
   }
 }
 
