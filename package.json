@@ -18,6 +18,8 @@
     "test:benchmark": "node --test scripts/benchmark-graph-build.test.mjs scripts/qualify-universal-indexing.test.mjs",
     "test:workflows": "node --test scripts/workflow-dependencies.test.mjs",
     "test:security": "node --test scripts/security-audit.test.mjs",
+    "coverage:rust": "node scripts/rust-coverage.mjs --check",
+    "coverage:rust:update": "node scripts/rust-coverage.mjs --update",
     "audit:security": "node scripts/security-audit.mjs",
     "verify:pre-push": "node scripts/verify.mjs --pre-push",
     "verify:release": "node scripts/verify.mjs --release"

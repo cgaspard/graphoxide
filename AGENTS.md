@@ -58,6 +58,26 @@ This adds the release build, VS Code Extension Host E2E suite, and VSIX package
 validation. CI also runs the Graphify differential parity suite and website and
 license checks; do not tag until CI for the exact main-branch commit is green.
 
+### Rust code coverage ratchet
+
+Executed Rust code coverage is measured separately from the indexing pipeline's
+file-admission/corpus "coverage". The ratchet keeps a committed baseline
+(`scripts/rust-coverage-baseline.json`) of line, region, and function coverage
+and fails if any metric regresses beyond a small tolerance. It exercises the same
+unit and integration tests as the gates.
+
+The full measurement requires the `cargo-llvm-cov` tool (not installed in the
+default CI toolchain), so it runs locally:
+
+```bash
+node scripts/rust-coverage.mjs --check   # measure + enforce the ratchet
+node scripts/rust-coverage.mjs --update  # re-baseline after an intentional drop
+```
+
+The fast ratchet *logic* test (`scripts/rust-coverage.test.mjs`) runs in every
+gate via `verify.mjs`. Re-baseline only when a change intentionally lowers
+coverage; the baseline otherwise acts as a guard against unexplained regressions.
+
 ## Issues, branches, and worktrees
 
 Create the GitHub issue first. Name every issue worktree and its branch from the
