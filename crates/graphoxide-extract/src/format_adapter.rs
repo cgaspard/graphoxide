@@ -899,7 +899,9 @@ impl RecursiveDispatchBudget {
     }
 }
 
-fn bounded_container_limits(allowance_bytes: usize) -> crate::containers::ContainerLimits {
+pub(crate) fn bounded_container_limits(
+    allowance_bytes: usize,
+) -> crate::containers::ContainerLimits {
     let defaults = crate::containers::ContainerLimits::default();
     // Metadata, decoded SVG bytes, parser events, and retained inventory all
     // share this worker-local allowance. Keep each independent ceiling below a

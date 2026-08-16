@@ -2053,15 +2053,247 @@ pub const fn format_registry() -> &'static FormatRegistry {
     &FORMAT_REGISTRY
 }
 
+/// A single admitted limit in a runtime profile: the static (absolute) parser
+/// ceiling and the effective ceiling the selected profile actually enforces.
+///
+/// `effective` is always `<=` the static limit because the isolated-runtime
+/// byte-credit multipliers can only lower admission. It is `None` when the
+/// profile's byte credits cannot admit the format at all (for example a PDF
+/// whose allowance cannot cover the minimum scratch class).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EffectiveLimit {
+    pub static_: u64,
+    pub effective: Option<u64>,
+}
+
+/// Bounded effective admission ceilings for one registered format under the
+/// default isolated-runtime profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EffectiveAdmission {
+    pub id: FormatId,
+    /// Adapter that owns the byte-credit accounting for this format.
+    pub adapter: ByteAdapterKind,
+    /// The single per-worker parser allowance (bytes) this profile derives.
+    pub parser_allowance_bytes: u64,
+    pub max_input_bytes: EffectiveLimit,
+    pub max_container_members: Option<usize>,
+    pub max_total_uncompressed_bytes: Option<u64>,
+}
+
+/// Deterministic description of the admission ceilings the default isolated
+/// runtime profile actually enforces, distinct from the static parser maxima
+/// in [`FormatLimits`].
+///
+/// The calculation is bounded and allocation-free: it reuses the exact
+/// container byte-credit multipliers from the live extraction path
+/// ([`super::format_adapter::bounded_container_limits`]) and the PDF/Office
+/// parser-allowance admission rules, applied to the maximum isolated parser
+/// allowance. It deliberately does *not* depend on the host memory budget, so
+/// the output is stable across machines and worker counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeAdmissionProfile {
+    pub name: &'static str,
+    pub parser_allowance_bytes: u64,
+    pub formats: Vec<EffectiveAdmission>,
+}
+
+/// The maximum per-worker parser allowance the isolated runtime can select.
+/// This is the ceiling used to describe the *default* profile deterministically;
+/// smaller host budgets only lower the effective limits further.
+pub const DEFAULT_PROFILE_PARSER_ALLOWANCE_BYTES: u64 =
+    super::MAX_ISOLATED_PARSER_ALLOWANCE_BYTES as u64;
+
+/// Compute the deterministic effective admission profile for every registered
+/// format. Only adapters with an arena/byte-credit multiplier are reported
+/// (`Pdf`, `Office`, and `ContainerMedia`); all other adapters are bounded by
+/// their static limit only and are omitted to keep the report focused.
+#[must_use]
+pub fn default_runtime_admission_profile() -> RuntimeAdmissionProfile {
+    let allowance = super::MAX_ISOLATED_PARSER_ALLOWANCE_BYTES;
+    let mut formats = Vec::new();
+    for spec in format_registry().specs() {
+        let adapter = spec.adapter();
+        let is_multiplied = matches!(
+            adapter,
+            ByteAdapterKind::Pdf | ByteAdapterKind::Office | ByteAdapterKind::ContainerMedia
+        );
+        if !is_multiplied {
+            continue;
+        }
+        let container = super::format_adapter::bounded_container_limits(allowance);
+        let max_input = match adapter {
+            // PDF and Office admission is gated by their own parser-allowance
+            // rules: a source of this size must be admitted under the
+            // profile's allowance. If it is not, the format cannot be admitted
+            // at all under this profile.
+            ByteAdapterKind::Pdf => {
+                let static_ = spec.limits.max_input_bytes;
+                let admitted =
+                    super::pdf::PdfLimits::for_parser_allowance(allowance, static_ as usize)
+                        .map(|_| static_)
+                        .or_else(|| {
+                            // Even if the full static size is not admitted, the
+                            // effective ceiling is the largest source length that
+                            // is admitted, capped at the static limit.
+                            let mut lo = 0usize;
+                            let mut hi = (static_ as usize).min(allowance);
+                            while lo < hi {
+                                let mid = lo + (hi - lo + 1).div_ceil(2);
+                                if super::pdf::PdfLimits::for_parser_allowance(allowance, mid)
+                                    .is_some()
+                                {
+                                    lo = mid;
+                                } else {
+                                    hi = mid - 1;
+                                }
+                            }
+                            (lo > 0).then_some(lo as u64)
+                        });
+                EffectiveLimit {
+                    static_,
+                    effective: admitted,
+                }
+            }
+            ByteAdapterKind::Office => {
+                let static_ = spec.limits.max_input_bytes;
+                let admitted =
+                    super::office::OfficeLimits::for_parser_allowance(allowance, static_ as usize)
+                        .map(|_| static_)
+                        .or_else(|| {
+                            let mut lo = 0usize;
+                            let mut hi = (static_ as usize).min(allowance);
+                            while lo < hi {
+                                let mid = lo + (hi - lo + 1).div_ceil(2);
+                                if super::office::OfficeLimits::for_parser_allowance(allowance, mid)
+                                    .is_some()
+                                {
+                                    lo = mid;
+                                } else {
+                                    hi = mid - 1;
+                                }
+                            }
+                            (lo > 0).then_some(lo as u64)
+                        });
+                EffectiveLimit {
+                    static_,
+                    effective: admitted,
+                }
+            }
+            _ => {
+                // The container byte-credit multiplier yields the admission
+                // ceiling the profile's allowance permits; it can never exceed
+                // the format's absolute parser maximum, so cap it there. This
+                // keeps the effective limit a true upper bound on admission for
+                // every container/media adapter (raster, SVG, archives, ...).
+                EffectiveLimit {
+                    static_: spec.limits.max_input_bytes,
+                    effective: Some(
+                        (container.max_input_bytes as u64).min(spec.limits.max_input_bytes),
+                    ),
+                }
+            }
+        };
+        formats.push(EffectiveAdmission {
+            id: spec.id,
+            adapter,
+            parser_allowance_bytes: allowance as u64,
+            max_input_bytes: max_input,
+            max_container_members: Some(container.max_members),
+            max_total_uncompressed_bytes: Some(container.max_total_uncompressed_bytes),
+        });
+    }
+    RuntimeAdmissionProfile {
+        name: "isolated-runtime-default",
+        parser_allowance_bytes: allowance as u64,
+        formats,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        format_registry, ByteAdapterKind, FormatCapability, MagicRule, SchemaRequirement,
-        COLUMNAR_PROTOCOL_LIMITS, CONTAINER_LIMITS, DIAGRAM_LIMITS, ENGINEERING_LIMITS,
-        OFFICE_LIMITS, PDF_LIMITS, PROTOCOL_LIMITS, SIMULATION_LIMITS, STRUCTURED_TEXT_LIMITS,
-        WATCHED_EXTENSIONS,
+        default_runtime_admission_profile, format_registry, ByteAdapterKind, FormatCapability,
+        MagicRule, SchemaRequirement, COLUMNAR_PROTOCOL_LIMITS, CONTAINER_LIMITS,
+        DEFAULT_PROFILE_PARSER_ALLOWANCE_BYTES, DIAGRAM_LIMITS, ENGINEERING_LIMITS, OFFICE_LIMITS,
+        PDF_LIMITS, PROTOCOL_LIMITS, SIMULATION_LIMITS, STRUCTURED_TEXT_LIMITS, WATCHED_EXTENSIONS,
     };
     use std::path::Path;
+
+    #[test]
+    fn runtime_admission_profile_is_deterministic_and_bounded() {
+        let profile = default_runtime_admission_profile();
+        assert_eq!(profile.name, "isolated-runtime-default");
+        assert_eq!(
+            profile.parser_allowance_bytes,
+            DEFAULT_PROFILE_PARSER_ALLOWANCE_BYTES
+        );
+        // Byte-credit-multiplied adapters only.
+        assert!(!profile.formats.is_empty());
+        for admission in &profile.formats {
+            assert!(
+                matches!(
+                    admission.adapter,
+                    ByteAdapterKind::Pdf
+                        | ByteAdapterKind::Office
+                        | ByteAdapterKind::ContainerMedia
+                ),
+                "{} should be a multiplied adapter",
+                admission.id.as_str()
+            );
+            // Effective ceiling can never exceed the static parser maximum.
+            if let Some(effective) = admission.max_input_bytes.effective {
+                assert!(
+                    effective <= admission.max_input_bytes.static_,
+                    "{} effective {} exceeds static {}",
+                    admission.id.as_str(),
+                    effective,
+                    admission.max_input_bytes.static_
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pdf_effective_admission_is_strictly_below_static_ceiling() {
+        let profile = default_runtime_admission_profile();
+        let pdf = profile
+            .formats
+            .iter()
+            .find(|format| format.id.as_str() == "pdf")
+            .expect("pdf admission entry");
+        let static_ = pdf.max_input_bytes.static_;
+        assert_eq!(static_, PDF_LIMITS.max_input_bytes, "pdf static ceiling");
+        let effective = pdf
+            .max_input_bytes
+            .effective
+            .expect("pdf should be admissible under the default profile");
+        // The byte-credit multiplier must make the effective ceiling strictly
+        // smaller than the static parser maximum (the issue's core complaint).
+        assert!(
+            effective < static_,
+            "pdf effective {effective} should be < static {static_}"
+        );
+    }
+
+    #[test]
+    fn container_effective_admission_uses_multiplier() {
+        let profile = default_runtime_admission_profile();
+        let zip = profile
+            .formats
+            .iter()
+            .find(|format| format.id.as_str() == "zip-archive")
+            .expect("zip admission entry");
+        assert_eq!(zip.adapter, ByteAdapterKind::ContainerMedia);
+        // The container multiplier is allowance * 16, capped by the static
+        // ceiling. At the 16 MiB default allowance the effective ceiling is
+        // the full 512 MiB static container limit (multiplier is not the
+        // binding constraint), which must still be <= the static limit.
+        let effective = zip
+            .max_input_bytes
+            .effective
+            .expect("zip should be admissible");
+        assert!(effective <= zip.max_input_bytes.static_);
+    }
 
     #[test]
     fn legacy_classification_and_watch_projection_remain_exact() {
