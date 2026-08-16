@@ -13,6 +13,7 @@
  * Host -> client messages:
  *   { type: 'replaceGraph', graph: VisualizerSnapshotV1 }
  *   { type: 'status', status: 'loading' | 'error', message?: string }
+ *   { type: 'sourceLinks', enabled: boolean }
  *   { type: 'testAction', action: TestAction, value?: string } // test mode only
  *
  * Client -> host messages:
@@ -329,6 +330,8 @@ if (!contextCandidate) throw new Error('Graphoxide could not initialize the grap
 const context: CanvasRenderingContext2D = contextCandidate;
 
 let graph: VisualizerSnapshotV1 | null = null;
+// The extension host can disable node source links (graphoxide.sourceLinks.enabled).
+let sourceLinksEnabled = true;
 let communityOptions = new Map<string, { readonly all: boolean; readonly id: string | null }>();
 let relationOptions = new Map<string, { readonly all: boolean; readonly relation: string | null }>();
 let canonicalCommunityNames = new Map<string | null, string>();
@@ -749,6 +752,12 @@ function handleHostMessage(value: unknown): void {
       return;
     }
     installGraph(snapshot);
+    return;
+  }
+  if (value.type === 'sourceLinks' && typeof value.enabled === 'boolean') {
+    if (value.enabled === sourceLinksEnabled) return;
+    sourceLinksEnabled = value.enabled;
+    updateView();
     return;
   }
   if (value.type === 'status' && (value.status === 'loading' || value.status === 'error')) {
@@ -1606,7 +1615,7 @@ function moveHistory(index: number): void {
 }
 
 function revealNode(id: string): void {
-  if (!nodeById.has(id)) return;
+  if (!nodeById.has(id) || !sourceLinksEnabled) return;
   vscode.postMessage({ type: 'reveal', id });
 }
 
@@ -1891,13 +1900,16 @@ function renderFocusCard(node: VisualizerNodeV1, incomingCount: number, outgoing
   appendMetric(metrics, 'Visible outgoing', outgoingCount);
   card.append(metrics);
   const actions = make('div', 'gx-card-actions');
-  const open = button('', 'Open source');
-  open.className = 'gx-primary-button';
-  open.addEventListener('click', () => revealNode(node.id));
+  if (sourceLinksEnabled) {
+    const open = button('', 'Open source');
+    open.className = 'gx-primary-button';
+    open.addEventListener('click', () => revealNode(node.id));
+    actions.append(open);
+  }
   const explain = button('', 'Explain');
   explain.className = 'gx-secondary-button';
   explain.addEventListener('click', () => explainNode(node.id));
-  actions.append(open, explain);
+  actions.append(explain);
   card.append(actions);
   ui.focusColumn.append(card);
 }
@@ -1976,16 +1988,19 @@ function renderInspector(): void {
   ui.inspector.append(header);
 
   const actions = make('div', 'gx-inspector-actions');
-  const open = button('', 'Open source');
-  open.className = 'gx-primary-button';
-  open.addEventListener('click', () => revealNode(node.id));
+  if (sourceLinksEnabled) {
+    const open = button('', 'Open source');
+    open.className = 'gx-primary-button';
+    open.addEventListener('click', () => revealNode(node.id));
+    actions.append(open);
+  }
   const focus = button('', 'Open Lens');
   focus.className = 'gx-secondary-button';
   focus.addEventListener('click', () => setFocus(node.id));
   const explain = button('', 'Explain');
   explain.className = 'gx-secondary-button';
   explain.addEventListener('click', () => explainNode(node.id));
-  actions.append(open, focus, explain);
+  actions.append(focus, explain);
   ui.inspector.append(actions);
 
   const metrics = make('dl', 'gx-inspector-metrics');

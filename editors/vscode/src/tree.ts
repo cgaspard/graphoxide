@@ -126,6 +126,10 @@ export class ResultsProvider implements vscode.TreeDataProvider<ResultElement>, 
     return [...this.values];
   }
 
+  refresh(): void {
+    this.changeEmitter.fire(undefined);
+  }
+
   setOutput(title: string, output: string, nodes: readonly GraphNode[] = []): void {
     const lines = output.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).slice(0, 150);
     this.values = [
@@ -161,7 +165,11 @@ function nodeTreeItem(node: GraphNode, degree?: number): vscode.TreeItem {
   item.iconPath = new vscode.ThemeIcon(iconForNode(node));
   item.contextValue = 'graphoxide.node';
   item.tooltip = new vscode.MarkdownString(`**${node.label}**\n\n\`${node.id}\`\n\n${node.sourceFile || node.fileType}${node.sourceLocation ? `:${node.sourceLocation}` : ''}`);
-  item.command = { command: 'graphoxide.revealNode', title: 'Reveal node', arguments: [node] };
+  // Source links can be disabled (graphoxide.sourceLinks.enabled) to keep the
+  // trees informational without opening editors.
+  if (vscode.workspace.getConfiguration('graphoxide').get<boolean>('sourceLinks.enabled', true)) {
+    item.command = { command: 'graphoxide.revealNode', title: 'Reveal node', arguments: [node] };
+  }
   return item;
 }
 
