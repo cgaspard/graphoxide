@@ -110,6 +110,17 @@ fn resolve_tool(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// The npm entry point bundled with a node installation. A node binary lives
+/// at `<prefix>/bin/node`, so the npm CLI script is two levels up from the
+/// binary, at `<prefix>/lib/node_modules/npm/bin/npm-cli.js`. Invoking it
+/// through the resolved node keeps the install independent of any (possibly
+/// broken) `npm` shim on PATH.
+fn bundled_npm_cli(node: &Path) -> Option<PathBuf> {
+    let prefix = node.ancestors().nth(2)?;
+    let npm_cli = prefix.join("lib/node_modules/npm/bin/npm-cli.js");
+    npm_cli.is_file().then_some(npm_cli)
+}
+
 /// Read a `package.json` and return its top-level `version` string.
 fn package_version(path: &Path) -> String {
     let raw = std::fs::read_to_string(path).expect("read package.json");
@@ -175,7 +186,7 @@ fn build_vsix() -> (PathBuf, PathBuf) {
     let node_str = node.to_str().expect("node path");
 
     if !vscode.join("node_modules").is_dir() {
-        let npm_cli = node.join("../lib/node_modules/npm/bin/npm-cli.js");
+        let npm_cli = bundled_npm_cli(&node).expect("npm-cli.js resolvable next to node");
         let output = run_bounded(
             &vscode,
             node_str,
@@ -227,8 +238,23 @@ fn packaged_vsix_bundled_binary_is_native_and_indexes_fixture() {
         eprintln!("packaged-artifact smoke: skipped (no native target for this host)");
         return;
     }
-    if resolve_node().is_none() {
-        eprintln!("packaged-artifact smoke: skipped (node not resolvable)");
+    let node = match resolve_node() {
+        Some(node) => node,
+        None => {
+            eprintln!("packaged-artifact smoke: skipped (node not resolvable)");
+            return;
+        }
+    };
+    // The install step only needs npm when dependencies are not staged yet;
+    // on hosts without a resolvable bundled npm the smoke test stays skipped.
+    if !repository_root()
+        .join("editors")
+        .join("vscode")
+        .join("node_modules")
+        .is_dir()
+        && bundled_npm_cli(&node).is_none()
+    {
+        eprintln!("packaged-artifact smoke: skipped (npm not resolvable next to node)");
         return;
     }
     let (vsix, _vscode) = build_vsix();
