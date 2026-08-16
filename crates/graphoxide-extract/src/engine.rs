@@ -358,6 +358,14 @@ fn extract_as_with_path_probes(
         lang = crate::languages::named("python");
     }
     if extension.is_empty() && lang.is_none() {
+        // No extension and no recognized language: this is an in-scope regular
+        // file that no extractor claims. Emit a deterministic bounded inventory
+        // node so it is useful graph evidence instead of a zero-fact outcome
+        // (issue #34). Sensitive/excluded/unreadable/symlinked/hard-linked
+        // files never reach this point (filtered by discovery/coverage).
+        if UNSUPPORTED_FILE_INVENTORY_ENABLED {
+            return Ok(unsupported_file_inventory(path, source_file, source));
+        }
         return Ok(Extraction::default());
     }
     if path
@@ -612,6 +620,118 @@ pub(crate) fn mpeg_transport_stream_inventory(
         }],
         edges: Vec::new(),
         hyperedges: Vec::new(),
+    }
+}
+
+/// Whether in-scope files that match no registered format, language, or
+/// fallback extractor are emitted as deterministic bounded inventory nodes
+/// (issue #34) instead of producing zero graph facts.
+///
+/// This is a compile-time feature gate. When enabled, the default build emits a
+/// single opaque inventory node per unsupported regular file carrying a stable
+/// identity, bounded size/hash/type facts, and an explicit inventory outcome.
+/// Sensitive, policy-excluded, unreadable, symlinked, hard-linked, or raced
+/// files are filtered by discovery/coverage *before* this point and are never
+/// read or classified here.
+const UNSUPPORTED_FILE_INVENTORY_ENABLED: bool = true;
+
+/// Maximum bytes of an unsupported file admitted for content hashing. Larger
+/// files are still inventoried, but their hash covers only this bounded prefix
+/// (suffixed with the total size so distinct sizes never collide).
+const UNSUPPORTED_INVENTORY_HASH_MAX_BYTES: usize = 1_048_576; // 1 MiB
+
+/// Maximum bytes of an unsupported file's prefix inspected for bounded type
+/// classification (magic-byte sniffing).
+const UNSUPPORTED_INVENTORY_SNIFF_BYTES: usize = 4096; // 4 KiB
+
+/// Build a deterministic, bounded inventory node for an in-scope regular file
+/// that no registered format, language, or fallback extractor claims. The
+/// result never executes, renders, or deeply deserializes the payload: it only
+/// reads a bounded prefix for a conservative type classification and hashes a
+/// bounded prefix of the content.
+pub(crate) fn unsupported_file_inventory(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+) -> Extraction {
+    let stem = Path::new(source_file)
+        .with_extension("")
+        .to_string_lossy()
+        .into_owned();
+    let label = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(source_file)
+        .to_owned();
+    // Inventory identities live in their own namespace so an unsupported file
+    // can never collide with a code/document anchor or a registered-format
+    // inventory node.
+    let id = make_id(&["format_inventory", "unsupported_file", &stem]);
+
+    // Bounded, allowlisted type classification from a small prefix. This is
+    // intentionally conservative: only a few unambiguous signatures are named;
+    // everything else stays `opaque`.
+    let prefix = &source[..source.len().min(UNSUPPORTED_INVENTORY_SNIFF_BYTES)];
+    let classification = classify_unsupported_prefix(prefix);
+
+    // Bounded content hash: SHA-256 over the (bounded) prefix plus the total
+    // size, so the digest is deterministic across roots and worker counts and
+    // never reads unbounded input.
+    let hash_prefix = &source[..source.len().min(UNSUPPORTED_INVENTORY_HASH_MAX_BYTES)];
+    let mut hasher = Sha256::new();
+    hasher.update(hash_prefix);
+    hasher.update(b"\0");
+    hasher.update((source.len() as u64).to_le_bytes());
+    let content_hash = hex::encode(hasher.finalize());
+
+    Extraction {
+        nodes: vec![Node {
+            id,
+            label,
+            file_type: "document".into(),
+            source_file: source_file.into(),
+            source_location: None,
+            community: None,
+            extra: BTreeMap::from([
+                ("type".into(), "format_inventory".into()),
+                ("format".into(), "unsupported_file".into()),
+                ("format_capability".into(), "inventory_only".into()),
+                ("parse_status".into(), "inventory_only".into()),
+                ("diagnostic".into(), "unsupported_file_inventory".into()),
+                ("byte_length".into(), (source.len() as u64).into()),
+                ("content_sha256".into(), content_hash.into()),
+                ("content_class".into(), classification.into()),
+            ]),
+        }],
+        edges: Vec::new(),
+        hyperedges: Vec::new(),
+    }
+}
+
+/// Conservative, bounded type classification for an unsupported file prefix.
+/// Only a few unambiguous, allowlisted signatures are named; ambiguous or
+/// unrecognized content stays `opaque`. This never deserializes the payload.
+fn classify_unsupported_prefix(prefix: &[u8]) -> &'static str {
+    if prefix.starts_with(b"PK\x03\x04") || prefix.starts_with(b"PK\x05\x06") {
+        "zip_container"
+    } else if prefix.starts_with(&[0x1f, 0x8b]) {
+        "gzip_container"
+    } else if prefix.starts_with(b"%PDF-") {
+        "pdf_signature"
+    } else if prefix.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png_signature"
+    } else if prefix.len() >= 3 && prefix[0] == 0xff && prefix[1] == 0xd8 && prefix[2] == 0xff {
+        "jpeg_signature"
+    } else if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
+        "gif_signature"
+    } else if prefix.starts_with(b"#!/") {
+        "script_shebang"
+    } else if prefix.starts_with(b"ARROW1") {
+        "arrow_ipc_signature"
+    } else if prefix.starts_with(b"PAR1") {
+        "parquet_signature"
+    } else {
+        "opaque"
     }
 }
 
@@ -4965,7 +5085,10 @@ fn go_predeclared_function(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_as_bytes, has_ast_extractor_bytes, parser_compatible_source};
+    use super::{
+        classify_unsupported_prefix, extract_as_bytes, has_ast_extractor_bytes,
+        parser_compatible_source, unsupported_file_inventory,
+    };
     use graphoxide_core::make_id;
     use std::{borrow::Cow, collections::BTreeSet, path::Path};
 
@@ -5008,6 +5131,96 @@ mod tests {
         assert!(extraction.nodes.iter().all(|node| {
             node.extra.get("type").and_then(serde_json::Value::as_str) != Some("file")
         }));
+    }
+
+    #[test]
+    fn unsupported_file_inventory_is_deterministic_and_bounded() {
+        let path = Path::new("data/blob.bin");
+        // A payload that matches no registered magic, has no extension-based
+        // language, and no shebang: purely unsupported content.
+        let source = b"\x00\x01\x02some opaque unsupported payload \x03\x04";
+        let first = unsupported_file_inventory(path, "data/blob.bin", source);
+        let second = unsupported_file_inventory(path, "data/blob.bin", source);
+
+        // Deterministic across invocations (and thus across worker counts).
+        assert_eq!(
+            serde_json::to_value(&first).expect("serialize first"),
+            serde_json::to_value(&second).expect("serialize second")
+        );
+
+        assert_eq!(first.nodes.len(), 1);
+        assert!(first.edges.is_empty());
+        assert!(first.hyperedges.is_empty());
+        let node = &first.nodes[0];
+        assert_eq!(node.file_type, "document");
+        assert_eq!(node.source_file, "data/blob.bin");
+        assert_eq!(node.extra["type"], "format_inventory");
+        assert_eq!(node.extra["format"], "unsupported_file");
+        assert_eq!(node.extra["format_capability"], "inventory_only");
+        assert_eq!(node.extra["parse_status"], "inventory_only");
+        assert_eq!(node.extra["diagnostic"], "unsupported_file_inventory");
+        assert_eq!(node.extra["byte_length"], source.len() as u64);
+        assert_eq!(node.extra["content_class"], "opaque");
+        // The hash is a stable 64-char hex digest.
+        let hash = node.extra["content_sha256"].as_str().expect("hash");
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        // The node satisfies the raw graph schema.
+        graphoxide_core::validate::validate_extraction(&first)
+            .expect("unsupported inventory must satisfy the raw graph schema");
+    }
+
+    #[test]
+    fn unsupported_file_inventory_is_emitted_by_the_engine_dispatch() {
+        // An extensionless, extension-less-language file with no shebang must
+        // now produce a bounded inventory node instead of an empty extraction.
+        let path = Path::new("weird_payload");
+        let source = b"no extension, no recognized language, no shebang";
+        let extraction =
+            extract_as_bytes(path, "weird_payload", source).expect("unsupported inventory");
+        assert_eq!(extraction.nodes.len(), 1, "expected one inventory node");
+        assert_eq!(extraction.nodes[0].extra["format"], "unsupported_file");
+        assert_eq!(extraction.nodes[0].extra["type"], "format_inventory");
+        graphoxide_core::validate::validate_extraction(&extraction)
+            .expect("engine-emitted unsupported inventory must be schema-valid");
+    }
+
+    #[test]
+    fn unsupported_file_inventory_classification_is_allowlisted() {
+        // A few unambiguous signatures are named; the rest stay opaque.
+        assert_eq!(
+            classify_unsupported_prefix(b"PK\x03\x04rest"),
+            "zip_container"
+        );
+        assert_eq!(
+            classify_unsupported_prefix(&[0x1f, 0x8b, 0, 0]),
+            "gzip_container"
+        );
+        assert_eq!(classify_unsupported_prefix(b"%PDF-1.7"), "pdf_signature");
+        assert_eq!(
+            classify_unsupported_prefix(b"\x89PNG\r\n\x1a\n"),
+            "png_signature"
+        );
+        assert_eq!(
+            classify_unsupported_prefix(b"\xff\xd8\xff\xe0"),
+            "jpeg_signature"
+        );
+        assert_eq!(classify_unsupported_prefix(b"GIF89a"), "gif_signature");
+        assert_eq!(
+            classify_unsupported_prefix(b"#!/usr/bin/env python3"),
+            "script_shebang"
+        );
+        assert_eq!(
+            classify_unsupported_prefix(b"ARROW1"),
+            "arrow_ipc_signature"
+        );
+        assert_eq!(classify_unsupported_prefix(b"PAR1"), "parquet_signature");
+        assert_eq!(
+            classify_unsupported_prefix(b"totally unknown bytes"),
+            "opaque"
+        );
+        assert_eq!(classify_unsupported_prefix(b""), "opaque");
     }
 
     #[test]
