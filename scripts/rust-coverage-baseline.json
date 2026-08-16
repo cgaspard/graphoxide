@@ -1,0 +1,14 @@
+{
+  "tool": "cargo-llvm-cov",
+  "generated_at": "2026-08-16T02:35:56.195Z",
+  "scope": "rust workspace (lib, bins, tests)",
+  "metrics": {
+    "regions": 182743,
+    "region_cover_pct": 88.79,
+    "functions": 10140,
+    "function_cover_pct": 88.96,
+    "lines": 115055,
+    "line_cover_pct": 89.71
+  },
+  "ratchet_tolerance_pct": 0.2
+}

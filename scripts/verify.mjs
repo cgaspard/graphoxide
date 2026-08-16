@@ -21,6 +21,7 @@ run('node', [
   'scripts/agent-artifacts.test.mjs',
   'scripts/benchmark-graph-build.test.mjs',
   'scripts/qualify-universal-indexing.test.mjs',
+  'scripts/rust-coverage.test.mjs',
   'scripts/security-audit.test.mjs',
   'scripts/workflow-dependencies.test.mjs',
 ]);
