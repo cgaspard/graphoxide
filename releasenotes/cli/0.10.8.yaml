@@ -2,9 +2,12 @@ version: 0.10.8
 date: 2026-08-15
 highlights:
   - Full builds now report live sub-stage progress (reconciling, merging nodes, resolving edges, deduplicating entities) and record per-sub-stage durations in the build report.
+  - In-scope files that match no registered format are now indexed as bounded inventory nodes instead of disappearing from the graph.
 added:
   - The build pipeline emits sub-stage progress events (Reconciling baseline, Merging nodes, Resolving edges, Deduplicating entities) so the Control Center status bar tracks fine-grained progress during graph construction.
   - Build telemetry now records wall-clock durations for each sub-stage (reconcile, merge, dedup, topology) alongside the existing stage timings.
+  - Unsupported in-scope files are emitted as a single deterministic inventory node carrying a stable identity, byte length, bounded SHA-256 digest, and allowlisted content classification, so they appear in the knowledge graph instead of being invisible.
+  - Executed Rust code coverage is now measured via a baseline-preserving ratchet gate (line, region, function) that runs locally with cargo-llvm-cov and enforces a committed baseline in every gate.
 changed: []
 fixed: []
 removed: []

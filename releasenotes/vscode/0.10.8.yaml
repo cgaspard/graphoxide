@@ -4,13 +4,16 @@ highlights:
   - Builds run silently with a live percentage in the status bar and fine-grained sub-stage labels, and the Control Center shows a per-sub-stage "Build detail" time breakdown.
   - Restored the MCP install/update/remove UI in the Control Center.
   - Migrated the extension to TypeScript 6 with node16 module resolution.
+  - Archive-embedded sources are now explained with an "Open archive" action instead of a raw error, and source links can be disabled entirely.
 added:
   - The status bar now shows build progress as a live percentage during full rebuilds, and builds no longer pop up modal progress notifications.
   - The Control Center "Latest index" card now shows a "Build detail" line with per-sub-stage durations (reconcile, merge, dedup, topology).
   - Live sub-stage labels (Reconciling baseline, Merging nodes, Resolving edges, Deduplicating entities) appear in the status bar during graph construction.
+  - A new graphoxide.sourceLinks.enabled setting (default true) turns node source links off: tree items become informational, the visualizer hides "Open source" actions, and reveal requests are a no-op.
 changed:
   - The extension is now compiled with TypeScript 6 using node16 module and moduleResolution, with webview code emitted as an ES module bundle.
   - After a full rebuild completes while in watch mode, the watch process is restarted automatically so incremental updates resume.
 fixed:
   - Restored the MCP install/update/remove UI in the Control Center, which was removed during the status-first redesign.
+  - Clicking a graph node whose source lives inside an archive (e.g. charts/x.tgz!/templates/yml) now shows an information message with an "Open archive" action instead of a raw file:/// error notification.
 removed: []

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.8 — 2026-08-15
+## 0.10.8 — 2026-08-16
 
 - Builds now run silently with a live percentage in the status bar instead of modal
   progress popups. After a full rebuild completes while in watch mode, the watch
@@ -12,6 +12,10 @@
 - Restored the MCP install/update/remove UI in the Control Center, which was removed
   during the status-first redesign.
 - Migrated the extension to TypeScript 6 with node16 module resolution.
+- Clicking a graph node whose source lives inside an archive (e.g. charts/x.tgz!/
+  templates/yml) now shows an information message with an "Open archive" action
+  instead of a raw file:/// error. A new graphoxide.sourceLinks.enabled setting
+  (default true) turns node source links off entirely.
 
 ## 0.10.7 — 2026-08-14
 
