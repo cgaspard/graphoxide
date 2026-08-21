@@ -2312,19 +2312,23 @@ fn parse_cmap_entries(
     let mut in_range = false;
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with("beginbfchar") {
+        // Section markers conventionally carry a count prefix
+        // (`69 beginbfchar`), so match the trailing token instead of the line
+        // prefix. Mapping lines end in hex tokens and cannot collide.
+        let marker = line.rsplit(char::is_whitespace).next().unwrap_or_default();
+        if marker == "beginbfchar" {
             in_char = true;
             continue;
         }
-        if line.starts_with("endbfchar") {
+        if marker == "endbfchar" {
             in_char = false;
             continue;
         }
-        if line.starts_with("beginbfrange") {
+        if marker == "beginbfrange" {
             in_range = true;
             continue;
         }
-        if line.starts_with("endbfrange") {
+        if marker == "endbfrange" {
             in_range = false;
             continue;
         }

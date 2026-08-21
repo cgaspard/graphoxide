@@ -1578,6 +1578,64 @@ fn type0_font_with_non_cmap_tounicode_stream_fails_closed() {
 }
 
 #[test]
+fn type0_font_with_counted_cmap_sections_decodes_cid_text() {
+    // Standard CMap section headers carry a count prefix (`4 beginbfchar`).
+    // Section markers must be recognized by their trailing token, otherwise
+    // every mapping line is ignored and the font fails closed.
+    let content = b"BT /F1 12 Tf 72 720 Td <00480065006C006C> Tj ET";
+    let cmap = br#"begincmap
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <ffff>
+endcodespacerange
+4 beginbfchar
+<0048> <0048>
+<0065> <0065>
+<006C> <006C>
+<006C> <006C>
+endbfchar
+endcmap
+"#;
+    let in_place = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            format!("<</Length {}>>\nstream\n{}endstream", content.len(), String::from_utf8_lossy(content)).into_bytes(),
+        ),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /MyFont /Encoding /Identity-H /DescendantFonts [7 0 R] /ToUnicode 6 0 R >>".to_vec(),
+        ),
+        (
+            6,
+            format!("<</Length {}>>\nstream\n{}endstream", cmap.len(), String::from_utf8_lossy(cmap)).into_bytes(),
+        ),
+        (
+            7,
+            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MyFont /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W [1 2 500] >>".to_vec(),
+        ),
+    ];
+    let pdf = build_xref_pdf(&in_place, None, 8, None);
+    let extraction = extract_source("type0-counted-cmap.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("Hell")),
+        "counted `N beginbfchar` sections must contribute their mappings"
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
 fn cross_reference_stream_with_explicit_index_extracts_text() {
     // /Index [0 3 3 3] splits the range; ids 3,4,5 still resolve.
     let in_place = vec![
