@@ -80,6 +80,28 @@ fn gzip_bytes(payload: &[u8]) -> Vec<u8> {
     encoder.finish().expect("finish GZIP stream")
 }
 
+fn bzip2_bytes(payload: &[u8]) -> Vec<u8> {
+    let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::new(6));
+    encoder.write_all(payload).expect("write BZIP2 payload");
+    encoder.finish().expect("finish BZIP2 stream")
+}
+
+fn xz_bytes(payload: &[u8]) -> Vec<u8> {
+    let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+    encoder.write_all(payload).expect("write XZ payload");
+    encoder.finish().expect("finish XZ stream")
+}
+
+fn zstd_bytes(payload: &[u8]) -> Vec<u8> {
+    zstd::encode_all(payload, 3).expect("encode Zstandard frame")
+}
+
+fn lz4_bytes(payload: &[u8]) -> Vec<u8> {
+    let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+    encoder.write_all(payload).expect("write LZ4 payload");
+    encoder.finish().expect("finish LZ4 frame")
+}
+
 fn managed(project: &Path, name: &str) -> PathBuf {
     project.join("graphoxide-out").join(name)
 }
@@ -350,4 +372,62 @@ fn default_clustered_index_recurses_a_single_gzip_stream() {
         .is_some_and(|links| { links.iter().any(|edge| edge["relation"] == "flows_to") }));
     assert!(!project.join("bundle.tar").exists());
     assert!(!project.join("design/architecture.dot").exists());
+}
+
+/// Each new single-stream codec (BZIP2, XZ, Zstandard, LZ4) must recurse a
+/// `.tar` child under the same worker-deterministic, bounded contract as the
+/// existing GZIP path: the decoded member is dispatched to a child extractor,
+/// no member is materialized on disk, and the warm cache is byte-identical.
+#[test]
+fn default_clustered_index_recurses_each_single_stream_codec() {
+    let source = b"digraph Runtime { gateway -> database [label=queries]; }\n";
+    // Build the four fixtures (name, encoded tar bytes).
+    let tar = tar_bytes(&[("design/architecture.dot", source)]);
+    let fixtures: Vec<(String, Vec<u8>)> = vec![
+        ("bundle.tar.bz2".into(), bzip2_bytes(&tar)),
+        ("bundle.tar.xz".into(), xz_bytes(&tar)),
+        ("bundle.tar.zst".into(), zstd_bytes(&tar)),
+        ("bundle.tar.lz4".into(), lz4_bytes(&tar)),
+    ];
+    for (name, encoded) in fixtures {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let project = fixture.path().join("project");
+        fs::create_dir(&project).expect("project");
+        fs::write(project.join(&name), encoded).expect("write fixture");
+
+        let indexed = graphoxide(&project)
+            .args(["index", ".", "--force", "--json"])
+            .output()
+            .expect("default clustered archive index");
+        assert_success(&indexed);
+
+        let accepted = graph(&project);
+        let nodes = accepted["nodes"].as_array().expect("clustered graph nodes");
+        assert!(
+            nodes.iter().any(|node| node["label"] == "gateway"),
+            "{name}: gateway node must be decoded and extracted"
+        );
+        // The decoded member is dispatched as `<archive>!<inner>.tar!<file>`.
+        let expected_source = format!("{name}!/bundle.tar!/design/architecture.dot");
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["source_file"] == expected_source),
+            "{name}: expected source {expected_source}, got {:?}",
+            nodes
+                .iter()
+                .filter(|node| node["label"] == "gateway")
+                .map(|node| node["source_file"].to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            accepted["links"]
+                .as_array()
+                .is_some_and(|links| { links.iter().any(|edge| edge["relation"] == "flows_to") }),
+            "{name}: flows_to edge must survive the recursive dispatch"
+        );
+        // No member is materialized on disk.
+        assert!(!project.join("design").exists());
+        assert!(!project.join("bundle.tar").exists());
+    }
 }

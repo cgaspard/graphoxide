@@ -495,6 +495,7 @@ const MAGIC_ARCHIVE: &[MagicRule] = &[
     MagicRule::new(0, b"BZh"),
     MagicRule::new(0, b"\xfd7zXZ\x00"),
     MagicRule::new(0, b"\x28\xb5\x2f\xfd"),
+    MagicRule::new(0, b"\x04\x22\x4d\x18"),
     MagicRule::new(0, b"7z\xbc\xaf\x27\x1c"),
     MagicRule::new(0, b"Rar!\x1a\x07\x00"),
     MagicRule::new(0, b"Rar!\x1a\x07\x01\x00"),

@@ -47,3 +47,7 @@ tempfile = "3"
 filetime = "0.2"
 flate2 = "1"
 zip = { version = "8.2", default-features = false, features = ["deflate"] }
+bzip2.workspace = true
+xz2.workspace = true
+zstd.workspace = true
+lz4_flex.workspace = true
