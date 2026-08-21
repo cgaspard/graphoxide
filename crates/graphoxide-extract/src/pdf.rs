@@ -2205,6 +2205,56 @@ fn collect_tounicode_cmaps(
             },
         );
     }
+    // Reference-driven second pass: the `/Type /CMap` key is optional on CMap
+    // stream dictionaries (ISO 32000-1), and real producers omit it. Any
+    // stream referenced as a Type0 font's `/ToUnicode` must be attempted as
+    // a CMap. Streams that do not parse as CMaps are skipped so the
+    // referencing font fails closed as `UnsupportedFont`, exactly as when the
+    // CMap is absent.
+    for object in parsed.objects.values() {
+        let PdfValue::Dictionary(dict) = &object.value else {
+            continue;
+        };
+        if !dictionary_name_is(dict, b"Subtype", b"Type0") {
+            continue;
+        }
+        let Some(tounicode) = dict.get(b"ToUnicode".as_slice()) else {
+            continue;
+        };
+        let (cmap_id, _) = resolve_value(parsed, tounicode, limits)?;
+        let Some(cmap_id) = cmap_id else {
+            continue;
+        };
+        if cmaps.contains_key(&cmap_id) {
+            continue;
+        }
+        if parsed
+            .objects
+            .get(&cmap_id)
+            .is_none_or(|object| object.stream.is_none())
+        {
+            continue;
+        }
+        check_cancelled(cancelled)?;
+        let decoded = decode.stream(source, parsed, cmap_id, cancelled)?;
+        let Ok(entries) = parse_cmap_entries(decoded, limits) else {
+            // Not a CMap after all; the referencing font fails closed later.
+            continue;
+        };
+        if entries.is_empty() {
+            // A stream with no mappings is not accepted as an untagged CMap:
+            // every CID would be silently dropped from the page text.
+            continue;
+        }
+        let code_width = dominant_cmap_code_width(&entries);
+        cmaps.insert(
+            cmap_id,
+            ToUnicodeCMap {
+                code_width,
+                entries,
+            },
+        );
+    }
     Ok(cmaps)
 }
 
