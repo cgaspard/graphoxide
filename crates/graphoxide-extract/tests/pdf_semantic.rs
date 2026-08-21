@@ -1415,6 +1415,78 @@ fn cross_reference_stream_with_object_stream_extracts_text() {
     assert_fact_sizes(&extraction);
 }
 
+/// Real producers may list the xref stream object itself as a type-1 entry in
+/// its own xref table (its offset equals the `startxref` value and its span
+/// runs to end-of-file). Such PDFs are valid and must extract. The shared
+/// builder writes the xref object's entry as a free entry, so this test
+/// re-enters it as type 1 to cover the producer layout (issue #129).
+#[test]
+fn xref_stream_object_self_entry_extracts_text() {
+    let in_place = vec![
+        (
+            4,
+            b"<< /Length 55 >>\nstream\nBT /F1 12 Tf 72 720 Td (self-entered xref stream) Tj ET\nendstream"
+                .to_vec(),
+        ),
+        (
+            6,
+            Vec::new(), // placeholder; replaced below by the real object stream
+        ),
+    ];
+    let objstm = Some((
+        6u32,
+        vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+            ),
+            (
+                5,
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+            ),
+        ],
+    ));
+    let xref_id = 7u32;
+    let mut pdf = build_xref_pdf(&in_place, objstm, xref_id, None);
+    // Re-enter the xref stream object as a type-1 entry pointing at its own
+    // offset, mirroring real-world xref tables. `build_xref_pdf` uses
+    // `/W [1 4 2]`, so every entry is 7 bytes and the entry table follows
+    // the xref object's `stream` keyword.
+    let header = format!("{xref_id} 0 obj");
+    let xref_offset = pdf
+        .windows(header.len())
+        .position(|window| window == header.as_bytes())
+        .expect("xref stream object header");
+    let table_start = xref_offset
+        + pdf[xref_offset..]
+            .windows(b"stream\n".len())
+            .position(|window| window == b"stream\n")
+            .expect("xref stream keyword")
+        + b"stream\n".len();
+    let entry = table_start + xref_id as usize * 7;
+    pdf[entry..entry + 7].copy_from_slice(&[
+        1u8,
+        (xref_offset >> 24) as u8,
+        (xref_offset >> 16) as u8,
+        (xref_offset >> 8) as u8,
+        xref_offset as u8,
+        0,
+        0,
+    ]);
+    let extraction = extract_source("xref-stream-self-entry.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("self-entered xref stream"))
+    );
+    assert_fact_sizes(&extraction);
+}
+
 #[test]
 fn type0_font_with_tounicode_cmap_decodes_cid_text() {
     // A Type0 (CID) font whose 2-byte CIDs decode through a ToUnicode CMap.
