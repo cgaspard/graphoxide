@@ -408,8 +408,8 @@
         },
         "graphoxide.codeLens.enabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Show graph connection counts above indexed symbols."
+          "default": false,
+          "description": "Show graph connection counts above indexed symbols in the editor. Off by default to keep files uncluttered; enable to add the pills back."
         },
         "graphoxide.sourceLinks.enabled": {
           "type": "boolean",

@@ -17,7 +17,7 @@ export class GraphCodeLensProvider implements vscode.CodeLensProvider, vscode.Di
   }
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    if (!vscode.workspace.getConfiguration('graphoxide', document.uri).get<boolean>('codeLens.enabled', true)) return [];
+    if (!vscode.workspace.getConfiguration('graphoxide', document.uri).get<boolean>('codeLens.enabled', false)) return [];
     const state = this.store.state;
     if (!state?.model || document.uri.scheme !== 'file') return [];
     const relative = path.relative(state.folder.uri.fsPath, document.uri.fsPath);
