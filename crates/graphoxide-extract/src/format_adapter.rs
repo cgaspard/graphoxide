@@ -13,6 +13,10 @@ use std::{
     rc::Rc,
 };
 
+use crate::containers::{
+    ArchiveKind, CompressedMemberAdmission, ContainerInspection, ContainerLimits,
+};
+
 /// Immutable input handed from the I/O owner to one structured byte adapter.
 /// It intentionally contains a logical path for classification/identity and
 /// a borrowed source slice, never a filesystem handle or a path-read method.
@@ -1458,9 +1462,8 @@ fn container_inventory_extraction(
     dispatch_budget: &mut RecursiveDispatchBudget,
 ) -> Option<Extraction> {
     use crate::containers::{
-        inspect_svgz_bounded, recursive_archive_kind, visit_gzip_member_bounded_with_encounter,
-        visit_tar_members_bounded_with_encounter, visit_zip_members_bounded_with_encounter,
-        ArchiveKind, ByteInventory, CompressedMemberAdmission, InspectionStatus,
+        inspect_svgz_bounded, recursive_archive_kind, visit_tar_members_bounded_with_encounter,
+        visit_zip_members_bounded_with_encounter, ByteInventory, InspectionStatus,
         SvgReferenceRelation,
     };
 
@@ -1599,75 +1602,28 @@ fn container_inventory_extraction(
             dispatch_stop_reason = branch_reason.get();
             ByteInventory::Container(inspection)
         }
-        Some(ArchiveKind::Gzip) => {
-            let branch_reason = Cell::new(None);
-            let encountered = Cell::new(0_usize);
-            let inspection = {
-                let budget = RefCell::new(&mut *dispatch_budget);
-                visit_gzip_member_bounded_with_encounter(
-                    &source_name,
-                    source,
-                    recursion_depth,
-                    limits,
-                    || budget.borrow().is_cancelled(),
-                    |_| {
-                        if budget.borrow_mut().admit_encounter() {
-                            encountered.set(encountered.get() + 1);
-                            true
-                        } else {
-                            branch_reason.set(Some("aggregate_encountered_member_limit"));
-                            false
-                        }
-                    },
-                    |member| {
-                        if is_sensitive_container_member_path(&member.path) {
-                            member_dispatch_statuses
-                                .insert(member.path.clone(), "sensitive_path_skipped");
-                            return CompressedMemberAdmission::Skip;
-                        }
-                        let mut budget = budget.borrow_mut();
-                        if !budget.can_reserve_output_facts(2) {
-                            branch_reason.set(Some("aggregate_fact_limit"));
-                            return CompressedMemberAdmission::Stop;
-                        }
-                        if !budget.admit_dispatch(member) {
-                            branch_reason.set(Some("aggregate_member_or_byte_limit"));
-                            return CompressedMemberAdmission::Stop;
-                        }
-                        let Ok(bytes) = usize::try_from(member.declared_uncompressed_bytes) else {
-                            branch_reason.set(Some("aggregate_member_or_byte_limit"));
-                            return CompressedMemberAdmission::Stop;
-                        };
-                        match budget.try_reserve_scratch(bytes) {
-                            Some(permit) => CompressedMemberAdmission::Dispatch(permit),
-                            None => {
-                                branch_reason.set(Some("aggregate_scratch_limit"));
-                                CompressedMemberAdmission::Stop
-                            }
-                        }
-                    },
-                    |child| {
-                        match dispatch_admitted_container_member(
-                            path,
-                            source_file,
-                            child.member,
-                            child.bytes,
-                            recursion_depth + 1,
-                            &mut budget.borrow_mut(),
-                        ) {
-                            Ok(Some(extracted)) => extracted_members.push(extracted),
-                            Ok(None) => {}
-                            Err(reason) => {
-                                branch_reason.set(Some(reason));
-                                return false;
-                            }
-                        }
-                        true
-                    },
-                )
-            };
-            admitted_encountered_members = Some(encountered.get());
-            dispatch_stop_reason = branch_reason.get();
+        Some(
+            ArchiveKind::Gzip
+            | ArchiveKind::Bzip2
+            | ArchiveKind::Xz
+            | ArchiveKind::Zstd
+            | ArchiveKind::Lz4,
+        ) => {
+            let (inspection, admitted, stop_reason) = dispatch_single_stream_container(
+                recursive_kind,
+                &source_name,
+                path,
+                source_file,
+                source,
+                recursion_depth,
+                limits,
+                dispatch_budget,
+                &mut extracted_members,
+                &mut member_dispatch_statuses,
+            )
+            .expect("single-stream arms only match a `Some` recursive kind");
+            admitted_encountered_members = Some(admitted);
+            dispatch_stop_reason = stop_reason;
             ByteInventory::Container(inspection)
         }
         _ if svgz => {
@@ -2049,6 +2005,308 @@ fn container_inventory_extraction(
     }
 }
 
+/// Dispatch one single-stream compressed member (GZIP, BZIP2, XZ, Zstandard,
+/// or LZ4) under caller-owned scratch admission, sharing the recursive member
+/// dispatch, encounter accounting, and stop-reason policy of the other
+/// container kinds.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_single_stream_container(
+    kind: Option<ArchiveKind>,
+    source_name: &str,
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    dispatch_budget: &mut RecursiveDispatchBudget,
+    extracted_members: &mut Vec<ExtractedContainerMember>,
+    member_dispatch_statuses: &mut BTreeMap<String, &'static str>,
+) -> Option<(ContainerInspection, usize, Option<&'static str>)> {
+    use crate::containers::{
+        visit_bzip2_member_bounded, visit_gzip_member_bounded_with_encounter,
+        visit_lz4_member_bounded, visit_xz_member_bounded, visit_zstd_member_bounded,
+    };
+    let kind = kind?;
+    let branch_reason = Cell::new(None);
+    let encountered = Cell::new(0_usize);
+    let budget = RefCell::new(dispatch_budget);
+    let inspection = match kind {
+        ArchiveKind::Gzip => visit_gzip_member_bounded_with_encounter(
+            source_name,
+            source,
+            recursion_depth,
+            limits,
+            || budget.borrow().is_cancelled(),
+            |member| single_stream_encounter(&budget, &branch_reason, &encountered, member),
+            |member| {
+                single_stream_admission(
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    member,
+                    member_dispatch_statuses,
+                )
+            },
+            |child| {
+                dispatch_container_child(
+                    child,
+                    path,
+                    source_file,
+                    recursion_depth,
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    extracted_members,
+                )
+            },
+        ),
+        ArchiveKind::Bzip2 => visit_bzip2_member_bounded(
+            source_name,
+            source,
+            recursion_depth,
+            limits,
+            || budget.borrow().is_cancelled(),
+            |member| single_stream_encounter(&budget, &branch_reason, &encountered, member),
+            |member| {
+                single_stream_admission(
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    member,
+                    member_dispatch_statuses,
+                )
+            },
+            |child| {
+                dispatch_container_child(
+                    child,
+                    path,
+                    source_file,
+                    recursion_depth,
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    extracted_members,
+                )
+            },
+        ),
+        ArchiveKind::Xz => visit_xz_member_bounded(
+            source_name,
+            source,
+            recursion_depth,
+            limits,
+            || budget.borrow().is_cancelled(),
+            |member| single_stream_encounter(&budget, &branch_reason, &encountered, member),
+            |member| {
+                single_stream_admission(
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    member,
+                    member_dispatch_statuses,
+                )
+            },
+            |child| {
+                dispatch_container_child(
+                    child,
+                    path,
+                    source_file,
+                    recursion_depth,
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    extracted_members,
+                )
+            },
+        ),
+        ArchiveKind::Zstd => visit_zstd_member_bounded(
+            source_name,
+            source,
+            recursion_depth,
+            limits,
+            || budget.borrow().is_cancelled(),
+            |member| single_stream_encounter(&budget, &branch_reason, &encountered, member),
+            |member| {
+                single_stream_admission(
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    member,
+                    member_dispatch_statuses,
+                )
+            },
+            |child| {
+                dispatch_container_child(
+                    child,
+                    path,
+                    source_file,
+                    recursion_depth,
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    extracted_members,
+                )
+            },
+        ),
+        ArchiveKind::Lz4 => visit_lz4_member_bounded(
+            source_name,
+            source,
+            recursion_depth,
+            limits,
+            || budget.borrow().is_cancelled(),
+            |member| single_stream_encounter(&budget, &branch_reason, &encountered, member),
+            |member| {
+                single_stream_admission(
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    member,
+                    member_dispatch_statuses,
+                )
+            },
+            |child| {
+                dispatch_container_child(
+                    child,
+                    path,
+                    source_file,
+                    recursion_depth,
+                    &mut budget.borrow_mut(),
+                    &branch_reason,
+                    extracted_members,
+                )
+            },
+        ),
+        ArchiveKind::SevenZip | ArchiveKind::Rar => {
+            unreachable!("7z and RAR are not single-stream dispatchable")
+        }
+        ArchiveKind::Tar => unreachable!("tar dispatch is handled separately"),
+        ArchiveKind::Zip => unreachable!("zip dispatch is handled separately"),
+    };
+    Some((inspection, encountered.get(), branch_reason.get()))
+}
+
+/// Shared encounter accounting for single-stream dispatch: admit one member
+/// until the aggregate encountered-member budget is exhausted.
+fn single_stream_encounter(
+    budget: &RefCell<&mut RecursiveDispatchBudget>,
+    branch_reason: &Cell<Option<&'static str>>,
+    encountered: &Cell<usize>,
+    _member: &crate::containers::ContainerMember,
+) -> bool {
+    if budget.borrow_mut().admit_encounter() {
+        encountered.set(encountered.get() + 1);
+        true
+    } else {
+        branch_reason.set(Some("aggregate_encountered_member_limit"));
+        false
+    }
+}
+
+/// Shared admission policy for single-stream dispatch: skip sensitive paths,
+/// then reserve output facts, the member/byte budget, and a bounded scratch
+/// permit.
+fn single_stream_admission(
+    budget: &mut RecursiveDispatchBudget,
+    branch_reason: &Cell<Option<&'static str>>,
+    member: &crate::containers::ContainerMember,
+    member_dispatch_statuses: &mut BTreeMap<String, &'static str>,
+) -> CompressedMemberAdmission<RecursiveScratchPermit> {
+    if is_sensitive_container_member_path(&member.path) {
+        member_dispatch_statuses.insert(member.path.clone(), "sensitive_path_skipped");
+        return CompressedMemberAdmission::Skip;
+    }
+    if !budget.can_reserve_output_facts(2) {
+        branch_reason.set(Some("aggregate_fact_limit"));
+        return CompressedMemberAdmission::Stop;
+    }
+    if !budget.admit_dispatch(member) {
+        branch_reason.set(Some("aggregate_member_or_byte_limit"));
+        return CompressedMemberAdmission::Stop;
+    }
+    let Ok(bytes) = usize::try_from(member.declared_uncompressed_bytes) else {
+        branch_reason.set(Some("aggregate_member_or_byte_limit"));
+        return CompressedMemberAdmission::Stop;
+    };
+    match budget.try_reserve_scratch(bytes) {
+        Some(permit) => CompressedMemberAdmission::Dispatch(permit),
+        None => {
+            branch_reason.set(Some("aggregate_scratch_limit"));
+            CompressedMemberAdmission::Stop
+        }
+    }
+}
+
+/// Shared body for dispatching one decoded single-stream child member. Each
+/// codec's `Dispatchable*Member` is destructured into its `member` and
+/// `bytes` before the uniform recursive dispatch runs.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_container_child<'member, 'bytes, Child>(
+    child: Child,
+    path: &Path,
+    source_file: &str,
+    recursion_depth: u16,
+    budget: &mut RecursiveDispatchBudget,
+    branch_reason: &Cell<Option<&'static str>>,
+    extracted_members: &mut Vec<ExtractedContainerMember>,
+) -> bool
+where
+    Child: SingleStreamChild<'member, 'bytes>,
+{
+    let (member, bytes) = child.into_parts();
+    match dispatch_admitted_container_member(
+        path,
+        source_file,
+        member,
+        bytes,
+        recursion_depth + 1,
+        budget,
+    ) {
+        Ok(Some(extracted)) => extracted_members.push(extracted),
+        Ok(None) => {}
+        Err(reason) => {
+            branch_reason.set(Some(reason));
+            return false;
+        }
+    }
+    true
+}
+
+/// Implemented by the five single-stream `Dispatchable*Member` types so a
+/// single recursive dispatch body can be shared across codecs.
+trait SingleStreamChild<'member, 'bytes> {
+    fn into_parts(self) -> (&'member crate::containers::ContainerMember, &'bytes [u8]);
+}
+
+impl<'member, 'bytes> SingleStreamChild<'member, 'bytes>
+    for crate::containers::DispatchableGzipMember<'member, 'bytes>
+{
+    fn into_parts(self) -> (&'member crate::containers::ContainerMember, &'bytes [u8]) {
+        (self.member, self.bytes)
+    }
+}
+
+impl<'member, 'bytes> SingleStreamChild<'member, 'bytes>
+    for crate::containers::DispatchableBzip2Member<'member, 'bytes>
+{
+    fn into_parts(self) -> (&'member crate::containers::ContainerMember, &'bytes [u8]) {
+        (self.member, self.bytes)
+    }
+}
+
+impl<'member, 'bytes> SingleStreamChild<'member, 'bytes>
+    for crate::containers::DispatchableXzMember<'member, 'bytes>
+{
+    fn into_parts(self) -> (&'member crate::containers::ContainerMember, &'bytes [u8]) {
+        (self.member, self.bytes)
+    }
+}
+
+impl<'member, 'bytes> SingleStreamChild<'member, 'bytes>
+    for crate::containers::DispatchableZstdMember<'member, 'bytes>
+{
+    fn into_parts(self) -> (&'member crate::containers::ContainerMember, &'bytes [u8]) {
+        (self.member, self.bytes)
+    }
+}
+
+impl<'member, 'bytes> SingleStreamChild<'member, 'bytes>
+    for crate::containers::DispatchableLz4Member<'member, 'bytes>
+{
+    fn into_parts(self) -> (&'member crate::containers::ContainerMember, &'bytes [u8]) {
+        (self.member, self.bytes)
+    }
+}
+
 fn source_stem(source_file: &str) -> String {
     Path::new(source_file)
         .with_extension("")
@@ -2379,7 +2637,13 @@ mod tests {
 
     #[test]
     fn archive_routing_reports_actual_inventory_capability() {
-        let bzip = extract("fixtures/asset.bz2", b"BZh9");
+        // A valid BZIP2 stream is now decoded and dispatched (parsed), no
+        // longer inventory-only.
+        let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::new(6));
+        use std::io::Write as _;
+        encoder.write_all(b"payload").expect("write bzip");
+        let valid_bzip = encoder.finish().expect("finish bzip");
+        let bzip = extract("fixtures/asset.tar.bz2", &valid_bzip);
         let bzip_root = bzip.nodes.first().expect("container root");
         assert_eq!(
             bzip_root
@@ -2393,15 +2657,17 @@ mod tests {
                 .extra
                 .get("inspection_status")
                 .and_then(serde_json::Value::as_str),
-            Some("inventoryonly")
+            Some("parsed")
         );
+        // A corrupt (truncated) BZIP2 stream fails closed and is rejected.
+        let corrupt = extract("fixtures/asset.bz2", b"BZh9");
+        let corrupt_root = corrupt.nodes.first().expect("container root");
         assert_eq!(
-            bzip_root
+            corrupt_root
                 .extra
-                .get("diagnostics")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|diagnostics| diagnostics.iter().find_map(serde_json::Value::as_str)),
-            Some("declaredsizeunavailable")
+                .get("inspection_status")
+                .and_then(serde_json::Value::as_str),
+            Some("rejected")
         );
 
         let seven_zip = extract("fixtures/asset.7z", b"7z\xbc\xaf\x27\x1c");
