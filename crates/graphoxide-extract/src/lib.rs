@@ -67,6 +67,7 @@ pub mod semantic_pipeline;
 mod sfc;
 mod simulation;
 mod sql;
+pub mod sqlite;
 pub mod stale;
 mod structured;
 mod swift;
@@ -81,6 +82,7 @@ pub use protocols::{
     BinaryProtocolKind, SchemaBindingError, VerifiedBinarySchemaBinding,
 };
 pub use sfc::mask_vue_non_script;
+pub use sqlite::extract_sqlite;
 pub use terraform::extract_terraform;
 
 /// Result of the byte-only I/O/CPU extraction substrate.
