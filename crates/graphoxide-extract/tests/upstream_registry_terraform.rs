@@ -3,7 +3,7 @@
 
 use graphoxide_core::{Confidence, Edge, Extraction};
 use graphoxide_extract::{
-    extract_terraform,
+    extract_sqlite, extract_terraform,
     extractor_registry::{
         registered_extractors, ExtractorFn, ExtractorRegistry, LanguageExtractor,
     },
@@ -163,6 +163,7 @@ fn test_every_registry_extractor_is_reexported_from_facade() {
     for extractor in registered_extractors() {
         let facade = match extractor.name {
             "terraform" => extract_terraform as ExtractorFn,
+            "sqlite" => extract_sqlite as ExtractorFn,
             unknown => panic!("registry extractor {unknown:?} has no public facade export"),
         };
         assert!(std::ptr::fn_addr_eq(extractor.extract, facade));
