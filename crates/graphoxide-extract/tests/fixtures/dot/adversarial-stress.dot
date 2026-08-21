@@ -1,0 +1,31 @@
+digraph Stress {
+	"α-β-γ" [label="unicode node with very long label that goes on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on"];
+	"node-1" [label="short"];
+
+	subgraph s1 {
+		"inner-1";
+		subgraph s2 {
+			"inner-2";
+			subgraph s3 {
+				"inner-3";
+				subgraph s4 {
+					"deep-1";
+					subgraph s5 {
+						"deep-2";
+						subgraph s6 {
+							"deep-3";
+							subgraph s7 {
+								"deep-4";
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	"α-β-γ" -> "node-1";
+	"inner-1" -> "inner-2";
+	"deep-1" -> "deep-4";
+	"node-1" -> "α-β-γ" [constraint=false, style=dotted, color=orange, penwidth=3.0];
+}

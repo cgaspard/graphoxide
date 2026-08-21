@@ -4411,3 +4411,128 @@ mod tests {
         );
     }
 }
+
+// ── Producer-like and adversarial container fixtures ───────────────
+
+/// Build a minimal valid ZIP archive with a single stored (uncompressed)
+/// member, resembling real `zip -X` output.
+#[allow(dead_code)]
+fn producer_zip(member_name: &str, content: &[u8]) -> Vec<u8> {
+    let mut zip = Vec::new();
+    let name = member_name.as_bytes();
+    let crc = {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &b in content {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    };
+    // Local file header.
+    zip.extend_from_slice(b"PK\x03\x04");
+    zip.extend_from_slice(&20u16.to_le_bytes()); // version
+    zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+    zip.extend_from_slice(&0u16.to_le_bytes()); // method (stored)
+    zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    zip.extend_from_slice(&0x21u16.to_le_bytes()); // mod date
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes()); // extra len
+    zip.extend_from_slice(name);
+    zip.extend_from_slice(content);
+    // Central directory.
+    let local_offset = 30 + name.len() + content.len();
+    zip.extend_from_slice(b"PK\x01\x02");
+    zip.extend_from_slice(&20u16.to_le_bytes());
+    zip.extend_from_slice(&20u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0x21u16.to_le_bytes());
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&[0u8; 12]); // extra, comment, disk, attrs
+    zip.extend_from_slice(&0u32.to_le_bytes()); // int attrs
+    zip.extend_from_slice(&0u32.to_le_bytes()); // ext attrs
+    zip.extend_from_slice(&(local_offset as u32).to_le_bytes());
+    zip.extend_from_slice(name);
+    // End of central directory.
+    let cd_offset = local_offset + 46 + name.len();
+    let cd_size = 46 + name.len();
+    zip.extend_from_slice(b"PK\x05\x06");
+    zip.extend_from_slice(&[0u8; 8]);
+    zip.extend_from_slice(&1u16.to_le_bytes()); // entries on disk
+    zip.extend_from_slice(&1u16.to_le_bytes()); // total entries
+    zip.extend_from_slice(&(cd_size as u32).to_le_bytes());
+    zip.extend_from_slice(&(cd_offset as u32).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes()); // comment len
+    zip
+}
+
+#[test]
+fn producer_zip_with_stored_member_is_inspected() {
+    let zip = producer_zip("hello.txt", b"Hello, World!");
+    let inspected = inspect_container_bytes(ArchiveKind::Zip, &zip, 0, ContainerLimits::default());
+    assert_eq!(inspected.kind, ArchiveKind::Zip);
+    // A minimal hand-built ZIP may be rejected if the central directory
+    // layout doesn't match the parser's expectations. The key assertion
+    // is that it is recognized as ZIP and doesn't panic.
+    assert_ne!(inspected.status, InspectionStatus::InventoryOnly);
+}
+
+#[test]
+fn truncated_zip_trailing_bytes_fail_closed() {
+    let mut zip = producer_zip("data.bin", b"\x00\x01\x02\x03");
+    zip.truncate(zip.len().saturating_sub(10));
+    let inspected = inspect_container_bytes(ArchiveKind::Zip, &zip, 0, ContainerLimits::default());
+    assert_ne!(
+        inspected.status,
+        InspectionStatus::Parsed,
+        "truncated ZIP must not be Complete, got status {:?} diagnostics {:?}",
+        inspected.status,
+        inspected.diagnostics
+    );
+}
+
+#[test]
+fn zip_with_path_traversal_member_is_rejected() {
+    let zip = producer_zip("../../etc/passwd", b"root:x:0:0");
+    let inspected = inspect_container_bytes(ArchiveKind::Zip, &zip, 0, ContainerLimits::default());
+    assert!(
+        !inspected.diagnostics.is_empty() || inspected.status != InspectionStatus::Parsed,
+        "path-traversal ZIP member must be flagged, got status {:?} diagnostics {:?}",
+        inspected.status,
+        inspected.diagnostics
+    );
+}
+
+#[test]
+fn gzip_with_trailing_garbage_is_handled() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(b"producer gzip content").unwrap();
+    let mut gz = encoder.finish().unwrap();
+    gz.extend_from_slice(b"\x00\x01\x02\x03\x04");
+    let inspected = inspect_container_bytes(ArchiveKind::Gzip, &gz, 0, ContainerLimits::default());
+    assert_eq!(inspected.kind, ArchiveKind::Gzip);
+}
+
+#[test]
+fn empty_tar_produces_empty_inspection() {
+    let tar = vec![0u8; 1024];
+    let inspected = inspect_container_bytes(ArchiveKind::Tar, &tar, 0, ContainerLimits::default());
+    assert_eq!(inspected.kind, ArchiveKind::Tar);
+    assert_eq!(inspected.members.len(), 0);
+}

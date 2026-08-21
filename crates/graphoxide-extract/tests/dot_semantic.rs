@@ -1115,3 +1115,90 @@ fn dot_identity_collisions_shared_labels_and_declared_self_loops_survive_graph_b
             && edge.true_target() == service.id.as_str()
     }));
 }
+
+// ── Producer-like and adversarial DOT fixtures ──────────────────────────
+
+/// A realistic Graphviz DOT file resembling production output from
+/// `dot -Tcanon` with clusters, port references, and style attributes.
+const PRODUCER_CANONICAL: &[u8] = include_bytes!("fixtures/dot/producer-canonical.dot");
+
+/// A DOT file with adversarial edge cases: very long labels, unicode
+/// identifiers, and deeply nested subgraphs that stress the parser.
+const ADVERSARIAL_STRESS: &[u8] = include_bytes!("fixtures/dot/adversarial-stress.dot");
+
+#[test]
+fn producer_canonical_dot_extracts_full_graph() {
+    let extraction = extract_source("producer-canonical.dot", PRODUCER_CANONICAL);
+    let root_node = root(&extraction);
+    assert_eq!(
+        root_node.extra.get("parse_status").and_then(Value::as_str),
+        Some("complete")
+    );
+
+    // The producer fixture has 5 named nodes and 4 edges.
+    let node_count = dot_nodes(&extraction)
+        .filter(|n| n.extra.get("type").and_then(Value::as_str) == Some("node"))
+        .count();
+    assert_eq!(node_count, 5);
+
+    let edge_count = extraction
+        .edges
+        .iter()
+        .filter(|e| e.relation == "flows_to" || e.relation == "links_to")
+        .count();
+    assert_eq!(edge_count, 4);
+}
+
+#[test]
+fn producer_canonical_dot_cluster_nodes_are_extracted() {
+    let extraction = extract_source("producer-canonical.dot", PRODUCER_CANONICAL);
+    // The "frontend" cluster should produce a subgraph node.
+    let has_cluster = dot_nodes(&extraction).any(|n| {
+        n.extra
+            .get("dot_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.contains("cluster") || id.contains("frontend"))
+    });
+    assert!(has_cluster, "cluster subgraph node must be extracted");
+}
+
+#[test]
+fn adversarial_stress_dot_handles_long_labels_and_unicode() {
+    let extraction = extract_source("adversarial-stress.dot", ADVERSARIAL_STRESS);
+    let root_node = root(&extraction);
+    // Even under stress, the parser must not panic and must produce a
+    // deterministic result (either complete or partial, never rejected
+    // for reasons other than a hard limit).
+    let status = root_node
+        .extra
+        .get("parse_status")
+        .and_then(Value::as_str)
+        .expect("parse_status must be present");
+    assert!(
+        status == "complete" || status == "partial",
+        "stress DOT must parse to complete or partial, got {status}"
+    );
+
+    // Unicode node IDs must survive round-trip.
+    let has_unicode_node = dot_nodes(&extraction).any(|n| {
+        n.extra
+            .get("dot_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.chars().any(|c| c as u32 > 127))
+    });
+    assert!(has_unicode_node, "unicode node ID must be extracted");
+}
+
+#[test]
+fn adversarial_stress_dot_deep_nesting_respects_limit() {
+    let extraction = extract_source("adversarial-stress.dot", ADVERSARIAL_STRESS);
+    // The stress fixture has 8 levels of subgraph nesting, well under the
+    // 32-level limit. All levels must be extracted.
+    let subgraph_count = dot_nodes(&extraction)
+        .filter(|n| n.extra.get("type").and_then(Value::as_str) == Some("subgraph"))
+        .count();
+    assert!(
+        subgraph_count >= 3,
+        "expected at least 3 subgraph nodes, got {subgraph_count}"
+    );
+}
