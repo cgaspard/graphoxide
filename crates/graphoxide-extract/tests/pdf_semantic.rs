@@ -1636,6 +1636,63 @@ endcmap
 }
 
 #[test]
+fn type0_font_with_bfrange_cmap_keeps_range_code_width() {
+    // Expanded `beginbfrange` codes must carry the range's source token
+    // width (2 bytes for Identity-H), not a fixed 4-byte width. A skewed
+    // dominant code width breaks every lookup of the narrower content CIDs
+    // and the font fails closed.
+    let content = b"BT /F1 12 Tf 72 720 Td <004100420030> Tj ET";
+    let cmap = br#"begincmap
+1 begincodespacerange
+<0000> <ffff>
+endcodespacerange
+1 beginbfchar
+<0030> <0048>
+endbfchar
+1 beginbfrange
+<0041> <0042> <006C>
+endbfrange
+endcmap
+"#;
+    let in_place = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            format!("<</Length {}>>\nstream\n{}endstream", content.len(), String::from_utf8_lossy(content)).into_bytes(),
+        ),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /MyFont /Encoding /Identity-H /DescendantFonts [7 0 R] /ToUnicode 6 0 R >>".to_vec(),
+        ),
+        (
+            6,
+            format!("<</Length {}>>\nstream\n{}endstream", cmap.len(), String::from_utf8_lossy(cmap)).into_bytes(),
+        ),
+        (
+            7,
+            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MyFont /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W [1 2 500] >>".to_vec(),
+        ),
+    ];
+    let pdf = build_xref_pdf(&in_place, None, 8, None);
+    let extraction = extract_source("type0-bfrange-cmap.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("lmH")),
+        "CIDs 0041 0042 map through the range to l m; 0030 maps via bfchar to H"
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
 fn cross_reference_stream_with_explicit_index_extracts_text() {
     // /Index [0 3 3 3] splits the range; ids 3,4,5 still resolve.
     let in_place = vec![

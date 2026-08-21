@@ -2392,9 +2392,15 @@ fn parse_cmap_bfrange_line(
     if span > (limits.max_container_entries_per_object as u32) {
         return Err(PdfError::TokenLimit);
     }
+    // Expanded codes must carry the same byte width as the range's source
+    // tokens (a 2-byte Identity-H range stays 2 bytes). Emitting a fixed
+    // `u32::to_be_bytes` width would skew the CMap's dominant code width and
+    // break every lookup of narrower content codes.
+    let width = lo.len().max(hi.len()).clamp(1, 4);
     let mut out = Vec::new();
     for (offset, code) in (lo_val..=hi_val).enumerate() {
-        let src = code.to_be_bytes().to_vec();
+        let bytes = code.to_be_bytes();
+        let src = bytes[4 - width..].to_vec();
         let scalar = start_val.checked_add(offset as u32);
         let ch = scalar.and_then(char::from_u32);
         if let Some(ch) = ch {
