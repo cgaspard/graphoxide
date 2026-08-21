@@ -385,6 +385,12 @@ fn extract_registered_format_at_depth(
             extension,
             "office_format_unrecognized",
         )),
+        ByteAdapterKind::Rtf => Some(extract_rtf_for_spec(
+            path,
+            source_file,
+            source,
+            dispatch_budget.cancellation(),
+        )),
         // A suffix can identify a container/media representation even when a
         // malformed buffer lacks a recognizable signature. Claim it with an
         // explicit rejection instead of leaking it to a generic text parser.
@@ -571,6 +577,44 @@ fn extract_pdf_for_spec(
         }
     });
     result.unwrap_or_else(|_| rejected_pdf_extraction(path, source_file, "parser_arena_budget"))
+}
+
+fn extract_rtf_for_spec(
+    path: &Path,
+    source_file: &str,
+    source: &[u8],
+    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+) -> Extraction {
+    let is_cancelled =
+        || cancellation.is_some_and(graphoxide_index_runtime::RuntimeCancellation::is_cancelled);
+    match crate::rtf::extract_rtf_bytes(
+        path,
+        source_file,
+        source,
+        crate::rtf::RtfLimits::default(),
+        Some(&is_cancelled),
+    ) {
+        Ok(extraction) if !extraction.nodes.is_empty() => extraction,
+        Ok(_) => rejected_rtf_extraction(path, source_file, "rtf_empty_extraction"),
+        Err(error) => rejected_rtf_extraction(path, source_file, error.code()),
+    }
+}
+
+fn rejected_rtf_extraction(path: &Path, source_file: &str, diagnostic: &'static str) -> Extraction {
+    let file_id = make_id(&[&source_stem(source_file)]);
+    let mut node = inventory_file_node(path, source_file, &file_id, "document");
+    node.file_type = "document".into();
+    node.extra.insert("format".into(), "rtf".into());
+    node.extra.insert("_origin".into(), "rtf".into());
+    node.extra
+        .insert("format_capability".into(), "structural_partial".into());
+    node.extra.insert("parse_status".into(), "rejected".into());
+    node.extra.insert("diagnostic".into(), diagnostic.into());
+    Extraction {
+        nodes: vec![node],
+        edges: Vec::new(),
+        hyperedges: Vec::new(),
+    }
 }
 
 struct OfficeExtractionRequest<'a> {
@@ -3344,6 +3388,7 @@ mod tests {
                 crate::format_registry::ByteAdapterKind::ContainerMedia => b"PK\x03\x04".as_slice(),
                 crate::format_registry::ByteAdapterKind::Pdf => b"%PDF-1.7\n".as_slice(),
                 crate::format_registry::ByteAdapterKind::Office => b"PK\x03\x04".as_slice(),
+                crate::format_registry::ByteAdapterKind::Rtf => b"{\\rtf1 fixture\n}\n".as_slice(),
                 crate::format_registry::ByteAdapterKind::Inventory => b"fixture\n".as_slice(),
             },
         };
@@ -3410,6 +3455,7 @@ mod tests {
                         | ByteAdapterKind::Simulation
                         | ByteAdapterKind::Pdf
                         | ByteAdapterKind::Office
+                        | ByteAdapterKind::Rtf
                         | ByteAdapterKind::ContainerMedia
                 ),
                 "{} claims structural extraction outside a partial-structure adapter",

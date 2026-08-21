@@ -61,6 +61,7 @@ mod project_path;
 mod protocols;
 pub mod resolution;
 pub mod resolver_registry;
+mod rtf;
 mod ruby;
 pub mod scip_ingest;
 pub mod semantic_pipeline;
