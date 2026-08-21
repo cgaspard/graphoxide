@@ -1159,7 +1159,51 @@ fn emit_generic_lookups(builder: &mut Builder<'_>, text: &str) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn framework_navigation_concepts_do_not_break_ast_cache_provenance() {
+        // A Flutter/Bloc file with route navigation and annotations emits
+        // source-less `Route ...`/`@...` concept nodes (the upstream contract
+        // is "empty source_file for concept nodes"). Those used to fail the
+        // runtime AST cache's all-node provenance check, so the whole file's
+        // cache persistence failed with "extraction provenance does not match
+        // its source". Source-less concept nodes must be exempt so this file
+        // caches cleanly.
+        let source = concat!(
+            "class LoginForm extends StatefulWidget {\n",
+            "  @riverpod\n",
+            "  void navigate(BuildContext context) {\n",
+            "    context.go('/login');\n",
+            "    context.goNamed('home');\n",
+            "  }\n",
+            "}\n",
+        );
+        let extraction = extract_dart_bytes(
+            Path::new("missing.dart"),
+            "lib/form.dart",
+            source.as_bytes(),
+        )
+        .expect("extract in-memory Dart framework source");
+        // The route and annotation concept nodes exist and are source-less...
+        let route = extraction
+            .nodes
+            .iter()
+            .find(|node| node.label == "Route /login")
+            .expect("route concept node");
+        assert!(route.source_file.is_empty());
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "@riverpod" && node.source_file.is_empty()));
+        // ...and the whole extraction still satisfies the provenance invariant
+        // the runtime AST cache enforces before persisting.
+        assert!(
+            cache::runtime_extraction_provenance_matches(&extraction, "lib/form.dart"),
+            "source-less concept nodes must not break AST cache provenance"
+        );
+    }
 
     #[test]
     fn byte_entrypoint_does_not_require_a_source_file() {

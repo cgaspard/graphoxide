@@ -2874,7 +2874,10 @@ pub fn decode_runtime_ast_cache_payload(
     Ok(extraction)
 }
 
-fn runtime_extraction_provenance_matches(extraction: &Extraction, expected: &str) -> bool {
+pub(crate) fn runtime_extraction_provenance_matches(
+    extraction: &Extraction,
+    expected: &str,
+) -> bool {
     fn source_matches(source_file: &str, extra: &BTreeMap<String, Value>, expected: &str) -> bool {
         if source_file == expected {
             return extra
@@ -2896,6 +2899,14 @@ fn runtime_extraction_provenance_matches(extraction: &Extraction, expected: &str
     fn node_source_matches(node: &graphoxide_core::Node, expected: &str) -> bool {
         if !node.source_file.is_empty() {
             return source_matches(&node.source_file, &node.extra, expected);
+        }
+        // Source-less concept nodes (routes, annotations, and other
+        // synthetic facts) carry no source claim by the upstream contract
+        // ("empty for concept nodes"), so they neither identify nor falsify
+        // the file. Requiring provenance on them broke cache persistence for
+        // any file that emitted one, even though the node ID is stable.
+        if node.file_type == "concept" {
+            return true;
         }
         // Language extractors use source-less nodes only for independently
         // owned unresolved references. Most retain their owner explicitly;
