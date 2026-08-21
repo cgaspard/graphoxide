@@ -815,6 +815,59 @@ fn content_operation_budget_is_aggregate_across_page_streams() {
 }
 
 #[test]
+fn marked_content_dictionary_operands_are_skipped_without_publication() {
+    // Tagged PDFs mark structure with `/Name <</...>> BDC ... EMC`
+    // sequences. The dictionary operand must be skipped — never published —
+    // while the text inside the marked sequence still extracts (issue #139).
+    let content = b"/NonStruct <</MCID 0 /ActualText (DICT_SECRET) >> BDC BT /F1 12 Tf 72 720 Td (tagged text) Tj ET EMC";
+    let pdf = one_page_pdf(vec![stream_body(content, b"")], b"", b"", vec![]);
+    let extraction = extract_source("marked-content.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("tagged text"))
+    );
+    assert_no_payload(&extraction, "DICT_SECRET");
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn nested_content_dictionaries_with_arrays_are_skipped() {
+    // Property dictionaries may nest dictionaries and arrays (e.g. /BBox,
+    // /C, /ActualText). All of it is consumed without publication.
+    let content = b"/OC <</MCID 1 /BBox [0 0 1 1] /C << /Type /Span /ActualText (NESTED_SECRET) >> >> BMC BT /F1 12 Tf 72 720 Td (nested text) Tj ET EMC";
+    let pdf = one_page_pdf(vec![stream_body(content, b"")], b"", b"", vec![]);
+    let extraction = extract_source("nested-content-dict.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("nested text"))
+    );
+    assert_no_payload(&extraction, "NESTED_SECRET");
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn unbalanced_content_dictionary_closing_bracket_fails_closed() {
+    let content = b"BT /F1 12 Tf 72 720 Td (x) Tj ET >>";
+    let pdf = one_page_pdf(vec![stream_body(content, b"")], b"", b"", vec![]);
+    assert_rejected("unbalanced-dict-end.pdf", &pdf, "pdf_malformed");
+}
+
+#[test]
+fn unclosed_content_dictionary_fails_closed() {
+    let content = b"BT /F1 12 Tf 72 720 Td (x) Tj ET /OC << /MCID 1";
+    let pdf = one_page_pdf(vec![stream_body(content, b"")], b"", b"", vec![]);
+    assert_rejected("unclosed-dict.pdf", &pdf, "pdf_malformed");
+}
+
+#[test]
 fn page_text_sanitizes_embedded_c0_controls_before_publication() {
     let content = literal_text_content(b"Visible\0\x01\x02\x07\x08\x0b\x0c\x0e\x1fEnd");
     let extraction = extract_source(
