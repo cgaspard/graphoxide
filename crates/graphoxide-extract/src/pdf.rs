@@ -44,6 +44,12 @@ enum PdfValue {
 enum StreamFilter {
     Raw,
     Flate,
+    /// A filter this extractor does not decode (e.g. `DCTDecode` image data).
+    /// Recording the stream is harmless — it is only rejected if a code path
+    /// actually tries to decode it (`decode_stream_bytes`), so documents that
+    /// merely *contain* undecoded streams (image XObjects, font file streams,
+    /// embedded files) still yield their text.
+    Unsupported,
 }
 
 #[derive(Debug, Clone)]
@@ -1833,19 +1839,24 @@ fn stream_filter(dictionary: &BTreeMap<Vec<u8>, PdfValue>) -> Result<StreamFilte
         // consumer does not treat as the authoritative stream contents.
         return Err(PdfError::ActiveContent);
     }
-    if let Some(parameters) = dictionary.get(b"DecodeParms".as_slice())
-        && !matches!(parameters, PdfValue::Null)
+    // Filters this extractor cannot decode are recorded, not rejected: the
+    // stream may be one graphoxide never decodes (image XObject, font file,
+    // embedded file), in which case it is inert. `decode_stream_bytes` still
+    // rejects `Unsupported` whenever a code path actually consumes the bytes,
+    // so every decodable-by-us stream fails closed exactly as before.
+    if dictionary
+        .get(b"DecodeParms".as_slice())
+        .is_some_and(|parameters| !matches!(parameters, PdfValue::Null))
     {
-        // Predictors and parameterized decoding are excluded. This check
-        // occurs before any decoder observes attacker-controlled dimensions.
-        return Err(PdfError::UnsupportedFilter);
+        // Predictors and parameterized decoding are excluded.
+        return Ok(StreamFilter::Unsupported);
     }
     match dictionary.get(b"Filter".as_slice()) {
         None | Some(PdfValue::Null) => Ok(StreamFilter::Raw),
         Some(PdfValue::Name(filter)) if matches!(filter.as_slice(), b"FlateDecode" | b"Fl") => {
             Ok(StreamFilter::Flate)
         }
-        _ => Err(PdfError::UnsupportedFilter),
+        _ => Ok(StreamFilter::Unsupported),
     }
 }
 
@@ -2489,6 +2500,10 @@ fn decode_stream_bytes(
 ) -> Result<Vec<u8>, PdfError> {
     let per_stream = limits.max_stream_decoded_bytes.min(remaining);
     match filter {
+        // Every stream class the extractor consumes (page content, ToUnicode
+        // CMaps, object streams, the xref stream) passes through here, so an
+        // undecodable filter still fails closed the moment it is needed.
+        StreamFilter::Unsupported => Err(PdfError::UnsupportedFilter),
         StreamFilter::Raw => {
             if encoded.len() > per_stream {
                 return Err(PdfError::DecompressionLimit);
