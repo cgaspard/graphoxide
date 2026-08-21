@@ -473,12 +473,47 @@ where
         file.sync_all()?;
         drop(file);
         replace(&temporary, destination)?;
+        // Sync the containing directory so the rename itself is durable.
+        // Without this, a crash after the rename but before the OS caches
+        // the directory entry can lose the publication entirely.
+        sync_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Fsync a directory to make metadata changes (rename, create, unlink) durable.
+///
+/// On platforms where directory fsync is unsupported or fails with
+/// `ENOTSUP`/`EINVAL` (some FUSE/overlay filesystems), the call is a no-op
+/// so that callers are never blocked by an unsupported operation.
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let file = fs::OpenOptions::new().read(true).open(path)?;
+        // `sync_all` on a directory fd issues `fsync(2)`.
+        if let Err(error) = file.sync_all() {
+            // Some filesystems (e.g. 9p, certain FUSE mounts) return
+            // ENOTSUP or EINVAL for directory fsync. Treat those as
+            // non-fatal so the write is not rejected for an unsupported op.
+            if !matches!(
+                error.raw_os_error(),
+                Some(code) if code == libc::ENOTSUP || code == libc::EINVAL
+            ) {
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: directory metadata is journaled by the NTFS log;
+        // no explicit directory sync is needed.
+        let _ = path;
+    }
+    Ok(())
 }
 
 fn resolve_destination(path: &Path) -> std::io::Result<PathBuf> {

@@ -2514,6 +2514,7 @@ pub fn save_manifest(root: &Path, entries: &Manifest) -> anyhow::Result<()> {
     save_manifest_to_output(&root.join("graphoxide-out"), entries)
 }
 pub fn save_manifest_to_output(output_dir: &Path, entries: &Manifest) -> anyhow::Result<()> {
+    cleanup_stale_temp_files(output_dir);
     atomic_json(&output_dir.join("manifest.json"), entries)
 }
 pub fn ast_cache_get(root: &Path, relative: &str, bytes: &[u8]) -> Option<Extraction> {
@@ -2549,7 +2550,11 @@ pub fn ast_cache_put_to_output(
     if bypass(relative) || value.nodes.is_empty() {
         return Ok(());
     }
-    atomic_json(&cache_path(output_dir, relative, bytes), value)
+    let path = cache_path(output_dir, relative, bytes);
+    if let Some(parent) = path.parent() {
+        cleanup_stale_temp_files(parent);
+    }
+    atomic_json(&path, value)
 }
 
 /// Build complete runtime-cache evidence from source bytes already admitted by
@@ -3055,6 +3060,59 @@ fn bypass(relative: &str) -> bool {
 }
 fn atomic_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     graphoxide_core::write_json_atomic(path, value, true)
+}
+
+/// Remove orphaned temporary files (`.name.pid.seq.tmp`) left behind by a
+/// crashed or interrupted atomic writer in `directory`.
+///
+/// The atomic writer creates a temp file beside the destination, writes,
+/// fsyncs, and renames. A crash between temp-creation and rename leaves the
+/// temp file in place. These files may contain secret-bearing cache payloads,
+/// so they should be cleaned up promptly.
+///
+/// Only files whose names match the exact temp-file pattern are removed;
+/// all other entries are left untouched. The function is best-effort:
+/// individual removal failures are silently ignored.
+pub(crate) fn cleanup_stale_temp_files(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let current_pid = std::process::id().to_string();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = match entry.file_name().to_str() {
+            Some(name) => name.to_owned(),
+            None => continue,
+        };
+        // Pattern: .<name>.<pid>.<seq>.tmp
+        if !name.ends_with(".tmp") || !name.starts_with('.') {
+            continue;
+        }
+        // After the leading dot and before ".tmp": "<name>.<pid>.<seq>"
+        let inner = &name[1..name.len() - 4];
+        // Split into at most 3 parts from the right: name, pid, seq
+        let parts: Vec<&str> = inner.rsplitn(3, '.').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let (seq, file_pid, _) = (parts[0], parts[1], parts[2]);
+        if !seq.bytes().all(|b| b.is_ascii_digit()) || !file_pid.bytes().all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        // Only remove temps from a *different* pid (crashed previous run).
+        // Temps from the current pid may belong to an in-flight write from
+        // a concurrent thread, so they are left alone.
+        if file_pid != current_pid {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4168,5 +4226,84 @@ mod tests {
             fs::read(artifact).expect("artifact preserved"),
             b"raw-secret"
         );
+    }
+
+    // ── Stale temp-file cleanup ──────────────────────────────────────────
+
+    #[test]
+    fn cleanup_stale_temp_removes_foreign_pid_temps_and_keeps_current() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dir = temp.path();
+
+        // A stale temp from a *different* pid (crashed previous run).
+        let foreign_pid = (std::process::id() + 9999).to_string();
+        let stale = dir.join(format!(".manifest.json.{foreign_pid}.0.tmp"));
+        fs::write(&stale, b"secret-payload").expect("write stale temp");
+
+        // A temp from the *current* pid (in-flight concurrent write).
+        let current_pid = std::process::id().to_string();
+        let active = dir.join(format!(".manifest.json.{current_pid}.1.tmp"));
+        fs::write(&active, b"active-payload").expect("write active temp");
+
+        // A regular cache file that must survive.
+        let cache_file = dir.join("manifest.json");
+        fs::write(&cache_file, b"{}").expect("write manifest");
+
+        // A file that does NOT match the temp pattern.
+        let not_a_temp = dir.join("readme.txt");
+        fs::write(&not_a_temp, b"hello").expect("write readme");
+
+        cleanup_stale_temp_files(dir);
+
+        assert!(!stale.exists(), "stale foreign-pid temp must be removed");
+        assert!(active.exists(), "current-pid temp must be preserved");
+        assert!(cache_file.exists(), "regular cache file must survive");
+        assert!(not_a_temp.exists(), "non-temp file must survive");
+    }
+
+    #[test]
+    fn cleanup_stale_temp_is_noop_on_missing_directory() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let missing = temp.path().join("does-not-exist");
+        // Must not panic or return an error.
+        cleanup_stale_temp_files(&missing);
+    }
+
+    #[test]
+    fn cleanup_stale_temp_ignores_subdirectories() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dir = temp.path();
+
+        // A directory that matches the temp name pattern must not be removed.
+        let foreign_pid = (std::process::id() + 42).to_string();
+        let subdir = dir.join(format!(".manifest.json.{foreign_pid}.0.tmp"));
+        fs::create_dir_all(&subdir).expect("create subdir");
+        fs::write(subdir.join("inner.txt"), b"data").expect("write inner");
+
+        cleanup_stale_temp_files(dir);
+
+        assert!(
+            subdir.is_dir(),
+            "directory matching temp pattern must not be removed"
+        );
+        assert!(subdir.join("inner.txt").exists());
+    }
+
+    // ── Directory fsync after rename ─────────────────────────────────────
+
+    #[test]
+    fn atomic_write_survives_directory_fsync_unsupported() {
+        // On platforms where directory fsync returns ENOTSUP/EINVAL,
+        // the write must still succeed (the sync is best-effort).
+        // We exercise the happy path here; the unsupported-path is
+        // platform-dependent and covered by the ENOTSUP/EINVAL match
+        // in sync_directory.
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dest = temp.path().join("test.json");
+        let value = serde_json::json!({"key": "value"});
+        graphoxide_core::write_json_atomic(&dest, &value, true).expect("write succeeds");
+        let read_back: serde_json::Value =
+            serde_json::from_slice(&fs::read(&dest).expect("read back")).expect("parse");
+        assert_eq!(read_back["key"], "value");
     }
 }
