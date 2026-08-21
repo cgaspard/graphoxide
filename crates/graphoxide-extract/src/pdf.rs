@@ -58,6 +58,10 @@ struct PdfObject {
     stream: Option<StreamSpec>,
 }
 
+/// A member of an object stream, decoded in place from the packed
+/// `id offset` header list. The raw `id gen obj` header is stripped and the
+/// value is re-parsed from the member's byte range.
+
 #[derive(Debug)]
 struct ParsedPdf {
     objects: BTreeMap<ObjectId, PdfObject>,
@@ -76,6 +80,12 @@ struct XrefTable {
     trailer: BTreeMap<Vec<u8>, PdfValue>,
     xref_offset: usize,
     counters: ParseCounters,
+    /// The object id of the xref-stream object itself (present only when the
+    /// cross-reference is a cross-reference stream, never a classic xref).
+    xref_object_id: Option<ObjectId>,
+    /// Type-2 cross-reference members (member id -> owning object-stream id
+    /// and index within it), populated only by cross-reference streams.
+    objstm_members: BTreeMap<ObjectId, (u32, usize)>,
 }
 
 /// Explicit ceilings for one PDF parse.
@@ -263,7 +273,7 @@ pub(crate) fn extract_pdf_bytes(
     }
     check_cancelled(cancelled)?;
     validate_pdf_header(source)?;
-    let xref = parse_classic_xref(source, &limits, cancelled)?;
+    let xref = parse_xref(source, &limits, cancelled)?;
     let parsed = parse_indirect_objects(source, xref, &limits, cancelled)?;
     let page_ids = collect_page_ids(&parsed, &limits, cancelled)?;
     let required_facts = page_ids
@@ -276,6 +286,7 @@ pub(crate) fn extract_pdf_bytes(
     }
 
     let mut decode = DecodeBudget::new(limits);
+    let cmaps = collect_tounicode_cmaps(source, &parsed, &limits, cancelled, &mut decode)?;
     let mut content_budget = ContentBudget::default();
     let mut page_text = Vec::new();
     page_text
@@ -284,7 +295,7 @@ pub(crate) fn extract_pdf_bytes(
     for (page_index, page_id) in page_ids.iter().copied().enumerate() {
         check_cancelled(cancelled)?;
         let content_ids = page_content_ids(&parsed, page_id, &limits)?;
-        let fonts = page_font_encodings(&parsed, page_id, &limits)?;
+        let fonts = page_font_encodings(&parsed, page_id, &cmaps, &limits)?;
         let text = extract_page_text(
             PageTextRequest {
                 source,
@@ -586,12 +597,12 @@ fn lex_name(
 }
 
 fn reject_unsafe_name(name: &[u8]) -> Result<(), PdfError> {
+    // Object streams and cross-reference streams are now supported; they are no
+    // longer rejected at the name-lexing stage. Their structure is validated by
+    // the dedicated parsers, which fail closed on malformed input.
     match name {
         b"Encrypt" => Err(PdfError::Encrypted),
-        b"ObjStm" => Err(PdfError::UnsupportedObjectStream),
-        b"XRef" | b"XRefStm" => Err(PdfError::UnsupportedXref),
         b"Prev" => Err(PdfError::UnsupportedIncremental),
-        b"ToUnicode" => Err(PdfError::UnsupportedFont),
         b"JavaScript" | b"JS" | b"Launch" | b"EmbeddedFile" | b"EmbeddedFiles" | b"Filespec"
         | b"GoToR" | b"SubmitForm" | b"ImportData" | b"RichMedia" | b"XFA" | b"OpenAction"
         | b"AA" | b"URI" => Err(PdfError::ActiveContent),
@@ -809,11 +820,13 @@ fn validate_pdf_header(source: &[u8]) -> Result<(), PdfError> {
     Ok(())
 }
 
-fn parse_classic_xref(
+/// Locate `startxref` and validate the trailing `%%EOF`, returning the offset
+/// of the cross-reference structure and the byte position of the `startxref`
+/// keyword (which bounds the classic xref/trailer scan).
+fn locate_xref_offset(
     source: &[u8],
-    limits: &PdfLimits,
     cancelled: Option<&dyn Fn() -> bool>,
-) -> Result<XrefTable, PdfError> {
+) -> Result<(usize, usize), PdfError> {
     let startxref_position =
         unique_line_keyword_offset(source, b"startxref", cancelled)?.ok_or(PdfError::Malformed)?;
     unique_line_keyword_offset(source, b"%%EOF", cancelled)?.ok_or(PdfError::Malformed)?;
@@ -821,11 +834,7 @@ fn parse_classic_xref(
     position = skip_space_and_comments(source, position, source.len());
     let (xref_offset_u64, after_offset) = parse_ascii_u64(source, position, source.len())?;
     let xref_offset = usize::try_from(xref_offset_u64).map_err(|_| PdfError::UnsupportedXref)?;
-    if xref_offset >= startxref_position
-        || !source
-            .get(xref_offset..)
-            .is_some_and(|tail| tail.starts_with(b"xref") && token_ends_at(tail, 4))
-    {
+    if xref_offset >= startxref_position {
         return Err(PdfError::UnsupportedXref);
     }
     let eof_position = skip_pdf_whitespace(source, after_offset, source.len());
@@ -842,12 +851,302 @@ fn parse_classic_xref(
     {
         return Err(PdfError::Malformed);
     }
+    Ok((xref_offset, startxref_position))
+}
 
+/// Parse the cross-reference, dispatching to the classic `xref`/`trailer`
+/// section or a cross-reference stream (type `/Type /XRef`).
+fn parse_xref(
+    source: &[u8],
+    limits: &PdfLimits,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<XrefTable, PdfError> {
+    let (xref_offset, startxref_position) = locate_xref_offset(source, cancelled)?;
+    // The classic cross-reference section begins with the `xref` keyword at the
+    // start of a line. A cross-reference *stream* object begins with `N 0 obj`,
+    // so the byte before `xref` there is part of the object header; require a
+    // preceding line break to disambiguate.
+    let xref_is_classic = source
+        .get(xref_offset..)
+        .is_some_and(|tail| tail.starts_with(b"xref") && token_ends_at(tail, 4))
+        && (xref_offset == 0 || matches!(source[xref_offset - 1], b'\n' | b'\r'));
+    if xref_is_classic {
+        parse_classic_xref(source, xref_offset, startxref_position, limits, cancelled)
+    } else {
+        parse_xref_stream(source, xref_offset, limits, cancelled)
+    }
+}
+
+fn parse_xref_stream(
+    source: &[u8],
+    xref_offset: usize,
+    limits: &PdfLimits,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<XrefTable, PdfError> {
+    // The xref stream is a cross-reference object: `id 0 obj << /Type /XRef
+    // /Size N /W [w1 w2 w3] [/Index [...]] >> stream ... endstream endobj`.
+    let mut counters = ParseCounters::default();
+    let value_start = {
+        let (_number, position) = parse_ascii_u64(source, xref_offset, source.len())?;
+        let position = skip_required_space(source, position, source.len())?;
+        let (_generation, position) = parse_ascii_u64(source, position, source.len())?;
+        let position = skip_required_space(source, position, source.len())?;
+        if !source
+            .get(position..)
+            .is_some_and(|tail| tail.starts_with(b"obj") && token_ends_at(tail, 3))
+        {
+            return Err(PdfError::Malformed);
+        }
+        position + 3
+    };
+    let xref_object_id = {
+        let number = u32::try_from(parse_ascii_u64(source, xref_offset, source.len())?.0)
+            .map_err(|_| PdfError::ObjectLimit)?;
+        ObjectId {
+            number,
+            generation: 0,
+        }
+    };
+    let mut parser = ValueParser::new(
+        source,
+        value_start,
+        source.len(),
+        limits,
+        &mut counters,
+        cancelled,
+    );
+    let value = parser.parse_value(0)?;
+    // Capture the position right after the dictionary (before `dictionary` is
+    // moved into the table at the end).
+    let after_value = skip_space_and_comments(source, parser.position, source.len());
+    let PdfValue::Dictionary(dictionary) = value else {
+        return Err(PdfError::Malformed);
+    };
+    if !dictionary_name_is(&dictionary, b"Type", b"XRef") {
+        return Err(PdfError::UnsupportedXref);
+    }
+    // Read /W (fixed-width field sizes), /Size, and optional /Index.
+    let width = xref_stream_width(&dictionary)?;
+    let size_value = dictionary_integer(&dictionary, b"Size")?;
+    let size = usize::try_from(size_value).map_err(|_| PdfError::ObjectLimit)?;
+    if size == 0 || size > limits.max_objects {
+        return Err(PdfError::ObjectLimit);
+    }
+    let index = xref_stream_index(&dictionary, size)?;
+
+    // Consume `stream`, the data, and `endstream` / `endobj` to bound the
+    // stream, then decode it.
+    if !source
+        .get(after_value..)
+        .is_some_and(|tail| tail.starts_with(b"stream") && token_ends_at(tail, 6))
+    {
+        return Err(PdfError::InvalidStream);
+    }
+    let data_start = consume_stream_eol(source, after_value + 6, source.len()).unwrap();
+    let length_value = dictionary
+        .get(b"Length".as_slice())
+        .ok_or(PdfError::InvalidStream)?;
+    let PdfValue::Integer(length_value) = length_value else {
+        return Err(PdfError::InvalidStream);
+    };
+    let length = usize::try_from(*length_value).map_err(|_| PdfError::InvalidStream)?;
+    if length > limits.max_stream_input_bytes {
+        return Err(PdfError::DecompressionLimit);
+    }
+    let data_end = data_start
+        .checked_add(length)
+        .filter(|end| *end <= source.len())
+        .ok_or(PdfError::InvalidStream)?;
+    let filter = stream_filter(&dictionary)?;
+    let decoded = decode_stream_bytes(
+        &source[data_start..data_end],
+        filter,
+        limits.max_stream_decoded_bytes,
+        limits,
+        cancelled,
+    )?;
+
+    // Walk the fixed-width entries, honoring the /Index subranges.
+    let mut entries = Vec::new();
+    let mut seen_ids = BTreeSet::new();
+    let mut data_pos = 0_usize;
+    // Type-2 members: member id -> (owning object-stream id, index within it).
+    let mut objstm_members: BTreeMap<ObjectId, (u32, usize)> = BTreeMap::new();
+    for &(range_start, range_count) in &index {
+        let range_count = usize::try_from(range_count).map_err(|_| PdfError::ObjectLimit)?;
+        for local in 0..range_count {
+            if local % 1_024 == 0 {
+                check_cancelled(cancelled)?;
+            }
+            let number = range_start
+                .checked_add(local as u64)
+                .ok_or(PdfError::ObjectLimit)?;
+            let (kind, field2, field3, next) = read_xref_fields(&decoded, data_pos, &width)?;
+            data_pos = next;
+            if number == 0 {
+                continue; // id 0 is the free head; never an object
+            }
+            let id_number = u32::try_from(number).map_err(|_| PdfError::ObjectLimit)?;
+            if !seen_ids.insert(id_number) {
+                return Err(PdfError::Malformed);
+            }
+            match kind {
+                0 => { /* free */ }
+                1 => {
+                    let offset = usize::try_from(field2).map_err(|_| PdfError::Malformed)?;
+                    let generation = u16::try_from(field3).map_err(|_| PdfError::Malformed)?;
+                    if offset == 0 {
+                        return Err(PdfError::Malformed);
+                    }
+                    validate_indirect_header(
+                        source,
+                        offset,
+                        source.len(),
+                        ObjectId {
+                            number: id_number,
+                            generation,
+                        },
+                    )?;
+                    entries.push(XrefEntry {
+                        id: ObjectId {
+                            number: id_number,
+                            generation,
+                        },
+                        offset,
+                    });
+                    if entries.len() > limits.max_objects {
+                        return Err(PdfError::ObjectLimit);
+                    }
+                }
+                2 => {
+                    let owner_id = u32::try_from(field2).map_err(|_| PdfError::ObjectLimit)?;
+                    let member_index = usize::try_from(field3).map_err(|_| PdfError::Malformed)?;
+                    if objstm_members
+                        .insert(
+                            ObjectId {
+                                number: id_number,
+                                generation: 0,
+                            },
+                            (owner_id, member_index),
+                        )
+                        .is_some()
+                    {
+                        return Err(PdfError::Malformed);
+                    }
+                }
+                _ => return Err(PdfError::Malformed),
+            }
+        }
+    }
+    if entries.is_empty() {
+        return Err(PdfError::Malformed);
+    }
+    entries.sort_unstable_by_key(|entry| entry.offset);
+    Ok(XrefTable {
+        entries,
+        trailer: dictionary,
+        xref_offset,
+        counters,
+        xref_object_id: Some(xref_object_id),
+        objstm_members,
+    })
+}
+
+/// Read the fixed-width field sizes from a cross-reference stream's `/W`
+/// array.
+fn xref_stream_width(dictionary: &BTreeMap<Vec<u8>, PdfValue>) -> Result<[usize; 3], PdfError> {
+    let PdfValue::Array(width) = dictionary.get(b"W".as_slice()).ok_or(PdfError::Malformed)? else {
+        return Err(PdfError::Malformed);
+    };
+    if width.len() != 3 {
+        return Err(PdfError::Malformed);
+    }
+    let mut out = [0_usize; 3];
+    for (slot, value) in width.iter().enumerate() {
+        let PdfValue::Integer(width) = value else {
+            return Err(PdfError::Malformed);
+        };
+        let width = usize::try_from(*width).map_err(|_| PdfError::Malformed)?;
+        if width == 0 || width > 10 {
+            return Err(PdfError::Malformed);
+        }
+        out[slot] = width;
+    }
+    Ok(out)
+}
+
+/// Resolve the cross-reference stream's `/Index` subranges, defaulting to a
+/// single `0 Size` range when absent.
+fn xref_stream_index(
+    dictionary: &BTreeMap<Vec<u8>, PdfValue>,
+    size: usize,
+) -> Result<Vec<(u64, u64)>, PdfError> {
+    let Some(PdfValue::Array(index)) = dictionary.get(b"Index".as_slice()) else {
+        return Ok(vec![(0, size as u64)]);
+    };
+    if index.len() % 2 != 0 || index.is_empty() {
+        return Err(PdfError::Malformed);
+    }
+    let mut ranges = Vec::new();
+    let mut seen = BTreeSet::new();
+    for pair in index.chunks(2) {
+        let start = match &pair[0] {
+            PdfValue::Integer(value) => *value,
+            _ => return Err(PdfError::Malformed),
+        };
+        let count = match &pair[1] {
+            PdfValue::Integer(value) => *value,
+            _ => return Err(PdfError::Malformed),
+        };
+        let start = usize::try_from(start).map_err(|_| PdfError::Malformed)?;
+        let count = usize::try_from(count).map_err(|_| PdfError::Malformed)?;
+        if count == 0 || start.saturating_add(count) > size || !seen.insert(start) {
+            return Err(PdfError::Malformed);
+        }
+        ranges.push((start as u64, count as u64));
+    }
+    Ok(ranges)
+}
+
+/// Read three fixed-width big-endian integers from a cross-reference stream's
+/// decoded payload, returning the values and the next byte position.
+fn read_xref_fields(
+    decoded: &[u8],
+    pos: usize,
+    width: &[usize; 3],
+) -> Result<(u64, u64, u64, usize), PdfError> {
+    let mut out = [0_u64; 3];
+    let mut position = pos;
+    for (slot, field_width) in width.iter().copied().enumerate() {
+        let end = position
+            .checked_add(field_width)
+            .filter(|end| *end <= decoded.len())
+            .ok_or(PdfError::Malformed)?;
+        let mut value = 0_u64;
+        for byte in &decoded[position..end] {
+            value = value
+                .checked_shl(8)
+                .and_then(|v| v.checked_add(u64::from(*byte)))
+                .ok_or(PdfError::Malformed)?;
+        }
+        out[slot] = value;
+        position = end;
+    }
+    Ok((out[0], out[1], out[2], position))
+}
+
+fn parse_classic_xref(
+    source: &[u8],
+    xref_offset: usize,
+    startxref_position: usize,
+    limits: &PdfLimits,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<XrefTable, PdfError> {
     let mut entries = Vec::new();
     let mut seen_ids = BTreeSet::new();
     let mut normal_offsets = BTreeSet::new();
     let mut max_seen_id = 0_u32;
-    position = xref_offset + 4;
+    let mut position = xref_offset + 4;
     loop {
         check_cancelled(cancelled)?;
         position = skip_blank_lines(source, position, startxref_position);
@@ -962,6 +1261,8 @@ fn parse_classic_xref(
         trailer,
         xref_offset,
         counters,
+        xref_object_id: None,
+        objstm_members: BTreeMap::new(),
     })
 }
 
@@ -1128,6 +1429,8 @@ fn parse_indirect_objects(
         trailer,
         xref_offset,
         mut counters,
+        xref_object_id,
+        objstm_members,
     } = xref;
     let mut objects = BTreeMap::new();
     let mut total_stream_input = 0_usize;
@@ -1141,83 +1444,20 @@ fn parse_indirect_objects(
         if entry.offset >= span_end {
             return Err(PdfError::Malformed);
         }
-        let value_start = indirect_value_start(source, entry.offset, span_end, entry.id)?;
-        let mut parser = ValueParser::new(
-            source,
-            value_start,
-            span_end,
-            limits,
-            &mut counters,
-            cancelled,
-        );
-        let value = parser.parse_value(0)?;
-        let mut stream = None;
-        let after_value = skip_space_and_comments(source, parser.position, span_end);
-        if source
-            .get(after_value..span_end)
-            .is_some_and(|tail| tail.starts_with(b"stream") && token_ends_at(tail, 6))
-        {
-            let PdfValue::Dictionary(dictionary) = &value else {
-                return Err(PdfError::InvalidStream);
-            };
-            parser.position = after_value;
-            if parser.next()? != Token::Keyword(b"stream".to_vec()) {
-                return Err(PdfError::InvalidStream);
-            }
-            let data_start = consume_stream_eol(source, parser.position, span_end)?;
-            let length = dictionary
-                .get(b"Length".as_slice())
-                .ok_or(PdfError::InvalidStream)?;
-            let PdfValue::Integer(length) = length else {
-                // Indirect and cyclic lengths are deliberately unsupported;
-                // no dependency gets a chance to cast or follow them.
-                return Err(PdfError::InvalidStream);
-            };
-            let length = usize::try_from(*length).map_err(|_| PdfError::InvalidStream)?;
-            if length > limits.max_stream_input_bytes {
-                return Err(PdfError::DecompressionLimit);
-            }
-            total_stream_input = total_stream_input
-                .checked_add(length)
-                .ok_or(PdfError::DecompressionLimit)?;
-            if total_stream_input > limits.max_input_bytes {
-                return Err(PdfError::DecompressionLimit);
-            }
-            let data_end = data_start
-                .checked_add(length)
-                .filter(|end| *end <= span_end)
-                .ok_or(PdfError::InvalidStream)?;
-            let filter = stream_filter(dictionary)?;
-            let after_endstream = consume_endstream(source, data_end, span_end)?;
-            parser.position = after_endstream;
-            let Token::Keyword(endobj) = parser.next()? else {
-                return Err(PdfError::Malformed);
-            };
-            if endobj != b"endobj" {
-                return Err(PdfError::Malformed);
-            }
-            if skip_space_and_comments(source, parser.position, span_end) != span_end {
-                return Err(PdfError::Malformed);
-            }
+        let (value, stream, stream_len) =
+            parse_object_at_offset(source, entry, span_end, &mut counters, limits, cancelled)?;
+        total_stream_input = total_stream_input
+            .checked_add(stream_len)
+            .ok_or(PdfError::DecompressionLimit)?;
+        if total_stream_input > limits.max_input_bytes {
+            return Err(PdfError::DecompressionLimit);
+        }
+        if stream.is_some() {
             stream_count = stream_count
                 .checked_add(1)
                 .ok_or(PdfError::DecompressionLimit)?;
             if stream_count > limits.max_streams {
                 return Err(PdfError::DecompressionLimit);
-            }
-            stream = Some(StreamSpec {
-                encoded: data_start..data_end,
-                filter,
-            });
-        } else {
-            parser.position = after_value;
-            let Token::Keyword(endobj) = parser.next()? else {
-                return Err(PdfError::Malformed);
-            };
-            if endobj != b"endobj"
-                || skip_space_and_comments(source, parser.position, span_end) != span_end
-            {
-                return Err(PdfError::Malformed);
             }
         }
         if objects
@@ -1230,7 +1470,304 @@ fn parse_indirect_objects(
     if objects.len() > limits.max_objects {
         return Err(PdfError::ObjectLimit);
     }
+    // Expand object-stream members into their own objects. Two sources:
+    //  * classic xref: any object whose value is `/Type /ObjStm`; and
+    //  * xref streams: type-2 entries recorded in `objstm_members`.
+    // The xref-stream object itself (a `/Type /XRef` stream) is not an object
+    // stream, so it is never expanded here.
+    let mut members = BTreeMap::new();
+    // First pass: classic object streams (their values were parsed above).
+    for object in objects.values() {
+        let (PdfValue::Dictionary(dict), Some(spec)) = (&object.value, object.stream.as_ref())
+        else {
+            continue;
+        };
+        if !dictionary_name_is(dict, b"Type", b"ObjStm") {
+            continue;
+        }
+        let count = dictionary_integer(dict, b"N")?;
+        let first = dictionary_integer(dict, b"First")?;
+        let count = usize::try_from(count).map_err(|_| PdfError::ObjectLimit)?;
+        if count > limits.max_container_entries {
+            return Err(PdfError::ObjectLimit);
+        }
+        let decoded = decode_stream_bytes(
+            &source[spec.encoded.clone()],
+            spec.filter,
+            limits.max_stream_decoded_bytes,
+            limits,
+            cancelled,
+        )?;
+        let expanded =
+            parse_objstm_members(&decoded, first, count, &mut counters, limits, cancelled)?;
+        for (member_id, member) in expanded {
+            if objects.contains_key(&member_id) || members.contains_key(&member_id) {
+                return Err(PdfError::Malformed);
+            }
+            members.insert(member_id, member);
+        }
+    }
+    // Second pass: xref-stream type-2 members, decoded from their owning
+    // object stream (which must itself be a parsed object above).
+    if xref_object_id.is_some() && !objstm_members.is_empty() {
+        // Resolve each owning object stream's full id (with generation) from
+        // the type-1 entries.
+        let owner_ids: BTreeMap<u32, ObjectId> = entries
+            .iter()
+            .filter(|entry| {
+                objstm_members
+                    .values()
+                    .any(|(owner, _)| *owner == entry.id.number)
+            })
+            .map(|entry| (entry.id.number, entry.id))
+            .collect();
+        for (member_id, (owner_id, member_index)) in &objstm_members {
+            // If the first pass already expanded this member (classic ObjStm
+            // detection), skip it to avoid a duplicate-insert collision.
+            if objects.contains_key(member_id) || members.contains_key(member_id) {
+                continue;
+            }
+            let owner_id = owner_ids
+                .get(owner_id)
+                .copied()
+                .ok_or(PdfError::UnsupportedObjectStream)?;
+            let owner = objects
+                .get(&owner_id)
+                .ok_or(PdfError::UnsupportedObjectStream)?;
+            let (PdfValue::Dictionary(dict), Some(spec)) = (&owner.value, owner.stream.as_ref())
+            else {
+                return Err(PdfError::UnsupportedObjectStream);
+            };
+            if !dictionary_name_is(dict, b"Type", b"ObjStm") {
+                return Err(PdfError::UnsupportedObjectStream);
+            }
+            let count = dictionary_integer(dict, b"N")?;
+            let first = dictionary_integer(dict, b"First")?;
+            let count = usize::try_from(count).map_err(|_| PdfError::ObjectLimit)?;
+            if *member_index >= count {
+                return Err(PdfError::Malformed);
+            }
+            let decoded = decode_stream_bytes(
+                &source[spec.encoded.clone()],
+                spec.filter,
+                limits.max_stream_decoded_bytes,
+                limits,
+                cancelled,
+            )?;
+            let list = parse_objstm_headers(&decoded, first, count)?;
+            let (_, start, end) = list.get(*member_index).ok_or(PdfError::Malformed)?;
+            let member_body = decoded[*start..*end].to_vec();
+            let mut member_parser = ValueParser::new(
+                &member_body,
+                0,
+                member_body.len(),
+                limits,
+                &mut counters,
+                cancelled,
+            );
+            let value = member_parser.parse_value(0)?;
+            if objects.contains_key(member_id) || members.contains_key(member_id) {
+                return Err(PdfError::Malformed);
+            }
+            members.insert(
+                *member_id,
+                PdfObject {
+                    value,
+                    stream: None,
+                },
+            );
+        }
+    }
+    for (id, object) in members {
+        if objects.insert(id, object).is_some() {
+            return Err(PdfError::Malformed);
+        }
+    }
+    if objects.len() > limits.max_objects {
+        return Err(PdfError::ObjectLimit);
+    }
     Ok(ParsedPdf { objects, trailer })
+}
+
+/// Parse an object stream's `id offset` header list, returning the members'
+/// id and value byte spans (relative to the decoded payload). The value spans
+/// are `[offset, next_offset)` for each of the `count` members.
+fn parse_objstm_headers(
+    decoded: &[u8],
+    first: i64,
+    count: usize,
+) -> Result<Vec<(u32, usize, usize)>, PdfError> {
+    let first = usize::try_from(first).map_err(|_| PdfError::Malformed)?;
+    if first > decoded.len() || count == 0 {
+        return Err(PdfError::Malformed);
+    }
+    let mut ids = Vec::with_capacity(count);
+    let mut offsets = Vec::with_capacity(count);
+    let mut position = 0_usize;
+    for _ in 0..count {
+        if position + 1 > decoded.len() {
+            return Err(PdfError::Malformed);
+        }
+        let (id, next) = parse_objstm_int(decoded, position)?;
+        let (offset, next) = parse_objstm_int(decoded, next)?;
+        ids.push(u32::try_from(id).map_err(|_| PdfError::ObjectLimit)?);
+        let offset = usize::try_from(offset).map_err(|_| PdfError::Malformed)?;
+        offsets.push(offset);
+        position = next;
+    }
+    // Offsets are relative to `/First`; convert to absolute decoded-payload
+    // indices. They must be contiguous, non-decreasing, and within the payload.
+    let mut prev = first;
+    for offset in &offsets {
+        let abs = first
+            .checked_add(*offset)
+            .filter(|abs| *abs <= decoded.len())
+            .ok_or(PdfError::Malformed)?;
+        if abs < prev {
+            return Err(PdfError::Malformed);
+        }
+        prev = abs;
+    }
+    let mut spans = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = first + offsets[index];
+        let end = offsets
+            .get(index + 1)
+            .map(|o| first + o)
+            .unwrap_or(decoded.len());
+        if start >= end {
+            return Err(PdfError::Malformed);
+        }
+        spans.push((ids[index], start, end));
+    }
+    Ok(spans)
+}
+
+/// Parse the value (and optional stream) of the indirect object located at
+/// `entry.offset`, returning the value, the stream spec (if any), and the raw
+/// encoded stream byte length (for the cumulative stream-input budget).
+fn parse_object_at_offset(
+    source: &[u8],
+    entry: &XrefEntry,
+    span_end: usize,
+    counters: &mut ParseCounters,
+    limits: &PdfLimits,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<(PdfValue, Option<StreamSpec>, usize), PdfError> {
+    let value_start = indirect_value_start(source, entry.offset, span_end, entry.id)?;
+    let mut parser = ValueParser::new(source, value_start, span_end, limits, counters, cancelled);
+    let value = parser.parse_value(0)?;
+    let mut stream = None;
+    let after_value = skip_space_and_comments(source, parser.position, span_end);
+    let mut stream_len = 0_usize;
+    if source
+        .get(after_value..span_end)
+        .is_some_and(|tail| tail.starts_with(b"stream") && token_ends_at(tail, 6))
+    {
+        let PdfValue::Dictionary(dictionary) = &value else {
+            return Err(PdfError::InvalidStream);
+        };
+        parser.position = after_value;
+        if parser.next()? != Token::Keyword(b"stream".to_vec()) {
+            return Err(PdfError::InvalidStream);
+        }
+        let data_start = consume_stream_eol(source, parser.position, span_end)?;
+        let length = dictionary
+            .get(b"Length".as_slice())
+            .ok_or(PdfError::InvalidStream)?;
+        let PdfValue::Integer(length) = length else {
+            // Indirect and cyclic lengths are deliberately unsupported;
+            // no dependency gets a chance to cast or follow them.
+            return Err(PdfError::InvalidStream);
+        };
+        let length = usize::try_from(*length).map_err(|_| PdfError::InvalidStream)?;
+        if length > limits.max_stream_input_bytes {
+            return Err(PdfError::DecompressionLimit);
+        }
+        stream_len = length;
+        let data_end = data_start
+            .checked_add(length)
+            .filter(|end| *end <= span_end)
+            .ok_or(PdfError::InvalidStream)?;
+        let filter = stream_filter(dictionary)?;
+        let after_endstream = consume_endstream(source, data_end, span_end)?;
+        parser.position = after_endstream;
+        let Token::Keyword(endobj) = parser.next()? else {
+            return Err(PdfError::Malformed);
+        };
+        if endobj != b"endobj" {
+            return Err(PdfError::Malformed);
+        }
+        if skip_space_and_comments(source, parser.position, span_end) != span_end {
+            return Err(PdfError::Malformed);
+        }
+        stream = Some(StreamSpec {
+            encoded: data_start..data_end,
+            filter,
+        });
+    } else {
+        parser.position = after_value;
+        let Token::Keyword(endobj) = parser.next()? else {
+            return Err(PdfError::Malformed);
+        };
+        if endobj != b"endobj"
+            || skip_space_and_comments(source, parser.position, span_end) != span_end
+        {
+            return Err(PdfError::Malformed);
+        }
+    }
+    Ok((value, stream, stream_len))
+}
+
+/// Expand the packed members of a decoded object stream into objects.
+///
+/// The decoded payload is `id_1 offset_1 id_2 offset_2 ...` (2 * N integers)
+/// followed by the concatenated member values. Each member's value is re-parsed
+/// from its byte range (offset relative to the start of the value section).
+fn parse_objstm_members(
+    decoded: &[u8],
+    first: i64,
+    count: usize,
+    counters: &mut ParseCounters,
+    limits: &PdfLimits,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<BTreeMap<ObjectId, PdfObject>, PdfError> {
+    let spans = parse_objstm_headers(decoded, first, count)?;
+    let mut members = BTreeMap::new();
+    for (id, start, end) in spans {
+        check_cancelled(cancelled)?;
+        let member_body = decoded[start..end].to_vec();
+        let mut member_parser = ValueParser::new(
+            &member_body,
+            0,
+            member_body.len(),
+            limits,
+            counters,
+            cancelled,
+        );
+        let value = member_parser.parse_value(0)?;
+        let object_id = ObjectId {
+            number: id,
+            generation: 0,
+        };
+        members.insert(
+            object_id,
+            PdfObject {
+                value,
+                stream: None,
+            },
+        );
+    }
+    Ok(members)
+}
+
+/// Parse one non-negative decimal integer from a decoded object-stream header
+/// or member, returning the value and the next position (after trailing space).
+fn parse_objstm_int(source: &[u8], start: usize) -> Result<(i64, usize), PdfError> {
+    let (value, position) = parse_ascii_u64(source, start, source.len())?;
+    let position = skip_space_and_comments(source, position, source.len());
+    let value = i64::try_from(value).map_err(|_| PdfError::Malformed)?;
+    Ok((value, position))
 }
 
 fn indirect_value_start(
@@ -1523,15 +2060,39 @@ struct ContentBudget {
     operations: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A parsed ToUnicode CMap: code → Unicode scalar (one or more code bytes per
+/// entry, since CID fonts use 2- or 4-byte codes). Bounded by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToUnicodeCMap {
+    /// Code width in bytes (2 or 4) for the font's CID encoding.
+    code_width: usize,
+    /// Ordered mapping from raw code bytes to a decoded Unicode string.
+    /// Stored as a flat Vec for a bounded, deterministic lookup.
+    entries: Vec<(Vec<u8>, String)>,
+}
+
+impl ToUnicodeCMap {
+    /// Map a raw code (of `code_width` bytes) to its Unicode string, if any.
+    fn translate(&self, code: &[u8]) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(key, _)| key == code)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FontEncoding {
     Standard,
     WinAnsi,
+    /// A Type0/CID font whose text is decoded through its ToUnicode CMap.
+    ToUnicode(ToUnicodeCMap),
 }
 
 fn page_font_encodings(
     parsed: &ParsedPdf,
     page_id: ObjectId,
+    cmaps: &BTreeMap<ObjectId, ToUnicodeCMap>,
     limits: &PdfLimits,
 ) -> Result<BTreeMap<Vec<u8>, FontEncoding>, PdfError> {
     let mut current = page_id;
@@ -1546,7 +2107,7 @@ fn page_font_encodings(
             else {
                 return Err(PdfError::Malformed);
             };
-            return parse_font_resources(parsed, resources, limits);
+            return parse_font_resources(parsed, resources, cmaps, limits);
         }
         let Some(PdfValue::Reference(parent)) = dictionary.get(b"Parent".as_slice()) else {
             return Ok(BTreeMap::new());
@@ -1559,6 +2120,7 @@ fn page_font_encodings(
 fn parse_font_resources(
     parsed: &ParsedPdf,
     resources: &BTreeMap<Vec<u8>, PdfValue>,
+    cmaps: &BTreeMap<ObjectId, ToUnicodeCMap>,
     limits: &PdfLimits,
 ) -> Result<BTreeMap<Vec<u8>, FontEncoding>, PdfError> {
     let Some(fonts) = resources.get(b"Font".as_slice()) else {
@@ -1575,35 +2137,263 @@ fn parse_font_resources(
         let (_, PdfValue::Dictionary(font)) = resolve_value(parsed, font, limits)? else {
             return Err(PdfError::UnsupportedFont);
         };
-        if !dictionary_name_is(font, b"Type", b"Font")
-            || !dictionary_name_is(font, b"Subtype", b"Type1")
-            || font.contains_key(b"ToUnicode".as_slice())
-        {
-            return Err(PdfError::UnsupportedFont);
-        }
-        let Some(PdfValue::Name(base_font)) = font.get(b"BaseFont".as_slice()) else {
-            return Err(PdfError::UnsupportedFont);
-        };
-        let encoding = match font.get(b"Encoding".as_slice()) {
-            None if is_unmodified_standard_font(font, base_font) => FontEncoding::Standard,
-            Some(PdfValue::Name(name))
-                if name == b"StandardEncoding" && is_unmodified_standard_font(font, base_font) =>
+        let encoding = if dictionary_name_is(font, b"Subtype", b"Type0") {
+            parse_type0_font(font, cmaps, limits, parsed)?
+        } else {
+            if !dictionary_name_is(font, b"Type", b"Font")
+                || !dictionary_name_is(font, b"Subtype", b"Type1")
+                || font.contains_key(b"ToUnicode".as_slice())
             {
-                FontEncoding::Standard
+                return Err(PdfError::UnsupportedFont);
             }
-            Some(PdfValue::Name(name))
-                if name == b"WinAnsiEncoding"
-                    && !matches!(base_font.as_slice(), b"Symbol" | b"ZapfDingbats") =>
-            {
-                FontEncoding::WinAnsi
+            let Some(PdfValue::Name(base_font)) = font.get(b"BaseFont".as_slice()) else {
+                return Err(PdfError::UnsupportedFont);
+            };
+            match font.get(b"Encoding".as_slice()) {
+                None if is_unmodified_standard_font(font, base_font) => FontEncoding::Standard,
+                Some(PdfValue::Name(name))
+                    if name == b"StandardEncoding"
+                        && is_unmodified_standard_font(font, base_font) =>
+                {
+                    FontEncoding::Standard
+                }
+                Some(PdfValue::Name(name))
+                    if name == b"WinAnsiEncoding"
+                        && !matches!(base_font.as_slice(), b"Symbol" | b"ZapfDingbats") =>
+                {
+                    FontEncoding::WinAnsi
+                }
+                _ => return Err(PdfError::UnsupportedFont),
             }
-            _ => return Err(PdfError::UnsupportedFont),
         };
         if encodings.insert(resource_name.clone(), encoding).is_some() {
             return Err(PdfError::Malformed);
         }
     }
     Ok(encodings)
+}
+
+/// Collect every distinct ToUnicode CMap in the document, keyed by its stream
+/// object id. Parsing them once up front (under the shared decode budget)
+/// avoids re-decoding a CMap per page and keeps the total decoded bytes
+/// bounded. CMaps that are malformed or fail closed simply are not inserted,
+/// so fonts referencing them are rejected later as `UnsupportedFont`.
+fn collect_tounicode_cmaps(
+    source: &[u8],
+    parsed: &ParsedPdf,
+    limits: &PdfLimits,
+    cancelled: Option<&dyn Fn() -> bool>,
+    decode: &mut DecodeBudget,
+) -> Result<BTreeMap<ObjectId, ToUnicodeCMap>, PdfError> {
+    let mut cmaps = BTreeMap::new();
+    for (id, object) in &parsed.objects {
+        let PdfValue::Dictionary(ref dict) = object.value else {
+            continue;
+        };
+        if !dictionary_name_is(dict, b"Type", b"CMap") {
+            continue;
+        }
+        check_cancelled(cancelled)?;
+        let decoded = decode.stream(source, parsed, *id, cancelled)?;
+        let entries = parse_cmap_entries(decoded, limits)?;
+        let code_width = dominant_cmap_code_width(&entries);
+        cmaps.insert(
+            *id,
+            ToUnicodeCMap {
+                code_width,
+                entries,
+            },
+        );
+    }
+    Ok(cmaps)
+}
+
+/// The dominant source-code byte width across a CMap's entries; defaults to 2
+/// (the common Identity-H / CID-2 case) when the CMap is empty.
+fn dominant_cmap_code_width(entries: &[(Vec<u8>, String)]) -> usize {
+    entries
+        .iter()
+        .map(|(code, _)| code.len())
+        .filter(|len| *len > 1)
+        .max()
+        .unwrap_or(2)
+        .max(2)
+}
+
+/// Parse a Type0 (composite/CID) font, decoding its text through the
+/// pre-parsed mandatory ToUnicode CMap.
+fn parse_type0_font(
+    font: &BTreeMap<Vec<u8>, PdfValue>,
+    cmaps: &BTreeMap<ObjectId, ToUnicodeCMap>,
+    limits: &PdfLimits,
+    parsed: &ParsedPdf,
+) -> Result<FontEncoding, PdfError> {
+    if !dictionary_name_is(font, b"Type", b"Font") {
+        return Err(PdfError::UnsupportedFont);
+    }
+    // A Type0 font must carry a ToUnicode CMap to be decodable.
+    let Some(tounicode) = font.get(b"ToUnicode".as_slice()) else {
+        return Err(PdfError::UnsupportedFont);
+    };
+    let (cmap_id, _) = resolve_value(parsed, tounicode, limits)?;
+    let Some(cmap_id) = cmap_id else {
+        return Err(PdfError::UnsupportedFont);
+    };
+    let cmap = cmaps
+        .get(&cmap_id)
+        .ok_or(PdfError::UnsupportedFont)?
+        .clone();
+    Ok(FontEncoding::ToUnicode(cmap))
+}
+
+/// Parse the bounded bytes of a ToUnicode CMap into code → unicode entries.
+///
+/// Recognizes the conservative `beginbfchar`/`beginbfrange` sections used by
+/// common producers. Each `<src> <dst>` mapping is recorded; a `beginbfrange`
+/// line `<lo> <hi> <dststart>` maps the contiguous code range to sequential
+/// Unicode scalars. Malformed or oversized CMaps fail closed.
+fn parse_cmap_entries(
+    decoded: &[u8],
+    limits: &PdfLimits,
+) -> Result<Vec<(Vec<u8>, String)>, PdfError> {
+    let mut entries: Vec<(Vec<u8>, String)> = Vec::new();
+    let text = std::str::from_utf8(decoded).map_err(|_| PdfError::Malformed)?;
+    let mut in_char = false;
+    let mut in_range = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("beginbfchar") {
+            in_char = true;
+            continue;
+        }
+        if line.starts_with("endbfchar") {
+            in_char = false;
+            continue;
+        }
+        if line.starts_with("beginbfrange") {
+            in_range = true;
+            continue;
+        }
+        if line.starts_with("endbfrange") {
+            in_range = false;
+            continue;
+        }
+        if line.is_empty() || line.starts_with('%') {
+            continue;
+        }
+        if in_char {
+            let (src, dst) = parse_cmap_bfchar_line(line)?;
+            entries.push((src, dst));
+        } else if in_range {
+            let mappings = parse_cmap_bfrange_line(line, limits)?;
+            for (src, dst) in mappings {
+                entries.push((src, dst));
+            }
+        }
+        if entries.len() > limits.max_container_entries {
+            return Err(PdfError::TokenLimit);
+        }
+    }
+    Ok(entries)
+}
+
+fn parse_cmap_bfchar_line(line: &str) -> Result<(Vec<u8>, String), PdfError> {
+    let trimmed = line.trim();
+    let (src, rest) = read_hex_token(trimmed)?;
+    let (dst, rest) = read_hex_token(rest.trim())?;
+    if !rest.trim().is_empty() {
+        return Err(PdfError::Malformed);
+    }
+    Ok((src, hex_to_unicode(&dst)))
+}
+
+fn parse_cmap_bfrange_line(
+    line: &str,
+    limits: &PdfLimits,
+) -> Result<Vec<(Vec<u8>, String)>, PdfError> {
+    let trimmed = line.trim();
+    let (lo, rest) = read_hex_token(trimmed)?;
+    let (hi, rest) = read_hex_token(rest.trim())?;
+    // The destination may be a hex string (start scalar) or an array of hex
+    // strings (one per code). We only accept the simple scalar start form.
+    let (start, rest) = read_hex_token(rest.trim())?;
+    if !rest.trim().is_empty() {
+        return Err(PdfError::UnsupportedFont);
+    }
+    let Some(lo_val) = hex_to_u32(&lo) else {
+        return Err(PdfError::Malformed);
+    };
+    let Some(hi_val) = hex_to_u32(&hi) else {
+        return Err(PdfError::Malformed);
+    };
+    let Some(start_val) = hex_to_u32(&start) else {
+        return Err(PdfError::Malformed);
+    };
+    if hi_val < lo_val {
+        return Err(PdfError::Malformed);
+    }
+    // Bound the range expansion against the per-object container ceiling so a
+    // single `beginbfrange` line cannot enumerate an unbounded code space.
+    let span = hi_val - lo_val;
+    if span > (limits.max_container_entries_per_object as u32) {
+        return Err(PdfError::TokenLimit);
+    }
+    let mut out = Vec::new();
+    for (offset, code) in (lo_val..=hi_val).enumerate() {
+        let src = code.to_be_bytes().to_vec();
+        let scalar = start_val.checked_add(offset as u32);
+        let ch = scalar.and_then(char::from_u32);
+        if let Some(ch) = ch {
+            out.push((src, ch.to_string()));
+        }
+    }
+    Ok(out)
+}
+
+fn read_hex_token(input: &str) -> Result<(Vec<u8>, &str), PdfError> {
+    let start = input.find('<').ok_or(PdfError::Malformed)?;
+    let end = input[start + 1..]
+        .find('>')
+        .ok_or(PdfError::Malformed)?
+        .checked_add(start + 1)
+        .ok_or(PdfError::Malformed)?;
+    let hex = &input[start + 1..end];
+    let bytes = hex_bytes(hex)?;
+    Ok((bytes, &input[end + 1..]))
+}
+
+fn hex_bytes(hex: &str) -> Result<Vec<u8>, PdfError> {
+    if !hex.len().is_multiple_of(2) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(PdfError::Malformed);
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| PdfError::Malformed)?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
+fn hex_to_u32(bytes: &[u8]) -> Option<u32> {
+    let mut value = 0_u32;
+    for byte in bytes {
+        value = value.checked_shl(8)?.checked_add(u32::from(*byte))?;
+    }
+    Some(value)
+}
+
+fn hex_to_unicode(bytes: &[u8]) -> String {
+    // A CMap destination is a Unicode code point (UTF-16BE in the CMap, but
+    // producers commonly emit scalar hex). Interpret as a scalar when possible,
+    // else UTF-8 of the raw bytes.
+    if bytes.len() <= 4 {
+        hex_to_u32(bytes)
+            .and_then(char::from_u32)
+            .map(|c| c.to_string())
+            .unwrap_or_default()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 fn is_unmodified_standard_font(font: &BTreeMap<Vec<u8>, PdfValue>, base_font: &[u8]) -> bool {
@@ -1934,9 +2724,10 @@ fn parse_content_text(
                             return Err(PdfError::Malformed);
                         };
                         *current_font = Some(
-                            *fonts
+                            fonts
                                 .get(name.as_slice())
-                                .ok_or(PdfError::UnsupportedFont)?,
+                                .ok_or(PdfError::UnsupportedFont)?
+                                .clone(),
                         );
                     }
                     b"Tj" if in_text => {
@@ -1946,7 +2737,7 @@ fn parse_content_text(
                         append_pdf_string(
                             output,
                             bytes,
-                            current_font.ok_or(PdfError::UnsupportedFont)?,
+                            current_font.as_ref().ok_or(PdfError::UnsupportedFont)?,
                             limits,
                         )?;
                     }
@@ -1957,7 +2748,7 @@ fn parse_content_text(
                         append_text_array(
                             output,
                             values,
-                            current_font.ok_or(PdfError::UnsupportedFont)?,
+                            current_font.as_ref().ok_or(PdfError::UnsupportedFont)?,
                             limits,
                         )?;
                     }
@@ -1969,7 +2760,7 @@ fn parse_content_text(
                         append_pdf_string(
                             output,
                             bytes,
-                            current_font.ok_or(PdfError::UnsupportedFont)?,
+                            current_font.as_ref().ok_or(PdfError::UnsupportedFont)?,
                             limits,
                         )?;
                     }
@@ -1983,7 +2774,7 @@ fn parse_content_text(
                         append_pdf_string(
                             output,
                             bytes,
-                            current_font.ok_or(PdfError::UnsupportedFont)?,
+                            current_font.as_ref().ok_or(PdfError::UnsupportedFont)?,
                             limits,
                         )?;
                     }
@@ -2054,7 +2845,7 @@ fn push_content_array_item(
 fn append_text_array(
     output: &mut String,
     values: &[ContentArrayItem],
-    encoding: FontEncoding,
+    encoding: &FontEncoding,
     limits: &PdfLimits,
 ) -> Result<(), PdfError> {
     for value in values {
@@ -2070,17 +2861,37 @@ fn append_text_array(
 fn append_pdf_string(
     output: &mut String,
     bytes: &[u8],
-    encoding: FontEncoding,
+    encoding: &FontEncoding,
     limits: &PdfLimits,
 ) -> Result<(), PdfError> {
-    for byte in bytes {
-        let character = match encoding {
-            FontEncoding::Standard => standard_encoding_character(*byte)?,
-            FontEncoding::WinAnsi => win_ansi_character(*byte),
-        };
-        append_source_char(output, character, limits)?;
+    match encoding {
+        FontEncoding::ToUnicode(cmap) => {
+            if !bytes.len().is_multiple_of(cmap.code_width) {
+                return Err(PdfError::UnsupportedFont);
+            }
+            for code in bytes.chunks(cmap.code_width) {
+                let Some(text) = cmap.translate(code) else {
+                    // A CID with no ToUnicode mapping is dropped (no guess);
+                    // the fact remains bounded and deterministic.
+                    continue;
+                };
+                for character in text.chars() {
+                    append_source_char(output, character, limits)?;
+                }
+            }
+            Ok(())
+        }
+        FontEncoding::Standard | FontEncoding::WinAnsi => {
+            for byte in bytes {
+                let character = match encoding {
+                    FontEncoding::Standard => standard_encoding_character(*byte)?,
+                    _ => win_ansi_character(*byte),
+                };
+                append_source_char(output, character, limits)?;
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 fn standard_encoding_character(byte: u8) -> Result<char, PdfError> {
@@ -2535,7 +3346,7 @@ mod tests {
         append_pdf_string(
             &mut standard,
             &[0x27, b' ', 0x60],
-            FontEncoding::Standard,
+            &FontEncoding::Standard,
             &limits,
         )
         .expect("bounded StandardEncoding text");
@@ -2545,7 +3356,7 @@ mod tests {
         append_pdf_string(
             &mut win_ansi,
             &[0x7f, 0x81, 0x8d, 0x8f, 0x90, 0x9d, 0xa0, 0xad],
-            FontEncoding::WinAnsi,
+            &FontEncoding::WinAnsi,
             &limits,
         )
         .expect("bounded WinAnsi text");

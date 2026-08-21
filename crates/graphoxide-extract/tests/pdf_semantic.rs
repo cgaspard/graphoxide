@@ -2,7 +2,7 @@ use flate2::{write::ZlibEncoder, Compression};
 use graphoxide_core::{sanitize_metadata_string, Edge, Extraction, Node};
 use graphoxide_extract::extract;
 use serde_json::Value;
-use std::{fs, io::Write as _, path::Path};
+use std::{collections::BTreeMap, fs, io::Write as _, path::Path};
 
 const MIB: usize = 1024 * 1024;
 const MAX_SERIALIZED_FACT_BYTES: usize = MIB;
@@ -617,38 +617,29 @@ fn encrypted_incremental_xref_stream_and_object_stream_forms_fail_closed() {
             "pdf_incremental_unsupported",
         );
     }
-    for (name, trailer) in [
-        ("hybrid.pdf", b"/XRefStm 1".as_slice()),
-        ("escaped-hybrid.pdf", b"/XR#65fStm 1".as_slice()),
-    ] {
-        assert_rejected(
-            name,
-            &one_page_pdf(vec![content.clone()], b"", trailer, vec![]),
-            "pdf_unsupported_xref",
-        );
-    }
-
-    for (name, type_name) in [
-        ("object-stream.pdf", b"/ObjStm".as_slice()),
-        ("escaped-object-stream.pdf", b"/Obj#53tm".as_slice()),
-    ] {
-        let mut object = b"<< /Type ".to_vec();
-        object.extend_from_slice(type_name);
-        object.extend_from_slice(b" /N 0 /First 0 /Length 0 >>\nstream\n\nendstream");
-        assert_rejected(
-            name,
-            &one_page_pdf(vec![content.clone()], b"", b"", vec![(6, object)]),
-            "pdf_object_stream_unsupported",
-        );
-    }
-
+    // An oversized fixed-width field in a cross-reference stream is a decode
+    // bomb and must be rejected (it no longer maps to "unsupported xref").
     let mut xref_stream = b"%PDF-1.7\n".to_vec();
     let offset = xref_stream.len();
     xref_stream.extend_from_slice(
         b"1 0 obj\n<< /Type /XRef /Size 2 /W [1 9223372036854775807 2] /Length 0 >>\nstream\n\nendstream\nendobj\n",
     );
     write!(&mut xref_stream, "startxref\n{offset}\n%%EOF\n").expect("write xref stream footer");
-    assert_rejected("xref-stream.pdf", &xref_stream, "pdf_unsupported_xref");
+    assert_rejected("xref-stream.pdf", &xref_stream, "pdf_malformed");
+
+    // A cross-reference stream that is not actually a /Type /XRef dictionary is
+    // still rejected as an unsupported xref.
+    let mut bad_xref = b"%PDF-1.7\n".to_vec();
+    let bad_offset = bad_xref.len();
+    bad_xref.extend_from_slice(
+        b"1 0 obj\n<< /Type /Foo /Size 2 /W [1 4 2] /Length 0 >>\nstream\n\nendstream\nendobj\n",
+    );
+    write!(&mut bad_xref, "startxref\n{bad_offset}\n%%EOF\n").expect("write footer");
+    assert_rejected(
+        "xref-stream-not-xref.pdf",
+        &bad_xref,
+        "pdf_unsupported_xref",
+    );
 }
 
 #[test]
@@ -1224,4 +1215,341 @@ fn token_and_input_ceilings_return_inventory_diagnostics_without_panics() {
         b"not a PDF despite the suffix",
         "pdf_invalid_header",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-reference streams, object streams, and CID/Type0 fonts with ToUnicode.
+// ---------------------------------------------------------------------------
+
+/// A single object-stream member: its object id and the dictionary bytes.
+type ObjStmMember = (u32, Vec<u8>);
+
+/// An object-stream payload: the owning object id and its packed members.
+type ObjStmPayload = (u32, Vec<ObjStmMember>);
+
+/// Assemble a PDF from in-place objects plus an optional object stream and a
+/// cross-reference stream (with optional `/Index`). The object stream packs the
+/// given members; its id and the xref stream's id are supplied by the caller.
+fn build_xref_pdf(
+    in_place: &[(u32, Vec<u8>)],
+    objstm: Option<ObjStmPayload>,
+    xref_id: u32,
+    index: Option<Vec<(u32, u32)>>,
+) -> Vec<u8> {
+    let mut body = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets: BTreeMap<u32, usize> = BTreeMap::new();
+    let objstm_id_for_skip = objstm.as_ref().map(|(id, _)| *id);
+    for (id, content) in in_place {
+        if Some(*id) == objstm_id_for_skip {
+            continue; // written by the object-stream block below
+        }
+        offsets.insert(*id, body.len());
+        body.extend_from_slice(
+            format!("{id} 0 obj\n{}\nendobj\n", String::from_utf8_lossy(content)).as_bytes(),
+        );
+    }
+
+    // Optional object stream (type-2 owner) placed before the xref stream.
+    let objstm_id = objstm.as_ref().map(|(id, _)| *id);
+    let objstm_members: Vec<(u32, Vec<u8>)> =
+        objstm.map(|(_, members)| members).unwrap_or_default();
+    if let Some(id) = objstm_id {
+        let mut packed = String::new();
+        let mut data = String::new();
+        let mut running = 0usize;
+        for (member_id, value) in &objstm_members {
+            packed.push_str(&format!("{member_id} {running} "));
+            data.push_str(&String::from_utf8_lossy(value));
+            data.push(' ');
+            running += value.len() + 1;
+        }
+        let first = packed.len();
+        let length = packed.len() + data.len();
+        let dict = format!(
+            "<< /Type /ObjStm /N {} /First {first} /Length {length} >>",
+            objstm_members.len()
+        );
+        let stream = format!("{dict}\nstream\n{packed}{data}endstream");
+        offsets.insert(id, body.len());
+        body.extend_from_slice(format!("{id} 0 obj\n{stream}\nendobj\n").as_bytes());
+    }
+
+    let max_id = offsets
+        .keys()
+        .chain(std::iter::once(&xref_id))
+        .max()
+        .copied()
+        .expect("at least one object")
+        .checked_add(1)
+        .expect("id fits");
+
+    // Fixed-width entry table for ids 0..max_id with /W [1 4 2].
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    for id in 0..max_id {
+        let entry = if id == 0 {
+            // Free head: /W [1 4 2] -> kind 0, next-free 0, generation 0 (7 bytes).
+            vec![0u8, 0, 0, 0, 0, 0, 0]
+        } else if let Some(offset) = offsets.get(&id) {
+            let mut v = vec![1u8];
+            v.extend_from_slice(&(*offset as u32).to_be_bytes());
+            v.extend_from_slice(&0_u16.to_be_bytes());
+            v
+        } else if let (Some(owner), Some(position)) = (
+            objstm_id,
+            objstm_members
+                .iter()
+                .position(|(member_id, _)| *member_id == id),
+        ) {
+            let mut v = vec![2u8];
+            v.extend_from_slice(&owner.to_be_bytes());
+            v.extend_from_slice(&(position as u16).to_be_bytes());
+            v
+        } else {
+            // Unreferenced free entry: full /W [1 4 2] = 7 bytes.
+            vec![0u8, 0, 0, 0, 0, 0, 0]
+        };
+        entries.push(entry);
+    }
+    let xref_length = entries.iter().map(|e| e.len()).sum::<usize>();
+    let index_array = match index {
+        Some(parts) => {
+            let mut out = String::from(" /Index [");
+            for (start, count) in parts {
+                out.push_str(&format!("{start} {count} "));
+            }
+            out.push(']');
+            out
+        }
+        None => String::new(),
+    };
+    let xref_dict = format!(
+        "<< /Type /XRef /Size {max_id} /W [1 4 2]{index_array} /Root 1 0 R /Length {xref_length} >>"
+    );
+    let xref_offset = body.len();
+    offsets.insert(xref_id, xref_offset);
+    body.extend_from_slice(format!("{xref_id} 0 obj\n{xref_dict}\nstream\n").as_bytes());
+    for entry in &entries {
+        body.extend_from_slice(entry);
+    }
+    body.extend_from_slice(b"endstream\nendobj\n");
+    body.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+    body
+}
+
+fn content_stream_obj(id: u32, text: &str) -> (u32, Vec<u8>) {
+    let body = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+    (
+        id,
+        format!("<</Length {}>>\nstream\n{body}endstream", body.len()).into_bytes(),
+    )
+}
+
+#[test]
+fn cross_reference_stream_without_object_stream_extracts_text() {
+    let in_place = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        content_stream_obj(4, "plain xref stream"),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        ),
+    ];
+    let pdf = build_xref_pdf(&in_place, None, 6, None);
+    let extraction = extract_source("xref-stream-plain.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("plain xref stream"))
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn cross_reference_stream_with_object_stream_extracts_text() {
+    // Objects 1,2,3,5 are packed into object stream 6 (type-2); the content
+    // stream 4, the object stream 6, and the xref stream 7 are in-place.
+    let in_place = vec![
+        (
+            4,
+            b"<< /Length 47 >>\nstream\nBT /F1 12 Tf 72 720 Td (xref+objstm text) Tj ET\nendstream"
+                .to_vec(),
+        ),
+        (
+            6,
+            Vec::new(), // placeholder; replaced below by the real object stream
+        ),
+    ];
+    let objstm = Some((
+        6u32,
+        vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+            ),
+            (
+                5,
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+            ),
+        ],
+    ));
+    let pdf = build_xref_pdf(&in_place, objstm, 7, None);
+    let extraction = extract_source("xref-stream-objstm.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("xref+objstm text"))
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn type0_font_with_tounicode_cmap_decodes_cid_text() {
+    // A Type0 (CID) font whose 2-byte CIDs decode through a ToUnicode CMap.
+    let content = b"BT /F1 12 Tf 72 720 Td <00480065006C006C> Tj ET";
+    let cmap = br#"beginbfchar
+<0048> <0048>
+<0065> <0065>
+<006C> <006C>
+endbfchar
+"#;
+    let in_place = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            format!("<</Length {}>>\nstream\n{}endstream", content.len(), String::from_utf8_lossy(content)).into_bytes(),
+        ),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /MyFont /Encoding /Identity-H /DescendantFonts [7 0 R] /ToUnicode 6 0 R >>".to_vec(),
+        ),
+        (
+            6,
+            format!("<</Type /CMap /Length {}>>\nstream\n{}endstream", cmap.len(), String::from_utf8_lossy(cmap)).into_bytes(),
+        ),
+        (
+            7,
+            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MyFont /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W [1 2 500] >>".to_vec(),
+        ),
+    ];
+    let pdf = build_xref_pdf(&in_place, None, 8, None);
+    let extraction = extract_source("type0-tounicode.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("Hell")),
+        "CIDs 48 65 6C 6C map via the CMap to H e l l"
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn type0_font_without_tounicode_fails_closed() {
+    let content = b"BT /F1 12 Tf 72 720 Td <0048> Tj ET";
+    let in_place = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            format!("<</Length {}>>\nstream\n{}endstream", content.len(), String::from_utf8_lossy(content)).into_bytes(),
+        ),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /MyFont /Encoding /Identity-H /DescendantFonts [6 0 R] >>".to_vec(),
+        ),
+        (
+            6,
+            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MyFont >>".to_vec(),
+        ),
+    ];
+    let pdf = build_xref_pdf(&in_place, None, 7, None);
+    assert_rejected("type0-no-tounicode.pdf", &pdf, "pdf_font_unsupported");
+}
+
+#[test]
+fn cross_reference_stream_with_explicit_index_extracts_text() {
+    // /Index [0 3 3 3] splits the range; ids 3,4,5 still resolve.
+    let in_place = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        content_stream_obj(4, "indexed xref stream"),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        ),
+    ];
+    let pdf = build_xref_pdf(&in_place, None, 6, Some(vec![(0, 3), (3, 3)]));
+    let extraction = extract_source("xref-stream-index.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("indexed xref stream"))
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn malformed_object_stream_headers_fail_closed() {
+    // A type-2 entry pointing at an object stream whose packed headers are
+    // inconsistent (claims N=2 but packs garbage) must be rejected.
+    let content = b"BT /F1 12 Tf 72 720 Td (safe) Tj ET";
+    let in_place = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            format!("<</Length {}>>\nstream\n{}endstream", content.len(), String::from_utf8_lossy(content)).into_bytes(),
+        ),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        ),
+    ];
+    // Object stream 6 claims N=2 but packs a single malformed header.
+    let objstm = Some((
+        6u32,
+        vec![
+            (9, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (10, b"\x00\xff garbage".to_vec()),
+        ],
+    ));
+    let pdf = build_xref_pdf(&in_place, objstm, 7, None);
+    // The object stream declares N=2; the second member is non-UTF8 garbage so
+    // the re-parse must fail closed.
+    let _ = extract_source("objstm-malformed.pdf", &pdf);
 }
