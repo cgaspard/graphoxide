@@ -92,6 +92,7 @@ pub enum ByteAdapterKind {
     ContainerMedia,
     Pdf,
     Office,
+    Rtf,
     Inventory,
 }
 
@@ -107,6 +108,7 @@ impl ByteAdapterKind {
             Self::ContainerMedia => "container_media",
             Self::Pdf => "pdf",
             Self::Office => "office",
+            Self::Rtf => "rtf",
             Self::Inventory => "inventory",
         }
     }
@@ -211,6 +213,16 @@ pub const PDF_LIMITS: FormatLimits = FormatLimits {
     max_container_members: 0,
     max_recursion_depth: 0,
     max_expansion_ratio: 64,
+};
+
+/// Effective ceilings enforced by the bounded RTF adapter.
+pub const RTF_LIMITS: FormatLimits = FormatLimits {
+    max_input_bytes: 16 * 1024 * 1024,
+    max_nesting: 64,
+    max_records: 4_096,
+    max_container_members: 0,
+    max_recursion_depth: 0,
+    max_expansion_ratio: 8,
 };
 
 /// Effective ceilings enforced by the bounded OOXML, ODF, and EPUB adapter.
@@ -413,6 +425,7 @@ impl FormatSpec {
             | "simulation-inventory" => ByteAdapterKind::Simulation,
             "pdf" => ByteAdapterKind::Pdf,
             "office-open-xml" | "office-container-documents" => ByteAdapterKind::Office,
+            "rtf" => ByteAdapterKind::Rtf,
             "office-documents"
             | "raster-image"
             | "additional-raster-image"
@@ -484,6 +497,7 @@ macro_rules! format_spec {
 }
 
 const MAGIC_PDF: &[MagicRule] = &[MagicRule::new(0, b"%PDF-")];
+const MAGIC_RTF: &[MagicRule] = &[MagicRule::new(0, b"{\\rtf")];
 const MAGIC_RASTER: &[MagicRule] = &[
     MagicRule::new(0, b"\x89PNG\r\n\x1a\n"),
     MagicRule::new(0, b"\xff\xd8\xff"),
@@ -536,7 +550,8 @@ const TOML_EXTENSIONS: &[&str] = &["toml"];
 const XML_EXTENSIONS: &[&str] = &["xml", "xsl", "xslt"];
 const LEGACY_OFFICE_EXTENSIONS: &[&str] = &["docx", "xlsx"];
 const OFFICE_CONTAINER_DOCUMENT_EXTENSIONS: &[&str] = &["pptx", "odt", "ods", "odp", "epub"];
-const OFFICE_DOCUMENT_EXTENSIONS: &[&str] = &["doc", "xls", "xlsm", "ppt", "rtf"];
+const OFFICE_DOCUMENT_EXTENSIONS: &[&str] = &["doc", "xls", "xlsm", "ppt"];
+const RTF_EXTENSIONS: &[&str] = &["rtf", "rtx"];
 const LEGACY_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 const IMAGE_EXTENSIONS: &[&str] = &[
     "bmp", "tif", "tiff", "ico", "avif", "heic", "heif", "jp2", "jxl",
@@ -912,6 +927,20 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         SchemaRequirement::NotRequired,
         CONTAINER_LIMITS,
         None,
+        false,
+        false,
+        false,
+        false,
+    ),
+    format_spec!(
+        "rtf",
+        RTF_EXTENSIONS,
+        &[],
+        MAGIC_RTF,
+        FormatCapability::StructuralPartial,
+        SchemaRequirement::NotRequired,
+        RTF_LIMITS,
+        Some(FileType::Document),
         false,
         false,
         false,
