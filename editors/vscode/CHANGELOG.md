@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.9 — 2026-08-20
+
+- The in-editor "N graph connections" CodeLens pills are now off by default so
+  open files stay uncluttered. Enable `graphoxide.codeLens.enabled` to bring
+  them back.
+- The bundled CLI no longer fails runtime AST cache persistence for Dart files
+  that emit source-less concept nodes (Flutter/Bloc routes and annotations),
+  which previously logged a provenance warning per affected file.
+
 ## 0.10.8 — 2026-08-16
 
 - Builds now run silently with a live percentage in the status bar instead of modal

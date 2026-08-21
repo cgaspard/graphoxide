@@ -1,0 +1,11 @@
+version: 0.10.9
+date: 2026-08-20
+highlights:
+  - The in-editor "N graph connections" CodeLens pills are off by default so open files stay uncluttered; enable graphoxide.codeLens.enabled to bring them back.
+  - The bundled CLI now persists the runtime AST cache for Dart files that emit source-less concept nodes (routes, annotations).
+added: []
+changed:
+  - graphoxide.codeLens.enabled now defaults to false. The CodeLens pills above indexed symbols only appear when the setting is explicitly enabled.
+fixed:
+  - The bundled graphoxide CLI no longer fails runtime AST cache persistence for Dart files that emit source-less concept nodes (Flutter/Bloc routes and annotations), which previously logged a provenance warning per affected file.
+removed: []

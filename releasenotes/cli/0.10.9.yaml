@@ -1,0 +1,9 @@
+version: 0.10.9
+date: 2026-08-20
+highlights:
+  - Dart files that emit source-less concept nodes (routes, annotations) no longer fail runtime AST cache persistence, so Flutter/Bloc projects cache cleanly.
+added: []
+changed: []
+fixed:
+  - The runtime AST cache provenance check no longer rejects extractions that contain source-less concept nodes (Dart `Route ...` and `@...` concept nodes per the upstream empty-source-file contract). Files that emit them previously logged "runtime AST cache extraction provenance does not match its source" and could not persist their cache.
+removed: []
