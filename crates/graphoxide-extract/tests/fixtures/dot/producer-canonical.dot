@@ -1,0 +1,29 @@
+digraph G {
+	rankdir=LR;
+	node [shape=box, style="rounded,filled", fillcolor=lightblue];
+	edge [color=gray40];
+
+	subgraph cluster_frontend {
+		label="frontend";
+		style=bold;
+		color=blue;
+
+		"web" [label="Web App", fillcolor=lightyellow];
+		"cdn" [label="CDN", shape=ellipse];
+		"web" -> "cdn" [label="assets"];
+	}
+
+	subgraph cluster_backend {
+		label="backend";
+		style=dashed;
+		color=red;
+
+		"api" [label="API Server"];
+		"db" [label="Database", shape=cylinder];
+		"cache" [label="Redis", shape=ellipse];
+		"api" -> "db" [label="SQL"];
+		"api" -> "cache" [label="get/set"];
+	}
+
+	"cdn" -> "api" [label="proxy"];
+}
