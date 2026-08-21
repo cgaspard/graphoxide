@@ -600,12 +600,21 @@ fn reject_unsafe_name(name: &[u8]) -> Result<(), PdfError> {
     // Object streams and cross-reference streams are now supported; they are no
     // longer rejected at the name-lexing stage. Their structure is validated by
     // the dedicated parsers, which fail closed on malformed input.
+    //
+    // Only names that denote executable or externally reachable content are
+    // rejected here. `Prev` is *not* on this list: pages-tree nodes carry
+    // standard `/Prev` sibling references, and incremental-update detection is
+    // structural (duplicate `startxref`/`%%EOF` markers and the trailer
+    // `/Prev` check in the xref parsers). `URI` is *not* on this list either:
+    // the extractor never follows URIs and never publishes annotation action
+    // strings — only content-stream page text and the eight Info-dictionary
+    // metadata fields reach the graph, so plain link annotations cannot leak
+    // payloads.
     match name {
         b"Encrypt" => Err(PdfError::Encrypted),
-        b"Prev" => Err(PdfError::UnsupportedIncremental),
         b"JavaScript" | b"JS" | b"Launch" | b"EmbeddedFile" | b"EmbeddedFiles" | b"Filespec"
         | b"GoToR" | b"SubmitForm" | b"ImportData" | b"RichMedia" | b"XFA" | b"OpenAction"
-        | b"AA" | b"URI" => Err(PdfError::ActiveContent),
+        | b"AA" => Err(PdfError::ActiveContent),
         _ => Ok(()),
     }
 }
@@ -925,6 +934,11 @@ fn parse_xref_stream(
     if !dictionary_name_is(&dictionary, b"Type", b"XRef") {
         return Err(PdfError::UnsupportedXref);
     }
+    // A cross-reference stream `/Prev` reference marks an incrementally
+    // updated document, the same as a classic trailer `/Prev`.
+    if dictionary.contains_key(b"Prev".as_slice()) {
+        return Err(PdfError::UnsupportedIncremental);
+    }
     // Read /W (fixed-width field sizes), /Size, and optional /Index.
     let width = xref_stream_width(&dictionary)?;
     let size_value = dictionary_integer(&dictionary, b"Size")?;
@@ -1237,6 +1251,12 @@ fn parse_classic_xref(
         != startxref_position
     {
         return Err(PdfError::Malformed);
+    }
+    // A trailer `/Prev` reference marks an incrementally updated document
+    // (pages-tree `/Prev` sibling references are unrelated and never appear
+    // in trailers).
+    if trailer.contains_key(b"Prev".as_slice()) {
+        return Err(PdfError::UnsupportedIncremental);
     }
     let size = dictionary_integer(&trailer, b"Size")?;
     if size <= 0 {
