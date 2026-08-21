@@ -155,6 +155,92 @@ pub fn resolve_with_root(extractions: &mut [Extraction], root: &std::path::Path)
     resolve_language_neutral(extractions);
     crate::csharp::resolve_types(extractions);
     crate::pascal::resolve_inherited_calls(extractions);
+    resolve_idl_imports(extractions);
+}
+
+/// Resolve cross-file IDL import/include edges for Protobuf, Thrift, and
+/// other text-based IDL formats.
+///
+/// The protocol extractor emits `imports` edges pointing at synthetic
+/// `protocol_reference` nodes (one per import string). This pass builds a
+/// corpus-wide index of `protocol_file` nodes keyed by their source-file
+/// basename and suffix, then re-targets each synthetic `imports` edge to the
+/// real `protocol_file` node when a unique match exists. Unresolved imports
+/// are marked with an `unresolved` extra so the behavior is auditable.
+pub(crate) fn resolve_idl_imports(extractions: &mut [Extraction]) {
+    // Build an index: file basename (e.g. "common.proto") -> protocol_file node id.
+    let mut file_by_basename: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut file_by_path: BTreeMap<String, String> = BTreeMap::new();
+
+    for extraction in extractions.iter() {
+        for node in &extraction.nodes {
+            if node.extra.get("type").and_then(|v| v.as_str()) != Some("protocol_file") {
+                continue;
+            }
+            let path = std::path::Path::new(&node.source_file);
+            let basename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_owned())
+                .unwrap_or_default();
+            if !basename.is_empty() {
+                file_by_basename
+                    .entry(basename)
+                    .or_default()
+                    .insert(node.id.clone());
+            }
+            let normalized = node.source_file.replace('\\', "/");
+            file_by_path.insert(normalized, node.id.clone());
+        }
+    }
+
+    if file_by_path.is_empty() {
+        return;
+    }
+
+    for extraction in extractions.iter_mut() {
+        let mut new_edges = Vec::new();
+        for edge in extraction.edges.drain(..) {
+            if edge.relation != "imports" {
+                new_edges.push(edge);
+                continue;
+            }
+            let target_name = edge
+                .target
+                .strip_prefix("protocol_reference_")
+                .unwrap_or(&edge.target)
+                .to_owned();
+
+            let resolved = file_by_path.get(&target_name).cloned().or_else(|| {
+                file_by_basename.get(&target_name).and_then(|ids| {
+                    if ids.len() == 1 {
+                        ids.iter().next().cloned()
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            match resolved {
+                Some(real_id) => {
+                    let mut resolved_edge = edge.clone();
+                    resolved_edge.target = real_id;
+                    resolved_edge
+                        .extra
+                        .insert("resolved".into(), serde_json::Value::from(true));
+                    new_edges.push(resolved_edge);
+                }
+                None => {
+                    let mut unresolved_edge = edge.clone();
+                    unresolved_edge
+                        .extra
+                        .insert("unresolved".into(), serde_json::Value::from(true));
+                    new_edges.push(unresolved_edge);
+                }
+            }
+        }
+        extraction.edges = new_edges;
+    }
 }
 
 /// Resolve an isolated project while admitting every newly retained resolver
@@ -2443,5 +2529,160 @@ include "./aux:worker.lua"
         assert!(is_python("stubs/Model.PYI"));
         assert!(same_go_package("pkg/a.GO", "pkg/b.go"));
         assert!(same_language_family("src/a.TSX", "src/b.Js"));
+    }
+
+    // ── IDL import resolution ────────────────────────────────────────────
+
+    fn proto_file_node(source_file: &str) -> (String, graphoxide_core::Node) {
+        let stem = source_file
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(source_file);
+        let id = graphoxide_core::make_id(&[stem]);
+        let node = graphoxide_core::Node {
+            id: id.clone(),
+            label: source_file.to_owned(),
+            file_type: "code".into(),
+            source_file: source_file.to_owned(),
+            source_location: None,
+            community: None,
+            extra: std::collections::BTreeMap::from([
+                ("type".into(), "protocol_file".into()),
+                ("_origin".into(), "protocols".into()),
+            ]),
+        };
+        (id, node)
+    }
+
+    fn synthetic_imports_edge(source: &str, target_name: &str) -> graphoxide_core::Edge {
+        let target = format!("protocol_reference_{}", target_name);
+        graphoxide_core::Edge {
+            source: source.to_owned(),
+            target,
+            relation: "imports".into(),
+            confidence: graphoxide_core::Confidence::Extracted,
+            source_file: source.to_owned(),
+            extra: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn idl_imports_resolve_to_real_protocol_file_nodes() {
+        let (common_id, common_node) = proto_file_node("common.proto");
+        let (main_id, main_node) = proto_file_node("main.proto");
+
+        let common = graphoxide_core::Extraction {
+            nodes: vec![common_node],
+            edges: Vec::new(),
+            hyperedges: Vec::new(),
+        };
+        let main = graphoxide_core::Extraction {
+            nodes: vec![main_node],
+            edges: vec![synthetic_imports_edge(&main_id, "common.proto")],
+            hyperedges: Vec::new(),
+        };
+
+        let mut extractions = vec![common, main];
+        resolve_idl_imports(&mut extractions);
+
+        // The imports edge should now point at the real common.proto node.
+        let edge = &extractions[1].edges[0];
+        assert_eq!(edge.target, common_id);
+        assert_eq!(
+            edge.extra.get("resolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+        assert!(!edge.extra.contains_key("unresolved"));
+    }
+
+    #[test]
+    fn idl_imports_unresolved_when_target_not_in_corpus() {
+        let (main_id, main_node) = proto_file_node("main.proto");
+
+        let main = graphoxide_core::Extraction {
+            nodes: vec![main_node],
+            edges: vec![synthetic_imports_edge(&main_id, "missing.proto")],
+            hyperedges: Vec::new(),
+        };
+
+        let mut extractions = vec![main];
+        resolve_idl_imports(&mut extractions);
+
+        let edge = &extractions[0].edges[0];
+        assert_eq!(
+            edge.extra.get("unresolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+        assert!(!edge.extra.contains_key("resolved"));
+    }
+
+    #[test]
+    fn idl_imports_ambiguous_basename_keeps_unresolved() {
+        // Two files with the same basename "types.proto" in different dirs.
+        let (a_id, a_node) = proto_file_node("a/types.proto");
+        let (b_id, b_node) = proto_file_node("b/types.proto");
+        let (main_id, main_node) = proto_file_node("main.proto");
+
+        let a = graphoxide_core::Extraction {
+            nodes: vec![a_node],
+            edges: Vec::new(),
+            hyperedges: Vec::new(),
+        };
+        let b = graphoxide_core::Extraction {
+            nodes: vec![b_node],
+            edges: Vec::new(),
+            hyperedges: Vec::new(),
+        };
+        let main = graphoxide_core::Extraction {
+            nodes: vec![main_node],
+            edges: vec![synthetic_imports_edge(&main_id, "types.proto")],
+            hyperedges: Vec::new(),
+        };
+
+        let _ = (a_id, b_id);
+        let mut extractions = vec![a, b, main];
+        resolve_idl_imports(&mut extractions);
+
+        // Ambiguous: two files named types.proto -> unresolved.
+        let edge = &extractions[2].edges[0];
+        assert_eq!(
+            edge.extra.get("unresolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+    }
+
+    #[test]
+    fn idl_imports_exact_path_match_wins_over_basename() {
+        let (common_id, common_node) = proto_file_node("vendor/common.proto");
+        let (local_id, local_node) = proto_file_node("local/common.proto");
+        let (main_id, main_node) = proto_file_node("main.proto");
+
+        let vendor = graphoxide_core::Extraction {
+            nodes: vec![common_node],
+            edges: Vec::new(),
+            hyperedges: Vec::new(),
+        };
+        let local = graphoxide_core::Extraction {
+            nodes: vec![local_node],
+            edges: Vec::new(),
+            hyperedges: Vec::new(),
+        };
+        let main = graphoxide_core::Extraction {
+            nodes: vec![main_node],
+            // Import by full path -> should resolve to vendor/common.proto.
+            edges: vec![synthetic_imports_edge(&main_id, "vendor/common.proto")],
+            hyperedges: Vec::new(),
+        };
+
+        let _ = local_id;
+        let mut extractions = vec![vendor, local, main];
+        resolve_idl_imports(&mut extractions);
+
+        let edge = &extractions[2].edges[0];
+        assert_eq!(edge.target, common_id);
+        assert_eq!(
+            edge.extra.get("resolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
     }
 }
