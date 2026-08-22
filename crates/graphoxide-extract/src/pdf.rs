@@ -17,7 +17,15 @@ use std::{
 
 const MIB: usize = 1024 * 1024;
 const FIXED_ALLOWANCE_BYTES: usize = 64 * 1024;
-const SOURCE_SCRATCH_MULTIPLIER: usize = 16;
+// Source-proportional scratch for the PDF text parser: the source bytes
+// themselves (retained once) plus the worst-case object-table/token scratch
+// (bounded by one more source copy). Decoded streams and extracted text are
+// separate capped classes reserved out of the same allowance below, so the
+// source term is not inflated to cover them. Matches the container-backed
+// Office parser, whose compressed sources likewise do not describe peak
+// decoded scratch (the generic source x16 admission estimate does not apply
+// to this format).
+const SOURCE_SCRATCH_MULTIPLIER: usize = 2;
 const RETAINED_BYTES_PER_FACT: usize = 2 * 1024;
 const DECODE_CHUNK_BYTES: usize = 16 * 1024;
 
@@ -146,9 +154,11 @@ impl Default for PdfLimits {
 
 impl PdfLimits {
     /// Tighten PDF-specific retained/decode ceilings to one isolated parser
-    /// allowance. The generic parser plan independently performs source x16
-    /// admission and installs fact credits; this method keeps the PDF's own
-    /// scratch classes within that same exact allowance.
+    /// allowance. The PDF adapter owns this scratch proof like the
+    /// container-backed formats: a PDF's compressed stream sources do not
+    /// describe peak decoded scratch, so the generic source x16 admission
+    /// estimate does not apply and the adapter installs its own fact plan
+    /// (`ParserPlan::for_fact_limit`) from the ceiling derived here.
     pub(crate) fn for_parser_allowance(allowance_bytes: usize, source_len: usize) -> Option<Self> {
         let mut limits = Self::default();
         if source_len > limits.max_input_bytes {
@@ -600,12 +610,21 @@ fn reject_unsafe_name(name: &[u8]) -> Result<(), PdfError> {
     // Object streams and cross-reference streams are now supported; they are no
     // longer rejected at the name-lexing stage. Their structure is validated by
     // the dedicated parsers, which fail closed on malformed input.
+    //
+    // Only names that denote executable or externally reachable content are
+    // rejected here. `Prev` is *not* on this list: pages-tree nodes carry
+    // standard `/Prev` sibling references, and incremental-update detection is
+    // structural (duplicate `startxref`/`%%EOF` markers and the trailer
+    // `/Prev` check in the xref parsers). `URI` is *not* on this list either:
+    // the extractor never follows URIs and never publishes annotation action
+    // strings — only content-stream page text and the eight Info-dictionary
+    // metadata fields reach the graph, so plain link annotations cannot leak
+    // payloads.
     match name {
         b"Encrypt" => Err(PdfError::Encrypted),
-        b"Prev" => Err(PdfError::UnsupportedIncremental),
         b"JavaScript" | b"JS" | b"Launch" | b"EmbeddedFile" | b"EmbeddedFiles" | b"Filespec"
         | b"GoToR" | b"SubmitForm" | b"ImportData" | b"RichMedia" | b"XFA" | b"OpenAction"
-        | b"AA" | b"URI" => Err(PdfError::ActiveContent),
+        | b"AA" => Err(PdfError::ActiveContent),
         _ => Ok(()),
     }
 }
@@ -925,6 +944,11 @@ fn parse_xref_stream(
     if !dictionary_name_is(&dictionary, b"Type", b"XRef") {
         return Err(PdfError::UnsupportedXref);
     }
+    // A cross-reference stream `/Prev` reference marks an incrementally
+    // updated document, the same as a classic trailer `/Prev`.
+    if dictionary.contains_key(b"Prev".as_slice()) {
+        return Err(PdfError::UnsupportedIncremental);
+    }
     // Read /W (fixed-width field sizes), /Size, and optional /Index.
     let width = xref_stream_width(&dictionary)?;
     let size_value = dictionary_integer(&dictionary, b"Size")?;
@@ -1238,6 +1262,12 @@ fn parse_classic_xref(
     {
         return Err(PdfError::Malformed);
     }
+    // A trailer `/Prev` reference marks an incrementally updated document
+    // (pages-tree `/Prev` sibling references are unrelated and never appear
+    // in trailers).
+    if trailer.contains_key(b"Prev".as_slice()) {
+        return Err(PdfError::UnsupportedIncremental);
+    }
     let size = dictionary_integer(&trailer, b"Size")?;
     if size <= 0 {
         return Err(PdfError::Malformed);
@@ -1438,6 +1468,15 @@ fn parse_indirect_objects(
 
     for (index, entry) in entries.iter().enumerate() {
         check_cancelled(cancelled)?;
+        // Producers may legally list the xref stream object itself as a
+        // type-1 entry in its own table. That object starts exactly at
+        // `xref_offset` and extends to end-of-file, so the trailing span
+        // bound would reject it. Its dictionary is already captured as the
+        // trailer and its stream was decoded by `parse_xref_stream`, so skip
+        // re-parsing it.
+        if xref_object_id.is_some_and(|xref_id| xref_id.number == entry.id.number) {
+            continue;
+        }
         let span_end = entries
             .get(index + 1)
             .map_or(xref_offset, |next| next.offset);
@@ -3280,6 +3319,26 @@ mod tests {
         assert!(limits.max_total_decoded_bytes <= PdfLimits::default().max_total_decoded_bytes);
         assert!(limits.max_total_text_bytes <= PdfLimits::default().max_total_text_bytes);
         assert!(limits.max_pages.saturating_mul(2).saturating_add(1) <= limits.max_facts);
+    }
+
+    #[test]
+    fn allowance_admits_multimegabyte_sources_with_scaled_ceilings() {
+        // The PDF scratch proof (source x2 plus separately capped decoded and
+        // text classes) must admit multi-MiB documents under the 16 MiB
+        // profile allowance; the old source x16 estimate capped admissible
+        // PDFs at ~1 MiB (issue #132).
+        let limits = PdfLimits::for_parser_allowance(16 * MIB, 5 * 1024 * 1024)
+            .expect("5 MiB source admitted under the 16 MiB allowance");
+        assert!(limits.max_total_decoded_bytes < PdfLimits::default().max_total_decoded_bytes);
+        assert!(limits.max_total_decoded_bytes >= 64 * 1024);
+        assert!(limits.max_total_text_bytes < PdfLimits::default().max_total_text_bytes);
+        assert!(limits.max_total_text_bytes >= 4 * 1024);
+        assert!(limits.max_facts >= 3);
+        // A source whose x2 scratch plus fixed overhead exceeds the allowance
+        // is still rejected.
+        assert!(PdfLimits::for_parser_allowance(16 * MIB, 8 * 1024 * 1024).is_none());
+        // The static input ceiling rejects regardless of the allowance.
+        assert!(PdfLimits::for_parser_allowance(16 * MIB, 20 * 1024 * 1024).is_none());
     }
 
     #[test]
