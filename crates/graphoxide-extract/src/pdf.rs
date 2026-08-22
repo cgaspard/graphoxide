@@ -2244,6 +2244,56 @@ fn collect_tounicode_cmaps(
             },
         );
     }
+    // Reference-driven second pass: the `/Type /CMap` key is optional on CMap
+    // stream dictionaries (ISO 32000-1), and real producers omit it. Any
+    // stream referenced as a Type0 font's `/ToUnicode` must be attempted as
+    // a CMap. Streams that do not parse as CMaps are skipped so the
+    // referencing font fails closed as `UnsupportedFont`, exactly as when the
+    // CMap is absent.
+    for object in parsed.objects.values() {
+        let PdfValue::Dictionary(dict) = &object.value else {
+            continue;
+        };
+        if !dictionary_name_is(dict, b"Subtype", b"Type0") {
+            continue;
+        }
+        let Some(tounicode) = dict.get(b"ToUnicode".as_slice()) else {
+            continue;
+        };
+        let (cmap_id, _) = resolve_value(parsed, tounicode, limits)?;
+        let Some(cmap_id) = cmap_id else {
+            continue;
+        };
+        if cmaps.contains_key(&cmap_id) {
+            continue;
+        }
+        if parsed
+            .objects
+            .get(&cmap_id)
+            .is_none_or(|object| object.stream.is_none())
+        {
+            continue;
+        }
+        check_cancelled(cancelled)?;
+        let decoded = decode.stream(source, parsed, cmap_id, cancelled)?;
+        let Ok(entries) = parse_cmap_entries(decoded, limits) else {
+            // Not a CMap after all; the referencing font fails closed later.
+            continue;
+        };
+        if entries.is_empty() {
+            // A stream with no mappings is not accepted as an untagged CMap:
+            // every CID would be silently dropped from the page text.
+            continue;
+        }
+        let code_width = dominant_cmap_code_width(&entries);
+        cmaps.insert(
+            cmap_id,
+            ToUnicodeCMap {
+                code_width,
+                entries,
+            },
+        );
+    }
     Ok(cmaps)
 }
 
@@ -2301,19 +2351,23 @@ fn parse_cmap_entries(
     let mut in_range = false;
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with("beginbfchar") {
+        // Section markers conventionally carry a count prefix
+        // (`69 beginbfchar`), so match the trailing token instead of the line
+        // prefix. Mapping lines end in hex tokens and cannot collide.
+        let marker = line.rsplit(char::is_whitespace).next().unwrap_or_default();
+        if marker == "beginbfchar" {
             in_char = true;
             continue;
         }
-        if line.starts_with("endbfchar") {
+        if marker == "endbfchar" {
             in_char = false;
             continue;
         }
-        if line.starts_with("beginbfrange") {
+        if marker == "beginbfrange" {
             in_range = true;
             continue;
         }
-        if line.starts_with("endbfrange") {
+        if marker == "endbfrange" {
             in_range = false;
             continue;
         }
@@ -2377,9 +2431,15 @@ fn parse_cmap_bfrange_line(
     if span > (limits.max_container_entries_per_object as u32) {
         return Err(PdfError::TokenLimit);
     }
+    // Expanded codes must carry the same byte width as the range's source
+    // tokens (a 2-byte Identity-H range stays 2 bytes). Emitting a fixed
+    // `u32::to_be_bytes` width would skew the CMap's dominant code width and
+    // break every lookup of narrower content codes.
+    let width = lo.len().max(hi.len()).clamp(1, 4);
     let mut out = Vec::new();
     for (offset, code) in (lo_val..=hi_val).enumerate() {
-        let src = code.to_be_bytes().to_vec();
+        let bytes = code.to_be_bytes();
+        let src = bytes[4 - width..].to_vec();
         let scalar = start_val.checked_add(offset as u32);
         let ch = scalar.and_then(char::from_u32);
         if let Some(ch) = ch {
