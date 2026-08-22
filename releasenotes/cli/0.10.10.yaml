@@ -13,4 +13,5 @@ fixed:
   - Undecoded (non-Flate) PDF streams such as JPEG image XObjects are now kept inert instead of aborting the whole document; they are decoded only when actually needed.
   - Balanced content-stream dictionaries used by tagged (structured) PDFs are now skipped instead of being treated as malformed content.
   - Atomic writes to a bare-filename destination (no directory component) no longer fail with "No such file or directory"; the temp file and directory sync now target the current directory.
+  - graphoxide-core's shared dependencies (serde, serde_json, petgraph, unicode-normalization, unicode-casefold, reqwest, sha2, hex, chrono) are now declared for all targets instead of unix-only, so the Windows release builds compile.
 removed: []

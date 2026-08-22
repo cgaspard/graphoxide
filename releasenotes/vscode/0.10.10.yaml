@@ -13,4 +13,5 @@ fixed:
   - The bundled graphoxide CLI no longer aborts a whole PDF over undecoded (non-Flate) streams such as JPEG image XObjects; they are kept inert unless actually needed.
   - The bundled graphoxide CLI no longer treats balanced content-stream dictionaries from tagged (structured) PDFs as malformed content.
   - The bundled graphoxide CLI no longer fails atomic export to a bare filename with "No such file or directory".
+  - The bundled graphoxide CLI now compiles for the Windows release targets (its shared dependencies are declared for all targets instead of unix-only).
 removed: []
