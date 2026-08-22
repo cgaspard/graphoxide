@@ -17,7 +17,15 @@ use std::{
 
 const MIB: usize = 1024 * 1024;
 const FIXED_ALLOWANCE_BYTES: usize = 64 * 1024;
-const SOURCE_SCRATCH_MULTIPLIER: usize = 16;
+// Source-proportional scratch for the PDF text parser: the source bytes
+// themselves (retained once) plus the worst-case object-table/token scratch
+// (bounded by one more source copy). Decoded streams and extracted text are
+// separate capped classes reserved out of the same allowance below, so the
+// source term is not inflated to cover them. Matches the container-backed
+// Office parser, whose compressed sources likewise do not describe peak
+// decoded scratch (the generic source x16 admission estimate does not apply
+// to this format).
+const SOURCE_SCRATCH_MULTIPLIER: usize = 2;
 const RETAINED_BYTES_PER_FACT: usize = 2 * 1024;
 const DECODE_CHUNK_BYTES: usize = 16 * 1024;
 
@@ -44,6 +52,12 @@ enum PdfValue {
 enum StreamFilter {
     Raw,
     Flate,
+    /// A filter this extractor does not decode (e.g. `DCTDecode` image data).
+    /// Recording the stream is harmless — it is only rejected if a code path
+    /// actually tries to decode it (`decode_stream_bytes`), so documents that
+    /// merely *contain* undecoded streams (image XObjects, font file streams,
+    /// embedded files) still yield their text.
+    Unsupported,
 }
 
 #[derive(Debug, Clone)]
@@ -146,9 +160,11 @@ impl Default for PdfLimits {
 
 impl PdfLimits {
     /// Tighten PDF-specific retained/decode ceilings to one isolated parser
-    /// allowance. The generic parser plan independently performs source x16
-    /// admission and installs fact credits; this method keeps the PDF's own
-    /// scratch classes within that same exact allowance.
+    /// allowance. The PDF adapter owns this scratch proof like the
+    /// container-backed formats: a PDF's compressed stream sources do not
+    /// describe peak decoded scratch, so the generic source x16 admission
+    /// estimate does not apply and the adapter installs its own fact plan
+    /// (`ParserPlan::for_fact_limit`) from the ceiling derived here.
     pub(crate) fn for_parser_allowance(allowance_bytes: usize, source_len: usize) -> Option<Self> {
         let mut limits = Self::default();
         if source_len > limits.max_input_bytes {
@@ -600,12 +616,21 @@ fn reject_unsafe_name(name: &[u8]) -> Result<(), PdfError> {
     // Object streams and cross-reference streams are now supported; they are no
     // longer rejected at the name-lexing stage. Their structure is validated by
     // the dedicated parsers, which fail closed on malformed input.
+    //
+    // Only names that denote executable or externally reachable content are
+    // rejected here. `Prev` is *not* on this list: pages-tree nodes carry
+    // standard `/Prev` sibling references, and incremental-update detection is
+    // structural (duplicate `startxref`/`%%EOF` markers and the trailer
+    // `/Prev` check in the xref parsers). `URI` is *not* on this list either:
+    // the extractor never follows URIs and never publishes annotation action
+    // strings — only content-stream page text and the eight Info-dictionary
+    // metadata fields reach the graph, so plain link annotations cannot leak
+    // payloads.
     match name {
         b"Encrypt" => Err(PdfError::Encrypted),
-        b"Prev" => Err(PdfError::UnsupportedIncremental),
         b"JavaScript" | b"JS" | b"Launch" | b"EmbeddedFile" | b"EmbeddedFiles" | b"Filespec"
         | b"GoToR" | b"SubmitForm" | b"ImportData" | b"RichMedia" | b"XFA" | b"OpenAction"
-        | b"AA" | b"URI" => Err(PdfError::ActiveContent),
+        | b"AA" => Err(PdfError::ActiveContent),
         _ => Ok(()),
     }
 }
@@ -925,6 +950,11 @@ fn parse_xref_stream(
     if !dictionary_name_is(&dictionary, b"Type", b"XRef") {
         return Err(PdfError::UnsupportedXref);
     }
+    // A cross-reference stream `/Prev` reference marks an incrementally
+    // updated document, the same as a classic trailer `/Prev`.
+    if dictionary.contains_key(b"Prev".as_slice()) {
+        return Err(PdfError::UnsupportedIncremental);
+    }
     // Read /W (fixed-width field sizes), /Size, and optional /Index.
     let width = xref_stream_width(&dictionary)?;
     let size_value = dictionary_integer(&dictionary, b"Size")?;
@@ -1238,6 +1268,12 @@ fn parse_classic_xref(
     {
         return Err(PdfError::Malformed);
     }
+    // A trailer `/Prev` reference marks an incrementally updated document
+    // (pages-tree `/Prev` sibling references are unrelated and never appear
+    // in trailers).
+    if trailer.contains_key(b"Prev".as_slice()) {
+        return Err(PdfError::UnsupportedIncremental);
+    }
     let size = dictionary_integer(&trailer, b"Size")?;
     if size <= 0 {
         return Err(PdfError::Malformed);
@@ -1438,6 +1474,15 @@ fn parse_indirect_objects(
 
     for (index, entry) in entries.iter().enumerate() {
         check_cancelled(cancelled)?;
+        // Producers may legally list the xref stream object itself as a
+        // type-1 entry in its own table. That object starts exactly at
+        // `xref_offset` and extends to end-of-file, so the trailing span
+        // bound would reject it. Its dictionary is already captured as the
+        // trailer and its stream was decoded by `parse_xref_stream`, so skip
+        // re-parsing it.
+        if xref_object_id.is_some_and(|xref_id| xref_id.number == entry.id.number) {
+            continue;
+        }
         let span_end = entries
             .get(index + 1)
             .map_or(xref_offset, |next| next.offset);
@@ -1833,19 +1878,24 @@ fn stream_filter(dictionary: &BTreeMap<Vec<u8>, PdfValue>) -> Result<StreamFilte
         // consumer does not treat as the authoritative stream contents.
         return Err(PdfError::ActiveContent);
     }
-    if let Some(parameters) = dictionary.get(b"DecodeParms".as_slice())
-        && !matches!(parameters, PdfValue::Null)
+    // Filters this extractor cannot decode are recorded, not rejected: the
+    // stream may be one graphoxide never decodes (image XObject, font file,
+    // embedded file), in which case it is inert. `decode_stream_bytes` still
+    // rejects `Unsupported` whenever a code path actually consumes the bytes,
+    // so every decodable-by-us stream fails closed exactly as before.
+    if dictionary
+        .get(b"DecodeParms".as_slice())
+        .is_some_and(|parameters| !matches!(parameters, PdfValue::Null))
     {
-        // Predictors and parameterized decoding are excluded. This check
-        // occurs before any decoder observes attacker-controlled dimensions.
-        return Err(PdfError::UnsupportedFilter);
+        // Predictors and parameterized decoding are excluded.
+        return Ok(StreamFilter::Unsupported);
     }
     match dictionary.get(b"Filter".as_slice()) {
         None | Some(PdfValue::Null) => Ok(StreamFilter::Raw),
         Some(PdfValue::Name(filter)) if matches!(filter.as_slice(), b"FlateDecode" | b"Fl") => {
             Ok(StreamFilter::Flate)
         }
-        _ => Err(PdfError::UnsupportedFilter),
+        _ => Ok(StreamFilter::Unsupported),
     }
 }
 
@@ -2205,6 +2255,56 @@ fn collect_tounicode_cmaps(
             },
         );
     }
+    // Reference-driven second pass: the `/Type /CMap` key is optional on CMap
+    // stream dictionaries (ISO 32000-1), and real producers omit it. Any
+    // stream referenced as a Type0 font's `/ToUnicode` must be attempted as
+    // a CMap. Streams that do not parse as CMaps are skipped so the
+    // referencing font fails closed as `UnsupportedFont`, exactly as when the
+    // CMap is absent.
+    for object in parsed.objects.values() {
+        let PdfValue::Dictionary(dict) = &object.value else {
+            continue;
+        };
+        if !dictionary_name_is(dict, b"Subtype", b"Type0") {
+            continue;
+        }
+        let Some(tounicode) = dict.get(b"ToUnicode".as_slice()) else {
+            continue;
+        };
+        let (cmap_id, _) = resolve_value(parsed, tounicode, limits)?;
+        let Some(cmap_id) = cmap_id else {
+            continue;
+        };
+        if cmaps.contains_key(&cmap_id) {
+            continue;
+        }
+        if parsed
+            .objects
+            .get(&cmap_id)
+            .is_none_or(|object| object.stream.is_none())
+        {
+            continue;
+        }
+        check_cancelled(cancelled)?;
+        let decoded = decode.stream(source, parsed, cmap_id, cancelled)?;
+        let Ok(entries) = parse_cmap_entries(decoded, limits) else {
+            // Not a CMap after all; the referencing font fails closed later.
+            continue;
+        };
+        if entries.is_empty() {
+            // A stream with no mappings is not accepted as an untagged CMap:
+            // every CID would be silently dropped from the page text.
+            continue;
+        }
+        let code_width = dominant_cmap_code_width(&entries);
+        cmaps.insert(
+            cmap_id,
+            ToUnicodeCMap {
+                code_width,
+                entries,
+            },
+        );
+    }
     Ok(cmaps)
 }
 
@@ -2262,19 +2362,23 @@ fn parse_cmap_entries(
     let mut in_range = false;
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with("beginbfchar") {
+        // Section markers conventionally carry a count prefix
+        // (`69 beginbfchar`), so match the trailing token instead of the line
+        // prefix. Mapping lines end in hex tokens and cannot collide.
+        let marker = line.rsplit(char::is_whitespace).next().unwrap_or_default();
+        if marker == "beginbfchar" {
             in_char = true;
             continue;
         }
-        if line.starts_with("endbfchar") {
+        if marker == "endbfchar" {
             in_char = false;
             continue;
         }
-        if line.starts_with("beginbfrange") {
+        if marker == "beginbfrange" {
             in_range = true;
             continue;
         }
-        if line.starts_with("endbfrange") {
+        if marker == "endbfrange" {
             in_range = false;
             continue;
         }
@@ -2338,9 +2442,15 @@ fn parse_cmap_bfrange_line(
     if span > (limits.max_container_entries_per_object as u32) {
         return Err(PdfError::TokenLimit);
     }
+    // Expanded codes must carry the same byte width as the range's source
+    // tokens (a 2-byte Identity-H range stays 2 bytes). Emitting a fixed
+    // `u32::to_be_bytes` width would skew the CMap's dominant code width and
+    // break every lookup of narrower content codes.
+    let width = lo.len().max(hi.len()).clamp(1, 4);
     let mut out = Vec::new();
     for (offset, code) in (lo_val..=hi_val).enumerate() {
-        let src = code.to_be_bytes().to_vec();
+        let bytes = code.to_be_bytes();
+        let src = bytes[4 - width..].to_vec();
         let scalar = start_val.checked_add(offset as u32);
         let ch = scalar.and_then(char::from_u32);
         if let Some(ch) = ch {
@@ -2489,6 +2599,10 @@ fn decode_stream_bytes(
 ) -> Result<Vec<u8>, PdfError> {
     let per_stream = limits.max_stream_decoded_bytes.min(remaining);
     match filter {
+        // Every stream class the extractor consumes (page content, ToUnicode
+        // CMaps, object streams, the xref stream) passes through here, so an
+        // undecodable filter still fails closed the moment it is needed.
+        StreamFilter::Unsupported => Err(PdfError::UnsupportedFilter),
         StreamFilter::Raw => {
             if encoded.len() > per_stream {
                 return Err(PdfError::DecompressionLimit);
@@ -3241,6 +3355,26 @@ mod tests {
         assert!(limits.max_total_decoded_bytes <= PdfLimits::default().max_total_decoded_bytes);
         assert!(limits.max_total_text_bytes <= PdfLimits::default().max_total_text_bytes);
         assert!(limits.max_pages.saturating_mul(2).saturating_add(1) <= limits.max_facts);
+    }
+
+    #[test]
+    fn allowance_admits_multimegabyte_sources_with_scaled_ceilings() {
+        // The PDF scratch proof (source x2 plus separately capped decoded and
+        // text classes) must admit multi-MiB documents under the 16 MiB
+        // profile allowance; the old source x16 estimate capped admissible
+        // PDFs at ~1 MiB (issue #132).
+        let limits = PdfLimits::for_parser_allowance(16 * MIB, 5 * 1024 * 1024)
+            .expect("5 MiB source admitted under the 16 MiB allowance");
+        assert!(limits.max_total_decoded_bytes < PdfLimits::default().max_total_decoded_bytes);
+        assert!(limits.max_total_decoded_bytes >= 64 * 1024);
+        assert!(limits.max_total_text_bytes < PdfLimits::default().max_total_text_bytes);
+        assert!(limits.max_total_text_bytes >= 4 * 1024);
+        assert!(limits.max_facts >= 3);
+        // A source whose x2 scratch plus fixed overhead exceeds the allowance
+        // is still rejected.
+        assert!(PdfLimits::for_parser_allowance(16 * MIB, 8 * 1024 * 1024).is_none());
+        // The static input ceiling rejects regardless of the allowance.
+        assert!(PdfLimits::for_parser_allowance(16 * MIB, 20 * 1024 * 1024).is_none());
     }
 
     #[test]

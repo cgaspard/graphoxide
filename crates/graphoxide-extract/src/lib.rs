@@ -5607,6 +5607,98 @@ mod tests {
     }
 
     #[test]
+    fn isolated_runtime_admits_multimegabyte_pdf_sources() {
+        // Under the isolated runtime profile a multi-MiB PDF must be admitted
+        // through the PDF's own scratch proof (source x2 plus separately
+        // capped decode/text classes), not the generic source x16 estimate
+        // that capped admissible PDFs at ~1 MiB (issue #132).
+        let fixture = Fixture::new();
+        let content = b"BT /F1 12 Tf 72 720 Td (large document) Tj ET";
+        // An inert stream object pads the source past ~1.5 MiB without
+        // affecting the page text.
+        let padding_len = 1536 * 1024;
+        let objects: Vec<(u32, Vec<u8>)> = vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+            ),
+            (
+                4,
+                format!("<</Length {}>>\nstream\n{}endstream", content.len(), String::from_utf8_lossy(content)).into_bytes(),
+            ),
+            (
+                5,
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+            ),
+            (
+                6,
+                format!("<</Length {padding_len}>>\nstream\n", ).into_bytes(),
+            ),
+        ];
+        let mut source = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        let mut offsets = Vec::new();
+        for (id, body) in &objects {
+            offsets.push(source.len());
+            source.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+            source.extend_from_slice(body);
+            if *id == 6 {
+                source.extend_from_slice(&vec![0u8; padding_len]);
+                source.extend_from_slice(b"endstream\nendobj\n");
+            } else {
+                source.extend_from_slice(b"\nendobj\n");
+            }
+        }
+        let xref_offset = source.len();
+        let size = offsets.len() + 1;
+        source.extend_from_slice(format!("xref\n0 {size}\n").as_bytes());
+        source.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in &offsets {
+            source.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        source.extend_from_slice(
+            format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n")
+                .as_bytes(),
+        );
+        assert!(
+            source.len() > 1024 * 1024,
+            "fixture must exceed the old 1 MiB ceiling"
+        );
+        fs::write(fixture.root.join("large.pdf"), &source).expect("write large PDF fixture");
+
+        let runtime = runtime_config(32 * 1024 * 1024);
+        let result = super::extract_project_with_runtime(&fixture.root, runtime)
+            .expect("isolated runtime extraction");
+        assert!(
+            result.read_failures.is_empty(),
+            "{:?}",
+            result.read_failures
+        );
+        let pdf_type = |node: &graphoxide_core::Node| {
+            node.extra.get("type").and_then(serde_json::Value::as_str) == Some("pdf_document")
+        };
+        let extraction = result
+            .extractions
+            .iter()
+            .find(|extraction| extraction.nodes.iter().any(pdf_type))
+            .expect("large PDF extraction");
+        let document = extraction
+            .nodes
+            .iter()
+            .find(|node| pdf_type(node))
+            .expect("PDF document node");
+        assert_eq!(
+            document
+                .extra
+                .get("parse_status")
+                .and_then(serde_json::Value::as_str),
+            Some("complete"),
+            "multi-MiB PDF must be admitted, not rejected parser_arena_budget"
+        );
+    }
+
+    #[test]
     fn isolated_incremental_reextracts_legacy_dot_manifest_once() {
         let fixture = Fixture::new();
         fixture.write(
