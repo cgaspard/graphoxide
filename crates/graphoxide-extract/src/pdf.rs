@@ -1438,6 +1438,15 @@ fn parse_indirect_objects(
 
     for (index, entry) in entries.iter().enumerate() {
         check_cancelled(cancelled)?;
+        // Producers may legally list the xref stream object itself as a
+        // type-1 entry in its own table. That object starts exactly at
+        // `xref_offset` and extends to end-of-file, so the trailing span
+        // bound would reject it. Its dictionary is already captured as the
+        // trailer and its stream was decoded by `parse_xref_stream`, so skip
+        // re-parsing it.
+        if xref_object_id.is_some_and(|xref_id| xref_id.number == entry.id.number) {
+            continue;
+        }
         let span_end = entries
             .get(index + 1)
             .map_or(xref_offset, |next| next.offset);
