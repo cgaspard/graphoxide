@@ -642,6 +642,107 @@ fn encrypted_incremental_xref_stream_and_object_stream_forms_fail_closed() {
     );
 }
 
+// Incremental-update detection is structural (trailer/xref-stream `/Prev`
+// and duplicate `startxref`/`%%EOF` markers), never the name-lexing
+// blacklist: standard pages-tree `/Prev`/`/Next` sibling references and
+// plain `/URI` link annotations must not reject their documents (issue #131).
+
+#[test]
+fn threaded_pages_tree_prev_next_references_extract() {
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /Next 4 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /Prev 3 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>".to_vec(),
+        ),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        ),
+        content_stream_obj(6, "first page"),
+        content_stream_obj(7, "second page"),
+    ];
+    let pdf = render_classic(objects, b"");
+    let extraction = extract_source("threaded-pages-tree.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction).len(),
+        2,
+        "both linked pages must publish"
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("first page"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[1].extra.get("text"),
+        Some(&Value::from("second page"))
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn plain_uri_link_annotation_extracts_without_publishing_the_uri() {
+    let uri = "file:///Users/cgaspard/docs/camera-decision-matrix.pdf";
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] /Contents 4 0 R >>".to_vec(),
+        ),
+        content_stream_obj(4, "page with a plain link"),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        ),
+        (
+            6,
+            format!(
+                "<< /Type /Annot /Subtype /Link /Rect [72 720 200 732] /Border [0 0 0] /A << /Type /Action /S /URI /URI ({uri}) >> >>"
+            )
+            .into_bytes(),
+        ),
+    ];
+    let pdf = render_classic(objects, b"");
+    let extraction = extract_source("plain-uri-annotation.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("page with a plain link"))
+    );
+    // The extractor never follows URIs and never publishes annotation action
+    // strings: only content-stream text and Info metadata reach the graph.
+    assert_no_payload(&extraction, uri);
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn xref_stream_prev_reference_still_rejects_incremental_documents() {
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let offset = pdf.len();
+    // Two 7-byte entries for `/W [1 4 2]`: free head + the xref object.
+    let entries: [u8; 14] = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, offset as u8, 0, 0];
+    pdf.extend_from_slice(
+        b"1 0 obj\n<< /Type /XRef /Size 2 /W [1 4 2] /Prev 0 /Length 14 >>\nstream\n",
+    );
+    pdf.extend_from_slice(&entries);
+    pdf.extend_from_slice(b"endstream\nendobj\n");
+    write!(&mut pdf, "startxref\n{offset}\n%%EOF\n").expect("write footer");
+    assert_rejected("xref-stream-prev.pdf", &pdf, "pdf_incremental_unsupported");
+}
+
 #[test]
 fn pdf_whitespace_cannot_hide_duplicate_incremental_markers_inside_streams() {
     // NUL and form feed are PDF whitespace even though they are not ordinary
