@@ -9,6 +9,8 @@
   key.
 - Exporting a report to a bare filename (no directory component) no longer
   fails with "No such file or directory".
+- The bundled CLI now compiles for the Windows release targets; its shared
+  dependencies were previously declared for unix only.
 
 ## 0.10.9 — 2026-08-20
 
