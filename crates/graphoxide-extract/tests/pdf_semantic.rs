@@ -1049,6 +1049,99 @@ fn unsupported_filters_predictors_inline_images_and_corrupt_flate_fail_closed() 
 }
 
 #[test]
+fn image_xobject_with_undecodable_filter_is_inert() {
+    // Image XObjects are never decoded by the extractor; an undecodable
+    // filter on one must not reject the whole document (issue #137).
+    let content = literal_text_content(b"architecture doc");
+    let jpeg = b"\xFF\xD8\xFF\xE0fake-jpeg-bytes\xFF\xD9";
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream_body(&content, b"")),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        ),
+        (
+            6,
+            stream_body(
+                jpeg,
+                b"/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode",
+            ),
+        ),
+    ];
+    let pdf = render_classic(objects, b"");
+    let extraction = extract_source("image-xobject.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("architecture doc"))
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn image_xobject_with_decode_parms_is_inert() {
+    // Parameterized (Predictor/CCITT-style) streams are inert when the
+    // extractor never decodes them.
+    let content = literal_text_content(b"scanned doc text");
+    let objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream_body(&content, b"")),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        ),
+        (
+            6,
+            stream_body(
+                b"fake-ccitt-bytes",
+                b"/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 2 >>",
+            ),
+        ),
+    ];
+    let pdf = render_classic(objects, b"");
+    let extraction = extract_source("image-xobject-decodeparms.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("scanned doc text"))
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn content_stream_with_undecodable_filter_still_fails_closed() {
+    // The relaxation is consumption-scoped: a page content stream with an
+    // undecodable filter is still rejected, and its payload is not published.
+    let unsupported = one_page_pdf(
+        vec![stream_body(b"DCT_CONTENT_SENTINEL", b"/Filter /DCTDecode")],
+        b"",
+        b"",
+        vec![],
+    );
+    assert_no_payload(
+        &assert_rejected("dct-content.pdf", &unsupported, "pdf_filter_unsupported"),
+        "DCT_CONTENT_SENTINEL",
+    );
+}
+
+#[test]
 fn decompression_ratio_and_decoded_stream_ceilings_precede_content_publication() {
     let ratio_payload = vec![b'%'; 512 * 1024];
     let ratio_pdf = one_page_pdf(
