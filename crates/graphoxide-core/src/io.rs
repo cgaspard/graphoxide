@@ -428,12 +428,23 @@ where
     atomic_write_destination(path, write, replace)
 }
 
+/// Directory containing `path`, or `.` when `path` is a bare filename.
+///
+/// `Path::parent()` returns `Some("")` for a bare filename, and an empty path
+/// fails `fs::open` (directory sync) even though `create_dir_all` tolerates
+/// it, so the empty case must collapse to `.`.
+fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 fn atomic_write_destination<W, R>(destination: &Path, write: W, replace: R) -> anyhow::Result<()>
 where
     W: FnOnce(&mut fs::File) -> std::io::Result<()>,
     R: FnOnce(&Path, &Path) -> std::io::Result<()>,
 {
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let parent = parent_directory(destination);
     fs::create_dir_all(parent)?;
     let name = destination
         .file_name()
@@ -732,7 +743,7 @@ pub fn check_graph_file_size_cap_with(path: &Path, cap: u64) -> anyhow::Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        check_graph_file_size_cap_with, prepare_for_export, read_bytes_with_cap,
+        check_graph_file_size_cap_with, parent_directory, prepare_for_export, read_bytes_with_cap,
         read_graph_from_open_file_with_cap, read_graph_with_cap, read_json_object,
         read_json_object_from_open_file_with_cap, read_json_object_from_reader_with_cap,
     };
@@ -740,8 +751,29 @@ mod tests {
     use std::{
         fs::{self, OpenOptions},
         io::{Seek, Write},
+        path::Path,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn parent_directory_collapses_bare_filename_to_dot() {
+        // Regression: a bare filename has `parent() == Some("")`, which broke
+        // the directory sync (`open("")` -> ENOENT) after #125 added it.
+        assert_eq!(
+            parent_directory(Path::new("positional.html")),
+            Path::new(".")
+        );
+        assert_eq!(parent_directory(Path::new("graph.json")), Path::new("."));
+        // Directory components are preserved unchanged.
+        assert_eq!(
+            parent_directory(Path::new("sub/out.html")),
+            Path::new("sub")
+        );
+        assert_eq!(
+            parent_directory(Path::new("/abs/dir/out.html")),
+            Path::new("/abs/dir")
+        );
+    }
 
     #[test]
     fn export_restores_direction_and_backfills_fields() {
