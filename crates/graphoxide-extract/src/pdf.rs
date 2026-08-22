@@ -2746,6 +2746,7 @@ fn parse_content_text(
     let mut position = 0_usize;
     let mut array = None::<Vec<ContentArrayItem>>;
     let mut in_text = false;
+    let mut dict_depth = 0_usize;
     let mut operands = Vec::new();
     while skip_space_and_comments(content, position, content.len()) < content.len() {
         if budget.tokens.is_multiple_of(1_024) {
@@ -2763,6 +2764,25 @@ fn parse_content_text(
         if budget.tokens > limits.max_tokens {
             return Err(PdfError::ContentLimit);
         }
+        // Dictionaries in a content stream are operands of marked-content
+        // (BDC/BMC) or shading (sh) operators — for example the tagged-PDF
+        // sequence `/NonStruct <</MCID 0 >> BDC`. Their entries are
+        // structural metadata that text extraction does not need, so a
+        // balanced top-level dictionary is consumed without publishing any of
+        // its values or executing any operators inside it.
+        if dict_depth > 0 {
+            match token {
+                Token::DictionaryStart => {
+                    dict_depth = dict_depth.checked_add(1).ok_or(PdfError::ContentLimit)?;
+                    if dict_depth > limits.max_content_nesting {
+                        return Err(PdfError::ContentLimit);
+                    }
+                }
+                Token::DictionaryEnd => dict_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
         match token {
             Token::ArrayStart => {
                 if array.is_some() {
@@ -2774,7 +2794,8 @@ fn parse_content_text(
                 let values = array.take().ok_or(PdfError::Malformed)?;
                 push_content_operand(&mut operands, ContentOperand::Array(values), limits)?;
             }
-            Token::DictionaryStart | Token::DictionaryEnd => return Err(PdfError::ContentLimit),
+            Token::DictionaryStart => dict_depth = 1,
+            Token::DictionaryEnd => return Err(PdfError::Malformed),
             Token::String(bytes) => {
                 if let Some(values) = &mut array {
                     push_content_array_item(values, ContentArrayItem::String(bytes), limits)?;
@@ -2911,7 +2932,7 @@ fn parse_content_text(
             }
         }
     }
-    if array.is_some() || in_text || !operands.is_empty() {
+    if array.is_some() || in_text || dict_depth > 0 || !operands.is_empty() {
         return Err(PdfError::Malformed);
     }
     Ok(())
