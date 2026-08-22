@@ -479,6 +479,29 @@ fn extract_with_parser_plan(
     };
     let plan = crate::parser_budget::ParserPlan::for_source(allowance_bytes, source_bytes)
         .ok_or_else(|| anyhow::anyhow!("parser arena budget rejected semantic extraction"))?;
+    run_parser_with_plan(plan, operation)
+}
+
+/// Run the PDF adapter with the parser plan the PDF adapter itself derived.
+/// Like the container-backed formats, the PDF owns its scratch proof: a PDF's
+/// compressed stream sources do not describe peak decoded scratch, so the
+/// generic source x16 admission (`ParserPlan::for_source`) does not apply.
+/// `PdfLimits::for_parser_allowance` proves the parser's scratch classes fit
+/// the same exact allowance and derives the fact ceiling installed here.
+fn extract_pdf_with_plan(
+    plan: Option<crate::parser_budget::ParserPlan>,
+    operation: impl FnOnce() -> anyhow::Result<Extraction>,
+) -> anyhow::Result<Extraction> {
+    match plan {
+        Some(plan) => run_parser_with_plan(plan, operation),
+        None => operation(),
+    }
+}
+
+fn run_parser_with_plan(
+    plan: crate::parser_budget::ParserPlan,
+    operation: impl FnOnce() -> anyhow::Result<Extraction>,
+) -> anyhow::Result<Extraction> {
     let max_facts = plan.max_facts();
     let (result, exhausted) = crate::parser_budget::with_plan(plan, operation);
     let mut extraction = result?;
@@ -540,26 +563,26 @@ fn extract_pdf_for_spec(
     parser_allowance_bytes: Option<usize>,
     cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
 ) -> Extraction {
-    let result = extract_with_parser_plan(parser_allowance_bytes, source.len(), || {
-        let limits = match parser_allowance_bytes {
-            Some(allowance_bytes) => {
-                let Some(limits) =
-                    crate::pdf::PdfLimits::for_parser_allowance(allowance_bytes, source.len())
-                else {
-                    anyhow::ensure!(
-                        crate::parser_budget::try_reserve_facts(1),
-                        "PDF rejection root exceeded its dynamic fact allowance"
-                    );
-                    return Ok(rejected_pdf_extraction(
-                        path,
-                        source_file,
-                        "parser_arena_budget",
-                    ));
-                };
-                limits
-            }
-            None => crate::pdf::PdfLimits::default(),
-        };
+    // The PDF adapter owns its scratch proof (see `extract_pdf_with_plan`):
+    // derive the limits first, then install the fact plan derived from them.
+    let (limits, plan) = match parser_allowance_bytes {
+        Some(allowance_bytes) => {
+            let Some(limits) =
+                crate::pdf::PdfLimits::for_parser_allowance(allowance_bytes, source.len())
+            else {
+                return rejected_pdf_extraction(path, source_file, "parser_arena_budget");
+            };
+            (
+                limits,
+                Some(
+                    crate::parser_budget::ParserPlan::for_fact_limit(limits.max_facts)
+                        .expect("for_parser_allowance guarantees a positive fact ceiling"),
+                ),
+            )
+        }
+        None => (crate::pdf::PdfLimits::default(), None),
+    };
+    let result = extract_pdf_with_plan(plan, || {
         let is_cancelled = || {
             cancellation.is_some_and(graphoxide_index_runtime::RuntimeCancellation::is_cancelled)
         };
