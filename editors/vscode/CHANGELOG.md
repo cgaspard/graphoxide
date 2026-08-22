@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.10 — 2026-08-22
+
+- The bundled CLI now extracts a much wider range of real-world PDFs that were
+  previously rejected or under-extracted: cross-reference streams with
+  self-referencing entries, multi-megabyte files, tagged (structured) PDFs,
+  JPEG/image streams, and ToUnicode CMaps that omit the optional `/Type /CMap`
+  key.
+- Exporting a report to a bare filename (no directory component) no longer
+  fails with "No such file or directory".
+
 ## 0.10.9 — 2026-08-20
 
 - The in-editor "N graph connections" CodeLens pills are now off by default so

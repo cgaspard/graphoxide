@@ -1,0 +1,16 @@
+version: 0.10.10
+date: 2026-08-22
+highlights:
+  - The bundled CLI extracts a much wider range of real-world PDFs: cross-reference streams with self-referencing entries, multi-megabyte files, tagged (structured) PDFs, JPEG/image streams, and ToUnicode CMaps that omit the optional /Type key are all handled now.
+  - Exporting a report to a bare filename (no directory component) no longer fails.
+added: []
+changed: []
+fixed:
+  - The bundled graphoxide CLI no longer rejects PDF documents whose cross-reference stream contains an entry for the xref stream object itself.
+  - The bundled graphoxide CLI no longer rejects legitimate PDFs from overly broad active-content (unsafe-name) matching; rejection is scoped to executable names.
+  - The bundled graphoxide CLI now indexes multi-megabyte PDFs instead of rejecting them for exceeding a fixed parser arena limit.
+  - The bundled graphoxide CLI now decodes text from ToUnicode CMaps that omit the optional /Type /CMap key, including counted section headers and bfrange ranges at the correct code width.
+  - The bundled graphoxide CLI no longer aborts a whole PDF over undecoded (non-Flate) streams such as JPEG image XObjects; they are kept inert unless actually needed.
+  - The bundled graphoxide CLI no longer treats balanced content-stream dictionaries from tagged (structured) PDFs as malformed content.
+  - The bundled graphoxide CLI no longer fails atomic export to a bare filename with "No such file or directory".
+removed: []
