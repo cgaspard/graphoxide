@@ -1,0 +1,11 @@
+version: 0.11.0
+date: 2026-08-24
+highlights:
+  - Graphoxide now indexes SQLite databases directly: it parses the file format (header, B-tree pages, sqlite_master) read-only and emits tables, views, indexes, triggers, columns, and foreign-key relationships without opening a database or executing SQL.
+  - Recursive archive indexing now decodes four more codecs: BZIP2, XZ, Zstandard, and LZ4. Files and directories nested inside these single-stream archives are extracted under the same bounded, deterministic, fail-closed limits as ZIP/GZIP/TAR.
+added:
+  - Read-only SQLite schema indexing: .db, .sqlite, and .sqlite3 files are parsed as a bounded file format (no SQL execution, no row reads) and produce file/table/view/index/trigger nodes, contains ownership edges, defines column edges (primary-key columns carry a primary_key context), and references edges for foreign keys.
+  - Bounded BZIP2, XZ, Zstandard, and LZ4 archive decoding: these single-stream codecs are now dispatched recursively, so members nested inside them (for example a .dot or .tar inside a .tar.bz2) are extracted under the existing nesting, member-size, decoded-byte, expansion-ratio, scratch, and cancellation ceilings.
+changed:
+  - The bzip2 dependency now uses the bzip2-sys backend (the C reference bzip2, MIT/Apache-2.0) instead of the default pure-Rust backend, so dependency-license generation resolves cleanly.
+removed: []

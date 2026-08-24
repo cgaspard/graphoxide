@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.0 — 2026-08-24
+
+- The bundled CLI now indexes SQLite databases. It reads the file format
+  directly — without opening a database or executing SQL — and shows tables,
+  views, indexes, triggers, columns, and foreign-key relationships in your
+  graph alongside source code.
+- Recursive archive indexing now decodes four more codecs: BZIP2, XZ,
+  Zstandard, and LZ4. Files and directories nested inside these archives (for
+  example a diagram or a `.tar` inside a `.tar.bz2`) are extracted under the
+  same bounded, deterministic limits as ZIP, GZIP, and TAR.
+
 ## 0.10.10 — 2026-08-22
 
 - The bundled CLI now extracts a much wider range of real-world PDFs that were
