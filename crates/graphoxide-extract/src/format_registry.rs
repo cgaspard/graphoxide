@@ -380,8 +380,8 @@ impl FormatSpec {
 
     pub fn adapter(self) -> ByteAdapterKind {
         match self.id.as_str() {
-            "source-code" | "terraform-hcl" | "markdown" | "plain-text" | "package-manifest"
-            | "mcp-configuration" => ByteAdapterKind::Engine,
+            "source-code" | "terraform-hcl" | "sqlite" | "markdown" | "plain-text"
+            | "package-manifest" | "mcp-configuration" => ByteAdapterKind::Engine,
             "json"
             | "json-variants"
             | "json5"
@@ -540,6 +540,7 @@ const JSON_VARIANT_EXTENSIONS: &[&str] = &[
 const JSON5_EXTENSIONS: &[&str] = &["json5"];
 const JSON_LINES_EXTENSIONS: &[&str] = &["jsonl", "ndjson"];
 const TERRAFORM_EXTENSIONS: &[&str] = &["tf", "tfvars", "hcl"];
+const SQLITE_EXTENSIONS: &[&str] = &["db", "sqlite", "sqlite3"];
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdx", "qmd", "skill"];
 const PLAIN_TEXT_EXTENSIONS: &[&str] = &["txt"];
 const MARKUP_DOCUMENT_EXTENSIONS: &[&str] = &[
@@ -781,6 +782,20 @@ const FORMAT_SPECS: &[FormatSpec] = &[
     format_spec!(
         "terraform-hcl",
         TERRAFORM_EXTENSIONS,
+        &[],
+        &[],
+        FormatCapability::StructuralPartial,
+        SchemaRequirement::NotRequired,
+        TEXT_LIMITS,
+        Some(FileType::Code),
+        true,
+        false,
+        false,
+        false,
+    ),
+    format_spec!(
+        "sqlite",
+        SQLITE_EXTENSIONS,
         &[],
         &[],
         FormatCapability::StructuralPartial,

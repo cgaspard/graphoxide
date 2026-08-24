@@ -60,12 +60,20 @@ impl LanguageExtractor {
     }
 }
 
-static LANGUAGE_EXTRACTORS: &[LanguageExtractor] = &[LanguageExtractor::with_bytes(
-    "terraform",
-    &["tf", "tfvars", "hcl"],
-    crate::terraform::extract_terraform,
-    crate::terraform::extract_terraform_bytes,
-)];
+static LANGUAGE_EXTRACTORS: &[LanguageExtractor] = &[
+    LanguageExtractor::with_bytes(
+        "terraform",
+        &["tf", "tfvars", "hcl"],
+        crate::terraform::extract_terraform,
+        crate::terraform::extract_terraform_bytes,
+    ),
+    LanguageExtractor::with_bytes(
+        "sqlite",
+        &["db", "sqlite", "sqlite3"],
+        crate::sqlite::extract_sqlite,
+        crate::sqlite::extract_sqlite_bytes,
+    ),
+];
 
 pub fn registered_extractors() -> &'static [LanguageExtractor] {
     LANGUAGE_EXTRACTORS
