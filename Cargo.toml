@@ -52,7 +52,10 @@ hex = "0.4"
 # Archive codec decoders. BZIP2/XZ/7-Zip are the C reference implementations
 # (Apache-2.0 OR MIT / public domain); zstd is BSD-3-Clause; lz4_flex is a
 # pure-Rust reimplementation of the public-domain LZ4 format (MIT OR Apache-2.0).
-bzip2 = "0.6"
+# bzip2 uses the `bzip2-sys` backend (MIT/Apache-2.0) rather than the default
+# `libbz2-rs-sys`, whose `bzip2-1.0.6` license field is not an SPDX identifier
+# that cargo-about can resolve for THIRD_PARTY_LICENSES.html generation.
+bzip2 = { version = "0.6", default-features = false, features = ["bzip2-sys"] }
 xz2 = "0.1"
 zstd = "0.13"
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "frame"] }
