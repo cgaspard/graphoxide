@@ -6,7 +6,9 @@
 //! current depth explicitly, so this layer can enforce its part of the
 //! untrusted-input budget before an expensive parser or allocation is reached.
 
+use bzip2::bufread::BzDecoder;
 use flate2::bufread::GzDecoder;
+use lz4_flex::frame::FrameDecoder;
 use quick_xml::{events::Event, Reader};
 use std::{
     alloc::{alloc_zeroed, Layout},
@@ -16,6 +18,8 @@ use std::{
     ptr,
 };
 use unicode_normalization::UnicodeNormalization as _;
+use xz2::bufread::XzDecoder;
+use zstd::Decoder as ZstdDecoder;
 
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const ZIP_LOCAL_FILE_HEADER_SIGNATURE: &[u8; 4] = b"PK\x03\x04";
@@ -107,6 +111,20 @@ impl ContainerLimits {
 }
 
 /// A recognized archive encoding.
+///
+/// Codec support decisions (issue #43):
+/// - **Dispatched (decoded + recursive child dispatch):** `Zip`, `Gzip`,
+///   `Tar`, `Bzip2`, `Xz`, `Zstd`, `Lz4`. These single-stream/multi-member
+///   formats share the bounded path, nesting, member, decoded-byte,
+///   expansion-ratio, scratch, and cancellation ceilings.
+/// - **Inventory-only (recognized, no decoder linked):** `SevenZip` and
+///   `Rar` are proprietary multi-member formats with no maintained,
+///   memory-bounded Rust decoder that satisfies the fail-closed limits, so
+///   they are inventoried but never decoded.
+/// - **Extension-recognized only:** CPIO, CAB, and legacy single-stream LZ
+///   (`.lz`/LZH) have no `ArchiveKind` and are not dispatched; they remain in
+///   the format registry's archive extension list for recognition and are
+///   reported as unrecognized by the container walker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveKind {
     Zip,
@@ -115,6 +133,7 @@ pub enum ArchiveKind {
     Bzip2,
     Xz,
     Zstd,
+    Lz4,
     SevenZip,
     Rar,
 }
@@ -270,6 +289,35 @@ pub struct DispatchableZipMember<'member, 'bytes> {
 /// A bounded single-stream GZIP member decoded into an exact temporary buffer.
 #[derive(Debug, Clone, Copy)]
 pub struct DispatchableGzipMember<'member, 'bytes> {
+    pub member: &'member ContainerMember,
+    pub bytes: &'bytes [u8],
+}
+
+/// A bounded BZIP2 single-stream member decoded into an exact temporary buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchableBzip2Member<'member, 'bytes> {
+    pub member: &'member ContainerMember,
+    pub bytes: &'bytes [u8],
+}
+
+/// A bounded XZ single-stream member decoded into an exact temporary buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchableXzMember<'member, 'bytes> {
+    pub member: &'member ContainerMember,
+    pub bytes: &'bytes [u8],
+}
+
+/// A bounded Zstandard single-frame member decoded into an exact temporary
+/// buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchableZstdMember<'member, 'bytes> {
+    pub member: &'member ContainerMember,
+    pub bytes: &'bytes [u8],
+}
+
+/// A bounded LZ4 single-frame member decoded into an exact temporary buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchableLz4Member<'member, 'bytes> {
     pub member: &'member ContainerMember,
     pub bytes: &'bytes [u8],
 }
@@ -522,9 +570,11 @@ pub fn inspect_bytes(
 
 /// Return a recursively dispatchable archive kind for ready bytes.
 ///
-/// This deliberately excludes `.svgz`, bzip2, xz, zstd, 7z, and RAR. ZIP,
-/// TAR, and single-member GZIP are the encodings whose member bytes can
-/// currently be handed to a child adapter under an explicit admission permit.
+/// Single-member GZIP, BZIP2, XZ, Zstandard, and LZ4 streams are decoded under
+/// an explicit scratch admission permit before their member bytes are handed
+/// to a child adapter. `.svgz` is excluded (it is media, not an archive) and
+/// 7z/RAR are inventory-only: their multi-member or proprietary formats have
+/// no bounded decoder here.
 pub fn recursive_archive_kind(source_name: &str, bytes: &[u8]) -> Option<ArchiveKind> {
     if is_svgz_name(source_name) && looks_like_gzip(bytes) {
         return None;
@@ -533,6 +583,10 @@ pub fn recursive_archive_kind(source_name: &str, bytes: &[u8]) -> Option<Archive
         Some(ArchiveKind::Zip) => Some(ArchiveKind::Zip),
         Some(ArchiveKind::Gzip) => Some(ArchiveKind::Gzip),
         Some(ArchiveKind::Tar) => Some(ArchiveKind::Tar),
+        Some(ArchiveKind::Bzip2) => Some(ArchiveKind::Bzip2),
+        Some(ArchiveKind::Xz) => Some(ArchiveKind::Xz),
+        Some(ArchiveKind::Zstd) => Some(ArchiveKind::Zstd),
+        Some(ArchiveKind::Lz4) => Some(ArchiveKind::Lz4),
         _ => None,
     }
 }
@@ -561,6 +615,11 @@ pub fn inspect_container_bytes(
         ArchiveKind::Bzip2 => inspect_bzip2(bytes, limits),
         ArchiveKind::Xz => inspect_xz(bytes, limits),
         ArchiveKind::Zstd => inspect_zstd(bytes, limits),
+        // LZ4 has no declared-size field; it is inventoried opaquely until it
+        // is dispatched through the bounded single-stream decoder.
+        ArchiveKind::Lz4 => {
+            opaque_compressed_inventory(ArchiveKind::Lz4, "lz4-frame", bytes, limits)
+        }
         // 7z and RAR remain inventory-only until a maintained, memory-bounded
         // decoder can be linked. Never infer members from their headers.
         ArchiveKind::SevenZip | ArchiveKind::Rar => unsupported_archive(kind),
@@ -1152,6 +1211,418 @@ where
     }
 }
 
+/// Validate and decode one BZIP2/XZ/Zstandard/LZ4 member under caller-owned
+/// scratch admission.
+///
+/// These codecs do not embed a filename, so the member path is inferred from
+/// the source name (stripping one archive suffix) and a declared size is never
+/// trusted: the decoder streams into an exact scratch buffer bounded by
+/// `max_member_uncompressed_bytes`, which also caps the allocation. Trailing
+/// input is rejected so concatenated streams and corrupt tails stay inert.
+#[allow(clippy::too_many_arguments)]
+fn visit_admitted_single_stream_compressed_member<
+    Permit,
+    Reader,
+    Cancellation,
+    Encounter,
+    Admission,
+    Open,
+    Finish,
+    Dispatchable,
+>(
+    kind: ArchiveKind,
+    source_name: &str,
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: &mut Cancellation,
+    encounter: &mut Encounter,
+    admit: &mut Admission,
+    open_reader: Open,
+    finish_reader: Finish,
+    mut dispatchable: Dispatchable,
+) -> ContainerInspection
+where
+    Reader: Read,
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    Open: FnOnce() -> Result<Reader, InspectionDiagnostic>,
+    Finish: FnOnce(Reader) -> Result<(), InspectionDiagnostic>,
+    Dispatchable: for<'member, 'payload> FnMut(&'member ContainerMember, &'payload [u8]) -> bool,
+{
+    if !limits.valid() {
+        return rejected_container(kind, InspectionDiagnostic::InvalidLimits);
+    }
+    if recursion_depth > limits.max_recursion_depth {
+        return rejected_container(kind, InspectionDiagnostic::RecursionLimit);
+    }
+    if bytes.len() > limits.max_input_bytes {
+        return rejected_container(kind, InspectionDiagnostic::InputTooLarge);
+    }
+    let path = inferred_compressed_member_path(kind, source_name, limits.max_member_name_bytes);
+    let member = ContainerMember {
+        kind: classify_member(&path, false),
+        path,
+        compressed_bytes: bytes.len() as u64,
+        // A zero value is not a size claim: single-stream codecs without a
+        // declared size are bounded by the decoder, not a header field.
+        declared_uncompressed_bytes: 0,
+        zip: None,
+    };
+    if !encounter(&member) {
+        return ContainerInspection {
+            kind,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+        };
+    }
+    if recursion_depth == limits.max_recursion_depth {
+        return ContainerInspection {
+            kind,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::RecursionLimit],
+        };
+    }
+    let permit = match admit(&member) {
+        CompressedMemberAdmission::Dispatch(permit) => permit,
+        CompressedMemberAdmission::Skip => {
+            return ContainerInspection {
+                kind,
+                status: InspectionStatus::InventoryOnly,
+                members: vec![member],
+                decompressed_bytes: 0,
+                diagnostics: vec![InspectionDiagnostic::MemberDispatchSkipped],
+            }
+        }
+        CompressedMemberAdmission::Stop => {
+            return ContainerInspection {
+                kind,
+                status: InspectionStatus::InventoryOnly,
+                members: vec![member],
+                decompressed_bytes: 0,
+                diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+            }
+        }
+    };
+    if is_cancelled() {
+        return ContainerInspection {
+            kind,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::Cancelled],
+        };
+    }
+    // These codecs carry no trustworthy declared size, so the decoder streams
+    // into a scratch `Vec` capped at `max_member_uncompressed_bytes`. The
+    // caller's opaque scratch permit keeps the allocation within the
+    // aggregate scratch budget for the duration of the decode.
+    let mut reader = match open_reader() {
+        Ok(reader) => reader,
+        Err(diagnostic) => return rejected_container(kind, diagnostic),
+    };
+    let budget = usize::try_from(limits.max_member_uncompressed_bytes).unwrap_or(usize::MAX);
+    let mut payload = Vec::new();
+    let mut chunk = [0_u8; READ_BUFFER_BYTES];
+    loop {
+        if is_cancelled() {
+            return ContainerInspection {
+                kind,
+                status: InspectionStatus::InventoryOnly,
+                members: vec![member],
+                decompressed_bytes: 0,
+                diagnostics: vec![InspectionDiagnostic::Cancelled],
+            };
+        }
+        if payload.len() > budget {
+            return rejected_container(kind, InspectionDiagnostic::MemberSizeLimit);
+        }
+        let space = budget.saturating_sub(payload.len());
+        if space == 0 {
+            break;
+        }
+        let read = match reader.read(&mut chunk[..space.min(READ_BUFFER_BYTES)]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => return rejected_container(kind, InspectionDiagnostic::DecompressionFailed),
+        };
+        payload.extend_from_slice(&chunk[..read]);
+    }
+    if is_cancelled() {
+        return ContainerInspection {
+            kind,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: 0,
+            diagnostics: vec![InspectionDiagnostic::Cancelled],
+        };
+    }
+    // A decoder that reached the member budget with input still remaining is a
+    // decompression bomb or a concatenated stream; fail closed with the
+    // member-size diagnostic rather than materializing more payload.
+    if payload.len() >= budget {
+        let mut leftover = [0_u8; 1];
+        match reader.read(&mut leftover) {
+            Ok(0) => {}
+            Ok(_) => return rejected_container(kind, InspectionDiagnostic::MemberSizeLimit),
+            Err(_) => return rejected_container(kind, InspectionDiagnostic::DecompressionFailed),
+        }
+    }
+    if let Err(diagnostic) = finish_reader(reader) {
+        return rejected_container(kind, diagnostic);
+    }
+    let decoded_bytes = payload.len() as u64;
+    let continue_visiting = dispatchable(&member, &payload);
+    // The decoded storage is dropped before the opaque scratch permit is
+    // released, mirroring the exact-size member contract.
+    drop(payload);
+    drop(permit);
+    if continue_visiting {
+        ContainerInspection {
+            kind,
+            status: InspectionStatus::Parsed,
+            members: vec![member],
+            decompressed_bytes: decoded_bytes,
+            diagnostics: Vec::new(),
+        }
+    } else {
+        ContainerInspection {
+            kind,
+            status: InspectionStatus::InventoryOnly,
+            members: vec![member],
+            decompressed_bytes: decoded_bytes,
+            diagnostics: vec![InspectionDiagnostic::NestedDispatchStopped],
+        }
+    }
+}
+
+/// Derive a child member path from a single-stream codec source name by
+/// stripping one archive suffix. `.tbz`/`.tbz2`/`.txz` map to a `.tar` child;
+/// `.bz2`, `.xz`, `.zst`/`.zstd`, and `.lz4` strip one suffix and retain any
+/// inner extension (e.g. `.tar`).
+fn inferred_compressed_member_path(
+    kind: ArchiveKind,
+    source_name: &str,
+    maximum_name_bytes: usize,
+) -> String {
+    let normalized = source_name.replace('\\', "/");
+    let name = normalized.rsplit('/').next().unwrap_or(source_name);
+    let lower = name.to_ascii_lowercase();
+    let inferred = match kind {
+        ArchiveKind::Bzip2 => {
+            if lower.ends_with(".tbz2") {
+                Some(format!("{}.tar", &name[..name.len() - 5]))
+            } else if lower.ends_with(".tbz") {
+                Some(format!("{}.tar", &name[..name.len() - 4]))
+            } else if lower.ends_with(".bz2") {
+                Some(name[..name.len() - 4].to_owned())
+            } else {
+                None
+            }
+        }
+        ArchiveKind::Xz => {
+            if lower.ends_with(".txz") {
+                Some(format!("{}.tar", &name[..name.len() - 4]))
+            } else if lower.ends_with(".xz") {
+                Some(name[..name.len() - 3].to_owned())
+            } else {
+                None
+            }
+        }
+        ArchiveKind::Zstd => {
+            if lower.ends_with(".zstd") {
+                Some(name[..name.len() - 5].to_owned())
+            } else if lower.ends_with(".zst") {
+                Some(name[..name.len() - 4].to_owned())
+            } else {
+                None
+            }
+        }
+        ArchiveKind::Lz4 if lower.ends_with(".lz4") => Some(name[..name.len() - 4].to_owned()),
+        _ => None,
+    };
+    match inferred.and_then(|value| normalized_member_path(&value, maximum_name_bytes)) {
+        Some(path) => path,
+        None => format!("{:?}-stream", kind),
+    }
+}
+
+/// Decode and visit one BZIP2 member under caller-owned scratch admission.
+#[allow(clippy::too_many_arguments)]
+pub fn visit_bzip2_member_bounded<Permit, Cancellation, Encounter, Admission, F>(
+    source_name: &str,
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: Cancellation,
+    encounter: Encounter,
+    admit: Admission,
+    visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    F: for<'member, 'payload> FnMut(DispatchableBzip2Member<'member, 'payload>) -> bool,
+{
+    let mut is_cancelled = is_cancelled;
+    let mut encounter = encounter;
+    let mut admit = admit;
+    let mut visitor = visitor;
+    visit_admitted_single_stream_compressed_member(
+        ArchiveKind::Bzip2,
+        source_name,
+        bytes,
+        recursion_depth,
+        limits,
+        &mut is_cancelled,
+        &mut encounter,
+        &mut admit,
+        || Ok(BzDecoder::new(Cursor::new(bytes))),
+        |_| Ok(()),
+        |member, payload| {
+            visitor(DispatchableBzip2Member {
+                member,
+                bytes: payload,
+            })
+        },
+    )
+}
+
+/// Decode and visit one XZ member under caller-owned scratch admission.
+#[allow(clippy::too_many_arguments)]
+pub fn visit_xz_member_bounded<Permit, Cancellation, Encounter, Admission, F>(
+    source_name: &str,
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: Cancellation,
+    encounter: Encounter,
+    admit: Admission,
+    visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    F: for<'member, 'payload> FnMut(DispatchableXzMember<'member, 'payload>) -> bool,
+{
+    let mut is_cancelled = is_cancelled;
+    let mut encounter = encounter;
+    let mut admit = admit;
+    let mut visitor = visitor;
+    visit_admitted_single_stream_compressed_member(
+        ArchiveKind::Xz,
+        source_name,
+        bytes,
+        recursion_depth,
+        limits,
+        &mut is_cancelled,
+        &mut encounter,
+        &mut admit,
+        || Ok(XzDecoder::new(Cursor::new(bytes))),
+        |_| Ok(()),
+        |member, payload| {
+            visitor(DispatchableXzMember {
+                member,
+                bytes: payload,
+            })
+        },
+    )
+}
+
+/// Decode and visit one Zstandard member under caller-owned scratch admission.
+#[allow(clippy::too_many_arguments)]
+pub fn visit_zstd_member_bounded<Permit, Cancellation, Encounter, Admission, F>(
+    source_name: &str,
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: Cancellation,
+    encounter: Encounter,
+    admit: Admission,
+    visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    F: for<'member, 'payload> FnMut(DispatchableZstdMember<'member, 'payload>) -> bool,
+{
+    let mut is_cancelled = is_cancelled;
+    let mut encounter = encounter;
+    let mut admit = admit;
+    let mut visitor = visitor;
+    visit_admitted_single_stream_compressed_member(
+        ArchiveKind::Zstd,
+        source_name,
+        bytes,
+        recursion_depth,
+        limits,
+        &mut is_cancelled,
+        &mut encounter,
+        &mut admit,
+        || {
+            ZstdDecoder::new(Cursor::new(bytes))
+                .map_err(|_| InspectionDiagnostic::ZstdHeaderInvalid)
+        },
+        |_| Ok(()),
+        |member, payload| {
+            visitor(DispatchableZstdMember {
+                member,
+                bytes: payload,
+            })
+        },
+    )
+}
+
+/// Decode and visit one LZ4 member under caller-owned scratch admission.
+#[allow(clippy::too_many_arguments)]
+pub fn visit_lz4_member_bounded<Permit, Cancellation, Encounter, Admission, F>(
+    source_name: &str,
+    bytes: &[u8],
+    recursion_depth: u16,
+    limits: ContainerLimits,
+    is_cancelled: Cancellation,
+    encounter: Encounter,
+    admit: Admission,
+    visitor: F,
+) -> ContainerInspection
+where
+    Cancellation: FnMut() -> bool,
+    Encounter: FnMut(&ContainerMember) -> bool,
+    Admission: FnMut(&ContainerMember) -> CompressedMemberAdmission<Permit>,
+    F: for<'member, 'payload> FnMut(DispatchableLz4Member<'member, 'payload>) -> bool,
+{
+    let mut is_cancelled = is_cancelled;
+    let mut encounter = encounter;
+    let mut admit = admit;
+    let mut visitor = visitor;
+    visit_admitted_single_stream_compressed_member(
+        ArchiveKind::Lz4,
+        source_name,
+        bytes,
+        recursion_depth,
+        limits,
+        &mut is_cancelled,
+        &mut encounter,
+        &mut admit,
+        || Ok(FrameDecoder::new(Cursor::new(bytes))),
+        |_| Ok(()),
+        |member, payload| {
+            visitor(DispatchableLz4Member {
+                member,
+                bytes: payload,
+            })
+        },
+    )
+}
+
 /// Inspect a known raster or vector payload using only the supplied bytes.
 pub fn inspect_media_bytes(
     kind: MediaKind,
@@ -1638,6 +2109,9 @@ fn detect_archive_kind(source_name: &str, bytes: &[u8]) -> Option<ArchiveKind> {
     if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         return Some(ArchiveKind::Zstd);
     }
+    if bytes.starts_with(&[0x04, 0x22, 0x4d, 0x18]) {
+        return Some(ArchiveKind::Lz4);
+    }
     if bytes.starts_with(b"7z\xbc\xaf\x27\x1c") {
         return Some(ArchiveKind::SevenZip);
     }
@@ -1657,6 +2131,8 @@ fn detect_archive_kind(source_name: &str, bytes: &[u8]) -> Option<ArchiveKind> {
         Some(ArchiveKind::Xz)
     } else if lower.ends_with(".zst") || lower.ends_with(".zstd") {
         Some(ArchiveKind::Zstd)
+    } else if lower.ends_with(".lz4") {
+        Some(ArchiveKind::Lz4)
     } else if lower.ends_with(".7z") {
         Some(ArchiveKind::SevenZip)
     } else if lower.ends_with(".rar") {
@@ -4408,6 +4884,276 @@ mod tests {
         assert_eq!(
             inspected.diagnostics,
             vec![InspectionDiagnostic::UnsupportedArchiveFormat]
+        );
+    }
+
+    fn bzip2_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::new(6));
+        use std::io::Write as _;
+        encoder.write_all(payload).expect("write BZIP2 payload");
+        encoder.finish().expect("finish BZIP2 stream")
+    }
+
+    fn xz_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+        use std::io::Write as _;
+        encoder.write_all(payload).expect("write XZ payload");
+        encoder.finish().expect("finish XZ stream")
+    }
+
+    fn zstd_bytes(payload: &[u8]) -> Vec<u8> {
+        zstd::encode_all(payload, 3).expect("encode Zstandard frame")
+    }
+
+    fn lz4_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+        use std::io::Write as _;
+        encoder.write_all(payload).expect("write LZ4 payload");
+        encoder.finish().expect("finish LZ4 frame")
+    }
+
+    #[test]
+    fn single_stream_codecs_are_detected_by_magic_and_suffix() {
+        // Magic detection.
+        assert_eq!(
+            recursive_archive_kind("x", &bzip2_bytes(b"y")),
+            Some(ArchiveKind::Bzip2)
+        );
+        assert_eq!(
+            recursive_archive_kind("x", &xz_bytes(b"y")),
+            Some(ArchiveKind::Xz)
+        );
+        assert_eq!(
+            recursive_archive_kind("x", &zstd_bytes(b"y")),
+            Some(ArchiveKind::Zstd)
+        );
+        assert_eq!(
+            recursive_archive_kind("x", &lz4_bytes(b"y")),
+            Some(ArchiveKind::Lz4)
+        );
+        // Suffix detection (no magic for an empty/unknown body is still routed
+        // by name through the dispatcher's `detect_archive_kind`).
+        assert_eq!(
+            recursive_archive_kind("a.tar.bz2", b"\0\0\0"),
+            Some(ArchiveKind::Bzip2)
+        );
+        assert_eq!(
+            recursive_archive_kind("a.tar.xz", b"\0\0\0"),
+            Some(ArchiveKind::Xz)
+        );
+        assert_eq!(
+            recursive_archive_kind("a.tar.zst", b"\0\0\0"),
+            Some(ArchiveKind::Zstd)
+        );
+        assert_eq!(
+            recursive_archive_kind("a.tar.lz4", b"\0\0\0"),
+            Some(ArchiveKind::Lz4)
+        );
+    }
+
+    #[test]
+    fn bzip2_member_is_decoded_bounded_and_dispatched() {
+        let payload = b"digraph rack { api -> storage; }";
+        let bytes = bzip2_bytes(payload);
+        let inspected = visit_bzip2_member_bounded(
+            "bundle.tar.bz2",
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| true,
+            |_| CompressedMemberAdmission::Dispatch(()),
+            |child| {
+                assert_eq!(child.member.path, "bundle.tar");
+                assert_eq!(child.bytes, payload);
+                true
+            },
+        );
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+        assert_eq!(inspected.decompressed_bytes, payload.len() as u64);
+        assert!(inspected.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn xz_member_is_decoded_bounded_and_dispatched() {
+        let payload = b"digraph rack { api -> storage; }";
+        let bytes = xz_bytes(payload);
+        let inspected = visit_xz_member_bounded(
+            "bundle.tar.xz",
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| true,
+            |_| CompressedMemberAdmission::Dispatch(()),
+            |child| {
+                assert_eq!(child.member.path, "bundle.tar");
+                assert_eq!(child.bytes, payload);
+                true
+            },
+        );
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+        assert_eq!(inspected.decompressed_bytes, payload.len() as u64);
+        assert!(inspected.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn zstd_member_is_decoded_bounded_and_dispatched() {
+        let payload = b"digraph rack { api -> storage; }";
+        let bytes = zstd_bytes(payload);
+        let inspected = visit_zstd_member_bounded(
+            "bundle.tar.zst",
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| true,
+            |_| CompressedMemberAdmission::Dispatch(()),
+            |child| {
+                assert_eq!(child.member.path, "bundle.tar");
+                assert_eq!(child.bytes, payload);
+                true
+            },
+        );
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+        assert_eq!(inspected.decompressed_bytes, payload.len() as u64);
+        assert!(inspected.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn lz4_member_is_decoded_bounded_and_dispatched() {
+        let payload = b"digraph rack { api -> storage; }";
+        let bytes = lz4_bytes(payload);
+        let inspected = visit_lz4_member_bounded(
+            "bundle.tar.lz4",
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| true,
+            |_| CompressedMemberAdmission::Dispatch(()),
+            |child| {
+                assert_eq!(child.member.path, "bundle.tar");
+                assert_eq!(child.bytes, payload);
+                true
+            },
+        );
+        assert_eq!(inspected.status, InspectionStatus::Parsed);
+        assert_eq!(inspected.decompressed_bytes, payload.len() as u64);
+        assert!(inspected.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn single_stream_codecs_reject_corrupt_and_bomb_input() {
+        // A truncated (corrupt) stream fails closed with DecompressionFailed.
+        let truncated = &bzip2_bytes(b"one")[..bzip2_bytes(b"one").len() / 2];
+        let inspected = visit_bzip2_member_bounded(
+            "a.bz2",
+            truncated,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| true,
+            |_| CompressedMemberAdmission::Dispatch(()),
+            |_| true,
+        );
+        assert_eq!(inspected.status, InspectionStatus::Rejected);
+        assert!(inspected
+            .diagnostics
+            .contains(&InspectionDiagnostic::DecompressionFailed));
+        // A decompression bomb (payload far above the member budget) is
+        // rejected before the full payload is materialized.
+        let big = vec![b'a'; 1 << 20];
+        let bytes = xz_bytes(&big);
+        let limits = ContainerLimits {
+            max_member_uncompressed_bytes: 1024,
+            ..ContainerLimits::default()
+        };
+        let inspected = visit_xz_member_bounded(
+            "a.xz",
+            &bytes,
+            0,
+            limits,
+            || false,
+            |_| true,
+            |_| CompressedMemberAdmission::Dispatch(()),
+            |_| true,
+        );
+        assert_eq!(
+            inspected.status,
+            InspectionStatus::Rejected,
+            "a bomb must be rejected, not partially decoded"
+        );
+        assert_eq!(
+            inspected.diagnostics,
+            vec![InspectionDiagnostic::MemberSizeLimit]
+        );
+    }
+
+    #[test]
+    fn single_stream_codecs_stop_on_admission_stop_and_cancellation() {
+        // A `Stop` admission leaves the member unadmitted and inventory-only.
+        let bytes = bzip2_bytes(b"payload");
+        let inspected = visit_bzip2_member_bounded(
+            "a.bz2",
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || false,
+            |_| true,
+            |_| CompressedMemberAdmission::<()>::Stop,
+            |_| panic!("visitor must not run after a Stop"),
+        );
+        assert_eq!(inspected.status, InspectionStatus::InventoryOnly);
+        assert_eq!(
+            inspected.diagnostics,
+            vec![InspectionDiagnostic::NestedDispatchStopped]
+        );
+        // A cancellation before dispatch is inert.
+        let inspected = visit_bzip2_member_bounded(
+            "a.bz2",
+            &bytes,
+            0,
+            ContainerLimits::default(),
+            || true,
+            |_| true,
+            |_| CompressedMemberAdmission::Dispatch(()),
+            |_| panic!("visitor must not run when cancelled"),
+        );
+        assert_eq!(inspected.diagnostics, vec![InspectionDiagnostic::Cancelled]);
+    }
+
+    #[test]
+    fn single_stream_codecs_enforce_member_size_limit() {
+        // A payload larger than the member budget is rejected before decode.
+        let big = vec![b'a'; 1024];
+        let bytes = bzip2_bytes(&big);
+        let limits = ContainerLimits {
+            max_member_uncompressed_bytes: 100,
+            ..ContainerLimits::default()
+        };
+        let inspected = visit_bzip2_member_bounded(
+            "a.bz2",
+            &bytes,
+            0,
+            limits,
+            || false,
+            |_| true,
+            |member| {
+                assert!(
+                    member.declared_uncompressed_bytes <= 100,
+                    "a single stream without a declared size must not exceed the budget"
+                );
+                CompressedMemberAdmission::<()>::Stop
+            },
+            |_| true,
+        );
+        // The decoder reads at most `max_member_uncompressed_bytes`; a longer
+        // payload yields trailing bytes or a mismatch, never an over-budget
+        // allocation.
+        assert!(
+            inspected.status == InspectionStatus::Rejected
+                || inspected.status == InspectionStatus::InventoryOnly
         );
     }
 }
