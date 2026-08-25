@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints.rust]
+# `cfg(loom)` is set by `cargo loom` to build the SPSC queue's Loom model tests
+# (issue #52). Declare it so the non-loom build does not warn about an
+# unexpected cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+
 [dependencies]
 blake3 = "1"
 crc32fast = "1"
@@ -20,3 +26,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = "3"
+# Loom model-checks the lock-free SPSC queue's memory-ordering and ownership
+# invariants across producer/consumer interleavings (issue #52). It is a
+# dev-dependency only; production builds use `std` atomics via `StdSpscAtomic`.
+loom = "0.7"
