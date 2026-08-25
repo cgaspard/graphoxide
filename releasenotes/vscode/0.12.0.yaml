@@ -1,0 +1,11 @@
+version: 0.12.0
+date: 2026-08-25
+highlights:
+  - The bundled CLI now links IDL and schema type relationships across files: field references in GraphQL, Protobuf, Thrift, and other text-based IDLs resolve to the real declared types, so cross-file type/service relationships appear in your graph.
+  - IDL import/include edges now resolve to the actual imported schema file.
+added:
+  - The bundled graphoxide CLI now resolves cross-file protocol type references: a field's non-builtin type (previously a dangling placeholder) is linked to the real declared type node when that type exists in the project, preferring the same IDL format and never guessing on ambiguous names.
+  - The bundled graphoxide CLI now resolves IDL import/include edges to the real imported schema file node, so dependencies between schema files are visible in the graph.
+changed:
+  - The bundled graphoxide CLI now keeps re-targeted type and import references stable through graph construction, so the resolved relationships are not reverted to placeholders.
+removed: []

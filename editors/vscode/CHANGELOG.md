@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.0 — 2026-08-25
+
+- The bundled CLI now links IDL and schema type relationships across files:
+  field references in GraphQL, Protobuf, Thrift, and other text-based IDLs
+  resolve to the real declared types, so cross-file type/service relationships
+  appear in the graph instead of dangling placeholders.
+- IDL import/include edges (for example a Protobuf `import "common.proto"`)
+  now resolve to the actual imported schema file.
+
 ## 0.11.0 — 2026-08-24
 
 - The bundled CLI now indexes SQLite databases. It reads the file format

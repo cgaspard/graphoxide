@@ -1,0 +1,11 @@
+version: 0.12.0
+date: 2026-08-25
+highlights:
+  - IDL and schema type relationships are now linked across files: field references in GraphQL, Protobuf, Thrift, and other text-based IDLs resolve to the real declared type nodes instead of dangling placeholders, so the graph shows genuine cross-file type/service relationships.
+  - IDL import/include edges (for example a Protobuf `import "common.proto"`) now resolve to the actual imported file node rather than a synthetic reference placeholder.
+added:
+  - Cross-file protocol type reference resolution: a field's non-builtin type reference (previously emitted as a synthetic `protocol_reference_<Type>` placeholder) is re-targeted to the real declared type node when that type exists in the corpus. Resolution prefers the same protocol format (a GraphQL `User` never silently resolves to a Thrift `User`), falls back to a format-agnostic match only when unambiguous, matches case-insensitively, and marks absent or ambiguous references `unresolved` for audit instead of guessing.
+  - Cross-file IDL import/include edges now re-target to the real imported file node (Protobuf, Thrift, and related text-based IDL formats), so the graph shows the actual dependency between schema files.
+changed:
+  - Protocol edges now keep their directional target consistent with the resolved endpoint, so graph construction no longer silently reverts re-targeted type and import references back to placeholders.
+removed: []
