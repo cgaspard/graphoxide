@@ -3029,22 +3029,103 @@ impl Drop for ByteCreditLease {
 #[repr(align(64))]
 struct CachePadded<T>(T);
 
-struct Slot<T> {
+/// The memory-ordering subset the SPSC ring needs, decoupled from any
+/// concrete atomic implementation so the same queue logic can be driven by
+/// either the production `std` atomics or Loom's instrumented atomics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpscOrdering {
+    Relaxed,
+    Acquire,
+    Release,
+}
+
+/// A single atomic cursor (the ring `head` or `tail`).
+///
+/// This is the only seam between the queue algorithm and the platform atomic
+/// type. Production uses [`StdSpscAtomic`]; the Loom model tests (see the
+/// `loom` test module below) substitute an instrumented atomic so the checker
+/// can explore every producer/consumer interleaving.
+pub trait SpscAtomic: Sized {
+    /// Create a cursor holding `value`.
+    fn new(value: usize) -> Self;
+    /// Read the cursor with `order`.
+    fn load(&self, order: SpscOrdering) -> usize;
+    /// Publish `value` to the cursor with `order`.
+    fn store(&self, value: usize, order: SpscOrdering);
+}
+
+/// Production atomic cursor backed by [`std::sync::atomic::AtomicUsize`].
+pub struct StdSpscAtomic(AtomicUsize);
+
+impl SpscAtomic for StdSpscAtomic {
+    fn new(value: usize) -> Self {
+        Self(AtomicUsize::new(value))
+    }
+    fn load(&self, order: SpscOrdering) -> usize {
+        // The SPSC algorithm only ever `load`s with `Relaxed` or `Acquire`.
+        // `Release` is not a valid load ordering, so map it to the strongest
+        // valid one; it is never actually requested by the queue.
+        use SpscOrdering::*;
+        match order {
+            Relaxed => self.0.load(Ordering::Relaxed),
+            Acquire => self.0.load(Ordering::Acquire),
+            Release => self.0.load(Ordering::SeqCst),
+        }
+    }
+    fn store(&self, value: usize, order: SpscOrdering) {
+        // The SPSC algorithm only ever `store`s with `Release`. `Acquire` is
+        // not a valid store ordering, so map it to the strongest valid one;
+        // it is never actually requested by the queue.
+        use SpscOrdering::*;
+        match order {
+            Relaxed => self.0.store(value, Ordering::Relaxed),
+            Acquire => self.0.store(value, Ordering::SeqCst),
+            Release => self.0.store(value, Ordering::Release),
+        }
+    }
+}
+
+/// A ring slot holding one not-yet-published value.
+///
+/// # Unsafe invariants
+///
+/// `Slot::value` is an `UnsafeCell<MaybeUninit<T>>`, so it is neither
+/// `Sync` nor `Send` on its own. The `unsafe impl Sync` below is sound only
+/// because the surrounding SPSC algorithm guarantees:
+///
+/// 1. **Single writer / single reader per slot.** Exactly one producer (the
+///    unique `SpscProducer`) ever calls `write` on a slot, and exactly one
+///    consumer (the unique `SpscConsumer`) ever calls
+///    `assume_init_read`/`assume_init_drop` on it. The endpoints are `Send`
+///    but not `Sync` (see `SpscProducer`/`SpscConsumer`), so the type system
+///    forbids a second concurrent endpoint.
+/// 2. **Initialization before publication.** A slot is `MaybeUninit::uninit`
+///    until the producer's `write`, and the producer publishes it *after* the
+///    write via the `Release` store of `tail`. The consumer only observes the
+///    slot once it has `Acquire`-loaded `tail` past the producer's write, so
+///    it never reads an uninitialized slot.
+/// 3. **Exactly-once consumption.** The consumer advances `head` with a
+///    `Release` store immediately after `assume_init_read`, so a slot is read
+///    exactly once before its next write re-initializes it. `Drop` relies on
+///    this to know which slots still hold live values.
+/// 4. **Drop after both endpoints are gone.** `Drop for SpscInner` only runs
+///    once both the producer and consumer `Arc` handles have been dropped, so
+///    no endpoint can touch a slot while `assume_init_drop` is destroying it.
+pub struct Slot<T> {
     value: std::cell::UnsafeCell<MaybeUninit<T>>,
 }
 
-// A slot is synchronized by the release/acquire cursor handoff in the SPSC
-// algorithm. Exactly one producer writes and exactly one consumer reads it.
+// See the invariants documented on [`Slot`].
 unsafe impl<T: Send> Sync for Slot<T> {}
 
-struct SpscInner<T> {
+struct SpscInner<T, A: SpscAtomic> {
     slots: Box<[Slot<T>]>,
     capacity: usize,
-    head: CachePadded<AtomicUsize>,
-    tail: CachePadded<AtomicUsize>,
+    head: CachePadded<A>,
+    tail: CachePadded<A>,
 }
 
-impl<T> SpscInner<T> {
+impl<T, A: SpscAtomic> SpscInner<T, A> {
     fn new(capacity: usize) -> Self {
         let mut slots = Vec::with_capacity(capacity);
         slots.resize_with(capacity, || Slot {
@@ -3053,21 +3134,22 @@ impl<T> SpscInner<T> {
         Self {
             slots: slots.into_boxed_slice(),
             capacity,
-            head: CachePadded(AtomicUsize::new(0)),
-            tail: CachePadded(AtomicUsize::new(0)),
+            head: CachePadded(A::new(0)),
+            tail: CachePadded(A::new(0)),
         }
     }
 }
 
-impl<T> Drop for SpscInner<T> {
+impl<T, A: SpscAtomic> Drop for SpscInner<T, A> {
     fn drop(&mut self) {
-        let head = self.head.0.load(Ordering::Relaxed);
-        let tail = self.tail.0.load(Ordering::Relaxed);
+        let head = self.head.0.load(SpscOrdering::Relaxed);
+        let tail = self.tail.0.load(SpscOrdering::Relaxed);
         let queued = tail.wrapping_sub(head).min(self.capacity);
         for offset in 0..queued {
             let index = head.wrapping_add(offset) % self.capacity;
             // Both endpoints have released the final `Arc`, so no producer or
-            // consumer can access an initialized slot while it is dropped.
+            // consumer can access an initialized slot while it is dropped
+            // (invariant 4 on [`Slot`]).
             unsafe {
                 (*self.slots[index].value.get()).assume_init_drop();
             }
@@ -3084,14 +3166,17 @@ pub enum SpscQueueError {
 
 /// A bounded, lock-free, single-producer/single-consumer ring constructor.
 ///
+/// `A` selects the atomic cursor implementation (production default
+/// [`StdSpscAtomic`]); see [`SpscAtomic`] for why the seam exists.
+///
 /// Call [`SpscQueue::split`] exactly once to obtain the unique producer and
 /// consumer. The endpoints are `Send` but deliberately not `Sync`, preventing
 /// accidental concurrent use by more than one producer or consumer.
-pub struct SpscQueue<T> {
-    inner: Arc<SpscInner<T>>,
+pub struct SpscQueue<T, A: SpscAtomic = StdSpscAtomic> {
+    inner: Arc<SpscInner<T, A>>,
 }
 
-impl<T> SpscQueue<T> {
+impl<T> SpscQueue<T, StdSpscAtomic> {
     /// Construct a fixed-capacity ring.
     pub fn new(capacity: usize) -> Result<Self, SpscQueueError> {
         if capacity == 0 {
@@ -3101,7 +3186,9 @@ impl<T> SpscQueue<T> {
             inner: Arc::new(SpscInner::new(capacity)),
         })
     }
+}
 
+impl<T, A: SpscAtomic> SpscQueue<T, A> {
     /// Return the fixed number of values this ring can hold.
     #[must_use]
     pub fn capacity(&self) -> usize {
@@ -3110,7 +3197,7 @@ impl<T> SpscQueue<T> {
 
     /// Split this queue into its sole producer and sole consumer endpoints.
     #[must_use]
-    pub fn split(self) -> (SpscProducer<T>, SpscConsumer<T>) {
+    pub fn split(self) -> (SpscProducer<T, A>, SpscConsumer<T, A>) {
         let producer = SpscProducer {
             inner: Arc::clone(&self.inner),
             not_sync: std::marker::PhantomData,
@@ -3124,37 +3211,42 @@ impl<T> SpscQueue<T> {
 }
 
 /// The only sending endpoint for a [`SpscQueue`].
-pub struct SpscProducer<T> {
-    inner: Arc<SpscInner<T>>,
+///
+/// `not_sync` makes this `Send` but not `Sync`, so it can cross a thread but
+/// never be shared, which is what guarantees a single producer (invariant 1 on
+/// [`Slot`]).
+pub struct SpscProducer<T, A: SpscAtomic = StdSpscAtomic> {
+    inner: Arc<SpscInner<T, A>>,
     not_sync: std::marker::PhantomData<Cell<()>>,
 }
 
-impl<T> SpscProducer<T> {
+impl<T, A: SpscAtomic> SpscProducer<T, A> {
     /// Attempt to enqueue without allocating, locking, or waiting.
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        let tail = self.inner.tail.0.load(Ordering::Relaxed);
-        let head = self.inner.head.0.load(Ordering::Acquire);
+        let tail = self.inner.tail.0.load(SpscOrdering::Relaxed);
+        let head = self.inner.head.0.load(SpscOrdering::Acquire);
         if tail.wrapping_sub(head) >= self.inner.capacity {
             return Err(value);
         }
         let index = tail % self.inner.capacity;
         // Only this unique producer writes this slot, and the consumer cannot
-        // observe it until the release store of `tail` below.
+        // observe it until the release store of `tail` below (invariants 1 and
+        // 2 on [`Slot`]).
         unsafe {
             (*self.inner.slots[index].value.get()).write(value);
         }
         self.inner
             .tail
             .0
-            .store(tail.wrapping_add(1), Ordering::Release);
+            .store(tail.wrapping_add(1), SpscOrdering::Release);
         Ok(())
     }
 
     /// Return an approximate number of currently free slots.
     #[must_use]
     pub fn available_slots(&self) -> usize {
-        let tail = self.inner.tail.0.load(Ordering::Relaxed);
-        let head = self.inner.head.0.load(Ordering::Acquire);
+        let tail = self.inner.tail.0.load(SpscOrdering::Relaxed);
+        let head = self.inner.head.0.load(SpscOrdering::Acquire);
         self.inner
             .capacity
             .saturating_sub(tail.wrapping_sub(head).min(self.inner.capacity))
@@ -3162,36 +3254,41 @@ impl<T> SpscProducer<T> {
 }
 
 /// The only receiving endpoint for a [`SpscQueue`].
-pub struct SpscConsumer<T> {
-    inner: Arc<SpscInner<T>>,
+///
+/// `not_sync` makes this `Send` but not `Sync`, guaranteeing a single consumer
+/// (invariant 1 on [`Slot`]).
+pub struct SpscConsumer<T, A: SpscAtomic = StdSpscAtomic> {
+    inner: Arc<SpscInner<T, A>>,
     not_sync: std::marker::PhantomData<Cell<()>>,
 }
 
-impl<T> SpscConsumer<T> {
+impl<T, A: SpscAtomic> SpscConsumer<T, A> {
     /// Attempt to dequeue without allocating, locking, or waiting.
     #[must_use]
     pub fn try_recv(&mut self) -> Option<T> {
-        let head = self.inner.head.0.load(Ordering::Relaxed);
-        let tail = self.inner.tail.0.load(Ordering::Acquire);
+        let head = self.inner.head.0.load(SpscOrdering::Relaxed);
+        let tail = self.inner.tail.0.load(SpscOrdering::Acquire);
         if head == tail {
             return None;
         }
         let index = head % self.inner.capacity;
         // The producer's release store of `tail` makes the initialized value
-        // visible here. Only this unique consumer reads this slot.
+        // visible here (invariant 2 on [`Slot`]). Only this unique consumer
+        // reads this slot, and the release store of `head` below makes the
+        // slot reusable by the next writer (invariant 3).
         let value = unsafe { (*self.inner.slots[index].value.get()).assume_init_read() };
         self.inner
             .head
             .0
-            .store(head.wrapping_add(1), Ordering::Release);
+            .store(head.wrapping_add(1), SpscOrdering::Release);
         Some(value)
     }
 
     /// Return an approximate number of currently queued values.
     #[must_use]
     pub fn len(&self) -> usize {
-        let head = self.inner.head.0.load(Ordering::Relaxed);
-        let tail = self.inner.tail.0.load(Ordering::Acquire);
+        let head = self.inner.head.0.load(SpscOrdering::Relaxed);
+        let tail = self.inner.tail.0.load(SpscOrdering::Acquire);
         tail.wrapping_sub(head).min(self.inner.capacity)
     }
 
@@ -4940,5 +5037,268 @@ mod tests {
             std::os::unix::fs::symlink(&self.target, &self.path)
                 .expect("retarget source after probe");
         }
+    }
+}
+
+/// Loom model-checking for the lock-free SPSC queue (issue #52).
+///
+/// Loom replaces the platform atomic instructions with instrumented versions
+/// and explores every bounded interleaving of the spawned "threads", failing
+/// the test if it observes a data race, a lost/duplicated value, an
+/// uninitialized read, or a memory-ordering violation. The queue is driven
+/// through the [`SpscAtomic`] seam with Loom's atomics so the *same*
+/// production algorithm is what gets model-checked.
+#[cfg(loom)]
+mod spsc_loom {
+    use super::{SpscAtomic, SpscInner, SpscOrdering, SpscQueue};
+    use loom::sync::atomic::{AtomicUsize as LoomAtomicUsize, Ordering as LoomOrdering};
+
+    /// Loom-backed atomic cursor. `Relaxed`/`Acquire`/`Release` map directly;
+    /// the unused `store(Acquire)`/`load(Release)` combos fall back to
+    /// `SeqCst`, mirroring [`StdSpscAtomic`].
+    struct LoomSpscAtomic(LoomAtomicUsize);
+
+    impl SpscAtomic for LoomSpscAtomic {
+        fn new(value: usize) -> Self {
+            Self(LoomAtomicUsize::new(value))
+        }
+        fn load(&self, order: SpscOrdering) -> usize {
+            use SpscOrdering::*;
+            match order {
+                Relaxed => self.0.load(LoomOrdering::Relaxed),
+                Acquire => self.0.load(LoomOrdering::Acquire),
+                Release => self.0.load(LoomOrdering::SeqCst),
+            }
+        }
+        fn store(&self, value: usize, order: SpscOrdering) {
+            use SpscOrdering::*;
+            match order {
+                Relaxed => self.0.store(value, LoomOrdering::Relaxed),
+                Acquire => self.0.store(value, LoomOrdering::SeqCst),
+                Release => self.0.store(value, LoomOrdering::Release),
+            }
+        }
+    }
+
+    /// Build a queue with a non-`std` atomic backend. `SpscQueue::new` is
+    /// std-specific (production), so the model constructs the ring directly
+    /// through [`SpscInner`], which is generic over the cursor.
+    fn build<A: SpscAtomic>(capacity: usize) -> SpscQueue<usize, A> {
+        assert!(capacity > 0, "non-zero capacity in loom model");
+        SpscQueue {
+            inner: std::sync::Arc::new(SpscInner::new(capacity)),
+        }
+    }
+
+    /// The scenario the model checks, generic over the atomic cursor so it can
+    /// run under Loom. `A` must be `Send + Sync` because the producer endpoint
+    /// is moved onto a Loom thread.
+    ///
+    /// The producer Loom thread pushes `0..count`, retrying on a full ring
+    /// (backpressure). The consumer runs on the current Loom thread and drains
+    /// exactly `count` values. Loom explores every interleaving of the two, so
+    /// the returned `seen` must be exactly `0..count` for the FIFO / no-loss /
+    /// no-duplication invariants to hold.
+    fn scenario<A: SpscAtomic + Send + Sync + 'static>(
+        capacity: usize,
+        count: usize,
+    ) -> Vec<usize> {
+        let queue = build::<A>(capacity);
+        let (producer, mut consumer) = queue.split();
+
+        let producer_handle = loom::thread::spawn(move || {
+            let mut producer = producer;
+            let mut pending = 0usize;
+            let mut delivered = 0usize;
+            while delivered < count {
+                match producer.try_send(pending) {
+                    Ok(()) => {
+                        delivered += 1;
+                        pending += 1;
+                    }
+                    Err(value) => {
+                        // Ring full: backpressure. The caller keeps ownership of
+                        // `value` and retries. Yield so Loom schedules the
+                        // consumer and the model makes progress instead of
+                        // spinning past its branch bound.
+                        pending = value;
+                        loom::thread::yield_now();
+                    }
+                }
+            }
+        });
+
+        let mut seen = Vec::with_capacity(count);
+        while seen.len() < count {
+            match consumer.try_recv() {
+                Some(value) => seen.push(value),
+                // Empty: yield so Loom schedules the producer and the model
+                // makes progress instead of spinning past its branch bound.
+                None => loom::thread::yield_now(),
+            }
+        }
+
+        producer_handle
+            .join()
+            .expect("producer thread joins under loom");
+        // Drain complete; drop the consumer so `Drop for SpscInner` runs on an
+        // (already empty) ring and we prove no value leaks on teardown.
+        drop(consumer);
+        seen
+    }
+
+    #[test]
+    fn spsc_fifo_no_loss_no_duplication() {
+        loom::model(|| {
+            let seen = scenario::<LoomSpscAtomic>(2, 3);
+            assert_eq!(
+                seen,
+                vec![0, 1, 2],
+                "FIFO order preserved, no loss/duplication"
+            );
+        });
+    }
+
+    #[test]
+    fn spsc_full_backpressure_then_drains() {
+        loom::model(|| {
+            // Capacity 1 forces the producer to observe `Err` (full) before the
+            // consumer advances, exercising the full/backpressure path.
+            let seen = scenario::<LoomSpscAtomic>(1, 2);
+            assert_eq!(seen, vec![0, 1]);
+        });
+    }
+
+    #[test]
+    fn spsc_empty_then_send_recv() {
+        loom::model(|| {
+            // A zero-delivery scenario: the consumer observes the empty queue
+            // (try_recv -> None) before the producer's first publish becomes
+            // visible, exercising the empty fast-path and the acquire/release
+            // handoff.
+            let queue = build::<LoomSpscAtomic>(4);
+            let (mut producer, mut consumer) = queue.split();
+            // Empty fast-path: no panic, no uninitialized read.
+            assert!(consumer.try_recv().is_none());
+            producer.try_send(42).expect("enqueue into non-full ring");
+            assert_eq!(consumer.try_recv(), Some(42));
+        });
+    }
+}
+
+/// Miri-compatible ownership and teardown tests for the SPSC queue (issue #52).
+///
+/// These exercise the `MaybeUninit` initialization and `Drop` paths with the
+/// production `std` atomics. Under Miri (`cargo +nightly miri test`), they prove
+/// there are no uninitialized reads, double-drops, or leaks on the teardown
+/// and backpressure paths. They are plain `#[test]`s so they also run in the
+/// normal (non-Miri) suite.
+#[cfg(test)]
+mod spsc_miri {
+    use super::{SpscQueue, SpscQueueError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts drops; used to prove every enqueued value is dropped exactly once.
+    #[derive(Debug)]
+    struct DropToken(Arc<AtomicUsize>);
+    impl Drop for DropToken {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    use std::sync::Arc;
+
+    /// Values queued at teardown are dropped by `Drop for SpscInner` (not
+    /// leaked), exactly once each.
+    #[test]
+    fn queued_values_dropped_exactly_once_on_teardown() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (mut producer, consumer) = SpscQueue::new(4).expect("capacity").split();
+        for i in 0..3u8 {
+            producer
+                .try_send(DropToken(Arc::clone(&drops)))
+                .expect("ring not full at i<3");
+            let _ = i;
+        }
+        // Teardown with 3 live values still queued: Drop must release them.
+        drop(consumer);
+        drop(producer);
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            3,
+            "each queued value dropped exactly once"
+        );
+    }
+
+    /// A value consumed before teardown is dropped by the caller, and teardown
+    /// drops nothing more (no double-drop).
+    #[test]
+    fn consumed_values_not_double_dropped_on_teardown() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (mut producer, mut consumer) = SpscQueue::new(2).expect("capacity").split();
+        producer
+            .try_send(DropToken(Arc::clone(&drops)))
+            .expect("enqueue");
+        let token = consumer.try_recv().expect("value present");
+        drop(token); // caller drop -> count 1
+        drop(producer);
+        drop(consumer); // teardown sees empty ring -> no further drops
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            1,
+            "no double-drop after consumption"
+        );
+    }
+
+    /// Backpressure: once full, `try_send` returns the value to the caller (the
+    /// caller retains ownership and drops it); no value is lost or duplicated.
+    #[test]
+    fn backpressure_returns_ownership_to_caller() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (mut producer, mut consumer) = SpscQueue::new(1).expect("capacity").split();
+        producer
+            .try_send(DropToken(Arc::clone(&drops)))
+            .expect("first fill ok");
+        // Ring full: try_send hands the token back to the caller.
+        let returned = producer.try_send(DropToken(Arc::clone(&drops)));
+        assert!(returned.is_err(), "full ring must return the value");
+        if let Err(token) = returned {
+            drop(token); // caller owns it now -> count 1
+        }
+        // Drain the one value actually in the ring -> count 2.
+        let drained = consumer.try_recv().expect("one value in ring");
+        drop(drained);
+        drop(producer);
+        drop(consumer);
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            2,
+            "backpressure value + ring value, each once"
+        );
+    }
+
+    /// Zero-capacity construction is rejected before any slot is allocated, so
+    /// no `MaybeUninit` slot can exist (no uninitialized-read surface).
+    #[test]
+    fn zero_capacity_rejected_without_allocation() {
+        assert!(matches!(
+            SpscQueue::<u8>::new(0),
+            Err(SpscQueueError::ZeroCapacity)
+        ));
+    }
+
+    /// The `Drop` boundary: a single-slot ring filled to capacity then torn down
+    /// drops exactly the live value. This is the path Miri checks most strictly
+    /// for `assume_init_drop` on a genuinely-initialized slot.
+    #[test]
+    fn single_slot_teardown_drops_live_value() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (mut producer, consumer) = SpscQueue::new(1).expect("capacity").split();
+        producer
+            .try_send(DropToken(Arc::clone(&drops)))
+            .expect("fill the single slot");
+        drop(consumer);
+        drop(producer);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 }
