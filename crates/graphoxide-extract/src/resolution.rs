@@ -156,6 +156,7 @@ pub fn resolve_with_root(extractions: &mut [Extraction], root: &std::path::Path)
     crate::csharp::resolve_types(extractions);
     crate::pascal::resolve_inherited_calls(extractions);
     resolve_idl_imports(extractions);
+    resolve_protocol_type_references(extractions);
 }
 
 /// Resolve cross-file IDL import/include edges for Protobuf, Thrift, and
@@ -224,7 +225,15 @@ pub(crate) fn resolve_idl_imports(extractions: &mut [Extraction]) {
             match resolved {
                 Some(real_id) => {
                     let mut resolved_edge = edge.clone();
-                    resolved_edge.target = real_id;
+                    resolved_edge.target = real_id.clone();
+                    // Protocol import edges carry their directional target in the
+                    // `_tgt` extra (see `Edge::true_target`); the graph build
+                    // resolves endpoints through that, so re-target it too.
+                    if resolved_edge.extra.contains_key("_tgt") {
+                        resolved_edge
+                            .extra
+                            .insert("_tgt".into(), serde_json::Value::from(real_id));
+                    }
                     resolved_edge
                         .extra
                         .insert("resolved".into(), serde_json::Value::from(true));
@@ -241,6 +250,167 @@ pub(crate) fn resolve_idl_imports(extractions: &mut [Extraction]) {
         }
         extraction.edges = new_edges;
     }
+}
+
+/// Protocol node kinds that declare a named type referenceable from a field.
+const PROTOCOL_TYPE_KINDS: &[&str] = &[
+    "type",
+    "message",
+    "struct",
+    "record",
+    "table",
+    "union",
+    "interface",
+    "input",
+    "enum",
+    "service",
+    "container",
+    "list",
+];
+
+/// Resolve cross-file protocol *type* references for text-based IDL formats.
+///
+/// The protocol extractor emits each field's non-builtin type as a `references`
+/// edge to a synthetic `protocol_reference_<Type>` placeholder node. When that
+/// type is actually declared elsewhere in the corpus (another file, or another
+/// scope of the same file), the placeholder is re-targeted to the real type
+/// node so the graph shows the genuine cross-file type/service relationship
+/// instead of a dangling reference.
+///
+/// Resolution is deterministic and conservative:
+/// - A candidate must be a declared type node (`extra.type` in
+///   [`PROTOCOL_TYPE_KINDS`]) whose label matches the referenced name.
+/// - The preferred candidate is in the same protocol format as the referencing
+///   extraction; a format-agnostic candidate is used only when no same-format
+///   candidate exists, so an unqualified name never silently crosses families.
+/// - A qualified name (`pkg.Type` / `namespace.Type`) first tries the full
+///   name, then its final segment.
+/// - Ambiguous (more than one candidate) or absent references are left with an
+///   `unresolved` marker so the behavior stays auditable.
+pub(crate) fn resolve_protocol_type_references(extractions: &mut [Extraction]) {
+    // Index declared type nodes by (format, label) and by label alone.
+    let mut by_format_label: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut by_label: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Per extraction index: its protocol format, so we can prefer same-format.
+    let mut extraction_format: Vec<Option<String>> = Vec::with_capacity(extractions.len());
+
+    for extraction in extractions.iter() {
+        // The protocol format is read from the first declared type node; an
+        // empty string means "no format recorded", which disables the
+        // same-format preference for this extraction.
+        let mut format: Option<String> = None;
+        for node in &extraction.nodes {
+            let kind = node.extra.get("type").and_then(|v| v.as_str());
+            let is_type = kind.is_some_and(|k| PROTOCOL_TYPE_KINDS.contains(&k));
+            if is_type {
+                if format.is_none() {
+                    format = node
+                        .extra
+                        .get("protocol_format")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                }
+                // The reference placeholder IDs are normalized (lowercased) by
+                // `make_id`, so the index must be keyed by the same normalized
+                // form of the type label or the names will never align.
+                let label = normalize_id(&node.label);
+                if label.is_empty() {
+                    continue;
+                }
+                if let Some(fmt) = format.as_deref()
+                    && !fmt.is_empty()
+                {
+                    by_format_label
+                        .entry((fmt.to_owned(), label.clone()))
+                        .or_default()
+                        .insert(node.id.clone());
+                }
+                by_label.entry(label).or_default().insert(node.id.clone());
+            }
+        }
+        extraction_format.push(format);
+    }
+
+    // No early return: even when the corpus declares no types, references are
+    // still walked so that absent targets are marked `unresolved` for audit.
+    for (index, extraction) in extractions.iter_mut().enumerate() {
+        let source_format = extraction_format[index].clone();
+        let mut new_edges = Vec::new();
+        for edge in extraction.edges.drain(..) {
+            if edge.relation != "references" || !edge.target.starts_with("protocol_reference_") {
+                new_edges.push(edge);
+                continue;
+            }
+            let referenced = &edge.target["protocol_reference_".len()..];
+            let resolved = resolve_type_candidate(
+                referenced,
+                source_format.as_deref(),
+                &by_format_label,
+                &by_label,
+            );
+            match resolved {
+                Some(real_id) => {
+                    let mut resolved_edge = edge.clone();
+                    resolved_edge.target = real_id.clone();
+                    // Protocol edges carry their directional endpoints in the
+                    // `_src`/`_tgt` extras (see `Edge::true_source`/`true_target`);
+                    // the graph build resolves endpoints through those, so the
+                    // re-targeted id must be written there as well.
+                    if resolved_edge.extra.contains_key("_tgt") {
+                        resolved_edge
+                            .extra
+                            .insert("_tgt".into(), serde_json::Value::from(real_id));
+                    }
+                    resolved_edge
+                        .extra
+                        .insert("resolved".into(), serde_json::Value::from(true));
+                    new_edges.push(resolved_edge);
+                }
+                None => {
+                    let mut unresolved_edge = edge.clone();
+                    unresolved_edge
+                        .extra
+                        .insert("unresolved".into(), serde_json::Value::from(true));
+                    new_edges.push(unresolved_edge);
+                }
+            }
+        }
+        extraction.edges = new_edges;
+    }
+}
+
+/// Pick a unique declared-type candidate for a referenced name, preferring the
+/// source's protocol format. Returns `None` when no candidate or ambiguous.
+fn resolve_type_candidate(
+    referenced: &str,
+    source_format: Option<&str>,
+    by_format_label: &BTreeMap<(String, String), BTreeSet<String>>,
+    by_label: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<String> {
+    // The referenced name is normalized to align with the normalized index
+    // keys. (Qualified names are already flattened to underscores by
+    // `normalize_id` in the placeholder, so the full normalized form is the
+    // only reliable key.)
+    let name = normalize_id(referenced);
+    if name.is_empty() {
+        return None;
+    }
+    // Same-format candidates take priority: a unique same-format match wins
+    // outright even if the global (cross-format) index is ambiguous.
+    if let Some(fmt) = source_format
+        && let Some(ids) = by_format_label.get(&(fmt.to_owned(), name.clone()))
+        && ids.len() == 1
+    {
+        return ids.iter().next().cloned();
+    }
+    // Fall back to the format-agnostic index, only when it is unambiguous.
+    by_label.get(&name).and_then(|ids| {
+        if ids.len() == 1 {
+            ids.iter().next().cloned()
+        } else {
+            None
+        }
+    })
 }
 
 /// Resolve an isolated project while admitting every newly retained resolver
@@ -331,6 +501,10 @@ pub(crate) fn resolve_with_snapshot_context_bounded(
     admission.checkpoint("csharp", fresh)?;
     crate::pascal::resolve_inherited_calls(fresh);
     admission.checkpoint("pascal", fresh)?;
+    resolve_idl_imports(fresh);
+    admission.checkpoint("idl-imports", fresh)?;
+    resolve_protocol_type_references(fresh);
+    admission.checkpoint("idl-type-refs", fresh)?;
     Ok(())
 }
 
@@ -2684,5 +2858,286 @@ include "./aux:worker.lua"
             edge.extra.get("resolved").unwrap(),
             &serde_json::Value::from(true)
         );
+    }
+
+    // ---- Cross-file protocol type reference resolution ----
+
+    /// A declared protocol type node (e.g. `type User`, `message Order`).
+    fn proto_type_node(
+        source_file: &str,
+        kind: &str,
+        label: &str,
+        format: &str,
+    ) -> (String, graphoxide_core::Node) {
+        let stem = source_file
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(source_file);
+        let id = graphoxide_core::make_id(&[stem, format, kind, "file", label]);
+        let node = graphoxide_core::Node {
+            id: id.clone(),
+            label: label.to_owned(),
+            file_type: "code".into(),
+            source_file: source_file.to_owned(),
+            source_location: None,
+            community: None,
+            extra: std::collections::BTreeMap::from([
+                ("type".into(), kind.into()),
+                ("protocol_format".into(), format.into()),
+                ("_origin".into(), "protocols".into()),
+            ]),
+        };
+        (id, node)
+    }
+
+    /// A field `references` edge to a synthetic `protocol_reference_<name>` node.
+    fn synthetic_type_ref_edge(source: &str, referenced: &str) -> graphoxide_core::Edge {
+        graphoxide_core::Edge {
+            source: source.to_owned(),
+            target: format!("protocol_reference_{}", referenced),
+            relation: "references".into(),
+            confidence: graphoxide_core::Confidence::Extracted,
+            source_file: source.to_owned(),
+            extra: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn extraction_with(
+        nodes: Vec<graphoxide_core::Node>,
+        edges: Vec<graphoxide_core::Edge>,
+    ) -> graphoxide_core::Extraction {
+        graphoxide_core::Extraction {
+            nodes,
+            edges,
+            hyperedges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn type_refs_resolve_cross_file_to_real_type_nodes() {
+        // `User` is declared in types.graphql; `Query.user` field references it
+        // from query.graphql. The reference placeholder should re-target to the
+        // real User type node.
+        let (user_id, user_node) = proto_type_node("types.graphql", "type", "User", "graphql");
+        let (query_id, query_node) = proto_type_node("query.graphql", "type", "Query", "graphql");
+        let (field_id, _field_node) = proto_type_node("query.graphql", "field", "user", "graphql");
+
+        let types = extraction_with(vec![user_node], Vec::new());
+        let query = extraction_with(
+            vec![query_node, field_id_node(field_id.clone())],
+            vec![synthetic_type_ref_edge(&field_id, "User")],
+        );
+
+        let mut extractions = vec![types, query];
+        resolve_protocol_type_references(&mut extractions);
+
+        let edge = &extractions[1].edges[0];
+        assert_eq!(edge.target, user_id, "cross-file type ref should resolve");
+        assert_eq!(
+            edge.extra.get("resolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+        assert!(!edge.extra.contains_key("unresolved"));
+        let _ = query_id;
+    }
+
+    #[test]
+    fn type_refs_resolve_within_same_file() {
+        // Two types in the same file; a field in one references the other.
+        let (a_id, a_node) = proto_type_node("schema.thrift", "struct", "A", "thrift");
+        let (b_id, b_node) = proto_type_node("schema.thrift", "struct", "B", "thrift");
+        let (field_id, field_node) = proto_type_node("schema.thrift", "field", "a", "thrift");
+
+        let single = extraction_with(
+            vec![a_node, b_node, field_node],
+            vec![synthetic_type_ref_edge(&field_id, "A")],
+        );
+
+        let mut extractions = vec![single];
+        resolve_protocol_type_references(&mut extractions);
+
+        let edge = &extractions[0].edges[0];
+        assert_eq!(edge.target, a_id, "same-file type ref should resolve");
+        assert_eq!(
+            edge.extra.get("resolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+        let _ = b_id;
+    }
+
+    #[test]
+    fn type_refs_unresolved_when_type_not_in_corpus() {
+        let (field_id, field_node) = proto_type_node("only.graphql", "field", "x", "graphql");
+        let only = extraction_with(
+            vec![field_node],
+            vec![synthetic_type_ref_edge(&field_id, "Missing")],
+        );
+
+        let mut extractions = vec![only];
+        resolve_protocol_type_references(&mut extractions);
+
+        let edge = &extractions[0].edges[0];
+        assert_eq!(
+            edge.extra.get("unresolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+        // Target remains the placeholder.
+        assert_eq!(edge.target, "protocol_reference_Missing");
+    }
+
+    #[test]
+    fn type_refs_ambiguous_across_files_stays_unresolved() {
+        // `User` declared in two different files -> ambiguous, unresolved.
+        let (_ua, ua_node) = proto_type_node("a.graphql", "type", "User", "graphql");
+        let (_ub, ub_node) = proto_type_node("b.graphql", "type", "User", "graphql");
+        let (field_id, field_node) = proto_type_node("q.graphql", "field", "u", "graphql");
+
+        let a = extraction_with(vec![ua_node], Vec::new());
+        let b = extraction_with(vec![ub_node], Vec::new());
+        let q = extraction_with(
+            vec![field_node],
+            vec![synthetic_type_ref_edge(&field_id, "User")],
+        );
+
+        let mut extractions = vec![a, b, q];
+        resolve_protocol_type_references(&mut extractions);
+
+        let edge = &extractions[2].edges[0];
+        assert_eq!(
+            edge.extra.get("unresolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+    }
+
+    #[test]
+    fn type_refs_prefer_same_format_over_cross_format() {
+        // A graphql `User` and a thrift `User` both exist. A graphql field's
+        // reference to `User` must resolve to the graphql one, not the thrift.
+        let (g_user, g_user_node) = proto_type_node("g.graphql", "type", "User", "graphql");
+        let (t_user, t_user_node) = proto_type_node("t.thrift", "struct", "User", "thrift");
+        let (field_id, field_node) = proto_type_node("g.graphql", "field", "u", "graphql");
+
+        let g = extraction_with(
+            vec![g_user_node, field_node],
+            vec![synthetic_type_ref_edge(&field_id, "User")],
+        );
+        let t = extraction_with(vec![t_user_node], Vec::new());
+
+        let mut extractions = vec![g, t];
+        resolve_protocol_type_references(&mut extractions);
+
+        let edge = &extractions[0].edges[0];
+        assert_eq!(edge.target, g_user, "same-format candidate must win");
+        assert_eq!(
+            edge.extra.get("resolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+        let _ = t_user;
+    }
+
+    #[test]
+    fn type_refs_match_case_insensitively_via_normalized_ids() {
+        // The placeholder ID is normalized (lowercased) by `make_id`, while the
+        // declared type label preserves case (`User`). The resolver must match
+        // them through the normalized index key, so a reference emitted as
+        // `protocol_reference_user` resolves to the `User` type node.
+        let (user_id, user_node) = proto_type_node("types.graphql", "type", "User", "graphql");
+        let (field_id, field_node) = proto_type_node("q.graphql", "field", "u", "graphql");
+
+        let types = extraction_with(vec![user_node], Vec::new());
+        let q = extraction_with(
+            vec![field_node],
+            vec![synthetic_type_ref_edge(&field_id, "user")],
+        );
+
+        let mut extractions = vec![types, q];
+        resolve_protocol_type_references(&mut extractions);
+
+        let edge = &extractions[1].edges[0];
+        assert_eq!(
+            edge.target, user_id,
+            "normalized names must align across case"
+        );
+        assert_eq!(
+            edge.extra.get("resolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+    }
+
+    #[test]
+    fn type_refs_unresolved_when_only_qualified_form_is_referenced() {
+        // `User` is declared, but the field references `pkg_user` (a qualified
+        // name flattened to underscores). Without a declared `pkg_user` type,
+        // this stays unresolved rather than guessing a partial match.
+        let (_user_id, user_node) = proto_type_node("types.proto", "message", "User", "protobuf");
+        let (field_id, field_node) = proto_type_node("q.proto", "field", "u", "protobuf");
+
+        let types = extraction_with(vec![user_node], Vec::new());
+        let q = extraction_with(
+            vec![field_node],
+            vec![synthetic_type_ref_edge(&field_id, "pkg_user")],
+        );
+
+        let mut extractions = vec![types, q];
+        resolve_protocol_type_references(&mut extractions);
+
+        let edge = &extractions[1].edges[0];
+        assert_eq!(
+            edge.extra.get("unresolved").unwrap(),
+            &serde_json::Value::from(true)
+        );
+    }
+
+    #[test]
+    fn type_refs_do_not_touch_non_reference_or_non_placeholder_edges() {
+        // A `contains` edge and a `references` edge to a real (non-placeholder)
+        // node must pass through unchanged.
+        let (a_id, a_node) = proto_type_node("s.thrift", "struct", "A", "thrift");
+        let (field_id, field_node) = proto_type_node("s.thrift", "field", "a", "thrift");
+
+        let contains_edge = graphoxide_core::Edge {
+            source: "file".to_owned(),
+            target: a_id.clone(),
+            relation: "contains".into(),
+            confidence: graphoxide_core::Confidence::Extracted,
+            source_file: "s.thrift".to_owned(),
+            extra: std::collections::BTreeMap::new(),
+        };
+        let real_ref = graphoxide_core::Edge {
+            source: field_id.clone(),
+            target: a_id.clone(),
+            relation: "references".into(),
+            confidence: graphoxide_core::Confidence::Extracted,
+            source_file: "s.thrift".to_owned(),
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        let single = extraction_with(vec![a_node, field_node], vec![contains_edge, real_ref]);
+        let mut extractions = vec![single];
+        resolve_protocol_type_references(&mut extractions);
+
+        // Both edges unchanged: no resolved/unresolved markers added.
+        for edge in &extractions[0].edges {
+            assert!(!edge.extra.contains_key("resolved"));
+            assert!(!edge.extra.contains_key("unresolved"));
+        }
+    }
+
+    /// Wrap a precomputed field node id into a node (the resolver only needs the
+    /// id to exist; label/kind are irrelevant for a field source).
+    fn field_id_node(id: String) -> graphoxide_core::Node {
+        graphoxide_core::Node {
+            id,
+            label: "field".to_owned(),
+            file_type: "code".into(),
+            source_file: "query.graphql".to_owned(),
+            source_location: None,
+            community: None,
+            extra: std::collections::BTreeMap::from([
+                ("type".into(), "field".into()),
+                ("protocol_format".into(), "graphql".into()),
+                ("_origin".into(), "protocols".into()),
+            ]),
+        }
     }
 }
