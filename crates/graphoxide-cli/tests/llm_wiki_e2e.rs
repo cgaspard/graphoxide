@@ -4,13 +4,7 @@ use graphoxide_cli::wiki_materialize::reviewable_draft_sha256;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
-use std::{
-    collections::BTreeMap,
-    fs,
-    io::Write as _,
-    path::Path,
-    process::Command,
-};
+use std::{collections::BTreeMap, fs, io::Write as _, path::Path, process::Command};
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 fn graphoxide() -> Command {
@@ -673,5 +667,4 @@ fn twelve_input_registry_builds_incremental_source_ready_wiki() {
     assert_eq!(changed["hashed"], 1);
     assert_eq!(changed["unchanged"], 11);
     assert_eq!(changed["queued"], 1);
-
 }
