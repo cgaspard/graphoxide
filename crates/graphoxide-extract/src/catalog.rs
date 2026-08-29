@@ -1767,6 +1767,9 @@ mod tests {
         let project = project_with_source("docs/page.md");
         let catalog_dir = project.path().join("metadata/source-catalog");
         write_catalog_at(&catalog_dir, json!([entry("docs/page.md")]));
+        // Absolute catalog paths must be symlink-free; canonicalize so the
+        // test holds on platforms where the temp root itself is a symlink.
+        let catalog_dir = fs::canonicalize(&catalog_dir).expect("canonical catalog directory");
 
         let catalog = Catalog::load(project.path(), &catalog_dir).expect("load nested catalog");
 
@@ -1817,6 +1820,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Non-UTF-8 directory names can only exist on byte-oriented filesystems
+    // (Linux ext4); APFS rejects them at creation, so the loader's UTF-8
+    // rejection is only observable there.
+    #[cfg(target_os = "linux")]
     #[test]
     fn rejects_non_utf8_catalog_scan_exclusion() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
