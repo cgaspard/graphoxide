@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use graphoxide_cli::wiki;
 use graphoxide_core::{KnowledgeGraph, Node};
 use graphoxide_export::{derive_topic_tree, render_structured_wiki};

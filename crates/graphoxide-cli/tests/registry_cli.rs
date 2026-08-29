@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use graphoxide_cli::wiki_materialize::reviewable_draft_sha256;
 use graphoxide_extract::registry::{shard_for_source_id, RegistrySourceState};
 use serde_json::{json, Value};
@@ -236,6 +237,7 @@ fn graphoxide() -> Command {
     Command::new(env!("CARGO_BIN_EXE_graphoxide"))
 }
 
+#[cfg(target_os = "linux")]
 fn commit_registry(tree: &Path) -> String {
     for args in [
         vec!["init"],
@@ -275,6 +277,7 @@ fn commit_registry(tree: &Path) -> String {
         .to_owned()
 }
 
+#[cfg(target_os = "linux")]
 fn commit_registry_changes(tree: &Path, message: &str) -> String {
     for args in [
         vec!["add", "."],
@@ -313,6 +316,7 @@ fn commit_registry_changes(tree: &Path, message: &str) -> String {
         .to_owned()
 }
 
+#[cfg(target_os = "linux")]
 fn write_materialize_graph(
     path: &Path,
     capture_id: &str,
@@ -1172,6 +1176,7 @@ fn update_binds_registry_sources_and_rejects_an_unrecorded_change() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn materialize_publishes_source_ready_pages_from_a_pinned_registry_commit() {
     let fixture = tempfile::tempdir().expect("temporary fixture");

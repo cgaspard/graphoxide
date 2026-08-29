@@ -1,4 +1,8 @@
 //! Fixed, single-threaded end-to-end corpus for Registry v1 live wikis.
+//!
+//! Secure wiki publication (render/materialize) is only supported on Linux
+//! AMD64, so the whole suite is gated to that platform.
+#![cfg(target_os = "linux")]
 
 use graphoxide_cli::wiki_materialize::reviewable_draft_sha256;
 use rusqlite::Connection;

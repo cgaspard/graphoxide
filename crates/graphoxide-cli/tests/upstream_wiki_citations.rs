@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use graphoxide_core::KnowledgeGraph;
 use graphoxide_export::{derive_topic_tree, render_structured_wiki_with_catalog};
 use graphoxide_extract::catalog::Catalog;
