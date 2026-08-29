@@ -1,4 +1,8 @@
 //! End-to-end coverage for the catalog-index-to-local-draft workflow.
+//!
+//! Secure wiki publication (draft/render) is only supported on Linux AMD64,
+//! so the whole suite is gated to that platform.
+#![cfg(target_os = "linux")]
 
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};

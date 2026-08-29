@@ -1,3 +1,7 @@
+//! Secure wiki publication (draft/render) is only supported on Linux AMD64,
+//! so the whole suite is gated to that platform.
+#![cfg(target_os = "linux")]
+
 use graphoxide_cli::{
     ollama_transport,
     wiki_draft::{draft, normalize_scopes, render, DraftArgs, DraftScope, RenderArgs, CONSENT},
