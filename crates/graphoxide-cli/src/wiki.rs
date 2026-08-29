@@ -7,14 +7,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs,
-    io::{Read as _, Write as _},
+    io::Write as _,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
-
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::{
     ffi::CString,
+    io::Read as _,
     os::{
         fd::{AsRawFd as _, FromRawFd as _},
         unix::{
@@ -22,6 +21,7 @@ use std::{
             fs::{MetadataExt as _, PermissionsExt as _},
         },
     },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -31,6 +31,7 @@ const MAX_CANONICAL_PLAN_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DRAFT_SOURCES: usize = 12;
 pub(crate) const MAX_CANONICAL_DRAFT_SECTIONS: usize = 8;
 const MAX_CANONICAL_QUALITY_DIAGNOSTICS: usize = 256;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 static OUTPUT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -967,6 +968,7 @@ impl OutputDirectory {
         }
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn regular_file_mode(&self, name: &OsStr) -> anyhow::Result<Option<u32>> {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
@@ -1283,11 +1285,6 @@ fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
         && left.ctime_nsec() == right.ctime_nsec()
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-fn ensure_regular_file(_file: &fs::File, _cap: usize) -> anyhow::Result<fs::Metadata> {
-    anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
-}
-
 pub(crate) fn output_parent(
     root: &OutputDirectory,
     output: &Path,
@@ -1316,13 +1313,13 @@ fn output_parent_if_existing(
         .filter(|name| !name.is_empty())
         .context("wiki output must have a final path component")?
         .to_os_string();
-    let mut parent = root.duplicate()?;
-    for component in output.parent().into_iter().flat_map(Path::components) {
-        let Component::Normal(name) = component else {
-            anyhow::bail!("wiki output has an unsafe parent path");
-        };
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let mut parent = root.duplicate()?;
+        for component in output.parent().into_iter().flat_map(Path::components) {
+            let Component::Normal(name) = component else {
+                anyhow::bail!("wiki output has an unsafe parent path");
+            };
             match open_directory_at(parent.file.as_raw_fd(), &c_name(name)?) {
                 Ok(opened) => parent = OutputDirectory { file: opened },
                 Err(error)
@@ -1335,13 +1332,13 @@ fn output_parent_if_existing(
                 Err(error) => return Err(error),
             }
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        {
-            let _ = name;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
-        }
+        Ok(Some((parent, name)))
     }
-    Ok(Some((parent, name)))
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        let _ = (root, output, name);
+        anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+    }
 }
 
 pub(crate) fn write_text_atomic_in(

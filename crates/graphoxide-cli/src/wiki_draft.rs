@@ -2282,7 +2282,7 @@ fn sha256_text(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 fn assembled_extracted_text(source: &Source) -> Result<String> {
     assembled_source_text(source, "")
 }
@@ -2413,7 +2413,7 @@ fn is_binary_source(source: &str) -> bool {
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest as _;
 
