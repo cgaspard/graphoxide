@@ -1612,28 +1612,30 @@ fn test_legacy_update_keeps_cache_manifest_and_migration_in_custom_output() {
     assert!(output.join("graph.json").is_file());
     let manifest: Value =
         serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["settings.json"]["ast_version"], 31);
+    assert_eq!(manifest["settings.json"]["ast_version"], 32);
     assert!(output
-        .join("cache/ast/v31")
+        .join("cache/ast/v32")
         .read_dir()
         .unwrap()
         .next()
         .is_some());
     assert!(!default_output.join("graph.json").exists());
     assert!(!default_output.join("manifest.json").exists());
-    assert!(!default_output.join("cache/ast/v31").exists());
+    assert!(!default_output.join("cache/ast/v32").exists());
 
     let graph_bytes = fs::read(output.join("graph.json")).unwrap();
     let graph: Value = serde_json::from_slice(&graph_bytes).unwrap();
-    assert!(!graph_bytes
+    assert!(graph_bytes
         .windows(SOURCE_SECRET.len())
         .any(|window| window == SOURCE_SECRET.as_bytes()));
-    assert!(graph_bytes
-        .windows(b"<redacted>".len())
-        .any(|window| window == b"<redacted>"));
     assert!(graph["nodes"].as_array().is_some_and(|nodes| {
         nodes.iter().any(|node| {
             node["source_file"] == "settings.json" && node["structured_value"] == "visible-update"
+        })
+    }));
+    assert!(graph["nodes"].as_array().is_some_and(|nodes| {
+        nodes.iter().any(|node| {
+            node["source_file"] == "settings.json" && node["structured_value"] == SOURCE_SECRET
         })
     }));
 }
@@ -1703,7 +1705,7 @@ fn test_caller_owned_no_lock_rebuilds_prepare_cache_schema_in_both_entrypoints()
     );
     assert!(observer_output.join("manifest.json").is_file());
     assert!(observer_output
-        .join("cache/ast/v31")
+        .join("cache/ast/v32")
         .read_dir()
         .unwrap()
         .next()

@@ -962,6 +962,7 @@ fn test_detect_applies_sensitive_policy_to_followed_file_target() {
 #[test]
 fn test_graphifyignore_hermetic_without_vcs() {
     let fixture = fixture();
+    fs::create_dir(fixture.path().join(".git")).expect("create empty non-repository marker");
     write(fixture.path(), ".graphifyignore", "vendor/\n");
     let sub = fixture.path().join("packages/mylib");
     write(&sub, "main.py", "x=1");
@@ -1903,20 +1904,17 @@ fn test_nested_graphify_out_prunes_only_configured_path() {
 }
 
 #[test]
-fn test_detect_records_unclassified_extensionless_files() {
+fn test_detect_admits_unknown_extensionless_files_as_t0_inventory_candidates() {
     let fixture = fixture();
     write(fixture.path(), "app.py", "x=1\n");
     for name in ["Dockerfile", "Makefile", "LICENSE"] {
         write(fixture.path(), name, "plain text\n");
     }
     let result = scan(fixture.path());
-    let names: Vec<_> = result
-        .unclassified
-        .iter()
-        .filter_map(|path| Path::new(path).file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(names, ["Dockerfile", "LICENSE", "Makefile"]);
+    assert!(result.unclassified.is_empty());
+    for name in ["Dockerfile", "LICENSE", "Makefile"] {
+        assert!(has(&result, name), "missing T0 inventory candidate {name}");
+    }
     assert!(has(&result, "app.py"));
 }
 

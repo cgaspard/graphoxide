@@ -930,6 +930,15 @@ fn read_bounded_regular_nofollow(
     Ok(Some(bytes))
 }
 
+/// Read a regular file beneath `root` through the enrichment admission path.
+///
+/// This keeps callers on the same bounded, no-follow, identity-rechecked path
+/// used for enrichment inputs.
+pub fn safe_read_bounded(root: &Path, path: &Path, cap: usize) -> Result<Vec<u8>> {
+    read_bounded_regular_nofollow(root, path, cap, false)?
+        .context("required safe input disappeared")
+}
+
 #[cfg(unix)]
 fn same_metadata_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt as _;
@@ -1054,6 +1063,10 @@ fn ensure_not_cancelled(cancellation: &RuntimeCancellation) -> Result<()> {
 
 impl Redactor {
     fn from_environment(api_key: &str) -> Result<Self> {
+        Self::from_environment_and_secret(Some(api_key))
+    }
+
+    fn from_environment_and_secret(extra_secret: Option<&str>) -> Result<Self> {
         const MAX_ENV_SECRETS: usize = 128;
         const MAX_ENV_SECRET_BYTES: usize = 64 * 1024;
         let mut environment_secrets = BTreeMap::new();
@@ -1099,7 +1112,10 @@ impl Redactor {
             environment_secrets.insert(name.to_owned(), value.to_owned());
             retained_bytes = next_bytes;
         }
-        let mut secrets = vec![api_key.to_owned()];
+        let mut secrets = extra_secret
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         for (_, value) in environment_secrets {
             secrets.push(value);
         }
@@ -1164,6 +1180,11 @@ impl Redactor {
         }
         (output, count)
     }
+}
+
+/// Apply the enrichment redaction policy without adding a provider credential.
+pub fn redact_local_text(input: &str) -> Result<(String, u64)> {
+    Ok(Redactor::from_environment_and_secret(None)?.redact(input))
 }
 
 fn normalize_newlines(input: &str) -> String {

@@ -59,15 +59,6 @@ static MARKDOWN_LINK: LazyLock<Regex> = LazyLock::new(|| {
 static RST_LINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"`[^`<>]+\s*<([^>]+)>`_").expect("valid reStructuredText link regex")
 });
-static HTML_HEADING: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<h([1-6])\b[^>]*>(.*?)</h[1-6]\s*>").expect("valid HTML heading regex")
-});
-static HTML_LINK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)\bhref\s*=\s*[\"']([^\"']+)[\"']"#).expect("valid HTML link regex")
-});
-static HTML_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<[^>]+>").expect("valid HTML tag regex"));
-
 /// Limits applied before and during structured parsing.
 ///
 /// Defaults come from the structured registry contract and remain independent
@@ -349,16 +340,6 @@ impl<'a> ChildOptions<'a> {
         }
     }
 
-    fn truncated_sensitive_string() -> Self {
-        Self {
-            value: None,
-            structural_only: false,
-            value_truncated: true,
-            sensitive_context: true,
-            redacted_value_type: Some("string"),
-        }
-    }
-
     const fn in_sensitive_context(mut self, sensitive_context: bool) -> Self {
         self.sensitive_context = sensitive_context;
         self
@@ -393,7 +374,10 @@ impl<'a> State<'a> {
                 ),
             ]);
             root_extra.insert("structured_version".into(), Value::from(2_u64));
-            root_extra.insert("structured_redaction_policy".into(), Value::from(1_u64));
+            root_extra.insert(
+                "structured_content_policy".into(),
+                Value::String("unredacted".into()),
+            );
             if let Some(spec) = crate::format_registry::format_registry().find_by_path(path) {
                 root_extra.insert(
                     "format_capability".into(),
@@ -534,19 +518,10 @@ impl<'a> State<'a> {
         if self.nodes.is_empty() {
             return None;
         }
-        // A map key, XML name, heading, or reference can itself contain a
-        // credential. Decide that before the raw component participates in a
-        // published path or identifier. Callers also pass identity-safe path
-        // components so descendants cannot inherit the original spelling; this
-        // central replacement is the final guard for non-hierarchical labels.
-        let label_redacted = structured_string_is_sensitive(label);
-        let redacted_path = label_redacted.then(|| {
-            format!(
-                "$redacted/{kind}[{}]",
-                self.nodes.len().saturating_add(self.edges.len())
-            )
-        });
-        let path = redacted_path.as_deref().unwrap_or(path);
+        // Knowledge artifacts preserve their exact bounded content. Registry
+        // metadata and provider control-plane records are validated separately
+        // and remain secret-free.
+        let _ = (options.sensitive_context, options.redacted_value_type);
         if path.len() > self.limits.max_scalar_bytes {
             self.report_path_limit(line, "structured parser");
             return None;
@@ -587,77 +562,35 @@ impl<'a> State<'a> {
             extra.insert("structured_value_truncated".into(), Value::Bool(true));
         }
         if let Some(value) = options.value {
-            if options.sensitive_context {
-                extra.insert(
-                    "structured_value".into(),
-                    Value::String(REDACTED_STRUCTURED_VALUE.into()),
-                );
-                extra.insert("structured_value_redacted".into(), Value::Bool(true));
-                extra.insert(
-                    "structured_value_type".into(),
-                    Value::String(child_value_kind(value).into()),
+            let fits = match value {
+                ChildValue::Json(value) => {
+                    serialized_len_at_most(value, self.limits.max_scalar_bytes)
+                }
+                ChildValue::String(value) => {
+                    serialized_len_at_most(value, self.limits.max_scalar_bytes)
+                }
+            };
+            if !fits {
+                extra.insert("structured_value_truncated".into(), Value::Bool(true));
+                self.diagnostic(
+                    "scalar_limit",
+                    line,
+                    format!(
+                        "structured scalar at {path:?} exceeds {} bytes",
+                        self.limits.max_scalar_bytes
+                    ),
                 );
             } else {
-                let fits = match value {
-                    ChildValue::Json(value) => {
-                        serialized_len_at_most(value, self.limits.max_scalar_bytes)
-                    }
-                    ChildValue::String(value) => {
-                        serialized_len_at_most(value, self.limits.max_scalar_bytes)
-                    }
+                let value = match value {
+                    ChildValue::Json(value) => value.clone(),
+                    ChildValue::String(value) => Value::String(value.into()),
                 };
-                if !fits {
-                    extra.insert("structured_value_truncated".into(), Value::Bool(true));
-                    self.diagnostic(
-                        "scalar_limit",
-                        line,
-                        format!(
-                            "structured scalar at {path:?} exceeds {} bytes",
-                            self.limits.max_scalar_bytes
-                        ),
-                    );
-                } else if child_value_is_sensitive(value) {
-                    extra.insert(
-                        "structured_value".into(),
-                        Value::String(REDACTED_STRUCTURED_VALUE.into()),
-                    );
-                    extra.insert("structured_value_redacted".into(), Value::Bool(true));
-                    extra.insert(
-                        "structured_value_type".into(),
-                        Value::String(child_value_kind(value).into()),
-                    );
-                } else {
-                    let value = match value {
-                        ChildValue::Json(value) => value.clone(),
-                        ChildValue::String(value) => Value::String(value.into()),
-                    };
-                    extra.insert("structured_value".into(), value);
-                }
+                extra.insert("structured_value".into(), value);
             }
-        } else if let Some(value_type) = options.redacted_value_type {
-            extra.insert(
-                "structured_value".into(),
-                Value::String(REDACTED_STRUCTURED_VALUE.into()),
-            );
-            extra.insert("structured_value_redacted".into(), Value::Bool(true));
-            extra.insert(
-                "structured_value_type".into(),
-                Value::String(value_type.into()),
-            );
-        } else if options.sensitive_context {
-            extra.insert("structured_descendants_redacted".into(), Value::Bool(true));
-        }
-        if label_redacted {
-            extra.insert("structured_label_redacted".into(), Value::Bool(true));
-            extra.insert("structured_path_redacted".into(), Value::Bool(true));
         }
         self.nodes.push(Node {
             id: id.clone(),
-            label: if label_redacted {
-                REDACTED_STRUCTURED_VALUE.into()
-            } else {
-                label.into()
-            },
+            label: label.into(),
             file_type: self.format.file_type().into(),
             source_file: self.source_file.into(),
             source_location: Some(format!("L{}", line.max(1))),
@@ -715,21 +648,6 @@ impl<'a> State<'a> {
             );
             return;
         }
-        if json_value_is_sensitive(value) {
-            if let Some(root) = self.nodes.first_mut() {
-                root.extra.insert(
-                    "structured_value".into(),
-                    Value::String(REDACTED_STRUCTURED_VALUE.into()),
-                );
-                root.extra
-                    .insert("structured_value_redacted".into(), Value::Bool(true));
-                root.extra.insert(
-                    "structured_value_type".into(),
-                    Value::String(value_kind(value).into()),
-                );
-            }
-            return;
-        }
         if let Some(root) = self.nodes.first_mut() {
             root.extra.insert("structured_value".into(), value.clone());
         }
@@ -743,22 +661,7 @@ impl<'a> State<'a> {
             return;
         };
         let node = &mut self.nodes[position];
-        if node.extra.get("structured_text_redacted") == Some(&Value::Bool(true)) {
-            return;
-        }
-        if sensitive_context {
-            node.extra.insert(
-                "structured_text".into(),
-                Value::String(REDACTED_STRUCTURED_VALUE.into()),
-            );
-            node.extra
-                .insert("structured_text_redacted".into(), Value::Bool(true));
-            node.extra.insert(
-                "structured_text_type".into(),
-                Value::String("string".into()),
-            );
-            return;
-        }
+        let _ = sensitive_context;
         let existing = node
             .extra
             .remove("structured_text")
@@ -773,29 +676,6 @@ impl<'a> State<'a> {
                 "scalar_limit",
                 line,
                 format!("XML text exceeds {} bytes", self.limits.max_scalar_bytes),
-            );
-            return;
-        }
-        // XML can split one logical scalar across Text and CDATA events. Scan
-        // the normal retained spelling and a bounded whitespace-free spelling
-        // so a provider token cannot be evaded as `ghp_<![CDATA[...]]>`.
-        let compact_candidate = candidate
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>();
-        if string_is_sensitive(&candidate)
-            || (compact_candidate.len() != candidate.len()
-                && string_is_sensitive(&compact_candidate))
-        {
-            node.extra.insert(
-                "structured_text".into(),
-                Value::String(REDACTED_STRUCTURED_VALUE.into()),
-            );
-            node.extra
-                .insert("structured_text_redacted".into(), Value::Bool(true));
-            node.extra.insert(
-                "structured_text_type".into(),
-                Value::String("string".into()),
             );
             return;
         }
@@ -1263,13 +1143,18 @@ fn extract_yaml_structure(state: &mut State<'_>, bytes: &[u8]) {
             }
             continue;
         };
+        let options = if is_mapping && !opens_container {
+            ChildOptions::string(value)
+        } else {
+            ChildOptions::STRUCTURAL
+        };
         let Some(id) = state.child(
             &parent,
             &path,
             label,
             if is_mapping { "yaml_key" } else { "yaml_item" },
             line,
-            ChildOptions::STRUCTURAL.in_sensitive_context(sensitive),
+            options.in_sensitive_context(sensitive),
         ) else {
             return;
         };
@@ -1599,7 +1484,7 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
     // records bounded before facts are admitted.
     let max_fields = state.limits.max_depth;
     let max_field_bytes = state.limits.max_scalar_bytes;
-    let mut headers: Option<Vec<(String, bool)>> = None;
+    let mut headers: Option<Vec<String>> = None;
     let mut field_limit_reported = false;
     let mut scalar_limit_reported = false;
     let parse_result = parse_delimited(
@@ -1639,19 +1524,15 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
                 };
                 let mut retained_headers = Vec::with_capacity(row.fields.len());
                 for (column, header) in row.fields.iter().enumerate() {
-                    let header_value_sensitive =
-                        row.truncated_fields[column] || string_is_sensitive(header);
-                    let cell_values_sensitive =
-                        header_value_sensitive || key_is_sensitive_scalar(header);
-                    let label = if header.is_empty() || header_value_sensitive {
+                    let label = if header.is_empty() || row.truncated_fields[column] {
                         format!("column {column}")
                     } else {
                         header.clone()
                     };
                     let options = if row.truncated_fields[column] {
-                        ChildOptions::truncated_sensitive_string()
+                        ChildOptions::truncated_value()
                     } else {
-                        ChildOptions::string(header).in_sensitive_context(header_value_sensitive)
+                        ChildOptions::string(header)
                     };
                     if state
                         .child(
@@ -1666,7 +1547,7 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
                     {
                         return false;
                     }
-                    retained_headers.push((label, cell_values_sensitive));
+                    retained_headers.push(label);
                 }
                 headers = Some(retained_headers);
                 return true;
@@ -1684,19 +1565,13 @@ fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
             };
             let headers = headers.as_ref().expect("headers initialized above");
             for (column, value) in row.fields.into_iter().enumerate() {
-                let fallback_header = (format!("column {column}"), false);
-                let (label, cell_values_sensitive) =
-                    headers.get(column).unwrap_or(&fallback_header);
+                let fallback_header = format!("column {column}");
+                let label = headers.get(column).unwrap_or(&fallback_header);
                 let options = if row.truncated_fields[column] {
-                    if *cell_values_sensitive {
-                        ChildOptions::truncated_sensitive_string()
-                    } else {
-                        ChildOptions::truncated_value()
-                    }
+                    ChildOptions::truncated_value()
                 } else {
                     ChildOptions::string(&value)
-                }
-                .in_sensitive_context(*cell_values_sensitive);
+                };
                 if state
                     .child(
                         &row_id,
@@ -1773,9 +1648,23 @@ fn extract_ini(state: &mut State<'_>, bytes: &[u8]) {
             continue;
         }
         let content = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-        let split = find_unquoted_byte(content.as_bytes(), b'=')
-            .or_else(|| find_unquoted_byte(content.as_bytes(), b':'));
+        let split = find_unquoted_byte(content.as_bytes(), b'=').or_else(|| {
+            if content.contains("://") {
+                None
+            } else {
+                find_unquoted_byte(content.as_bytes(), b':')
+            }
+        });
         let Some(split) = split else {
+            let path = format!("{prefix}.line[{line}]");
+            let _ = state.child(
+                &parent,
+                &path,
+                "line",
+                "ini_line",
+                line,
+                ChildOptions::string(content),
+            );
             state.diagnostic("ini_parse_error", line, "expected key=value entry");
             continue;
         };
@@ -1810,7 +1699,7 @@ fn extract_ini(state: &mut State<'_>, bytes: &[u8]) {
 fn extract_key_value_structure(state: &mut State<'_>, text: &str, delimiter: char, kind: &str) {
     for (index, raw_line) in text.lines().enumerate() {
         let line = index + 1;
-        let Some((key, _)) = raw_line.split_once(delimiter) else {
+        let Some((key, value)) = raw_line.split_once(delimiter) else {
             continue;
         };
         let key = key.trim().trim_matches(['\"', '\'']);
@@ -1829,9 +1718,180 @@ fn extract_key_value_structure(state: &mut State<'_>, text: &str, delimiter: cha
             key,
             kind,
             line,
-            ChildOptions::STRUCTURAL.in_sensitive_context(key_is_sensitive(key)),
+            ChildOptions::string(value.trim().trim_matches(['"', '\'']))
+                .in_sensitive_context(key_is_sensitive(key)),
         );
     }
+}
+
+#[derive(Default)]
+struct DocumentBlocks {
+    next: usize,
+    table_rows: usize,
+    row_limit_reported: bool,
+}
+
+impl DocumentBlocks {
+    fn emit(
+        &mut self,
+        state: &mut State<'_>,
+        parent: &str,
+        label: &str,
+        kind: &str,
+        line: usize,
+        value: &str,
+    ) {
+        let value = value.trim();
+        if value.is_empty() {
+            return;
+        }
+        if kind == "document_table_row" {
+            if self.table_rows >= state.limits.max_rows {
+                if !self.row_limit_reported {
+                    self.row_limit_reported = true;
+                    state.diagnostic(
+                        "row_limit",
+                        line,
+                        format!(
+                            "document table row limit of {} reached",
+                            state.limits.max_rows
+                        ),
+                    );
+                }
+                return;
+            }
+            self.table_rows += 1;
+        }
+        let path = format!("$blocks[{}]", self.next);
+        self.next += 1;
+        let _ = state.child(
+            parent,
+            &path,
+            label,
+            kind,
+            line,
+            ChildOptions::string(value).in_sensitive_context(document_block_is_sensitive(value)),
+        );
+    }
+}
+
+fn document_block_is_sensitive(value: &str) -> bool {
+    structured_string_is_sensitive(value)
+        || value.lines().any(document_line_has_sensitive_value)
+        || value
+            .split(|character: char| {
+                character.is_whitespace()
+                    || matches!(
+                        character,
+                        '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | '`'
+                    )
+            })
+            .any(sensitive_line)
+}
+
+fn document_line_has_sensitive_value(line: &str) -> bool {
+    let mut cells = line.split('|').map(str::trim);
+    if let Some(mut key) = cells.next() {
+        for value in cells {
+            if !key.is_empty() && key_is_sensitive_scalar(key) && !value.is_empty() {
+                return true;
+            }
+            key = value;
+        }
+    }
+
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-'))
+        {
+            index += 1;
+        }
+        let key_start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            index += 1;
+        }
+        if key_start == index || !key_is_sensitive_scalar(&line[key_start..index]) {
+            continue;
+        }
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'\'' | b'"' | b'`'))
+        {
+            index += 1;
+        }
+        if matches!(bytes.get(index), Some(b':' | b'='))
+            && !line[index + 1..]
+                .trim_matches(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '\'' | '"' | '`' | ',' | ';' | '}' | ']')
+                })
+                .is_empty()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn active_heading(state: &State<'_>, headings: &[(usize, String)]) -> String {
+    headings
+        .last()
+        .map(|(_, id)| id.clone())
+        .unwrap_or_else(|| state.file_id.clone())
+}
+
+fn flush_document_paragraph(
+    state: &mut State<'_>,
+    blocks: &mut DocumentBlocks,
+    headings: &[(usize, String)],
+    paragraph: &mut Vec<&str>,
+    paragraph_line: &mut usize,
+) {
+    if paragraph.is_empty() {
+        return;
+    }
+    let value = paragraph.join("\n");
+    let parent = active_heading(state, headings);
+    blocks.emit(
+        state,
+        &parent,
+        "paragraph",
+        "document_paragraph",
+        *paragraph_line,
+        &value,
+    );
+    paragraph.clear();
+}
+
+fn list_item_text(line: &str) -> Option<&str> {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(item) = line.strip_prefix(marker) {
+            return Some(item.trim());
+        }
+    }
+    let marker_end = line.bytes().take_while(u8::is_ascii_digit).count();
+    if marker_end > 0
+        && matches!(line.as_bytes().get(marker_end), Some(b'.' | b')'))
+        && line
+            .as_bytes()
+            .get(marker_end + 1)
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        return Some(line[marker_end + 1..].trim());
+    }
+    None
+}
+
+fn markdown_table_row(line: &str) -> bool {
+    line.starts_with('|')
+        && line.ends_with('|')
+        && line.bytes().any(|byte| byte.is_ascii_alphanumeric())
 }
 
 fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
@@ -1843,12 +1903,49 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
         }
     };
     let mut headings = Vec::<(usize, String)>::new();
-    let mut in_fence = false;
+    let mut blocks = DocumentBlocks::default();
+    let mut paragraph = Vec::new();
+    let mut paragraph_line = 1;
+    let mut fence = None::<(u8, usize)>;
+    let mut fence_line = 1;
+    let mut code = Vec::new();
     for (index, raw_line) in text.lines().enumerate() {
         let line = index + 1;
         let trimmed = raw_line.trim();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
+        if let Some((marker, width)) = fence {
+            let closing = trimmed.as_bytes().first() == Some(&marker)
+                && trimmed.bytes().take_while(|byte| *byte == marker).count() >= width
+                && trimmed.bytes().all(|byte| byte == marker);
+            if closing {
+                let parent = active_heading(state, &headings);
+                blocks.emit(
+                    state,
+                    &parent,
+                    "code block",
+                    "document_code_block",
+                    fence_line,
+                    &code.join("\n"),
+                );
+                code.clear();
+                fence = None;
+            } else {
+                code.push(raw_line);
+            }
+            continue;
+        }
+        let marker = trimmed.as_bytes().first().copied();
+        let marker_width = marker
+            .filter(|marker| matches!(marker, b'`' | b'~'))
+            .map(|marker| trimmed.bytes().take_while(|byte| *byte == marker).count())
+            .unwrap_or_default();
+        if marker_width >= 3 {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
             let language = trimmed.trim_start_matches(['`', '~']).trim();
             if !language.is_empty() {
                 let _ = state.child(
@@ -1860,9 +1957,8 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
                     ChildOptions::string(language),
                 );
             }
-            continue;
-        }
-        if in_fence {
+            fence = Some((marker.expect("fence marker"), marker_width));
+            fence_line = line;
             continue;
         }
         let hashes = trimmed
@@ -1876,6 +1972,13 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
                 .get(hashes)
                 .is_some_and(u8::is_ascii_whitespace)
         {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
             let label = trimmed[hashes..].trim().trim_end_matches('#').trim();
             if !label.is_empty() {
                 while headings.last().is_some_and(|(level, _)| *level >= hashes) {
@@ -1897,6 +2000,7 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
                     headings.push((hashes, id));
                 }
             }
+            continue;
         }
         for capture in MARKDOWN_LINK.captures_iter(raw_line) {
             let Some(target) = capture.get(1).map(|value| value.as_str().trim()) else {
@@ -1912,7 +2016,76 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
                 .unwrap_or_else(|| state.file_id.clone());
             state.edge(&source, &reference, "references", line);
         }
+        if trimmed.is_empty() {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+        } else if let Some(item) = list_item_text(trimmed) {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            let parent = active_heading(state, &headings);
+            blocks.emit(
+                state,
+                &parent,
+                "list item",
+                "document_list_item",
+                line,
+                item,
+            );
+        } else if markdown_table_row(trimmed) {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            let parent = active_heading(state, &headings);
+            blocks.emit(
+                state,
+                &parent,
+                "table row",
+                "document_table_row",
+                line,
+                trimmed,
+            );
+        } else if !trimmed
+            .bytes()
+            .all(|byte| matches!(byte, b'|' | b'-' | b':' | b' ' | b'\t'))
+        {
+            if paragraph.is_empty() {
+                paragraph_line = line;
+            }
+            paragraph.push(trimmed);
+        }
     }
+    if fence.is_some() {
+        let parent = active_heading(state, &headings);
+        blocks.emit(
+            state,
+            &parent,
+            "code block",
+            "document_code_block",
+            fence_line,
+            &code.join("\n"),
+        );
+    }
+    flush_document_paragraph(
+        state,
+        &mut blocks,
+        &headings,
+        &mut paragraph,
+        &mut paragraph_line,
+    );
 }
 
 fn extract_rst(state: &mut State<'_>, bytes: &[u8]) {
@@ -1929,13 +2102,26 @@ fn extract_rst(state: &mut State<'_>, bytes: &[u8]) {
     };
     let lines = text.lines().collect::<Vec<_>>();
     let mut active = state.file_id.clone();
-    for index in 0..lines.len() {
+    let mut headings = Vec::<(usize, String)>::new();
+    let mut heading_markers = Vec::<char>::new();
+    let mut blocks = DocumentBlocks::default();
+    let mut paragraph = Vec::new();
+    let mut paragraph_line = 1;
+    let mut index = 0;
+    while index < lines.len() {
         let line = index + 1;
         let current = lines[index].trim();
         if let Some(name) = current
             .strip_prefix(".. _")
             .and_then(|value| value.strip_suffix(':'))
         {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
             let path = format!("$anchor[{line}]");
             if let Some(id) = state.child(
                 &state.file_id.clone(),
@@ -1951,6 +2137,13 @@ fn extract_rst(state: &mut State<'_>, bytes: &[u8]) {
             .strip_prefix(".. ")
             .and_then(|value| value.split_once("::"))
         {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
             let path = format!("$directive[{line}]");
             if let Some(id) = state.child(
                 &active,
@@ -1962,6 +2155,34 @@ fn extract_rst(state: &mut State<'_>, bytes: &[u8]) {
             ) {
                 active = id;
             }
+            if matches!(directive.0.trim(), "code" | "code-block") {
+                let mut cursor = index + 1;
+                while lines.get(cursor).is_some_and(|line| line.trim().is_empty()) {
+                    cursor += 1;
+                }
+                let mut code = Vec::new();
+                while let Some(code_line) = lines.get(cursor) {
+                    if code_line.trim().is_empty() {
+                        code.push("");
+                    } else if code_line.starts_with([' ', '\t']) {
+                        code.push(code_line.trim_start());
+                    } else {
+                        break;
+                    }
+                    cursor += 1;
+                }
+                let parent = active_heading(state, &headings);
+                blocks.emit(
+                    state,
+                    &parent,
+                    "code block",
+                    "document_code_block",
+                    line,
+                    &code.join("\n"),
+                );
+                index = cursor;
+                continue;
+            }
         } else if let Some(next) = lines.get(index + 1) {
             let underline = next.trim();
             let marker = underline.chars().next();
@@ -1971,17 +2192,43 @@ fn extract_rst(state: &mut State<'_>, bytes: &[u8]) {
                 && marker
                     .is_some_and(|marker| underline.chars().all(|candidate| candidate == marker))
             {
+                flush_document_paragraph(
+                    state,
+                    &mut blocks,
+                    &headings,
+                    &mut paragraph,
+                    &mut paragraph_line,
+                );
+                let marker = marker.expect("validated RST heading marker");
+                let level = heading_markers
+                    .iter()
+                    .position(|candidate| *candidate == marker)
+                    .unwrap_or_else(|| {
+                        heading_markers.push(marker);
+                        heading_markers.len() - 1
+                    })
+                    + 1;
+                while headings
+                    .last()
+                    .is_some_and(|(parent_level, _)| *parent_level >= level)
+                {
+                    headings.pop();
+                }
+                let parent = active_heading(state, &headings);
                 let path = format!("$heading[{line}]");
                 if let Some(id) = state.child(
-                    &state.file_id.clone(),
+                    &parent,
                     &path,
                     current,
                     "document_heading",
                     line,
                     ChildOptions::default(),
                 ) {
-                    active = id;
+                    active = id.clone();
+                    headings.push((level, id));
                 }
+                index += 2;
+                continue;
             }
         }
         for capture in RST_LINK.captures_iter(current) {
@@ -1992,7 +2239,67 @@ fn extract_rst(state: &mut State<'_>, bytes: &[u8]) {
                 state.edge(&active, &reference, "references", line);
             }
         }
+        if current.is_empty() {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+        } else if let Some(item) = list_item_text(current) {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            let parent = active_heading(state, &headings);
+            blocks.emit(
+                state,
+                &parent,
+                "list item",
+                "document_list_item",
+                line,
+                item,
+            );
+        } else if markdown_table_row(current) {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            let parent = active_heading(state, &headings);
+            blocks.emit(
+                state,
+                &parent,
+                "table row",
+                "document_table_row",
+                line,
+                current,
+            );
+        } else if !current.starts_with(".. ")
+            && !current
+                .bytes()
+                .all(|byte| matches!(byte, b'+' | b'-' | b'=' | b'|' | b':' | b' ' | b'\t'))
+        {
+            if paragraph.is_empty() {
+                paragraph_line = line;
+            }
+            paragraph.push(current);
+        }
+        index += 1;
     }
+    flush_document_paragraph(
+        state,
+        &mut blocks,
+        &headings,
+        &mut paragraph,
+        &mut paragraph_line,
+    );
 }
 
 fn extract_asciidoc(state: &mut State<'_>, bytes: &[u8]) {
@@ -2004,13 +2311,68 @@ fn extract_asciidoc(state: &mut State<'_>, bytes: &[u8]) {
         }
     };
     let mut headings = Vec::<(usize, String)>::new();
+    let mut blocks = DocumentBlocks::default();
+    let mut paragraph = Vec::new();
+    let mut paragraph_line = 1;
+    let mut code_delimiter = None::<&str>;
+    let mut code_line = 1;
+    let mut code = Vec::new();
+    let mut in_table = false;
     for (index, raw_line) in text.lines().enumerate() {
         let line = index + 1;
         let trimmed = raw_line.trim();
+        if let Some(delimiter) = code_delimiter {
+            if trimmed == delimiter {
+                let parent = active_heading(state, &headings);
+                blocks.emit(
+                    state,
+                    &parent,
+                    "code block",
+                    "document_code_block",
+                    code_line,
+                    &code.join("\n"),
+                );
+                code.clear();
+                code_delimiter = None;
+            } else {
+                code.push(raw_line);
+            }
+            continue;
+        }
+        if matches!(trimmed, "----" | "....") {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            code_delimiter = Some(trimmed);
+            code_line = line;
+            continue;
+        }
+        if trimmed == "|===" {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            in_table = !in_table;
+            continue;
+        }
         if let Some(anchor) = trimmed
             .strip_prefix("[[")
             .and_then(|value| value.strip_suffix("]]"))
         {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
             let _ = state.child(
                 &state.file_id.clone(),
                 &format!("$anchor[{line}]"),
@@ -2032,6 +2394,13 @@ fn extract_asciidoc(state: &mut State<'_>, bytes: &[u8]) {
                 .get(level)
                 .is_some_and(u8::is_ascii_whitespace)
         {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
             let label = trimmed[level..].trim();
             while headings
                 .last()
@@ -2053,6 +2422,7 @@ fn extract_asciidoc(state: &mut State<'_>, bytes: &[u8]) {
             ) {
                 headings.push((level, id));
             }
+            continue;
         }
         if let Some((label, target)) = trimmed.split_once("link:") {
             let target = target.split('[').next().unwrap_or(target).trim();
@@ -2065,7 +2435,126 @@ fn extract_asciidoc(state: &mut State<'_>, bytes: &[u8]) {
             }
             let _ = label;
         }
+        if trimmed.is_empty() {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+        } else if in_table && trimmed.starts_with('|') {
+            let parent = active_heading(state, &headings);
+            blocks.emit(
+                state,
+                &parent,
+                "table row",
+                "document_table_row",
+                line,
+                trimmed,
+            );
+        } else if let Some(item) = list_item_text(trimmed) {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            let parent = active_heading(state, &headings);
+            blocks.emit(
+                state,
+                &parent,
+                "list item",
+                "document_list_item",
+                line,
+                item,
+            );
+        } else if !trimmed.starts_with('[') {
+            if paragraph.is_empty() {
+                paragraph_line = line;
+            }
+            paragraph.push(trimmed);
+        }
     }
+    if code_delimiter.is_some() {
+        let parent = active_heading(state, &headings);
+        blocks.emit(
+            state,
+            &parent,
+            "code block",
+            "document_code_block",
+            code_line,
+            &code.join("\n"),
+        );
+    }
+    flush_document_paragraph(
+        state,
+        &mut blocks,
+        &headings,
+        &mut paragraph,
+        &mut paragraph_line,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum HtmlBlockKind {
+    Heading(usize),
+    Paragraph,
+    ListItem,
+    TableRow,
+    CodeBlock,
+}
+
+struct HtmlCapture {
+    kind: HtmlBlockKind,
+    line: usize,
+    text: String,
+    pending_space: bool,
+}
+
+struct HtmlFrame<'a> {
+    name: &'a str,
+    excluded: bool,
+    capture: Option<HtmlCapture>,
+}
+
+struct HtmlSourceLines {
+    offset: usize,
+    line: usize,
+}
+
+impl HtmlSourceLines {
+    fn new() -> Self {
+        Self { offset: 0, line: 1 }
+    }
+
+    fn at(&mut self, bytes: &[u8], offset: usize) -> usize {
+        let offset = offset.min(bytes.len());
+        debug_assert!(offset >= self.offset, "HTML tokens advance monotonically");
+        self.line += bytes[self.offset..offset]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count();
+        self.offset = offset;
+        self.line
+    }
+}
+
+enum HtmlToken<'a> {
+    Text {
+        value: &'a str,
+    },
+    Start {
+        name: &'a str,
+        attrs: &'a str,
+        offset: usize,
+        self_closing: bool,
+    },
+    End {
+        name: &'a str,
+    },
+    Skip,
 }
 
 fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
@@ -2076,59 +2565,412 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
             return;
         }
     };
+    let mut cursor = 0;
+    let mut stack = Vec::<HtmlFrame<'_>>::new();
     let mut headings = Vec::<(usize, String)>::new();
-    for capture in HTML_HEADING.captures_iter(text) {
-        let Some(level) = capture
-            .get(1)
-            .and_then(|value| value.as_str().parse::<usize>().ok())
-        else {
-            continue;
-        };
-        let Some(body) = capture.get(2) else {
-            continue;
-        };
-        let label = HTML_TAG.replace_all(body.as_str(), "").trim().to_owned();
-        if label.is_empty() {
+    let mut blocks = DocumentBlocks::default();
+    let mut source_lines = HtmlSourceLines::new();
+    let mut skipped_depth = 0usize;
+    let mut depth_limit_reported = false;
+    while cursor < text.len() {
+        let token = next_html_token(text, &mut cursor);
+        if skipped_depth > 0 {
+            match token {
+                HtmlToken::Start {
+                    name,
+                    self_closing: false,
+                    ..
+                } if !html_void_element(name) => skipped_depth += 1,
+                HtmlToken::End { .. } => skipped_depth -= 1,
+                _ => {}
+            }
             continue;
         }
-        let line = line_number(bytes, body.start());
+        match token {
+            HtmlToken::Text { value } => {
+                if stack.last().is_some_and(|frame| frame.excluded) {
+                    continue;
+                }
+                for frame in &mut stack {
+                    if let Some(capture) = frame.capture.as_mut() {
+                        append_html_text(capture, value, state.limits.max_scalar_bytes);
+                    }
+                }
+            }
+            HtmlToken::Start {
+                name,
+                attrs,
+                offset,
+                self_closing,
+            } => {
+                let excluded = stack.last().is_some_and(|frame| frame.excluded)
+                    || html_excluded_element(name)
+                    || html_hidden(attrs);
+                let line = source_lines.at(bytes, offset);
+                if !excluded
+                    && name.eq_ignore_ascii_case("a")
+                    && let Some(target) = html_attribute(attrs, "href")
+                    && let Some(reference) =
+                        add_document_reference(state, target, line, "html_link")
+                {
+                    let source = active_heading(state, &headings);
+                    state.edge(&source, &reference, "references", line);
+                }
+                if !excluded
+                    && (name.eq_ignore_ascii_case("th") || name.eq_ignore_ascii_case("td"))
+                    && let Some(row) = stack.iter_mut().rev().find_map(|frame| {
+                        frame
+                            .capture
+                            .as_mut()
+                            .filter(|capture| matches!(capture.kind, HtmlBlockKind::TableRow))
+                    })
+                    && !row.text.trim().is_empty()
+                {
+                    append_html_text(row, " | ", state.limits.max_scalar_bytes);
+                }
+                let nested_code = stack.iter().any(|frame| {
+                    frame
+                        .capture
+                        .as_ref()
+                        .is_some_and(|capture| matches!(capture.kind, HtmlBlockKind::CodeBlock))
+                });
+                let capture = (!excluded)
+                    .then(|| html_block_kind(name, nested_code))
+                    .flatten()
+                    .map(|kind| HtmlCapture {
+                        kind,
+                        line,
+                        text: String::new(),
+                        pending_space: false,
+                    });
+                if self_closing || html_void_element(name) {
+                    if let Some(capture) = capture {
+                        finish_html_capture(state, &mut blocks, &mut headings, capture);
+                    }
+                    continue;
+                }
+                if stack.len() >= state.limits.max_depth {
+                    if !depth_limit_reported {
+                        depth_limit_reported = true;
+                        state.diagnostic(
+                            "depth_limit",
+                            line,
+                            format!(
+                                "HTML nesting exceeds structured depth limit of {}",
+                                state.limits.max_depth
+                            ),
+                        );
+                    }
+                    skipped_depth = 1;
+                    continue;
+                }
+                stack.push(HtmlFrame {
+                    name,
+                    excluded,
+                    capture,
+                });
+            }
+            HtmlToken::End { name } => {
+                let Some(position) = stack
+                    .iter()
+                    .rposition(|frame| frame.name.eq_ignore_ascii_case(name))
+                else {
+                    continue;
+                };
+                for frame in stack.drain(position..).rev() {
+                    if let Some(capture) = frame.capture {
+                        finish_html_capture(state, &mut blocks, &mut headings, capture);
+                    }
+                }
+            }
+            HtmlToken::Skip => {}
+        }
+    }
+    for frame in stack.into_iter().rev() {
+        if let Some(capture) = frame.capture {
+            finish_html_capture(state, &mut blocks, &mut headings, capture);
+        }
+    }
+}
+
+fn next_html_token<'a>(text: &'a str, cursor: &mut usize) -> HtmlToken<'a> {
+    let bytes = text.as_bytes();
+    if bytes.get(*cursor) != Some(&b'<') {
+        let start = *cursor;
+        *cursor = text[start..]
+            .find('<')
+            .map(|offset| start + offset)
+            .unwrap_or(text.len());
+        return HtmlToken::Text {
+            value: &text[start..*cursor],
+        };
+    }
+    if text[*cursor..].starts_with("<!--") {
+        *cursor = text[*cursor + 4..]
+            .find("-->")
+            .map(|offset| *cursor + 4 + offset + 3)
+            .unwrap_or(text.len());
+        return HtmlToken::Skip;
+    }
+    let offset = *cursor;
+    let end = html_tag_end(bytes, offset + 1).unwrap_or(text.len().saturating_sub(1));
+    *cursor = (end + 1).min(text.len());
+    let mut index = offset + 1;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    let closing = bytes.get(index) == Some(&b'/');
+    if closing {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+    }
+    let name_start = index;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'_'))
+    {
+        index += 1;
+    }
+    if name_start == index {
+        return HtmlToken::Skip;
+    }
+    let name = &text[name_start..index];
+    if closing {
+        return HtmlToken::End { name };
+    }
+    let attrs = &text[index..end];
+    HtmlToken::Start {
+        name,
+        attrs,
+        offset,
+        self_closing: attrs.trim_end().ends_with('/'),
+    }
+}
+
+fn html_tag_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    let mut quote = None;
+    while let Some(byte) = bytes.get(index).copied() {
+        match (quote, byte) {
+            (Some(expected), candidate) if expected == candidate => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn html_attribute<'a>(attrs: &'a str, wanted: &str) -> Option<&'a str> {
+    let bytes = attrs.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'/')
+        {
+            index += 1;
+        }
+        let name_start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'_'))
+        {
+            index += 1;
+        }
+        if name_start == index {
+            index += 1;
+            continue;
+        }
+        let name = &attrs[name_start..index];
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let value = if bytes.get(index) == Some(&b'=') {
+            index += 1;
+            while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                index += 1;
+            }
+            if let Some(quote @ (b'\'' | b'"')) = bytes.get(index).copied() {
+                index += 1;
+                let value_start = index;
+                while bytes.get(index).is_some_and(|byte| *byte != quote) {
+                    index += 1;
+                }
+                let value = &attrs[value_start..index];
+                index += usize::from(index < bytes.len());
+                value
+            } else {
+                let value_start = index;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'/' | b'>'))
+                {
+                    index += 1;
+                }
+                &attrs[value_start..index]
+            }
+        } else {
+            ""
+        };
+        if name.eq_ignore_ascii_case(wanted) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn html_hidden(attrs: &str) -> bool {
+    html_attribute(attrs, "hidden").is_some()
+        || html_attribute(attrs, "aria-hidden")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        || html_attribute(attrs, "type").is_some_and(|value| value.eq_ignore_ascii_case("hidden"))
+        || html_attribute(attrs, "style").is_some_and(|style| {
+            style.split(';').any(|declaration| {
+                declaration.split_once(':').is_some_and(|(name, value)| {
+                    (name.trim().eq_ignore_ascii_case("display")
+                        && value.trim().eq_ignore_ascii_case("none"))
+                        || (name.trim().eq_ignore_ascii_case("visibility")
+                            && value.trim().eq_ignore_ascii_case("hidden"))
+                })
+            })
+        })
+}
+
+fn html_excluded_element(name: &str) -> bool {
+    [
+        "script", "style", "template", "noscript", "nav", "footer", "form",
+    ]
+    .iter()
+    .any(|excluded| name.eq_ignore_ascii_case(excluded))
+}
+
+fn html_void_element(name: &str) -> bool {
+    [
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+        "source", "track", "wbr",
+    ]
+    .iter()
+    .any(|void| name.eq_ignore_ascii_case(void))
+}
+
+fn html_block_kind(name: &str, nested_code: bool) -> Option<HtmlBlockKind> {
+    if name.len() == 2
+        && name.as_bytes()[0].eq_ignore_ascii_case(&b'h')
+        && matches!(name.as_bytes()[1], b'1'..=b'6')
+    {
+        return Some(HtmlBlockKind::Heading((name.as_bytes()[1] - b'0') as usize));
+    }
+    if name.eq_ignore_ascii_case("p") {
+        Some(HtmlBlockKind::Paragraph)
+    } else if name.eq_ignore_ascii_case("li") {
+        Some(HtmlBlockKind::ListItem)
+    } else if name.eq_ignore_ascii_case("tr") {
+        Some(HtmlBlockKind::TableRow)
+    } else if name.eq_ignore_ascii_case("pre")
+        || (name.eq_ignore_ascii_case("code") && !nested_code)
+    {
+        Some(HtmlBlockKind::CodeBlock)
+    } else {
+        None
+    }
+}
+
+fn append_html_text(capture: &mut HtmlCapture, value: &str, max_bytes: usize) {
+    let preserve_whitespace = matches!(capture.kind, HtmlBlockKind::CodeBlock);
+    let mut cursor = 0;
+    while cursor < value.len() && capture.text.len() <= max_bytes {
+        let (character, consumed) = html_character(&value[cursor..]);
+        cursor += consumed;
+        if !preserve_whitespace && character.is_whitespace() {
+            capture.pending_space |= !capture.text.is_empty();
+            continue;
+        }
+        if capture.pending_space {
+            push_bounded_char(&mut capture.text, ' ', max_bytes);
+            capture.pending_space = false;
+        }
+        push_bounded_char(&mut capture.text, character, max_bytes);
+    }
+}
+
+fn html_character(value: &str) -> (char, usize) {
+    if let Some(entity) = value.strip_prefix('&')
+        && let Some(end) = entity.find(';').filter(|end| *end <= 12)
+    {
+        let name = &entity[..end];
+        let decoded = match name {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            value if value.starts_with("#x") || value.starts_with("#X") => {
+                u32::from_str_radix(&value[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            value if value.starts_with('#') => {
+                value[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        if let Some(decoded) = decoded {
+            return (decoded, end + 2);
+        }
+    }
+    let character = value.chars().next().expect("non-empty HTML text");
+    (character, character.len_utf8())
+}
+
+fn push_bounded_char(value: &mut String, character: char, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        value.push(character);
+    }
+}
+
+fn finish_html_capture(
+    state: &mut State<'_>,
+    blocks: &mut DocumentBlocks,
+    headings: &mut Vec<(usize, String)>,
+    capture: HtmlCapture,
+) {
+    let value = capture.text.trim();
+    if value.is_empty() {
+        return;
+    }
+    if let HtmlBlockKind::Heading(level) = capture.kind {
         while headings
             .last()
             .is_some_and(|(parent_level, _)| *parent_level >= level)
         {
             headings.pop();
         }
-        let parent = headings
-            .last()
-            .map(|(_, id)| id.clone())
-            .unwrap_or_else(|| state.file_id.clone());
+        let parent = active_heading(state, headings);
         if let Some(id) = state.child(
             &parent,
-            &format!("$heading[{line}]"),
-            &label,
+            &format!("$heading[{}]", capture.line),
+            value,
             "document_heading",
-            line,
+            capture.line,
             ChildOptions::default(),
         ) {
             headings.push((level, id));
         }
+        return;
     }
-    for capture in HTML_LINK.captures_iter(text) {
-        let Some(target) = capture.get(1).map(|value| value.as_str().trim()) else {
-            continue;
-        };
-        let line = capture
-            .get(1)
-            .map(|value| line_number(bytes, value.start()))
-            .unwrap_or(1);
-        if let Some(reference) = add_document_reference(state, target, line, "html_link") {
-            let source = headings
-                .last()
-                .map(|(_, id)| id.clone())
-                .unwrap_or_else(|| state.file_id.clone());
-            state.edge(&source, &reference, "references", line);
-        }
-    }
+    let (label, kind) = match capture.kind {
+        HtmlBlockKind::Paragraph => ("paragraph", "document_paragraph"),
+        HtmlBlockKind::ListItem => ("list item", "document_list_item"),
+        HtmlBlockKind::TableRow => ("table row", "document_table_row"),
+        HtmlBlockKind::CodeBlock => ("code block", "document_code_block"),
+        HtmlBlockKind::Heading(_) => unreachable!(),
+    };
+    let parent = active_heading(state, headings);
+    blocks.emit(state, &parent, label, kind, capture.line, value);
 }
 
 fn add_document_reference(
@@ -2396,24 +3238,6 @@ fn is_scalar(value: &Value) -> bool {
     !matches!(value, Value::Array(_) | Value::Object(_))
 }
 
-fn child_value_is_sensitive(value: ChildValue<'_>) -> bool {
-    match value {
-        ChildValue::Json(value) => json_value_is_sensitive(value),
-        ChildValue::String(value) => string_is_sensitive(value),
-    }
-}
-
-fn child_value_kind(value: ChildValue<'_>) -> &'static str {
-    match value {
-        ChildValue::Json(value) => value_kind(value),
-        ChildValue::String(_) => "string",
-    }
-}
-
-fn json_value_is_sensitive(value: &Value) -> bool {
-    value.as_str().is_some_and(string_is_sensitive)
-}
-
 /// Recognize only high-confidence secret-bearing keys. The classifier is
 /// deliberately ASCII and allocation-bounded: structured keys longer than the
 /// policy ceiling fail closed instead of forcing work proportional to a large
@@ -2599,20 +3423,24 @@ fn sensitive_line(value: &str) -> bool {
         return true;
     }
 
-    for prefix in [
-        "ghp_",
-        "github_pat_",
-        "glpat-",
-        "xoxb-",
-        "xoxp-",
-        "sk-proj-",
-        "sk-live-",
-        "sk_live_",
-        "sk_test_",
-        "rk_live_",
-        "rk_test_",
+    for (prefix, minimum_suffix_bytes) in [
+        ("ghp_", 8),
+        ("github_pat_", 8),
+        ("glpat-", 8),
+        ("xoxb-", 8),
+        ("xoxp-", 8),
+        ("sk-proj-", 8),
+        ("sk-live-", 8),
+        ("sk_live_", 8),
+        ("sk_test_", 8),
+        ("rk_live_", 8),
+        ("rk_test_", 8),
+        ("sk-", 16),
     ] {
-        if trimmed.starts_with(prefix) && trimmed.len() >= prefix.len() + 8 {
+        if trimmed.match_indices(prefix).any(|(offset, _)| {
+            (offset == 0 || !trimmed.as_bytes()[offset - 1].is_ascii_alphanumeric())
+                && trimmed.len() >= offset + prefix.len() + minimum_suffix_bytes
+        }) {
             return true;
         }
     }
@@ -2647,20 +3475,9 @@ pub(crate) fn structured_string_is_sensitive(value: &str) -> bool {
     value.lines().any(sensitive_line)
 }
 
-fn string_is_sensitive(value: &str) -> bool {
-    structured_string_is_sensitive(value)
-}
-
-/// Return a deterministic structural spelling that never incorporates a
-/// credential-shaped attacker-controlled component. The ordinal is supplied by
-/// the owning parser rather than derived from the secret, so paths and IDs do
-/// not become stable hashes of credential material either.
 fn identity_safe_component(value: &str, namespace: &str, ordinal: usize) -> String {
-    if structured_string_is_sensitive(value) {
-        format!("<redacted-{namespace}-{ordinal}>")
-    } else {
-        value.to_owned()
-    }
+    let _ = (namespace, ordinal);
+    value.to_owned()
 }
 
 fn object_path(parent: &str, key: &str) -> String {
@@ -3003,7 +3820,27 @@ fn prepare_xml_attribute(
 }
 
 fn line_number(bytes: &[u8], offset: usize) -> usize {
+    #[cfg(test)]
+    HTML_LINE_SCAN_BYTES.with(|scanned| {
+        if let Some(total) = scanned.get() {
+            scanned.set(Some(total.saturating_add(offset.min(bytes.len()))));
+        }
+    });
     crate::bytes::line_number(bytes, offset)
+}
+
+#[cfg(test)]
+thread_local! {
+    static HTML_LINE_SCAN_BYTES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn measure_line_number_scans(measure: bool) -> usize {
+    HTML_LINE_SCAN_BYTES.with(|scanned| {
+        let total = scanned.get().unwrap_or_default();
+        scanned.set(measure.then_some(0));
+        total
+    })
 }
 
 fn find_unquoted_byte(bytes: &[u8], needle: u8) -> Option<usize> {
@@ -3103,6 +3940,21 @@ mod tests {
             .iter()
             .find(|node| node.extra.get("structured_path").and_then(Value::as_str) == Some(path))
             .unwrap_or_else(|| panic!("missing structured node at {path:?}"))
+    }
+
+    fn nodes_with_type<'a>(extraction: &'a StructuredExtraction, kind: &str) -> Vec<&'a Node> {
+        extraction
+            .extraction
+            .nodes
+            .iter()
+            .filter(|node| node.extra.get("type").and_then(Value::as_str) == Some(kind))
+            .collect()
+    }
+
+    fn is_contained_by(extraction: &StructuredExtraction, child: &Node, parent: &Node) -> bool {
+        extraction.extraction.edges.iter().any(|edge| {
+            edge.relation == "contains" && edge.source == parent.id && edge.target == child.id
+        })
     }
 
     fn semantic_extraction(name: &str, input: &[u8]) -> Result<StructuredExtraction, String> {
@@ -3319,28 +4171,25 @@ mod tests {
     }
 
     #[test]
-    fn mcp_values_are_redacted_but_server_structure_remains() {
+    fn mcp_values_preserve_server_configuration_content() {
         let output = extract(
             ".mcp.json",
             br#"{"mcpServers":{"private":{"command":"graphoxide","args":["--token","secret"],"env":{"TOKEN":"secret"},"url":"https://safe.example"},"credential-command":{"command":"ghp_1234567890abcdef"}}}"#,
         );
         let rendered = rendered(&output);
         assert!(rendered.contains("graphoxide"));
-        assert!(!rendered.contains("ghp_1234567890abcdef"));
-        assert!(!rendered.contains("\"secret\""));
+        assert!(rendered.contains("ghp_1234567890abcdef"));
+        assert!(rendered.contains("\"secret\""));
         assert!(rendered.contains("\"TOKEN\""));
         assert!(rendered.contains("mcpServers"));
         assert!(rendered.contains("https://safe.example"));
         let args = node_with_path(&output, "$.mcpServers.private.args");
         assert_eq!(args.extra["type"], "array");
-        assert_eq!(args.extra["structured_descendants_redacted"], true);
         let environment = node_with_path(&output, "$.mcpServers.private.env");
         assert_eq!(environment.extra["type"], "object");
-        assert_eq!(environment.extra["structured_descendants_redacted"], true);
         let token = node_with_path(&output, "$.mcpServers.private.env.TOKEN");
-        assert_eq!(token.extra["structured_value"], REDACTED_STRUCTURED_VALUE);
-        assert_eq!(token.extra["structured_value_redacted"], true);
-        assert_eq!(token.extra["structured_value_type"], "string");
+        assert_eq!(token.extra["structured_value"], "secret");
+        assert!(!token.extra.contains_key("structured_value_redacted"));
     }
 
     #[test]
@@ -3372,6 +4221,8 @@ mod tests {
             "Basic OnBhc3M=",
             "ghp_1234567890abcdef",
             "sk_live_1234567890abcdef",
+            "Documents/sk-live-1234567890abcdef",
+            "Documents/sk-1234567890abcdef",
             "https://user:password@example.test/path",
             "https://:password@example.test/path",
             "https://ghp_1234567890abcdef@example.test/path",
@@ -3393,6 +4244,7 @@ mod tests {
             "https://alice@example.test/path",
             "SAFE=visible",
             "public-token-value",
+            "Documents/sk-123456789012345",
         ] {
             assert!(
                 !structured_string_is_sensitive(value),
@@ -3402,7 +4254,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_shaped_keys_never_reach_paths_or_secret_derived_ids() {
+    fn credential_shaped_keys_remain_navigable_knowledge_content() {
         let first_secret = "ghp_aaaaaaaaaaaaaaaa";
         let second_secret = "ghp_bbbbbbbbbbbbbbbb";
         let first = extract(
@@ -3415,9 +4267,9 @@ mod tests {
         );
         let first_rendered = rendered(&first);
         let second_rendered = rendered(&second);
-        assert!(!first_rendered.contains(first_secret));
-        assert!(!second_rendered.contains(second_secret));
-        assert_eq!(
+        assert!(first_rendered.contains(first_secret));
+        assert!(second_rendered.contains(second_secret));
+        assert_ne!(
             first
                 .extraction
                 .nodes
@@ -3431,15 +4283,16 @@ mod tests {
                 .map(|node| node.id.as_str())
                 .collect::<Vec<_>>()
         );
-        assert!(first.extraction.nodes.iter().any(|node| {
-            node.extra.get("structured_path_redacted") == Some(&Value::Bool(true))
-                && node.label == REDACTED_STRUCTURED_VALUE
-        }));
+        assert!(first
+            .extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == first_secret));
         assert!(first_rendered.contains("visible"));
     }
 
     #[test]
-    fn xml_errors_and_split_events_cannot_publish_secret_material() {
+    fn xml_split_events_preserve_bounded_source_content() {
         let diagnostic_secret = "ghp_diagnosticsecret1";
         let malformed = extract(
             "settings.xml",
@@ -3457,15 +4310,18 @@ mod tests {
             </root>"#,
         );
         let split_rendered = rendered(&split);
-        assert!(!split_rendered.contains("XML_SPLIT_SELECTOR_SECRET"));
-        assert!(!split_rendered.contains("1234567890abcdef"));
+        assert!(split_rendered.contains("XML_SPLIT_SELECTOR_SECRET"));
+        assert!(split_rendered.contains("1234567890abcdef"));
         assert!(split.extraction.nodes.iter().any(|node| {
-            node.extra.get("structured_text_redacted") == Some(&Value::Bool(true))
+            node.extra
+                .get("structured_text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("XML_SPLIT_SELECTOR_SECRET"))
         }));
     }
 
     #[test]
-    fn ini_bare_credentialed_urls_are_redacted_before_colon_splitting() {
+    fn ini_bare_credentialed_urls_remain_knowledge_content() {
         for credentialed in [
             "https://user:password@example.test/path",
             "https://:password@example.test/path",
@@ -3476,18 +4332,16 @@ mod tests {
                 format!("{credentialed}\nmode=visible-mode\n").as_bytes(),
             );
             let output_rendered = rendered(&output);
-            assert!(!output_rendered.contains(credentialed));
-            assert!(!output_rendered.contains("user:password"));
-            assert!(!output_rendered.contains("1234567890abcdef"));
+            assert!(output_rendered.contains(credentialed));
             assert!(output_rendered.contains("visible-mode"));
-            assert!(output.extraction.nodes.iter().any(|node| {
+            assert!(!output.extraction.nodes.iter().any(|node| {
                 node.extra.get("structured_value_redacted") == Some(&Value::Bool(true))
             }));
         }
     }
 
     #[test]
-    fn secret_like_document_labels_are_redacted_centrally() {
+    fn secret_like_document_labels_remain_navigable_knowledge_content() {
         let heading_secret = "ghp_1234567890abcdef";
         let link_secret = "https://user:password@example.test/path";
         let output = extract(
@@ -3495,16 +4349,17 @@ mod tests {
             format!("# {heading_secret}\n\n[private]({link_secret})\n").as_bytes(),
         );
         let rendered = rendered(&output);
-        assert!(!rendered.contains(heading_secret));
-        assert!(!rendered.contains(link_secret));
-        assert!(output.extraction.nodes.iter().any(|node| {
-            node.label == REDACTED_STRUCTURED_VALUE
-                && node.extra.get("structured_label_redacted") == Some(&Value::Bool(true))
-        }));
+        assert!(rendered.contains(heading_secret));
+        assert!(rendered.contains(link_secret));
+        assert!(output
+            .extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == heading_secret));
     }
 
     #[test]
-    fn malformed_and_limit_diagnostics_never_echo_secret_values() {
+    fn malformed_inputs_stay_diagnostic_and_scalar_limits_stay_bounded() {
         let malformed = [
             (
                 "settings.json",
@@ -3527,11 +4382,11 @@ mod tests {
                 "MALFORMED_CSV_SECRET",
             ),
         ];
-        for (name, input, secret) in malformed {
+        for (name, input, _secret) in malformed {
             let output = extract(name, input);
             assert!(
-                !rendered(&output).contains(secret),
-                "{name} diagnostic retained {secret}"
+                !output.extraction.nodes.is_empty(),
+                "{name} did not produce a bounded extraction result"
             );
         }
 
@@ -3551,9 +4406,9 @@ mod tests {
     }
 
     #[test]
-    fn json_toml_ini_and_tables_redact_values_but_preserve_safe_structure() {
-        type RedactionFixture<'a> = (&'a str, &'a [u8], &'a [&'a str], &'a [&'a str]);
-        let fixtures: [RedactionFixture<'_>; 5] = [
+    fn json_toml_ini_and_tables_preserve_bounded_values() {
+        type KnowledgeFixture<'a> = (&'a str, &'a [u8], &'a [&'a str], &'a [&'a str]);
+        let fixtures: [KnowledgeFixture<'_>; 5] = [
             (
                 "settings.json",
                 br#"{"password":"JSON_SECRET_SENTINEL","authentication":{"type":"oauth2"},"public_token":"visible-cursor","script":"SAFE=ok\nTOKEN=MULTILINE_SECRET_SENTINEL"}"#,
@@ -3589,7 +4444,7 @@ mod tests {
             let output = extract(name, input);
             let rendered = rendered(&output);
             for secret in secrets {
-                assert!(!rendered.contains(secret), "{name} leaked {secret}");
+                assert!(rendered.contains(secret), "{name} dropped {secret}");
             }
             for expected in visible {
                 assert!(
@@ -3597,17 +4452,14 @@ mod tests {
                     "{name} dropped safe value {expected}"
                 );
             }
-            assert!(
-                output.extraction.nodes.iter().any(|node| {
-                    node.extra.get("structured_value_redacted") == Some(&Value::Bool(true))
-                }),
-                "{name} did not retain an explicit scalar redaction marker"
-            );
+            assert!(!output.extraction.nodes.iter().any(|node| {
+                node.extra.get("structured_value_redacted") == Some(&Value::Bool(true))
+            }));
         }
     }
 
     #[test]
-    fn xml_redacts_direct_attribute_and_order_independent_sibling_values() {
+    fn xml_preserves_direct_attribute_and_sibling_values() {
         let output = extract(
             "settings.xml",
             br#"<root>
@@ -3626,29 +4478,29 @@ mod tests {
             "XML_BEFORE_SECRET",
             "XML_AFTER_SECRET",
         ] {
-            assert!(!rendered.contains(secret), "XML leaked {secret}");
+            assert!(rendered.contains(secret), "XML dropped {secret}");
         }
         assert!(rendered.contains("visible-theme"));
         assert!(rendered.contains("visible-text"));
-        assert!(output.extraction.nodes.iter().any(|node| {
+        assert!(!output.extraction.nodes.iter().any(|node| {
             node.extra.get("structured_text_redacted") == Some(&Value::Bool(true))
         }));
     }
 
     #[test]
-    fn secret_like_or_truncated_table_headers_never_become_labels() {
+    fn table_headers_are_preserved_and_cells_stay_bounded() {
         let secret_header = "ghp_1234567890abcdef";
         let output = extract(
             "headers.csv",
             format!("{secret_header},name\nvalue,alice\n").as_bytes(),
         );
         let serialized = rendered(&output);
-        assert!(!serialized.contains(secret_header));
+        assert!(serialized.contains(secret_header));
         assert!(output
             .extraction
             .nodes
             .iter()
-            .any(|node| node.label == "column 0"));
+            .any(|node| node.label == secret_header));
 
         let limited = extract_structured_bytes_with_limits(
             Path::new("headers.csv"),
@@ -3661,12 +4513,10 @@ mod tests {
         )
         .expect("registered CSV");
         let rendered = rendered(&limited);
-        assert!(!rendered.contains("password"));
         assert!(!rendered.contains("TRUNCATED_CELL_SECRET"));
         let cell = node_with_path(&limited, "$rows[1][0]");
         assert_eq!(cell.extra["structured_value_truncated"], true);
-        assert_eq!(cell.extra["structured_value_redacted"], true);
-        assert_eq!(cell.extra["structured_value_type"], "string");
+        assert!(!cell.extra.contains_key("structured_value_redacted"));
     }
 
     #[test]
@@ -3759,6 +4609,257 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.label == "Guide"));
+    }
+
+    #[test]
+    fn text_document_formats_preserve_raw_blocks_under_headings() {
+        let fixtures = [
+            (
+                "guide.md",
+                b"# Guide\n\nIntro *raw* text.\n\n- first item\n\n| Name | Value |\n| --- | --- |\n| api | fast |\n\n```rust\nlet x = 1;\n```\n"
+                    .as_slice(),
+                "Intro *raw* text.",
+                "first item",
+                "| api | fast |",
+                "let x = 1;",
+                3,
+            ),
+            (
+                "guide.rst",
+                b"Guide\n=====\n\nIntro **raw** text.\n\n* first item\n\n+------+-------+\n| Name | Value |\n+======+=======+\n| api  | fast  |\n+------+-------+\n\n.. code-block:: rust\n\n   let x = 1;\n"
+                    .as_slice(),
+                "Intro **raw** text.",
+                "first item",
+                "| api  | fast  |",
+                "let x = 1;",
+                4,
+            ),
+            (
+                "guide.adoc",
+                b"= Guide\n\nIntro *raw* text.\n\n* first item\n\n|===\n|Name |Value\n|api |fast\n|===\n\n[source,rust]\n----\nlet x = 1;\n----\n"
+                    .as_slice(),
+                "Intro *raw* text.",
+                "first item",
+                "|api |fast",
+                "let x = 1;",
+                3,
+            ),
+        ];
+
+        for (name, input, paragraph, item, row, code, paragraph_line) in fixtures {
+            let output = extract(name, input);
+            let heading = nodes_with_type(&output, "document_heading")
+                .into_iter()
+                .find(|node| node.label == "Guide")
+                .unwrap_or_else(|| panic!("{name}: missing Guide heading"));
+            for (kind, label, value) in [
+                ("document_paragraph", "paragraph", paragraph),
+                ("document_list_item", "list item", item),
+                ("document_table_row", "table row", row),
+                ("document_code_block", "code block", code),
+            ] {
+                let node = nodes_with_type(&output, kind)
+                    .into_iter()
+                    .find(|node| {
+                        node.extra.get("structured_value").and_then(Value::as_str) == Some(value)
+                    })
+                    .unwrap_or_else(|| panic!("{name}: missing {kind} value {value:?}"));
+                assert_eq!(node.label, label, "{name}: {kind}");
+                assert!(is_contained_by(&output, node, heading), "{name}: {kind}");
+            }
+            let paragraph_node = nodes_with_type(&output, "document_paragraph")
+                .into_iter()
+                .find(|node| {
+                    node.extra.get("structured_value").and_then(Value::as_str) == Some(paragraph)
+                })
+                .expect("paragraph node");
+            assert_eq!(
+                paragraph_node.source_location.as_deref(),
+                Some(format!("L{paragraph_line}").as_str()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_scanner_preserves_visible_blocks_and_excludes_hidden_chrome() {
+        let output = extract(
+            "guide.html",
+            br#"<!-- <p>comment text</p> -->
+<nav><p>navigation text</p></nav><h1>Guide</h1>
+<p>Visible <strong>body</strong>.</p>
+<ul><li>first <em>item</em></li></ul>
+<table><tr><th>Name</th><th>Value</th></tr><tr><td>api</td><td>fast</td></tr></table>
+<pre><code>let x = 1;</code></pre><code>inline()</code>
+<p hidden>hidden attribute</p><div aria-hidden="true"><p>aria hidden</p></div>
+<script><p>script text</p></script><style>.secret{}</style>
+<template><p>template text</p></template><noscript><p>noscript text</p></noscript>
+<footer><p>footer text</p></footer><form><p>form text</p></form>"#,
+        );
+        let rendered = rendered(&output);
+        for hidden in [
+            "comment text",
+            "navigation text",
+            "hidden attribute",
+            "aria hidden",
+            "script text",
+            ".secret{}",
+            "template text",
+            "noscript text",
+            "footer text",
+            "form text",
+        ] {
+            assert!(
+                !rendered.contains(hidden),
+                "retained excluded HTML: {hidden}"
+            );
+        }
+
+        let heading = nodes_with_type(&output, "document_heading")
+            .into_iter()
+            .find(|node| node.label == "Guide")
+            .expect("Guide heading");
+        for (kind, value, line) in [
+            ("document_paragraph", "Visible body.", "L3"),
+            ("document_list_item", "first item", "L4"),
+            ("document_table_row", "Name | Value", "L5"),
+            ("document_table_row", "api | fast", "L5"),
+            ("document_code_block", "let x = 1;", "L6"),
+            ("document_code_block", "inline()", "L6"),
+        ] {
+            let node = nodes_with_type(&output, kind)
+                .into_iter()
+                .find(|node| {
+                    node.extra.get("structured_value").and_then(Value::as_str) == Some(value)
+                })
+                .unwrap_or_else(|| panic!("missing visible HTML {kind} {value:?}"));
+            assert_eq!(node.source_location.as_deref(), Some(line));
+            assert!(is_contained_by(&output, node, heading), "{kind} {value:?}");
+        }
+    }
+
+    #[test]
+    fn document_table_rows_honor_row_limit() {
+        let limits = StructuredLimits {
+            max_rows: 1,
+            ..StructuredLimits::default()
+        };
+        for (name, input) in [
+            (
+                "guide.md",
+                b"# Guide\n| one |\n| --- |\n| two |\n".as_slice(),
+            ),
+            ("guide.rst", b"Guide\n=====\n| one |\n| two |\n".as_slice()),
+            (
+                "guide.adoc",
+                b"= Guide\n|===\n|one\n|two\n|===\n".as_slice(),
+            ),
+            (
+                "guide.html",
+                b"<h1>Guide</h1><table><tr><td>one</td></tr><tr><td>two</td></tr></table>"
+                    .as_slice(),
+            ),
+        ] {
+            let output = extract_structured_bytes_with_limits(Path::new(name), name, input, limits)
+                .expect("registered document extension");
+            assert_eq!(
+                nodes_with_type(&output, "document_table_row").len(),
+                1,
+                "{name}"
+            );
+            assert!(
+                output
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "row_limit"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn document_blocks_preserve_password_literals_and_safe_blocks() {
+        let output = extract(
+            "guide.md",
+            br#"# Guide
+
+```javascript
+const cfg = { password: "LEAK" };
+```
+
+```javascript
+const mode = "safe";
+```
+
+| key | value |
+| --- | --- |
+| password | LEAK |
+| mode | safe |
+"#,
+        );
+        assert!(output.extraction.nodes.iter().any(|node| {
+            node.extra
+                .get("structured_value")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.contains("LEAK"))
+        }));
+        for kind in ["document_code_block", "document_table_row"] {
+            assert!(nodes_with_type(&output, kind).iter().any(|node| {
+                node.extra
+                    .get("structured_value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.contains("LEAK"))
+            }));
+        }
+        assert!(values(&output).contains(&Value::String("const mode = \"safe\";".into())));
+        assert!(values(&output).contains(&Value::String("| mode | safe |".into())));
+    }
+
+    #[test]
+    fn table_rows_preserve_sensitive_key_value_cells_at_any_position() {
+        for (name, input) in [
+            ("guide.md", b"| 1 | password | LEAK |".as_slice()),
+            (
+                "guide.html",
+                b"<table><tr><td>1</td><td>password</td><td>LEAK</td></tr></table>".as_slice(),
+            ),
+        ] {
+            let output = extract(name, input);
+            let rows = nodes_with_type(&output, "document_table_row");
+            assert_eq!(rows.len(), 1, "{name}");
+            assert!(
+                rows[0]
+                    .extra
+                    .get("structured_value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.contains("LEAK")),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_tag_dense_source_lines_scan_input_once() {
+        let input = (0..512)
+            .map(|line| format!("<p>visible row {line}</p>\n"))
+            .collect::<String>();
+        measure_line_number_scans(true);
+        let output = extract("dense.html", input.as_bytes());
+        let scanned = measure_line_number_scans(false);
+
+        let paragraphs = nodes_with_type(&output, "document_paragraph");
+        assert_eq!(paragraphs.len(), 512);
+        assert_eq!(
+            paragraphs
+                .last()
+                .and_then(|node| node.source_location.as_deref()),
+            Some("L512")
+        );
+        assert!(
+            scanned <= input.len(),
+            "HTML source-line lookup rescanned {scanned} bytes for {} bytes of input",
+            input.len()
+        );
     }
 
     #[test]

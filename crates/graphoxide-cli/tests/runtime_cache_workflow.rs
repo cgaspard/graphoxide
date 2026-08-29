@@ -346,12 +346,7 @@ fn assert_bytes_exclude_secrets(label: &str, bytes: &[u8], secrets: &[&str]) {
     }
 }
 
-fn assert_output_and_managed_tree_exclude_secrets(
-    project: &Path,
-    output: &Output,
-    runtime_report_path: &Path,
-    secrets: &[&str],
-) {
+fn assert_output_excludes_secrets(output: &Output, runtime_report_path: &Path, secrets: &[&str]) {
     assert_bytes_exclude_secrets("CLI stdout", &output.stdout, secrets);
     assert_bytes_exclude_secrets("CLI stderr", &output.stderr, secrets);
     assert_bytes_exclude_secrets(
@@ -359,7 +354,9 @@ fn assert_output_and_managed_tree_exclude_secrets(
         &fs::read(runtime_report_path).expect("runtime report bytes"),
         secrets,
     );
+}
 
+fn assert_managed_tree_excludes_secrets(project: &Path, secrets: &[&str]) {
     fn visit(path: &Path, secrets: &[&str]) {
         let entries = fs::read_dir(path).unwrap_or_else(|error| {
             panic!("read managed output directory {}: {error}", path.display())
@@ -803,7 +800,7 @@ fn worker_count_does_not_change_cold_or_warm_graph_and_coverage() {
 }
 
 #[test]
-fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers() {
+fn structured_source_content_survives_cold_warm_and_updated_artifacts_across_workers() {
     let fixture = tempfile::tempdir().expect("temporary fixture");
     let one_worker = fixture.path().join("one-worker");
     let many_workers = fixture.path().join("many-workers");
@@ -812,13 +809,23 @@ fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers
         assert_structured_fixture_contains_secrets(project);
     }
 
-    let mut all_secrets = STRUCTURED_SECRET_SENTINELS.to_vec();
-    all_secrets.extend([
-        ROTATED_JSON_SECRET_SENTINEL,
+    let source_secrets = [
+        &STRUCTURED_SECRET_SENTINELS[..7],
+        &STRUCTURED_SECRET_SENTINELS[10..11],
+    ]
+    .concat();
+    let mut withheld_secrets = STRUCTURED_SECRET_SENTINELS[7..10].to_vec();
+    withheld_secrets.extend([
+        STRUCTURED_SECRET_SENTINELS[11],
         RETIRED_AST_SECRET_SENTINEL,
         RETIRED_RUNTIME_SECRET_SENTINEL,
         PRIOR_GRAPH_SECRET_SENTINEL,
     ]);
+    let mut output_secrets = source_secrets.clone();
+    output_secrets.extend(withheld_secrets.iter().copied());
+    output_secrets.push(ROTATED_JSON_SECRET_SENTINEL);
+    let mut cold_withheld_secrets = withheld_secrets.clone();
+    cold_withheld_secrets.push(ROTATED_JSON_SECRET_SENTINEL);
 
     for (project, workers, report_name) in [
         (&one_worker, "1", "one-cold.json"),
@@ -830,7 +837,8 @@ fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers
         let cold = run_full_index(project, &report, workers);
         assert_success(&cold);
         assert_retired_cache_purged(&retired);
-        assert_output_and_managed_tree_exclude_secrets(project, &cold, &report, &all_secrets);
+        assert_output_excludes_secrets(&cold, &report, &output_secrets);
+        assert_managed_tree_excludes_secrets(project, &cold_withheld_secrets);
         let cold_stdout: Value = serde_json::from_slice(&cold.stdout).expect("cold stdout JSON");
         assert_eq!(
             cold_stdout["build"]["files"]["sensitive"], 1,
@@ -846,7 +854,12 @@ fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers
         let graph_value: Value = serde_json::from_slice(&graph).expect("cold graph JSON");
         let nodes = graph_value["nodes"].as_array().expect("cold graph nodes");
         let graph_text = String::from_utf8_lossy(&graph);
-        assert!(graph_text.contains("<redacted>"));
+        for secret in &source_secrets {
+            assert!(
+                graph_text.contains(secret),
+                "cold graph dropped source knowledge {secret}"
+            );
+        }
         for (source, safe_marker, route) in [
             ("settings.json", "visible-json", "JSON"),
             ("settings.toml", "visible-toml", "TOML"),
@@ -886,9 +899,9 @@ fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers
         assert!(
             nodes.iter().any(|node| {
                 node["source_file"] == "settings.zip!/nested/settings.json"
-                    && node["structured_value_redacted"] == true
+                    && node["structured_value"] == STRUCTURED_SECRET_SENTINELS[10]
             }),
-            "archived JSON member was inventory-only instead of structurally redacted"
+            "archived JSON member dropped its source knowledge"
         );
         let stderr = String::from_utf8_lossy(&cold.stderr);
         assert!(
@@ -924,7 +937,8 @@ fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers
                 .is_some_and(|value| value >= 9),
             "warm structured build reparsed cached inputs: {cache}"
         );
-        assert_output_and_managed_tree_exclude_secrets(project, &warm, &report, &all_secrets);
+        assert_output_excludes_secrets(&warm, &report, &output_secrets);
+        assert_managed_tree_excludes_secrets(project, &cold_withheld_secrets);
         assert_eq!(graph_and_coverage_bytes(project), accepted);
     }
 
@@ -953,7 +967,8 @@ fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers
                 >= 6,
             "unchanged inputs selected for the incremental pass did not remain warm: {cache}"
         );
-        assert_output_and_managed_tree_exclude_secrets(project, &update, &report, &all_secrets);
+        assert_output_excludes_secrets(&update, &report, &output_secrets);
+        assert_managed_tree_excludes_secrets(project, &withheld_secrets);
         let updated_graph: Value = serde_json::from_slice(
             &fs::read(managed(project, "graph.json")).expect("updated graph bytes"),
         )
@@ -968,10 +983,9 @@ fn structured_secrets_stay_out_of_cold_warm_and_updated_artifacts_across_workers
         assert!(
             updated_nodes.iter().any(|node| {
                 node["source_file"] == "settings.json"
-                    && node["structured_value"] == "<redacted>"
-                    && node["structured_value_redacted"] == true
+                    && node["structured_value"] == ROTATED_JSON_SECRET_SENTINEL
             }),
-            "updated JSON route did not retain an explicit redaction marker"
+            "updated JSON route dropped the current source value"
         );
     }
     assert_eq!(

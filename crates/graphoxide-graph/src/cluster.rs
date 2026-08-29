@@ -1,10 +1,14 @@
 //! Deterministic Leiden community assignment.
 
+use crate::build::is_file_node_label;
 use graphoxide_core::KnowledgeGraph;
 use network_partitions::{leiden, network::LabeledNetworkBuilder};
 use rand::{rngs::SmallRng, SeedableRng};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    hash::Hash,
+};
 
 pub fn cluster(graph: &mut KnowledgeGraph) -> anyhow::Result<()> {
     if graph.nodes.is_empty() {
@@ -104,17 +108,141 @@ pub fn communities(graph: &KnowledgeGraph) -> BTreeMap<i64, Vec<String>> {
     output
 }
 
+/// Deterministically partition positive weighted links between arbitrary labels.
+///
+/// Opposite directions share one undirected edge. Contributions are sorted
+/// before finite, saturating aggregation so shuffled input cannot alter the
+/// partitioner's weights.
+pub fn partition_weighted_labels<T>(
+    links: impl IntoIterator<Item = (T, T, f64)>,
+) -> anyhow::Result<Vec<Vec<T>>>
+where
+    T: Clone + Eq + Hash + Ord,
+{
+    let weights = aggregate_weighted_labels(links);
+    if weights.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut builder = LabeledNetworkBuilder::new();
+    let network = builder.build(
+        weights
+            .into_iter()
+            .map(|((source, target), weight)| (source, target, weight)),
+        true,
+    );
+    let mut rng = SmallRng::seed_from_u64(42);
+    let (_, partition) = leiden::leiden(
+        network.compact(),
+        None,
+        Some(1),
+        Some(1.0),
+        Some(0.001),
+        &mut rng,
+        true,
+        None,
+    )
+    .map_err(|error| anyhow::anyhow!("weighted Leiden clustering failed: {error:?}"))?;
+    let mut groups = BTreeMap::<usize, Vec<T>>::new();
+    for item in &partition {
+        groups
+            .entry(item.cluster)
+            .or_default()
+            .push(network.label_for(item.node_id).clone());
+    }
+    let mut groups = groups.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.sort();
+    }
+    groups.sort();
+    Ok(groups)
+}
+
+fn aggregate_weighted_labels<T>(
+    links: impl IntoIterator<Item = (T, T, f64)>,
+) -> BTreeMap<(T, T), f64>
+where
+    T: Ord,
+{
+    let mut contributions = BTreeMap::<(T, T), Vec<f64>>::new();
+    for (source, target, weight) in links {
+        if source == target || !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        let edge = if source < target {
+            (source, target)
+        } else {
+            (target, source)
+        };
+        contributions.entry(edge).or_default().push(weight);
+    }
+    contributions
+        .into_iter()
+        .map(|(edge, mut values)| {
+            values.sort_by(f64::total_cmp);
+            let weight = values.into_iter().fold(0.0, |total, value| {
+                let sum = total + value;
+                if sum.is_finite() {
+                    sum
+                } else {
+                    f64::MAX
+                }
+            });
+            (edge, weight)
+        })
+        .collect()
+}
+
+fn matches_uri_reference_form(label: &str) -> bool {
+    label.starts_with("./") || label.starts_with("../") || label.starts_with("#/")
+}
+
+fn is_compressed_document_wrapper_label(node: &graphoxide_core::Node, label: &str) -> bool {
+    if node.file_type != "document" {
+        return false;
+    }
+    let mut file_name = node.source_file.rsplit('/').next().unwrap_or_default();
+    let mut stripped_compression = false;
+    loop {
+        let Some((stem, extension)) = file_name.rsplit_once('.') else {
+            return false;
+        };
+        if matches!(extension, "bz2" | "gz" | "lz4" | "lzma" | "xz" | "zst") {
+            stripped_compression = true;
+        } else if !(stripped_compression && extension == "tar") {
+            return false;
+        }
+        file_name = stem;
+        if label == file_name {
+            return true;
+        }
+    }
+}
+
+fn is_navigation_label_artifact(node: &graphoxide_core::Node, label: &str) -> bool {
+    is_file_node_label(label, &node.source_file)
+        || label.contains("://")
+        || matches_uri_reference_form(label)
+        || (node
+            .extra
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind.ends_with("_link"))
+            && (label.starts_with('#') || label.starts_with('/')))
+        || is_compressed_document_wrapper_label(node, label)
+}
+
 /// Deterministic, backend-free names based on each community's structural hub.
-/// Degree is measured across the full graph; ties use ascending node ID.
+/// Semantic labels use full-graph degree followed by ascending node ID;
+/// artifact-only communities receive an explicit structural fallback.
 pub fn label_communities_by_hub(
     graph: &KnowledgeGraph,
     groups: &BTreeMap<i64, Vec<String>>,
 ) -> BTreeMap<i64, String> {
-    let node_ids = graph
+    let nodes = graph
         .nodes
         .iter()
-        .map(|node| node.id.as_str())
-        .collect::<BTreeSet<_>>();
+        .map(|node| (node.id.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
     let mut degree = graph
         .nodes
         .iter()
@@ -124,7 +252,7 @@ pub fn label_communities_by_hub(
     for edge in &graph.links {
         let source = edge.true_source();
         let target = edge.true_target();
-        if !node_ids.contains(source) || !node_ids.contains(target) {
+        if !nodes.contains_key(source) || !nodes.contains_key(target) {
             continue;
         }
         let key = if source <= target {
@@ -147,15 +275,28 @@ pub fn label_communities_by_hub(
         .map(|(community, members)| {
             let hub = members
                 .iter()
-                .filter(|member| node_ids.contains(member.as_str()))
+                .filter_map(|member| nodes.get(member.as_str()).map(|node| (member, *node)))
                 .min_by_key(|member| {
+                    let (member, node) = member;
+                    let label = node.label.trim();
+                    let label = if label.is_empty() {
+                        node.id.as_str()
+                    } else {
+                        label
+                    };
                     (
+                        is_navigation_label_artifact(node, label),
                         std::cmp::Reverse(degree.get(member.as_str()).copied().unwrap_or(0)),
                         member.as_str(),
                     )
+                })
+                .filter(|(_, node)| {
+                    let label = node.label.trim();
+                    let label = if label.is_empty() { &node.id } else { label };
+                    !is_navigation_label_artifact(node, label)
                 });
             let label = hub
-                .and_then(|hub| graph.nodes.iter().find(|node| node.id == *hub))
+                .map(|(_, node)| node)
                 .map(|node| {
                     let label = node.label.trim();
                     let label = if label.is_empty() { &node.id } else { label };
@@ -482,6 +623,24 @@ pub fn remap_communities_to_previous(current: &mut KnowledgeGraph, previous: &Kn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weighted_label_aggregation_is_order_independent_and_finite() {
+        let first = aggregate_weighted_labels(vec![(0_i64, 1_i64, 1e16), (1, 0, 1.0), (0, 1, 1.0)]);
+        let second =
+            aggregate_weighted_labels(vec![(0_i64, 1_i64, 1.0), (1, 0, 1.0), (0, 1, 1e16)]);
+
+        assert_eq!(first, second);
+        assert_eq!(first[&(0, 1)], 10_000_000_000_000_002.0);
+    }
+
+    #[test]
+    fn weighted_label_aggregation_saturates_finite_overflow() {
+        let weights = aggregate_weighted_labels(vec![(0_i64, 1_i64, f64::MAX), (1, 0, f64::MAX)]);
+
+        assert_eq!(weights[&(0, 1)], f64::MAX);
+    }
+
     #[test]
     fn empty_graph_is_supported() {
         let mut graph = KnowledgeGraph::default();

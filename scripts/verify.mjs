@@ -7,9 +7,13 @@ import path from 'node:path';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const release = process.argv.includes('--release');
 const prePush = process.argv.includes('--pre-push');
+const testConcurrency = process.env.GRAPHOXIDE_TEST_CONCURRENCY;
 
 if ((release && prePush) || (!release && !prePush) || process.argv.length !== 3) {
   fail('Usage: node scripts/verify.mjs --pre-push | --release');
+}
+if (testConcurrency !== undefined && !/^[1-9]\d*$/u.test(testConcurrency)) {
+  fail('GRAPHOXIDE_TEST_CONCURRENCY must be a positive integer when set.');
 }
 
 const vscode = path.join(root, 'editors', 'vscode');
@@ -18,6 +22,7 @@ run('cargo', ['clippy', '--workspace', '--all-targets', '--', '-D', 'warnings'])
 run('cargo', ['test', '--workspace', '--no-fail-fast', '--locked']);
 run('node', [
   '--test',
+  ...(testConcurrency === undefined ? [] : [`--test-concurrency=${testConcurrency}`]),
   'scripts/agent-artifacts.test.mjs',
   'scripts/benchmark-graph-build.test.mjs',
   'scripts/qualify-universal-indexing.test.mjs',

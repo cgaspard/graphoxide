@@ -29,6 +29,7 @@ mod bash;
 mod bytes;
 pub mod cache;
 pub mod cargo_introspect;
+pub mod catalog;
 mod compat;
 pub mod containers;
 pub mod coverage;
@@ -59,6 +60,8 @@ pub mod pg_introspect;
 mod php;
 mod project_path;
 mod protocols;
+pub mod registry;
+pub mod registry_state;
 pub mod resolution;
 pub mod resolver_registry;
 mod rtf;
@@ -245,6 +248,7 @@ pub fn extract_project_with_runtime_with_telemetry(
                 physical_path.clone(),
                 &resolved_root,
             )
+            .map(|request| request.with_max_bytes(config.max_input_bytes))
         })
         .collect::<std::io::Result<Vec<_>>>()?;
     let contexts = Arc::new(contexts);
@@ -474,6 +478,8 @@ pub struct DeferredProjectExtractionResult {
     pub pending_manifest_retained_bytes: usize,
     pub detection: detect::DetectResult,
     pub progress: ProjectExtractionProgress,
+    /// Sorted, root-relative sources excluded from successful extraction.
+    pub failed_sources: Vec<std::path::PathBuf>,
     /// One entry per file that could not be read or extracted.
     pub warnings: Vec<String>,
     /// Canonical physical identities whose current extraction completed.
@@ -797,6 +803,8 @@ fn extract_one_project_file(
 struct RuntimeFileContext {
     /// Logical path retained as graph provenance and format identity.
     path: std::path::PathBuf,
+    /// Original root-relative identity retained without Unicode or separator normalization.
+    relative_path: std::path::PathBuf,
     /// Once-canonicalized regular target used only by runtime I/O.
     physical_path: std::path::PathBuf,
     /// Stable discovery bucket persisted as incremental ownership evidence.
@@ -1401,6 +1409,16 @@ fn normalized_project_key(
         .replace('\\', "/")
         .nfc()
         .collect()
+}
+
+fn project_relative_path<'a>(
+    path: &'a std::path::Path,
+    resolved_root: &std::path::Path,
+    original_root: &std::path::Path,
+) -> anyhow::Result<&'a std::path::Path> {
+    path.strip_prefix(resolved_root)
+        .or_else(|_| path.strip_prefix(original_root))
+        .context("discovered source is outside the project root")
 }
 
 fn detected_source_kinds(
@@ -2089,6 +2107,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
         );
         let indexed = indexed_paths.contains(&path);
         let physical_path = detection.physical_source(&path);
+        let relative_path = project_relative_path(&path, &resolved_root, root)?.to_path_buf();
         let relative = path
             .strip_prefix(&resolved_root)
             .or_else(|_| path.strip_prefix(root))
@@ -2103,6 +2122,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(RuntimeFileContext {
                     path,
+                    relative_path,
                     physical_path,
                     source_kind,
                     indexed,
@@ -2240,6 +2260,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                     context.physical_path.clone(),
                     &resolved_root,
                 )
+                .map(|request| request.with_max_bytes(config.max_input_bytes))
             })
         })
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -3058,6 +3079,29 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
             &unverified_source_kind_transitions,
         ));
     }
+    let mut failed_sources = completed
+        .failures
+        .iter()
+        .filter_map(|failure| {
+            contexts
+                .get(failure.identity.normalized_path.as_ref())
+                .filter(|context| context.indexed)
+                .map(|context| context.relative_path.clone())
+        })
+        .chain(
+            rows.iter()
+                .filter(|row| row.indexed && row.warning.is_some())
+                .map(|row| {
+                    contexts
+                        .get(row.relative.as_str())
+                        .expect("indexed runtime row has a source context")
+                        .relative_path
+                        .clone()
+                }),
+        )
+        .collect::<Vec<_>>();
+    failed_sources.sort();
+    failed_sources.dedup();
     let mut warnings = completed
         .failures
         .iter()
@@ -3377,6 +3421,7 @@ fn extract_project_with_runtime_scan_options_deferred_manifest_impl(
                     total: total_work,
                     succeeded,
                 },
+                failed_sources,
                 warnings,
                 rebuilt_sources,
                 verified_representation_sources,
@@ -3521,11 +3566,20 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
         .collect::<Vec<_>>();
     files.sort();
     files.dedup();
+    let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let files = files
+        .into_iter()
+        .map(|path| {
+            Ok((
+                project_relative_path(&path, &resolved_root, root)?.to_path_buf(),
+                path,
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let total_work = files.len().saturating_add(detection.walk_errors.len());
     if let Some(observer) = progress_observer.as_ref() {
         observer(0, files.len());
     }
-    let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let detected_kinds = detected_source_kinds(&detection, &resolved_root, root)?;
     if let Some(hook) = before_extraction.as_mut() {
         hook(&detection)?;
@@ -3533,9 +3587,9 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
     // One unreadable or unextractable file must not abort the scan. Each
     // failure becomes a warning and one unsuccessful unit of progress, which
     // the build guard already interprets as an incomplete build.
-    let outcomes: Vec<anyhow::Result<_>> = files
+    let outcomes: Vec<(std::path::PathBuf, anyhow::Result<_>)> = files
         .par_iter()
-        .map(|path| {
+        .map(|(relative_path, path)| {
             let relative = path
                 .strip_prefix(&resolved_root)
                 .or_else(|_| path.strip_prefix(root))
@@ -3543,24 +3597,29 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
                     |_| normalized_project_key(path, &resolved_root, root),
                     |relative| normalized_project_key(relative, &resolved_root, root),
                 );
-            extract_one_project_file(path, &relative, force, &managed_output_dir)
-                .with_context(|| format!("skipped {relative}"))
+            let outcome = extract_one_project_file(path, &relative, force, &managed_output_dir)
+                .with_context(|| format!("skipped {relative}"));
+            (relative_path.clone(), outcome)
         })
         .collect();
     let mut rows = Vec::with_capacity(outcomes.len());
     let mut warnings = Vec::new();
+    let mut failed_sources = Vec::new();
     let mut failures: Vec<anyhow::Error> = Vec::new();
-    for outcome in outcomes {
+    for (relative, outcome) in outcomes {
         match outcome {
             Ok(row) => rows.push(row),
             Err(error) => {
                 let warning = format!("{error:#}");
                 tracing::warn!("{warning}");
                 warnings.push(warning);
+                failed_sources.push(relative);
                 failures.push(error);
             }
         }
     }
+    failed_sources.sort();
+    failed_sources.dedup();
     // Individual bad files are tolerated; a corpus in which nothing at all
     // could be extracted is a broken backend, not an empty success.
     if rows.is_empty()
@@ -3827,6 +3886,7 @@ fn extract_project_with_scan_options_deferred_manifest_impl_with_hooks(
             total: total_work,
             succeeded,
         },
+        failed_sources,
         warnings,
         rebuilt_sources,
         verified_representation_sources,
@@ -4505,6 +4565,7 @@ mod tests {
             compute_workers: 2,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         }
     }
 
@@ -4950,6 +5011,7 @@ mod tests {
             compute_workers: 2,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
         let result = super::extract_project_with_runtime(&fixture.root, runtime)
             .expect("isolated runtime extraction");
@@ -4974,6 +5036,7 @@ mod tests {
             compute_workers: 1,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
 
         let result = super::extract_project_with_runtime(&fixture.root, runtime)
@@ -5001,6 +5064,7 @@ mod tests {
             compute_workers: 1,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
         let parallel = graphoxide_index_runtime::IndexRuntimeConfig {
             compute_workers: 8,
@@ -5038,6 +5102,7 @@ mod tests {
             compute_workers: 8,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
         let (allowance, snapshot) = super::isolated_parser_layout(runtime, true);
         let parser_pool = runtime
@@ -5085,6 +5150,7 @@ mod tests {
             compute_workers: 1,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 64 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
         let parallel_runtime = graphoxide_index_runtime::IndexRuntimeConfig {
             io_workers: 2,
@@ -5522,6 +5588,7 @@ mod tests {
                 compute_workers: workers,
                 io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
                 read_batch_bytes: 4 * 1024,
+                max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
             };
             let cold = super::extract_project_with_runtime_scan_options_deferred_manifest(
                 &fixture.root,
@@ -5587,6 +5654,7 @@ mod tests {
                 compute_workers: workers,
                 io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
                 read_batch_bytes: 4 * 1024,
+                max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
             };
             let result = super::extract_project_with_runtime(&fixture.root, runtime)
                 .expect("isolated runtime extraction");
@@ -5697,6 +5765,51 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("complete"),
             "multi-MiB PDF must be admitted, not rejected parser_arena_budget"
+        );
+    }
+
+    #[test]
+    fn configured_input_cap_reaches_direct_and_deferred_verified_requests() {
+        const LARGE_SOURCE_BYTES: usize = 68_699_481;
+        let fixture = Fixture::new();
+        fs::File::create(fixture.root.join("large.json"))
+            .and_then(|file| file.set_len(LARGE_SOURCE_BYTES as u64))
+            .expect("create sparse large source");
+        let runtime = graphoxide_index_runtime::IndexRuntimeConfig {
+            max_input_bytes: 128 * 1024 * 1024,
+            ..runtime_config(1024 * 1024 * 1024)
+        };
+
+        let direct = super::extract_project_with_runtime_with_telemetry(&fixture.root, runtime)
+            .expect("direct isolated extraction");
+        assert!(
+            direct.read_failures.is_empty(),
+            "{:?}",
+            direct.read_failures
+        );
+        assert_eq!(
+            direct.telemetry.io.source_bytes_delivered,
+            LARGE_SOURCE_BYTES as u64
+        );
+
+        let deferred =
+            super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
+                &fixture.root,
+                true,
+                &fixture.root.join("graphoxide-out"),
+                false,
+                &super::detect::DetectOptions::default(),
+                runtime,
+            )
+            .expect("deferred isolated extraction");
+        assert!(
+            deferred.failed_sources.is_empty(),
+            "{:?}",
+            deferred.failed_sources
+        );
+        assert_eq!(
+            deferred.telemetry.io.source_bytes_delivered,
+            LARGE_SOURCE_BYTES as u64
         );
     }
 
@@ -5814,6 +5927,7 @@ mod tests {
             compute_workers: 3,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
         let result = super::extract_project_with_runtime(&fixture.root, runtime)
             .expect("arena-rejected inputs retain stable inventory");
@@ -5880,6 +5994,7 @@ mod tests {
             compute_workers: 2,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
         let result =
             super::extract_project_with_runtime_scan_options_deferred_manifest_with_telemetry(
@@ -6034,6 +6149,7 @@ mod tests {
                 "changed.ts".to_owned(),
                 super::RuntimeFileContext {
                     path: changed_path.clone(),
+                    relative_path: "changed.ts".into(),
                     physical_path: changed_path,
                     source_kind: "code".into(),
                     indexed: true,
@@ -6043,6 +6159,7 @@ mod tests {
                 "unchanged.ts".to_owned(),
                 super::RuntimeFileContext {
                     path: unchanged_path.clone(),
+                    relative_path: "unchanged.ts".into(),
                     physical_path: unchanged_path,
                     source_kind: "code".into(),
                     indexed: true,
@@ -6386,6 +6503,7 @@ mod tests {
             compute_workers: 2,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
         let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
             &fixture.root,
@@ -6475,6 +6593,7 @@ mod tests {
             compute_workers: 2,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
 
         let result = super::extract_project_with_runtime_scan_options_deferred_manifest(
@@ -6512,6 +6631,7 @@ mod tests {
             compute_workers: 1,
             io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
             read_batch_bytes: 4 * 1024,
+            max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
         };
 
         let error = super::extract_project_with_runtime_scan_options_deferred_manifest(
@@ -7161,6 +7281,7 @@ mod tests {
                 compute_workers: workers,
                 io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
                 read_batch_bytes: 4 * 1024,
+                max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
             };
             let output = fixture.root.join(format!("output-{workers}"));
             fs::create_dir_all(&output).expect("create committed output");

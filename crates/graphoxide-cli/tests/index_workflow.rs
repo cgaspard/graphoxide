@@ -1467,6 +1467,67 @@ fn incomplete_index_requires_allow_partial_and_reports_it_truthfully() {
     );
 }
 
+#[test]
+fn extraction_failure_requires_partial_and_reclassifies_coverage() {
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let project = fixture.path().join("project");
+    let allowed_output = fixture.path().join("allowed-output");
+    let refused_output = fixture.path().join("refused-output");
+    let large_name = "e\u{301}.zip";
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("main.rs"), "fn main() {}\n").expect("normal source");
+    fs::File::create(project.join(large_name))
+        .expect("large source")
+        .set_len(64 * 1024 * 1024 + 1)
+        .expect("large source length");
+
+    let allowed = run_build(
+        &project,
+        "index",
+        &allowed_output,
+        &["--force", "--no-cluster", "--allow-partial"],
+    );
+    assert!(allowed.status.success(), "{}", output_text(&allowed));
+    let stdout: Value = serde_json::from_slice(&allowed.stdout)
+        .unwrap_or_else(|error| panic!("index JSON: {error}\n{}", output_text(&allowed)));
+    assert_eq!(stdout["coverage"]["complete"], false);
+    let report = coverage(&allowed_output);
+    assert!(!report.complete);
+    let large = report
+        .files
+        .iter()
+        .find(|file| file.path == large_name)
+        .expect("large source coverage");
+    assert_eq!(large.status.as_str(), "extraction_failed");
+    assert_eq!(large.reason.as_deref(), Some("extraction_failed"));
+    let serialized = fs::read_to_string(managed(&allowed_output).join(COVERAGE_ARTIFACT)).unwrap();
+    assert!(
+        !serialized.contains(project.to_string_lossy().as_ref()),
+        "coverage artifact leaked its absolute root"
+    );
+    assert!(!serialized.contains("TooLarge"));
+    assert!(!serialized.contains("67108865"));
+
+    let refused = run_build(
+        &project,
+        "index",
+        &refused_output,
+        &["--force", "--no-cluster"],
+    );
+    assert!(!refused.status.success(), "{}", output_text(&refused));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("incomplete coverage"),
+        "{}",
+        output_text(&refused)
+    );
+    for artifact in ["graph.json", "manifest.json", COVERAGE_ARTIFACT] {
+        assert!(
+            !managed(&refused_output).join(artifact).exists(),
+            "refused partial index published {artifact}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn explicit_never_is_silent_while_waiting_for_the_build_lock() {

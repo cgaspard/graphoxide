@@ -106,7 +106,7 @@ pub(crate) fn extract_json_config_bytes(
         1,
         "file",
     );
-    state.walk_object(object, &file_id, &[], None, 0, false);
+    state.walk_object(object, &file_id, &[], None, 0);
     Ok(Extraction {
         nodes: state.nodes,
         edges: state.edges,
@@ -190,7 +190,10 @@ fn collect_json_key_lines(
 }
 
 fn is_config(path: &Path, object: &serde_json::Map<String, serde_json::Value>) -> bool {
-    is_named_config(path) || object.keys().any(|key| CONFIG_KEYS.contains(&key.as_str()))
+    is_named_config(path)
+        || is_editor_config_path(path)
+        || is_resolution_config_path(path)
+        || object.keys().any(|key| CONFIG_KEYS.contains(&key.as_str()))
 }
 
 fn is_named_config(path: &Path) -> bool {
@@ -242,28 +245,12 @@ struct JsonState<'a> {
 
 impl JsonState<'_> {
     fn add_node(&mut self, id: String, label: &str, file_type: &str, line: usize, kind: &str) {
-        self.add_node_with_redaction(id, label, file_type, line, kind, false);
-    }
-
-    fn add_node_with_redaction(
-        &mut self,
-        id: String,
-        label: &str,
-        file_type: &str,
-        line: usize,
-        kind: &str,
-        redacted: bool,
-    ) {
         if id.is_empty() || self.nodes.iter().any(|node| node.id == id) {
             return;
         }
-        let mut node = Node {
+        let node = Node {
             id,
-            label: if redacted {
-                crate::structured::REDACTED_STRUCTURED_VALUE.into()
-            } else {
-                label.into()
-            },
+            label: label.into(),
             file_type: file_type.into(),
             // Upstream keeps config-owned reference/dependency concepts tied to
             // the manifest that declared them. Besides preserving provenance,
@@ -277,16 +264,6 @@ impl JsonState<'_> {
                 ("type".into(), kind.into()),
             ]),
         };
-        if redacted {
-            node.extra
-                .insert("structured_value_redacted".into(), true.into());
-            node.extra
-                .insert("structured_label_redacted".into(), true.into());
-            node.extra
-                .insert("structured_value_type".into(), "string".into());
-            node.extra
-                .insert("structured_redaction_policy".into(), 1_u64.into());
-        }
         self.nodes.push(node);
     }
 
@@ -332,7 +309,6 @@ impl JsonState<'_> {
         prefix: &[String],
         parent_key: Option<&str>,
         depth: usize,
-        ancestor_identity_redacted: bool,
     ) {
         if depth > MAX_DEPTH {
             return;
@@ -341,7 +317,6 @@ impl JsonState<'_> {
             if self.pair_count >= MAX_PAIRS {
                 return;
             }
-            let pair_ordinal = self.pair_count;
             self.pair_count += 1;
             if normalize_id(key).is_empty() {
                 continue;
@@ -349,128 +324,62 @@ impl JsonState<'_> {
             let mut path = prefix.to_vec();
             path.push(key.clone());
             let line = self.key_lines.get(&path).copied().unwrap_or(1);
-            let key_identity_redacted = crate::structured::structured_string_is_sensitive(key);
-            let identity_redacted = ancestor_identity_redacted || key_identity_redacted;
-            let key_id = if identity_redacted {
-                make_id(&[parent_id, "redacted_json_key", &pair_ordinal.to_string()])
-            } else {
-                let mut parts = vec![self.stem.as_str()];
-                parts.extend(path.iter().map(String::as_str));
-                make_id(&parts)
-            };
-            self.add_node_with_redaction(
-                key_id.clone(),
-                key,
-                "code",
-                line,
-                "json_key",
-                key_identity_redacted,
-            );
+            let mut parts = vec![self.stem.as_str()];
+            parts.extend(path.iter().map(String::as_str));
+            let key_id = make_id(&parts);
+            self.add_node(key_id.clone(), key, "code", line, "json_key");
             self.add_edge(parent_id.into(), key_id.clone(), "contains", None, line);
 
             match value {
                 serde_json::Value::Object(child) => {
-                    self.walk_object(
-                        child,
-                        &key_id,
-                        &path,
-                        Some(key),
-                        depth + 1,
-                        identity_redacted,
-                    );
+                    self.walk_object(child, &key_id, &path, Some(key), depth + 1);
                 }
                 serde_json::Value::Array(items) if key == "extends" => {
-                    for (index, item) in items
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .enumerate()
-                    {
-                        let redacted = crate::structured::structured_string_is_sensitive(item);
-                        let index = index.to_string();
-                        let reference = if redacted {
-                            make_id(&[&key_id, "redacted_reference", &index])
-                        } else {
-                            make_id(&["ref", item])
-                        };
-                        self.add_node_with_redaction(
-                            reference.clone(),
-                            if redacted {
-                                crate::structured::REDACTED_STRUCTURED_VALUE
-                            } else {
-                                item
-                            },
-                            "concept",
-                            line,
-                            "reference",
-                            redacted,
-                        );
+                    for item in items.iter().filter_map(serde_json::Value::as_str) {
+                        let reference = make_id(&["ref", item]);
+                        self.add_node(reference.clone(), item, "concept", line, "reference");
                         self.add_edge(key_id.clone(), reference, "extends", Some("import"), line);
                     }
                 }
                 serde_json::Value::String(text) if key == "extends" => {
-                    let redacted = crate::structured::structured_string_is_sensitive(text);
-                    let reference = if redacted {
-                        make_id(&[&key_id, "redacted_reference"])
-                    } else {
-                        make_id(&["ref", text])
-                    };
-                    self.add_node_with_redaction(
-                        reference.clone(),
-                        if redacted {
-                            crate::structured::REDACTED_STRUCTURED_VALUE
-                        } else {
-                            text
-                        },
-                        "concept",
-                        line,
-                        "reference",
-                        redacted,
-                    );
+                    let reference = make_id(&["ref", text]);
+                    self.add_node(reference.clone(), text, "concept", line, "reference");
                     let file_id = make_id(&[&self.stem]);
                     self.add_edge(file_id, reference, "extends", Some("import"), line);
                 }
                 serde_json::Value::String(text) if key == "$ref" => {
-                    let redacted = crate::structured::structured_string_is_sensitive(text);
-                    let reference = if redacted {
-                        make_id(&[&key_id, "redacted_reference"])
-                    } else {
-                        make_id(&["ref", text])
-                    };
-                    self.add_node_with_redaction(
-                        reference.clone(),
-                        if redacted {
-                            crate::structured::REDACTED_STRUCTURED_VALUE
-                        } else {
-                            text
-                        },
-                        "concept",
-                        line,
-                        "reference",
-                        redacted,
-                    );
+                    let reference = make_id(&["ref", text]);
+                    self.add_node(reference.clone(), text, "concept", line, "reference");
                     self.add_edge(parent_id.into(), reference, "references", None, line);
                 }
                 serde_json::Value::String(_)
                     if parent_key.is_some_and(|key| DEPENDENCY_KEYS.contains(&key)) =>
                 {
-                    let dependency = if key_identity_redacted {
-                        make_id(&[&key_id, "redacted_dependency"])
-                    } else {
-                        make_id(&[key])
-                    };
-                    self.add_node_with_redaction(
-                        dependency.clone(),
-                        key,
-                        "concept",
-                        line,
-                        "dependency",
-                        key_identity_redacted,
-                    );
+                    let dependency = make_id(&[key]);
+                    self.add_node(dependency.clone(), key, "concept", line, "dependency");
                     self.add_edge(key_id, dependency, "imports", Some("import"), line);
                 }
-                _ => {}
+                serde_json::Value::String(text) => {
+                    self.add_scalar(&key_id, text, line);
+                }
+                serde_json::Value::Number(value) => {
+                    self.add_scalar(&key_id, &value.to_string(), line);
+                }
+                serde_json::Value::Bool(value) => {
+                    self.add_scalar(&key_id, &value.to_string(), line);
+                }
+                serde_json::Value::Null => {
+                    self.add_scalar(&key_id, "null", line);
+                }
+                serde_json::Value::Array(_) => {}
             }
         }
+    }
+
+    fn add_scalar(&mut self, key_id: &str, value: &str, line: usize) {
+        let value_id = make_id(&[key_id, "value", value]);
+        self.add_node(value_id.clone(), value, "code", line, "json_value");
+        self.add_edge(key_id.into(), value_id, "contains", None, line);
     }
 }
 
@@ -494,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_references_apply_the_structured_redaction_policy() {
+    fn compatibility_references_preserve_source_content() {
         let secret_ref = "Bearer abcdefghijklmnop";
         let secret_extend = "sk_live_1234567890abcdef";
         let extraction = extract_json_config_bytes(
@@ -505,16 +414,9 @@ mod tests {
         )
         .expect("extract named JSON configuration");
         let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
-        assert!(!rendered.contains(secret_ref));
-        assert!(!rendered.contains(secret_extend));
+        assert!(rendered.contains(secret_ref));
+        assert!(rendered.contains(secret_extend));
         assert!(rendered.contains("safe-base.json"));
-        assert!(extraction.nodes.iter().any(|node| {
-            node.label == crate::structured::REDACTED_STRUCTURED_VALUE
-                && node.extra.get("structured_value_redacted")
-                    == Some(&serde_json::Value::Bool(true))
-                && node.extra.get("structured_value_type")
-                    == Some(&serde_json::Value::String("string".into()))
-        }));
     }
 
     #[test]
@@ -532,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_keys_use_safe_labels_and_secret_independent_ids() {
+    fn compatibility_keys_preserve_source_labels_and_identity() {
         fn extract_with_key(secret_key: &str) -> Extraction {
             extract_json_config_bytes(
                 Path::new(".vscode/settings.json"),
@@ -551,9 +453,9 @@ mod tests {
         let second = extract_with_key(second_secret);
         let first_rendered = serde_json::to_string(&first).expect("serialize first extraction");
         let second_rendered = serde_json::to_string(&second).expect("serialize second extraction");
-        assert!(!first_rendered.contains(first_secret));
-        assert!(!second_rendered.contains(second_secret));
-        assert_eq!(
+        assert!(first_rendered.contains(first_secret));
+        assert!(second_rendered.contains(second_secret));
+        assert_ne!(
             first
                 .nodes
                 .iter()
@@ -565,12 +467,22 @@ mod tests {
                 .map(|node| node.id.as_str())
                 .collect::<Vec<_>>()
         );
-        assert!(first.nodes.iter().any(|node| {
-            node.label == crate::structured::REDACTED_STRUCTURED_VALUE
-                && node.extra.get("structured_label_redacted")
-                    == Some(&serde_json::Value::Bool(true))
-        }));
         assert!(first_rendered.contains("visibleChild"));
+    }
+
+    #[test]
+    fn named_json_scalars_remain_knowledge_content() {
+        let password = "default-password-123456";
+        let extraction = extract_json_config_bytes(
+            Path::new(".vscode/settings.json"),
+            ".vscode/settings.json",
+            format!(r#"{{"defaultPassword":"{password}","enabled":true,"retries":3}}"#).as_bytes(),
+        )
+        .expect("extract named JSON configuration");
+        let rendered = serde_json::to_string(&extraction).expect("serialize extraction");
+        assert!(rendered.contains(password));
+        assert!(rendered.contains("true"));
+        assert!(rendered.contains('3'));
     }
 
     #[test]

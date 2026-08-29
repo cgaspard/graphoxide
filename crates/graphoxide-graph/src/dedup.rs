@@ -631,6 +631,11 @@ fn preserves_declared_identity(node: &Node) -> bool {
     node.file_type == "code"
         || node
             .extra
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind.starts_with("document_"))
+        || node
+            .extra
             .get("_origin")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|origin| matches!(origin, "document_package" | "enrichment"))

@@ -6,6 +6,7 @@ import {
   automaticGraphUpdateArguments,
   graphBuildDecision,
   graphBuildOutputDirectory,
+  registryBindingArguments,
   workspaceGraphMutationAllowed,
 } from '../src/build';
 
@@ -16,6 +17,24 @@ test('automatic updates retain shrink authorization until the CLI splits force s
 test('requires workspace trust for graph artifact mutations', () => {
   assert.equal(workspaceGraphMutationAllowed(false), false);
   assert.equal(workspaceGraphMutationAllowed(true), true);
+});
+
+test('adds one validated workspace registry binding to graph mutations', () => {
+  assert.deepEqual(
+    registryBindingArguments('/work/example', { tree: '../graphoxide-catalog', origin: 'internal-kbs' }),
+    ['--registry', '/work/graphoxide-catalog', '--registry-origin', 'internal-kbs'],
+  );
+  assert.deepEqual(registryBindingArguments('/work/example', undefined), []);
+  for (const binding of [
+    {},
+    { tree: '../graphoxide-catalog' },
+    { origin: 'internal-kbs' },
+    { tree: '', origin: 'internal-kbs' },
+    { tree: '../graphoxide-catalog', origin: '', extra: true },
+    { tree: '../graphoxide-catalog', origin: 'internal-kbs', extra: true },
+  ]) {
+    assert.throws(() => registryBindingArguments('/work/example', binding), /Registry Binding/);
+  }
 });
 
 test('routes build output to the configured graph directory', () => {

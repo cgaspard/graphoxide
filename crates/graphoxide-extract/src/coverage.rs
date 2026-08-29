@@ -15,7 +15,7 @@ use anyhow::{bail, Context as _};
 use graphoxide_index_runtime::RuntimeCancellation;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     ffi::OsStr,
     fs,
     path::{Component, Path, PathBuf},
@@ -51,6 +51,8 @@ pub struct CoverageOptions {
     pub code_only: bool,
     pub honor_gitignore: bool,
     pub extra_excludes: Vec<String>,
+    /// Exact project-relative paths selected by a trusted source registry.
+    pub tracked_paths: Vec<String>,
     pub output_dir: Option<PathBuf>,
 }
 
@@ -62,6 +64,7 @@ impl Default for CoverageOptions {
             code_only: false,
             honor_gitignore: true,
             extra_excludes: Vec::new(),
+            tracked_paths: Vec::new(),
             output_dir: None,
         }
     }
@@ -86,6 +89,7 @@ impl From<&DetectOptions> for CoverageOptions {
             code_only: false,
             honor_gitignore: options.honor_gitignore,
             extra_excludes: options.extra_excludes.clone(),
+            tracked_paths: options.tracked_paths.clone(),
             output_dir: options.output_dir.clone(),
         }
     }
@@ -142,6 +146,7 @@ impl CoverageGraphAssociation {
 #[serde(rename_all = "snake_case")]
 pub enum CoverageStatus {
     Covered,
+    ExtractionFailed,
     InventoryOnly,
     Unsupported,
     ExcludedSensitive,
@@ -154,6 +159,7 @@ impl CoverageStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Covered => "covered",
+            Self::ExtractionFailed => "extraction_failed",
             Self::InventoryOnly => "inventory_only",
             Self::Unsupported => "unsupported",
             Self::ExcludedSensitive => "excluded_sensitive",
@@ -228,6 +234,8 @@ pub struct CoverageDiagnostic {
 pub struct CoverageSummary {
     pub total_files: usize,
     pub covered: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub extraction_failed: usize,
     pub inventory_only: usize,
     pub unsupported: usize,
     pub excluded_sensitive: usize,
@@ -244,7 +252,7 @@ pub struct CoverageReport {
     /// machine-specific absolute scan path.
     pub root: String,
     pub schema_version: u32,
-    /// Whether traversal completed without unreadable inputs, walk errors, or
+    /// Whether traversal and extraction completed without source failures or
     /// retained-report truncation.
     pub complete: bool,
     /// Accepted graph bytes this report describes. Standalone audits omit it.
@@ -277,11 +285,82 @@ impl CoverageReport {
     pub fn strict_failure_count(&self) -> usize {
         self.summary
             .unreadable
+            .saturating_add(self.summary.extraction_failed)
             .saturating_add(self.summary.walk_errors)
             .saturating_add(self.files_truncated)
             .saturating_add(self.boundaries_truncated)
             .saturating_add(self.directory_walks_truncated)
             .saturating_add(self.ignore_sources_truncated)
+    }
+
+    /// Reclassify exact registered sources that failed after the coverage
+    /// audit without retaining machine-specific paths or extractor details.
+    pub fn record_extraction_failures(
+        &mut self,
+        failed_sources: &[PathBuf],
+    ) -> anyhow::Result<&mut Self> {
+        let failed_sources = failed_sources
+            .iter()
+            .map(|path| {
+                anyhow::ensure!(
+                    !path.as_os_str().is_empty() && !path.is_absolute(),
+                    "extraction failure path must be a non-empty relative path"
+                );
+                let mut components = Vec::new();
+                for component in path.components() {
+                    let Component::Normal(component) = component else {
+                        anyhow::bail!(
+                            "extraction failure path must contain only relative normal components"
+                        );
+                    };
+                    components.push(encode_component(component));
+                }
+                anyhow::ensure!(
+                    !components.is_empty(),
+                    "extraction failure path must be a non-empty relative path"
+                );
+                Ok(components.join("/"))
+            })
+            .collect::<anyhow::Result<BTreeSet<_>>>()?;
+
+        let mut reclassified = 0_usize;
+        for path in &failed_sources {
+            let index = self
+                .files
+                .binary_search_by(|file| file.path.as_str().cmp(path))
+                .map_err(|_| anyhow::anyhow!("extraction failure has no exact coverage outcome"))?;
+            reclassified = reclassified.saturating_add(usize::from(
+                self.files[index].status == CoverageStatus::Covered,
+            ));
+        }
+        let covered = self
+            .summary
+            .covered
+            .checked_sub(reclassified)
+            .context("coverage summary cannot reclassify extraction failures")?;
+        let extraction_failed = self
+            .summary
+            .extraction_failed
+            .checked_add(reclassified)
+            .context("coverage extraction-failure summary overflow")?;
+
+        for path in &failed_sources {
+            let index = self
+                .files
+                .binary_search_by(|file| file.path.as_str().cmp(path))
+                .expect("failed source paths were validated before mutation");
+            let file = &mut self.files[index];
+            if file.status == CoverageStatus::Covered {
+                file.status = CoverageStatus::ExtractionFailed;
+                file.reason = Some("extraction_failed".to_owned());
+            }
+        }
+        if !failed_sources.is_empty() {
+            self.complete = false;
+        }
+        self.summary.covered = covered;
+        self.summary.extraction_failed = extraction_failed;
+        Ok(self)
     }
 
     /// Associate this coverage report with the exact graph artifact it
@@ -327,9 +406,31 @@ struct AuditWalker<'a> {
     directory_walks_truncated: usize,
     ignore_sources_truncated: usize,
     traversal_stopped: bool,
+    tracked_paths: BTreeSet<String>,
 }
 
 impl AuditWalker<'_> {
+    fn explicitly_tracked(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root)
+            .ok()
+            .and_then(Path::to_str)
+            .is_some_and(|path| self.tracked_paths.contains(path))
+    }
+
+    fn contains_tracked_descendant(&self, path: &Path) -> bool {
+        let Some(path) = path.strip_prefix(&self.root).ok().and_then(Path::to_str) else {
+            return false;
+        };
+        if path.is_empty() {
+            return !self.tracked_paths.is_empty();
+        }
+        let prefix = format!("{path}/");
+        self.tracked_paths
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|tracked| tracked.starts_with(&prefix))
+    }
+
     fn check_cancellation(&self) -> anyhow::Result<()> {
         if self.cancellation.is_cancelled() {
             bail!("coverage audit cancelled");
@@ -460,7 +561,7 @@ impl AuditWalker<'_> {
             self.boundary(path, CoverageBoundaryKind::Ignored, "non_unicode_path");
             return Ok(());
         }
-        if detect::is_sensitive_directory(path) {
+        if detect::is_sensitive_directory(path) && !self.contains_tracked_descendant(path) {
             self.boundary(path, CoverageBoundaryKind::Ignored, "sensitive_directory");
             return Ok(());
         }
@@ -508,11 +609,11 @@ impl AuditWalker<'_> {
                 );
                 return Ok(());
             }
-            if is_noise_dir(name, path.parent()) {
+            if is_noise_dir(name, path.parent()) && !self.contains_tracked_descendant(path) {
                 self.boundary(path, CoverageBoundaryKind::PrunedNoise, "noise_directory");
                 return Ok(());
             }
-            if self.is_ignored(path) {
+            if self.is_ignored(path) && !self.contains_tracked_descendant(path) {
                 self.boundary(path, CoverageBoundaryKind::Ignored, "ignore_rule");
                 return Ok(());
             }
@@ -521,7 +622,7 @@ impl AuditWalker<'_> {
     }
 
     fn visit_symlink_file(&mut self, path: &Path, memory_tree: bool) -> anyhow::Result<()> {
-        if !memory_tree && self.is_ignored(path) {
+        if !memory_tree && self.is_ignored(path) && !self.explicitly_tracked(path) {
             self.boundary(path, CoverageBoundaryKind::Ignored, "ignore_rule");
             return Ok(());
         }
@@ -562,7 +663,11 @@ impl AuditWalker<'_> {
             return Ok(());
         }
         self.check_cancellation()?;
-        if !memory_tree && self.is_ignored(path) {
+        let explicitly_tracked = self.explicitly_tracked(path);
+        if !self.tracked_paths.is_empty() && !explicitly_tracked {
+            return Ok(());
+        }
+        if !memory_tree && self.is_ignored(path) && !explicitly_tracked {
             self.boundary(path, CoverageBoundaryKind::Ignored, "ignore_rule");
             return Ok(());
         }
@@ -575,7 +680,7 @@ impl AuditWalker<'_> {
             );
             return Ok(());
         }
-        if detect::is_sensitive_path_only(path) {
+        if detect::is_sensitive_path_only(path) && !explicitly_tracked {
             self.terminal(
                 path,
                 CoverageStatus::ExcludedSensitive,
@@ -596,7 +701,7 @@ impl AuditWalker<'_> {
             );
             return Ok(());
         }
-        if detect::is_policy_excluded_file(path) {
+        if detect::is_policy_excluded_file(path) && !explicitly_tracked {
             self.terminal(
                 path,
                 CoverageStatus::ExcludedPolicy,
@@ -652,7 +757,7 @@ impl AuditWalker<'_> {
             );
             return Ok(());
         }
-        if detect::is_sensitive_path_only(&physical) {
+        if detect::is_sensitive_path_only(&physical) && !explicitly_tracked {
             self.terminal(
                 path,
                 CoverageStatus::ExcludedSensitive,
@@ -911,6 +1016,7 @@ fn increment_file_summary(summary: &mut CoverageSummary, status: CoverageStatus)
     summary.total_files = summary.total_files.saturating_add(1);
     let value = match status {
         CoverageStatus::Covered => &mut summary.covered,
+        CoverageStatus::ExtractionFailed => &mut summary.extraction_failed,
         CoverageStatus::InventoryOnly => &mut summary.inventory_only,
         CoverageStatus::Unsupported => &mut summary.unsupported,
         CoverageStatus::ExcludedSensitive => &mut summary.excluded_sensitive,
@@ -954,6 +1060,7 @@ pub fn audit_coverage_with_cancellation(
         google_workspace: options.google_workspace,
         convert_office_sidecars: false,
         extra_excludes: options.extra_excludes.clone(),
+        tracked_paths: options.tracked_paths.clone(),
         output_dir: options.output_dir.clone(),
         honor_gitignore: options.honor_gitignore,
     };
@@ -986,6 +1093,17 @@ pub fn audit_coverage_with_cancellation(
         directory_walks_truncated: 0,
         ignore_sources_truncated: ignore_policy.truncated_sources,
         traversal_stopped: false,
+        tracked_paths: options
+            .tracked_paths
+            .iter()
+            .map(|path| {
+                anyhow::ensure!(
+                    crate::project_path::normalize_project_path(path).as_deref() == Some(path),
+                    "tracked coverage path must be normalized and project-relative"
+                );
+                Ok(path.clone())
+            })
+            .collect::<anyhow::Result<BTreeSet<_>>>()?,
     };
     let root = walker.root.clone();
     if walker.ignore_sources_truncated == 0 {
@@ -1107,6 +1225,7 @@ mod tests {
             directory_walks_truncated: 0,
             ignore_sources_truncated: 0,
             traversal_stopped: false,
+            tracked_paths: BTreeSet::new(),
         }
     }
 
@@ -1117,6 +1236,7 @@ mod tests {
             google_workspace: true,
             convert_office_sidecars: false,
             extra_excludes: vec!["generated/**".to_owned(), "*.secret".to_owned()],
+            tracked_paths: vec!["docs/guide.md".to_owned()],
             output_dir: Some(PathBuf::from("custom-output")),
             honor_gitignore: false,
         };
@@ -1129,9 +1249,52 @@ mod tests {
                 code_only: false,
                 honor_gitignore: false,
                 extra_excludes: vec!["generated/**".to_owned(), "*.secret".to_owned()],
+                tracked_paths: vec!["docs/guide.md".to_owned()],
                 output_dir: Some(PathBuf::from("custom-output")),
             }
         );
+    }
+
+    #[test]
+    fn extraction_failures_are_exact_and_preserve_terminal_statuses() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let root = fs::canonicalize(root.path()).expect("canonical root");
+        let cancellation = RuntimeCancellation::new();
+        let mut walker = test_walker(root, &cancellation);
+        for (path, status) in [
+            ("main.rs", CoverageStatus::Covered),
+            ("package.json", CoverageStatus::InventoryOnly),
+        ] {
+            walker.retain_file(CoverageFile {
+                path: path.to_owned(),
+                status,
+                format_id: None,
+                declared_capability: None,
+                reason: None,
+            });
+        }
+        let mut report = walker.into_report();
+        let before = report.clone();
+        assert!(report
+            .record_extraction_failures(&[PathBuf::from("main.rs"), PathBuf::from("missing.rs"),])
+            .is_err());
+        assert_eq!(report, before, "unexpected paths must fail atomically");
+
+        report
+            .record_extraction_failures(&[
+                PathBuf::from("package.json"),
+                PathBuf::from("main.rs"),
+                PathBuf::from("main.rs"),
+            ])
+            .expect("known extraction failures");
+        assert!(!report.complete);
+        assert_eq!(report.summary.covered, 0);
+        assert_eq!(report.summary.extraction_failed, 1);
+        assert_eq!(report.summary.inventory_only, 1);
+        assert_eq!(report.files[0].status, CoverageStatus::ExtractionFailed);
+        assert_eq!(report.files[0].reason.as_deref(), Some("extraction_failed"));
+        assert_eq!(report.files[1].status, CoverageStatus::InventoryOnly);
+        assert_eq!(report.files[1].reason, None);
     }
 
     #[test]

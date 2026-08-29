@@ -18,7 +18,7 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
-  statSync,
+  unlinkSync,
   writeSync,
   writeFileSync,
 } from 'node:fs';
@@ -36,8 +36,22 @@ const MUTATION_TARGET = 'jvm/app/Runner.java';
 const MUTATION_TEXT =
   '\nfinal class GraphoxideBenchmarkMutation { static int revision() { return 1; } }\n';
 const MAX_COMMAND_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_BINARY_BYTES = 1024 * 1024 * 1024;
 const FULL_BUILD_ARGS = ['extract', '.', '--force', '--json'];
 const INCREMENTAL_UPDATE_ARGS = ['update', '.', '--json'];
+const CATALOG_WIKI_BUILD_ARGS = ['index', '.', '--catalog', 'provenance', '--json'];
+const CATALOG_WIKI_INDEX_ARGS = ['wiki', 'index', '.', '--config', 'wiki.json'];
+const CATALOG_WIKI_CHECK_ARGS = [
+  'wiki',
+  'check',
+  '.',
+  '--config',
+  'wiki.json',
+  '--catalog',
+  'provenance',
+  '--graph',
+  'graphoxide-out/graph.json',
+];
 const INDEX_RUNTIME_TELEMETRY_SCHEMA_VERSION = 2;
 
 const SCENARIO_DEFINITIONS = Object.freeze({
@@ -100,6 +114,19 @@ const SCENARIO_DEFINITIONS = Object.freeze({
     description: 'OpenUSD, robotics, simulation, geometry, and material-asset inputs',
     fixture: 'generated',
     format_families: Object.freeze(['openusd', 'simulation', 'robotics', '3d-asset']),
+  }),
+  'catalog-wiki': Object.freeze({
+    description: 'mixed catalog and wiki documents with archive-only, ignored, malformed, and annotation inputs',
+    fixture: 'generated',
+    format_families: Object.freeze([
+      'markdown',
+      'structured-json',
+      'configuration',
+      'office-document',
+      'pdf',
+      'container',
+      'catalog-metadata',
+    ]),
   }),
 });
 
@@ -476,6 +503,25 @@ function createGlb(json) {
   return Buffer.concat([header, body]);
 }
 
+function createMinimalPdf() {
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\n',
+  ];
+  const header = '%PDF-1.4\n';
+  const offsets = [];
+  let cursor = Buffer.byteLength(header, 'ascii');
+  for (const object of objects) {
+    offsets.push(cursor);
+    cursor += Buffer.byteLength(object, 'ascii');
+  }
+  const xref = `xref\n0 4\n0000000000 65535 f \n${offsets
+    .map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`)
+    .join('')}trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n${cursor}\n%%EOF\n`;
+  return Buffer.from(`${header}${objects.join('')}${xref}`, 'ascii');
+}
+
 function writeSourceAnchor(root) {
   writeScenarioFile(
     root,
@@ -656,6 +702,80 @@ export function materializeGeneratedScenario(name) {
       writeScenarioFile(root, 'scenario.xosc', '<OpenSCENARIO><FileHeader description="benchmark" /></OpenSCENARIO>\n');
       writeScenarioFile(root, 'model.fmu.json', '{"fmiVersion":"3.0","modelName":"benchmark"}\n');
       break;
+    case 'catalog-wiki':
+      {
+        const runbook =
+          '---\ntitle: Runbook\nsources:\n  - source-one#capture-active\n  - source-one#capture-history\n---\n\n# Runbook\n\nThe wiki links to the service catalog.\n';
+        const active =
+          '# Active Capture\n\n## Full Derived Knowledge\n\nThe full extracted graph text stays available at the configured 4GB cap.\n';
+        writeScenarioFile(root, 'docs/runbook.md', runbook);
+        writeScenarioFile(root, 'raw/active.md', active);
+        writeScenarioFile(
+          root,
+          'wiki.json',
+          '{"version":1,"roots":["docs"],"exclude":["docs/drafts"],"required_frontmatter":["title","sources"],"output":"llms.txt"}\n',
+        );
+        writeScenarioFile(
+          root,
+          'provenance/catalog.json',
+          `${JSON.stringify({
+            version: 2,
+            sources: [
+              {
+                source_id: 'source-one',
+                source_system: 'sharepoint',
+                url: 'https://example.invalid/site/page',
+                location: 'Site/Library/Folder/Page',
+                active_capture_id: 'capture-active',
+              },
+            ],
+            captures: [
+              {
+                source_id: 'source-one',
+                capture_id: 'capture-active',
+                source_path: 'raw/active.md',
+                sha256: createHash('sha256').update(active).digest('hex'),
+                captured_at: '2026-08-24T12:00:00Z',
+                accessed_at: '2026-08-24T12:00:00Z',
+                updated_at: '2026-08-23T20:00:00Z',
+                representation: 'markdown',
+              },
+              {
+                source_id: 'source-one',
+                capture_id: 'capture-history',
+                source_path: 'raw/history.md',
+                sha256: 'b'.repeat(64),
+                captured_at: '2026-08-23T12:00:00Z',
+                accessed_at: '2026-08-23T12:00:00Z',
+                updated_at: '2026-08-23T12:00:00Z',
+                representation: 'markdown',
+              },
+            ],
+          })}\n`,
+        );
+      }
+      writeScenarioFile(root, 'metadata/services.json', '{"service":"wiki","annotation":"catalog-only annotation"}\n');
+      writeScenarioFile(root, 'metadata/services.yaml', 'service: wiki\nowner: graphoxide\n');
+      writeScenarioFile(root, 'metadata/catalog-only-metadata.json', '{"annotation":"catalog-only metadata edit"}\n');
+      writeScenarioFile(root, 'metadata/malformed.json', '{ not valid JSON }\n');
+      writeScenarioFile(root, '.env', 'TOKEN=not-for-indexing\n');
+      writeScenarioFile(root, '.graphoxideignore', 'ignored/\nprovenance/\n');
+      writeScenarioFile(root, 'ignored/private.md', 'Ignored by fixture policy.\n');
+      writeScenarioBytes(root, 'documents/guide.pdf', createMinimalPdf());
+      writeScenarioBytes(
+        root,
+        'documents/catalog.docx',
+        createStoredZip([
+          { path: '[Content_Types].xml', data: '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>\n' },
+          { path: 'word/document.xml', data: '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>\n' },
+        ]),
+      );
+      writeScenarioBytes(
+        root,
+        'archives/wiki-only.zip',
+        createStoredZip([{ path: 'members/wiki-only.md', data: '# Archive-only wiki record\n' }]),
+      );
+      break;
     default:
       throw new Error(`no generated fixture writer for scenario: ${name}`);
   }
@@ -691,10 +811,20 @@ function relativeDisplay(absolute) {
     : absolute;
 }
 
-function requireExecutable(binary) {
-  let metadata;
+function binaryIdentity(metadata) {
+  return {
+    dev: metadata.dev,
+    ino: metadata.ino,
+    size: metadata.size,
+    mtime_ms: metadata.mtimeMs,
+    mode: metadata.mode,
+  };
+}
+
+function pinBinary(binary) {
+  let before;
   try {
-    metadata = statSync(binary);
+    before = lstatSync(binary);
   } catch (error) {
     if (error?.code === 'ENOENT') {
       throw new Error(
@@ -703,7 +833,64 @@ function requireExecutable(binary) {
     }
     throw error;
   }
-  if (!metadata.isFile()) throw new Error(`Graphoxide binary is not a file: ${binary}`);
+  if (
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    before.nlink !== 1 ||
+    !Number.isSafeInteger(before.size) ||
+    before.size < 0 ||
+    before.size > MAX_BINARY_BYTES
+  ) {
+    throw new Error(`Graphoxide binary must be a single-link regular file within ${MAX_BINARY_BYTES} bytes`);
+  }
+  if (process.platform !== 'win32' && (before.mode & 0o111) === 0) {
+    throw new Error(`Graphoxide binary is not executable: ${binary}`);
+  }
+  const descriptor = openSync(binary, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(descriptor);
+    if (!sameIdentity(before, opened) || !opened.isFile() || opened.nlink !== 1) {
+      throw new Error(`Graphoxide binary changed identity while opening: ${binary}`);
+    }
+    const digest = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let total = 0;
+    while (true) {
+      const count = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      total += count;
+      if (!Number.isSafeInteger(total) || total > MAX_BINARY_BYTES) {
+        throw new Error(`Graphoxide binary exceeds its ${MAX_BINARY_BYTES}-byte ceiling: ${binary}`);
+      }
+      digest.update(buffer.subarray(0, count));
+    }
+    const after = fstatSync(descriptor);
+    const pathAfter = lstatSync(binary);
+    if (
+      !sameIdentity(opened, after) ||
+      !sameIdentity(opened, pathAfter) ||
+      after.size !== total ||
+      pathAfter.isSymbolicLink() ||
+      pathAfter.nlink !== 1
+    ) {
+      throw new Error(`Graphoxide binary changed while being pinned: ${binary}`);
+    }
+    return { path: binary, sha256: digest.digest('hex'), identity: binaryIdentity(after) };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function verifyPinnedBinary(pin, phase) {
+  const observed = pinBinary(pin.path);
+  if (
+    pin.sha256 !== observed.sha256 ||
+    pin.identity.dev !== observed.identity.dev ||
+    pin.identity.ino !== observed.identity.ino ||
+    pin.identity.size !== observed.identity.size
+  ) {
+    throw new Error(`Graphoxide binary changed ${phase}`);
+  }
 }
 
 function buildDefaultReleaseBinary() {
@@ -741,6 +928,12 @@ export function parseCliReport(stdout, commandName = 'graphoxide command') {
   }
   if (report === null || Array.isArray(report) || typeof report !== 'object') {
     throw new Error(`${commandName} JSON must be an object`);
+  }
+  if (report.build !== undefined) {
+    if (report.build === null || Array.isArray(report.build) || typeof report.build !== 'object') {
+      throw new Error(`${commandName} JSON build must be an object`);
+    }
+    report = report.build;
   }
   if (
     typeof report.elapsed_ms !== 'number' ||
@@ -1032,7 +1225,9 @@ function sanitizedEnvironment() {
   return environment;
 }
 
-export function runCliJson(binary, args, cwd, expected, clock = () => performance.now()) {
+export function runCliJson(binary, args, cwd, expected, clock = () => performance.now(), binaryPin) {
+  const commandName = `graphoxide ${args[0]}`;
+  if (binaryPin) verifyPinnedBinary(binaryPin, `before ${commandName}`);
   const started = clock();
   const result = spawnSync(binary, args, {
     cwd,
@@ -1041,7 +1236,7 @@ export function runCliJson(binary, args, cwd, expected, clock = () => performanc
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
   });
   const externalWallMs = clock() - started;
-  const commandName = `graphoxide ${args[0]}`;
+  if (binaryPin) verifyPinnedBinary(binaryPin, `after ${commandName}`);
   if (result.error) throw new Error(`${commandName} failed to start: ${result.error.message}`);
   if (result.status !== 0) {
     const stderr = outputPreview(result.stderr);
@@ -1057,6 +1252,34 @@ export function runCliJson(binary, args, cwd, expected, clock = () => performanc
     external_wall_ms: roundMilliseconds(externalWallMs),
     reported_elapsed_ms: report.elapsed_ms,
     cli_report: report,
+  };
+}
+
+function runCliText(binary, args, cwd, clock = () => performance.now(), binaryPin) {
+  const commandName = `graphoxide ${args.join(' ')}`;
+  if (binaryPin) verifyPinnedBinary(binaryPin, `before ${commandName}`);
+  const started = clock();
+  const result = spawnSync(binary, args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedEnvironment(),
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+  });
+  const externalWallMs = clock() - started;
+  if (binaryPin) verifyPinnedBinary(binaryPin, `after ${commandName}`);
+  if (result.error) throw new Error(`${commandName} failed to start: ${result.error.message}`);
+  if (result.status !== 0) {
+    const stderr = outputPreview(result.stderr);
+    const stdout = outputPreview(result.stdout);
+    throw new Error(
+      `${commandName} exited with status ${result.status}${stderr ? `: ${stderr}` : ''}${
+        stdout ? ` (stdout: ${stdout})` : ''
+      }`,
+    );
+  }
+  return {
+    external_wall_ms: roundMilliseconds(externalWallMs),
+    stdout: String(result.stdout),
   };
 }
 
@@ -1350,7 +1573,7 @@ export function verifyBuildArtifacts(project, cliReport, commandName) {
   };
 }
 
-export function runSample({ binary, fixture, run }) {
+export function runSample({ binary, binaryPin, fixture, run }) {
   const runDirectory = mkdtempSync(path.join(os.tmpdir(), RUN_DIRECTORY_PREFIX));
   const project = path.join(runDirectory, 'project');
   try {
@@ -1368,6 +1591,8 @@ export function runSample({ binary, fixture, run }) {
       [...FULL_BUILD_ARGS, '--runtime-report', fullBuildRuntimeReport],
       project,
       fullBuildExpected,
+      undefined,
+      binaryPin,
     );
     const fullBuildArtifact = verifyBuildArtifacts(project, fullBuild.cli_report, 'full build');
     const mutation = mutateCopiedFixture(project);
@@ -1388,6 +1613,8 @@ export function runSample({ binary, fixture, run }) {
       [...INCREMENTAL_UPDATE_ARGS, '--runtime-report', incrementalRuntimeReport],
       project,
       incrementalExpected,
+      undefined,
+      binaryPin,
     );
     const incrementalArtifact = verifyBuildArtifacts(
       project,
@@ -1424,6 +1651,269 @@ export function runSample({ binary, fixture, run }) {
   }
 }
 
+function removeGraphArtifact(project) {
+  const graph = path.join(project, 'graphoxide-out', 'graph.json');
+  const metadata = lstatSync(graph);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`benchmark graph artifact is not a regular file: ${graph}`);
+  }
+  unlinkSync(graph);
+}
+
+function mutateCatalogOnly(project, location = 'fixtures/catalog-wiki/docs/runbook-catalog-only.md') {
+  const catalog = path.join(project, 'provenance', 'catalog.json');
+  const before = sha256File(catalog);
+  const value = JSON.parse(readFileSync(catalog, 'utf8'));
+  const source = value?.sources?.[0];
+  if (!source || typeof source.location !== 'string') {
+    throw new Error('catalog/wiki fixture has no mutable catalog location');
+  }
+  source.location = location;
+  writeFileSync(catalog, `${JSON.stringify(value)}\n`);
+  const after = sha256File(catalog);
+  if (after === before) throw new Error('catalog-only mutation did not change catalog bytes');
+  return { sha256_before: before, sha256_after: after, location: source.location };
+}
+
+function mutateActiveCatalogCapture(project) {
+  const source = path.join(project, 'raw', 'active.md');
+  const catalog = path.join(project, 'provenance', 'catalog.json');
+  writeFileSync(source, `${readFileSync(source, 'utf8')}\nActive capture revision.\n`);
+  const value = JSON.parse(readFileSync(catalog, 'utf8'));
+  const sourceRecord = value?.sources?.[0];
+  const capture = value?.captures?.find((candidate) => candidate?.capture_id === sourceRecord?.active_capture_id);
+  if (!capture || typeof capture.sha256 !== 'string') {
+    throw new Error('catalog/wiki fixture has no active capture');
+  }
+  capture.sha256 = sha256File(source);
+  capture.updated_at = '2026-08-24T00:01:00Z';
+  writeFileSync(catalog, `${JSON.stringify(value)}\n`);
+  return { path: 'raw/active.md', sha256: capture.sha256 };
+}
+
+function assertCatalogAnnotation(project, location) {
+  const graph = readJsonArtifact(path.join(project, 'graphoxide-out', 'graph.json'), 'catalog graph');
+  if (
+    !graph.value.nodes.some(
+      (node) =>
+        node?.source_file === 'raw/active.md' &&
+        node?.catalog?.source_path === 'raw/active.md' &&
+        node.catalog.location === location,
+    )
+  ) {
+    throw new Error('catalog/wiki annotation was not applied to the runbook graph node');
+  }
+}
+
+function assertActiveCaptureDerivedKnowledge(project) {
+  const graph = readJsonArtifact(path.join(project, 'graphoxide-out', 'graph.json'), 'catalog graph');
+  if (
+    graph.value.nodes.some(
+      (node) =>
+        node?.source_file === 'raw/history.md' || node?.catalog?.capture_id === 'capture-history',
+    )
+  ) {
+    throw new Error('catalog/wiki graph retained an absent historical capture');
+  }
+  if (
+    !graph.value.nodes.some(
+      (node) =>
+        node?.source_file === 'raw/active.md' &&
+        node?.label === 'Full Derived Knowledge' &&
+        node?.catalog?.capture_id === 'capture-active',
+    )
+  ) {
+    throw new Error('catalog/wiki graph omitted active capture derived knowledge');
+  }
+}
+
+function assertCatalogWikiCoverage(project) {
+  const graph = readJsonArtifact(path.join(project, 'graphoxide-out', 'graph.json'), 'catalog graph');
+  const coverage = readJsonArtifact(path.join(project, 'graphoxide-out', 'coverage.json'), 'catalog coverage');
+  if (!Array.isArray(graph.value.nodes) || !Array.isArray(coverage.value.files)) {
+    throw new Error('catalog/wiki graph or coverage has an invalid shape');
+  }
+  const byPath = new Map();
+  for (const file of coverage.value.files) {
+    if (!file || typeof file.path !== 'string' || byPath.has(file.path)) {
+      throw new Error('catalog/wiki coverage has an invalid or duplicate file outcome');
+    }
+    byPath.set(file.path, file);
+  }
+  const outcome = (file, expectedStatus, expectedFormat) => {
+    const actual = byPath.get(file);
+    if (actual?.status !== expectedStatus || (expectedFormat && actual.format_id !== expectedFormat)) {
+      throw new Error(`catalog/wiki coverage outcome for ${file} is incorrect`);
+    }
+  };
+  outcome('.env', 'excluded_sensitive');
+  outcome('metadata/malformed.json', 'covered', 'json');
+  outcome('archives/wiki-only.zip', 'covered', 'zip-archive');
+  if (byPath.has('ignored/private.md')) {
+    throw new Error('catalog/wiki ignored input unexpectedly appears in coverage');
+  }
+  const sourceFiles = new Set(
+    graph.value.nodes.map((node) => node?.source_file).filter((source) => typeof source === 'string'),
+  );
+  for (const source of ['metadata/malformed.json', 'archives/wiki-only.zip!/members/wiki-only.md']) {
+    if (!sourceFiles.has(source)) {
+      throw new Error(`catalog/wiki graph omitted required source ${source}`);
+    }
+  }
+  for (const source of ['.env', 'ignored/private.md']) {
+    if (sourceFiles.has(source)) {
+      throw new Error(`catalog/wiki graph included excluded source ${source}`);
+    }
+  }
+}
+
+function describeCacheTree(project) {
+  return describeFixture(path.join(project, 'graphoxide-out', 'cache'));
+}
+
+function catalogIndexPass(binary, binaryPin, project, label, expected) {
+  const runtimeReport = path.join(project, 'graphoxide-out', `benchmark-runtime-${label}.json`);
+  const build = runCliJson(
+    binary,
+    [...CATALOG_WIKI_BUILD_ARGS, '--runtime-report', runtimeReport],
+    project,
+    expected,
+    undefined,
+    binaryPin,
+  );
+  return {
+    ...build,
+    artifacts: verifyBuildArtifacts(project, build.cli_report, label),
+    runtime_telemetry: readRuntimeTelemetry(runtimeReport, expected, `graphoxide ${label}`),
+  };
+}
+
+function runCatalogWikiSample({ binary, binaryPin, fixture, run }) {
+  const runDirectory = mkdtempSync(path.join(os.tmpdir(), RUN_DIRECTORY_PREFIX));
+  const project = path.join(runDirectory, 'project');
+  try {
+    assertIsolatedBenchmarkArgs(CATALOG_WIKI_BUILD_ARGS);
+    cpSync(fixture, project, { recursive: true, errorOnExist: true, preserveTimestamps: true });
+
+    const fullBuildExpected = { operation: 'index', mode: 'full', status: 'rebuilt' };
+    const fullBuild = catalogIndexPass(binary, binaryPin, project, 'catalog-cold', fullBuildExpected);
+    assertCatalogWikiCoverage(project);
+    assertCatalogAnnotation(project, 'Site/Library/Folder/Page');
+    assertActiveCaptureDerivedKnowledge(project);
+
+    removeGraphArtifact(project);
+    const warmBuild = catalogIndexPass(binary, binaryPin, project, 'catalog-warm', fullBuildExpected);
+    if (
+      warmBuild.artifacts.graph_sha256 !== fullBuild.artifacts.graph_sha256 ||
+      warmBuild.artifacts.manifest_sha256 !== fullBuild.artifacts.manifest_sha256
+    ) {
+      throw new Error('warm catalog build changed graph or manifest bytes');
+    }
+    if (warmBuild.runtime_telemetry.cache.parses_avoided < 1) {
+      throw new Error('warm catalog build reported no avoided parses');
+    }
+
+    const mutation = mutateActiveCatalogCapture(project);
+    const incrementalExpected = {
+      operation: 'index',
+      mode: 'incremental',
+      status: 'rebuilt',
+      changed: 1,
+      processed: 1,
+    };
+    const incrementalUpdate = catalogIndexPass(binary, binaryPin, project, 'catalog-incremental', incrementalExpected);
+    if (
+      incrementalUpdate.artifacts.graph_sha256 === fullBuild.artifacts.graph_sha256 ||
+      incrementalUpdate.artifacts.manifest_sha256 === fullBuild.artifacts.manifest_sha256
+    ) {
+      throw new Error('one-source catalog workflow mutation did not change graph and manifest bytes');
+    }
+
+    const catalogMutation = mutateCatalogOnly(project);
+    const catalogOnlyExpected = {
+      operation: 'index',
+      mode: 'incremental',
+      status: 'rebuilt',
+      changed: 0,
+      processed: 0,
+    };
+    const cacheBefore = describeCacheTree(project);
+    const catalogOnly = catalogIndexPass(binary, binaryPin, project, 'catalog-only', catalogOnlyExpected);
+    const cacheAfter = describeCacheTree(project);
+    if (catalogOnly.artifacts.manifest_sha256 !== incrementalUpdate.artifacts.manifest_sha256) {
+      throw new Error('catalog-only mutation changed manifest bytes');
+    }
+    if (
+      cacheAfter.sha256 !== cacheBefore.sha256 ||
+      cacheAfter.file_count !== cacheBefore.file_count ||
+      cacheAfter.total_bytes !== cacheBefore.total_bytes
+    ) {
+      throw new Error('catalog-only mutation changed extraction cache tree');
+    }
+    if (catalogOnly.artifacts.graph_sha256 === incrementalUpdate.artifacts.graph_sha256) {
+      throw new Error('catalog-only mutation did not change graph annotations');
+    }
+    if (
+      catalogOnly.runtime_telemetry.work.parses !== 0 ||
+      catalogOnly.runtime_telemetry.cache.misses !== 0
+    ) {
+      throw new Error('catalog-only mutation re-extracted source text');
+    }
+    assertCatalogAnnotation(project, catalogMutation.location);
+
+    const wikiIndex = runCliText(binary, CATALOG_WIKI_INDEX_ARGS, project, undefined, binaryPin);
+    if (!wikiIndex.stdout.includes('Indexed 1 wiki pages')) {
+      throw new Error('wiki index did not report the generated runbook page');
+    }
+    const wikiOutput = path.join(project, 'llms.txt');
+    const wikiBeforeCheck = sha256File(wikiOutput);
+    const wikiCheck = runCliText(binary, CATALOG_WIKI_CHECK_ARGS, project, undefined, binaryPin);
+    if (!wikiCheck.stdout.includes('Checked 1 wiki pages')) {
+      throw new Error('wiki check did not validate the generated runbook page');
+    }
+    if (sha256File(wikiOutput) !== wikiBeforeCheck) {
+      throw new Error('wiki check modified deterministic generated output');
+    }
+
+    const staleCatalogMutation = mutateCatalogOnly(
+      project,
+      'fixtures/catalog-wiki/docs/runbook-stale-check.md',
+    );
+    const graphBeforeStaleCheck = sha256File(path.join(project, 'graphoxide-out', 'graph.json'));
+    const wikiBeforeStaleCheck = sha256File(wikiOutput);
+    let staleCheckFailed = false;
+    try {
+      runCliText(binary, CATALOG_WIKI_CHECK_ARGS, project, undefined, binaryPin);
+    } catch {
+      staleCheckFailed = true;
+    }
+    if (!staleCheckFailed) {
+      throw new Error('catalog/wiki stale graph annotations were accepted');
+    }
+    if (
+      sha256File(path.join(project, 'graphoxide-out', 'graph.json')) !== graphBeforeStaleCheck ||
+      sha256File(wikiOutput) !== wikiBeforeStaleCheck
+    ) {
+      throw new Error('catalog/wiki stale graph check modified graph or wiki artifacts');
+    }
+
+    return {
+      run,
+      mutation,
+      catalog_mutation: catalogMutation,
+      stale_catalog_mutation: staleCatalogMutation,
+      full_build: fullBuild,
+      warm_build: warmBuild,
+      incremental_update: incrementalUpdate,
+      catalog_only: { ...catalogOnly, cache_tree: { before: cacheBefore, after: cacheAfter } },
+      wiki_index: wikiIndex,
+      wiki_check: wikiCheck,
+    };
+  } finally {
+    cleanupRunDirectory(runDirectory);
+  }
+}
+
 function roundMilliseconds(value) {
   return Number(value.toFixed(3));
 }
@@ -1451,10 +1941,14 @@ export function summarizeSamples(samples) {
     external_wall_ms: summarize(samples.map((sample) => sample[name].external_wall_ms)),
     reported_elapsed_ms: summarize(samples.map((sample) => sample[name].reported_elapsed_ms)),
   });
-  return {
+  const summary = {
     full_build: phase('full_build'),
     incremental_update: phase('incremental_update'),
   };
+  for (const name of ['warm_build', 'catalog_only']) {
+    if (samples.every((sample) => sample[name] !== undefined)) summary[name] = phase(name);
+  }
+  return summary;
 }
 
 function probe(command, args, cwd = repositoryRoot) {
@@ -1508,6 +2002,9 @@ export function buildBenchmarkReport({
   if (!Array.isArray(samples) || samples.length !== options.runs) {
     throw new Error('benchmark report sample count must equal requested runs');
   }
+  const catalogWiki = materialized.scenario.name === 'catalog-wiki';
+  const buildCommand = catalogWiki ? CATALOG_WIKI_BUILD_ARGS : FULL_BUILD_ARGS;
+  const incrementalCommand = catalogWiki ? CATALOG_WIKI_BUILD_ARGS : INCREMENTAL_UPDATE_ARGS;
   return {
     schema_version: 1,
     benchmark: 'graphoxide-graph-build',
@@ -1519,15 +2016,23 @@ export function buildBenchmarkReport({
       generated: materialized.generated,
       ...fixture,
       mutation: {
-        preferred_path: MUTATION_TARGET,
+        preferred_path: catalogWiki ? 'src/benchmark.rs' : MUTATION_TARGET,
         method: 'append one deterministic source declaration in the temporary copy',
       },
     },
     commands: {
-      full_build: ['graphoxide', ...FULL_BUILD_ARGS],
-      incremental_update: ['graphoxide', ...INCREMENTAL_UPDATE_ARGS],
+      full_build: ['graphoxide', ...buildCommand],
+      incremental_update: ['graphoxide', ...incrementalCommand],
       runtime_telemetry:
         'each command additionally receives --runtime-report beneath its temporary graphoxide-out directory',
+      ...(catalogWiki
+        ? {
+            warm_build: ['graphoxide', ...CATALOG_WIKI_BUILD_ARGS],
+            catalog_only: ['graphoxide', ...CATALOG_WIKI_BUILD_ARGS],
+            wiki_index: ['graphoxide', ...CATALOG_WIKI_INDEX_ARGS],
+            wiki_check: ['graphoxide', ...CATALOG_WIKI_CHECK_ARGS],
+          }
+        : {}),
     },
     metadata,
     samples,
@@ -1539,22 +2044,41 @@ export function buildBenchmarkReport({
       'Runtime stage durations may overlap in isolated execution modes and must not be summed.',
       'Operating-system filesystem caches are not flushed or controlled.',
       'The slow-io profile uses many small files; it does not inject artificial device latency.',
+      ...(catalogWiki
+        ? [
+            'The catalog/wiki profile measures cold, warm, one-source incremental, and catalog-only index passes before deterministic wiki index and check.',
+            'Catalog-only passes require unchanged manifest bytes, zero source parses and cache misses, and changed graph annotation bytes.',
+          ]
+        : []),
       'These measurements are descriptive observations for this fixture and environment, not performance targets.',
     ],
   };
 }
 
 export function runBenchmark(options) {
-  requireExecutable(options.binary);
+  const binaryPin = pinBinary(options.binary);
+  verifyPinnedBinary(binaryPin, 'before graphoxide --version');
   const cliVersion = probe(options.binary, ['--version']);
+  verifyPinnedBinary(binaryPin, 'after graphoxide --version');
   if (!cliVersion) throw new Error(`could not read CLI version from ${options.binary}`);
   const materialized = materializeScenario(options);
   try {
     const fixture = describeFixture(materialized.fixture);
     const samples = [];
     for (let run = 1; run <= options.runs; run += 1) {
-      samples.push(runSample({ binary: options.binary, fixture: materialized.fixture, run }));
+      samples.push(
+        options.scenario === 'catalog-wiki'
+          ? runCatalogWikiSample({
+              binary: options.binary,
+              binaryPin,
+              fixture: materialized.fixture,
+              run,
+            })
+          : runSample({ binary: options.binary, binaryPin, fixture: materialized.fixture, run }),
+      );
     }
+
+    verifyPinnedBinary(binaryPin, 'after benchmark phases');
 
     return buildBenchmarkReport({
       options,
@@ -1565,7 +2089,8 @@ export function runBenchmark(options) {
         repository: repositoryMetadata(),
         binary: {
           path: relativeDisplay(options.binary),
-          sha256: sha256File(options.binary),
+          sha256: binaryPin.sha256,
+          identity: binaryPin.identity,
         },
         cli_version: cliVersion,
         rust_version: probe('rustc', ['--version']),

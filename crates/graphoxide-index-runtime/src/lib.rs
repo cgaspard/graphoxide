@@ -360,6 +360,8 @@ pub struct IndexRuntimeConfig {
     pub io_backend: IoBackendSelection,
     /// Requested single-read target size.
     pub read_batch_bytes: usize,
+    /// Maximum accepted logical size for one isolated source.
+    pub max_input_bytes: usize,
 }
 
 impl IndexRuntimeConfig {
@@ -380,6 +382,7 @@ impl IndexRuntimeConfig {
             compute_workers,
             io_backend: IoBackendSelection::Auto,
             read_batch_bytes: DEFAULT_READ_BATCH_BYTES,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
         }
     }
 
@@ -3626,6 +3629,7 @@ mod tests {
             compute_workers,
             io_backend: IoBackendSelection::Threaded,
             read_batch_bytes: 3,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
         }
     }
 
@@ -3786,6 +3790,7 @@ mod tests {
         assert_eq!(config.io_workers, 4);
         assert_eq!(config.compute_workers, 11);
         assert_eq!(config.read_batch_bytes, DEFAULT_READ_BATCH_BYTES);
+        assert_eq!(config.max_input_bytes, DEFAULT_MAX_INPUT_BYTES);
         assert_eq!(
             config.io_backend.resolve().effective,
             EffectiveIoBackend::Threaded
@@ -3812,6 +3817,7 @@ mod tests {
             compute_workers: 64,
             io_backend: IoBackendSelection::Threaded,
             read_batch_bytes: usize::MAX,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
         };
         let evidence = config.execution_evidence(2);
         assert_eq!(evidence.admitted_requests, 2);
@@ -4062,6 +4068,7 @@ mod tests {
             compute_workers: 2,
             io_backend: IoBackendSelection::Threaded,
             read_batch_bytes: 3,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
         };
         let result = read_files_concurrently(
             config,
@@ -4108,6 +4115,7 @@ mod tests {
                 compute_workers: 1,
                 io_backend: IoBackendSelection::Threaded,
                 read_batch_bytes: 7,
+                max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             },
             vec![
                 FileReadRequest::new_verified(InputIdentity::new("source.txt", 0), path)
@@ -4153,6 +4161,7 @@ mod tests {
                 compute_workers: 1,
                 io_backend: IoBackendSelection::Threaded,
                 read_batch_bytes: DEFAULT_READ_BATCH_BYTES,
+                max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             },
             vec![FileReadRequest::new(InputIdentity::new("large.txt", 0), path).with_max_bytes(8)],
             |input| input.bytes().len(),
@@ -4176,6 +4185,67 @@ mod tests {
     }
 
     #[test]
+    fn verified_large_source_requires_explicit_cap_and_ready_input_credit() {
+        const LARGE_SOURCE_BYTES: usize = 68_699_481;
+        let directory = tempfile::tempdir().expect("temporary source root");
+        let path = directory.path().join("large.bin");
+        fs::File::create(&path)
+            .and_then(|file| file.set_len(LARGE_SOURCE_BYTES as u64))
+            .expect("create sparse large source");
+
+        let default_config = IndexRuntimeConfig {
+            memory_budget_bytes: 512 * 1024 * 1024,
+            io_workers: 1,
+            compute_workers: 1,
+            io_backend: IoBackendSelection::Threaded,
+            read_batch_bytes: DEFAULT_READ_BATCH_BYTES,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
+        };
+        let default_result = read_files_concurrently(
+            default_config,
+            vec![FileReadRequest::new_verified_under(
+                InputIdentity::new("large.bin", 0),
+                path.clone(),
+                directory.path(),
+            )
+            .expect("bind default request")],
+            |input| input.bytes().len(),
+        )
+        .expect("default cap reports a deterministic source failure");
+        assert!(default_result.completed.is_empty());
+        assert!(matches!(
+            default_result.failures.as_slice(),
+            [FileReadFailure {
+                kind: FileReadFailureKind::TooLarge {
+                    observed_bytes: 68_699_481,
+                    max_bytes: DEFAULT_MAX_INPUT_BYTES,
+                },
+                ..
+            }]
+        ));
+
+        let raised_config = IndexRuntimeConfig {
+            max_input_bytes: 128 * 1024 * 1024,
+            ..default_config
+        };
+        assert!(raised_config.memory_budget().ready_inputs_bytes >= LARGE_SOURCE_BYTES);
+        let raised_result = read_files_concurrently(
+            raised_config,
+            vec![FileReadRequest::new_verified_under(
+                InputIdentity::new("large.bin", 0),
+                path,
+                directory.path(),
+            )
+            .expect("bind raised request")
+            .with_max_bytes(raised_config.max_input_bytes)],
+            |input| input.bytes().len(),
+        )
+        .expect("raised cap and ready-input credit admit the source");
+        assert!(raised_result.failures.is_empty());
+        assert_eq!(raised_result.completed[0].value, LARGE_SOURCE_BYTES);
+    }
+
+    #[test]
     fn bounded_layout_clamps_untrusted_worker_counts_to_memory_partitions() {
         let config = IndexRuntimeConfig {
             memory_budget_bytes: 128 * 1024,
@@ -4183,6 +4253,7 @@ mod tests {
             compute_workers: usize::MAX,
             io_backend: IoBackendSelection::Threaded,
             read_batch_bytes: usize::MAX,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
         };
         config.validate().expect("minimal partitions are usable");
 
@@ -4601,6 +4672,7 @@ mod tests {
                 compute_workers: 1,
                 io_backend: IoBackendSelection::Threaded,
                 read_batch_bytes: DEFAULT_READ_BATCH_BYTES,
+                max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             },
             requests,
             |input| input.bytes().len(),
@@ -4639,6 +4711,7 @@ mod tests {
                 compute_workers: 1,
                 io_backend: IoBackendSelection::Threaded,
                 read_batch_bytes: DEFAULT_READ_BATCH_BYTES,
+                max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             },
             vec![FileReadRequest::new(
                 InputIdentity::new("source.txt", 0),
@@ -4745,6 +4818,7 @@ mod tests {
                 compute_workers: 1,
                 io_backend: IoBackendSelection::Threaded,
                 read_batch_bytes: 1,
+                max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             },
             requests,
             |_| -> () { panic!("intentional compute panic") },

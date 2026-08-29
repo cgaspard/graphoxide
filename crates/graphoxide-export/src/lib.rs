@@ -10,7 +10,11 @@
 pub mod html;
 pub mod obsidian;
 pub mod report;
+pub mod taxonomy;
 pub mod wiki;
+pub mod wiki_canonical;
+pub mod wiki_evidence;
+pub mod wiki_plan;
 
 pub use html::{
     derive_sections_from_communities, render_callflow_html, render_callflow_html_with_options,
@@ -24,7 +28,22 @@ pub use obsidian::{
 pub use report::{
     render_report, render_report_with_options, DetectionSummary, ReportOptions, TokenCost,
 };
-pub use wiki::{export_wiki, export_wiki_with_options, GodNodeArticle, WikiOptions, WikiReport};
+pub use taxonomy::{derive_topic_tree, Topic, TopicTree};
+pub use wiki::{
+    export_wiki, export_wiki_with_options, render_structured_wiki,
+    render_structured_wiki_with_catalog, GodNodeArticle, StructuredWikiPage, StructuredWikiPlan,
+    WikiOptions, WikiReport,
+};
+pub use wiki_canonical::{canonical_source_coverage, render_canonical_wiki};
+pub use wiki_evidence::{
+    project_wiki_evidence, WikiEvidenceBlock, WikiEvidenceDiagnostic, WikiEvidenceProjection,
+    WikiEvidenceSource,
+};
+pub use wiki_plan::{
+    load_wiki_plan, parse_wiki_plan, WikiArticleType, WikiPlan, WikiPlanArticle, WikiPlanCoverage,
+    WikiPlanDomain, WikiPlanPathKind, WikiPlanSource, MAX_WIKI_PLAN_ARTICLES,
+    MAX_WIKI_PLAN_DOMAINS, MAX_WIKI_PLAN_SOURCES,
+};
 
 use graphoxide_core::KnowledgeGraph;
 use serde_json::Value;

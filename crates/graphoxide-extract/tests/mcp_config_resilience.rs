@@ -111,8 +111,14 @@ fn a_file_that_cannot_be_extracted_is_skipped_with_a_warning() {
     let fixture = tempfile::tempdir().unwrap();
     let project = fixture.path().join("project");
     let output = fixture.path().join("managed/graphoxide-out");
+    let failed_directory = if cfg!(unix) {
+        "e\u{301}\\raw"
+    } else {
+        "e\u{301}"
+    };
+    let failed_source = std::path::PathBuf::from(failed_directory).join("tsconfig.json");
     write(&project.join("app.py"), "def app():\n    return 1\n");
-    write(&project.join("tsconfig.json"), "{not valid json");
+    write(&project.join(&failed_source), "{not valid json");
 
     let prepared = extract_project_with_scan_options_deferred_manifest(
         &project,
@@ -134,6 +140,7 @@ fn a_file_that_cannot_be_extracted_is_skipped_with_a_warning() {
     );
     assert!(!prepared.progress.is_complete());
     assert_eq!(prepared.progress.succeeded, prepared.progress.total - 1);
+    assert_eq!(prepared.failed_sources, [failed_source]);
     // The healthy file still made it into the graph.
     assert!(prepared
         .extractions

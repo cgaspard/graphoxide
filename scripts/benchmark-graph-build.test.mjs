@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
   cpSync,
+  existsSync,
   fstatSync,
   linkSync,
   mkdirSync,
@@ -70,6 +74,30 @@ function openReadDescriptor(file) {
   return openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
 }
 
+function zipMemberNames(bytes) {
+  const names = [];
+  for (
+    let offset = bytes.indexOf(Buffer.from('PK\x01\x02', 'binary'));
+    offset >= 0 && offset + 46 <= bytes.length && bytes.readUInt32LE(offset) === 0x02014b50;
+  ) {
+    const nameLength = bytes.readUInt16LE(offset + 28);
+    const extraLength = bytes.readUInt16LE(offset + 30);
+    const commentLength = bytes.readUInt16LE(offset + 32);
+    names.push(bytes.subarray(offset + 46, offset + 46 + nameLength).toString('utf8'));
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return names;
+}
+
+function assertMinimalPdf(bytes) {
+  const text = bytes.toString('ascii');
+  assert.match(text, /^%PDF-1\.4\n/);
+  assert.match(text, /1 0 obj\n<< \/Type \/Catalog \/Pages 2 0 R >>\nendobj/);
+  assert.match(text, /trailer\n<< \/Size 4 \/Root 1 0 R >>\nstartxref\n\d+\n%%EOF\n$/);
+  const startxref = Number(text.match(/startxref\n(\d+)\n%%EOF\n$/)?.[1]);
+  assert.equal(text.slice(startxref, startxref + 9), 'xref\n0 4\n');
+}
+
 test('parseArguments supplies the reproducible baseline defaults', () => {
   const options = parseArguments([], repositoryRoot);
   assert.equal(options.runs, 5);
@@ -126,6 +154,7 @@ test('parseArguments accepts each deterministic built-in benchmark profile', () 
     'diagrams',
     'facility-models',
     'openusd-assets',
+    'catalog-wiki',
   ]);
   for (const scenario of BENCHMARK_SCENARIOS) {
     const options = parseArguments(['--scenario', scenario], repositoryRoot);
@@ -136,6 +165,107 @@ test('parseArguments accepts each deterministic built-in benchmark profile', () 
     () => parseArguments(['--fixture', 'fixture', '--scenario', 'many-small'], repositoryRoot),
     /cannot be combined/,
   );
+});
+
+test('catalog/wiki fixture keeps mixed documents, archive-only inputs, ignored inputs, and a catalog annotation separate', () => {
+  const fixture = materializeGeneratedScenario('catalog-wiki');
+  try {
+    const runbook = readFileSync(path.join(fixture, 'docs', 'runbook.md'), 'utf8');
+    const catalog = JSON.parse(readFileSync(path.join(fixture, 'provenance', 'catalog.json'), 'utf8'));
+    assert.match(runbook, /^---\ntitle: Runbook\nsources:\n  - source-one#capture-active\n  - source-one#capture-history\n---\n/);
+    assert.deepEqual(catalog, {
+      version: 2,
+      sources: [
+        {
+          source_id: 'source-one',
+          source_system: 'sharepoint',
+          url: 'https://example.invalid/site/page',
+          location: 'Site/Library/Folder/Page',
+          active_capture_id: 'capture-active',
+        },
+      ],
+      captures: [
+        {
+          source_id: 'source-one',
+          capture_id: 'capture-active',
+          source_path: 'raw/active.md',
+          sha256: createHash('sha256').update(readFileSync(path.join(fixture, 'raw', 'active.md'))).digest('hex'),
+          captured_at: '2026-08-24T12:00:00Z',
+          accessed_at: '2026-08-24T12:00:00Z',
+          updated_at: '2026-08-23T20:00:00Z',
+          representation: 'markdown',
+        },
+        {
+          source_id: 'source-one',
+          capture_id: 'capture-history',
+          source_path: 'raw/history.md',
+          sha256: 'b'.repeat(64),
+          captured_at: '2026-08-23T12:00:00Z',
+          accessed_at: '2026-08-23T12:00:00Z',
+          updated_at: '2026-08-23T12:00:00Z',
+          representation: 'markdown',
+        },
+      ],
+    });
+    assert.equal(existsSync(path.join(fixture, 'raw', 'history.md')), false);
+    assert.match(readFileSync(path.join(fixture, 'wiki.json'), 'utf8'), /"output":"llms\.txt"/);
+    assert.match(readFileSync(path.join(fixture, 'metadata', 'services.json'), 'utf8'), /catalog-only annotation/);
+    assert.match(readFileSync(path.join(fixture, 'metadata', 'services.yaml'), 'utf8'), /service:/);
+    assertMinimalPdf(readFileSync(path.join(fixture, 'documents', 'guide.pdf')));
+    assert.deepEqual(readFileSync(path.join(fixture, 'documents', 'catalog.docx')).subarray(0, 4), Buffer.from('PK\x03\x04'));
+    const archive = readFileSync(path.join(fixture, 'archives', 'wiki-only.zip'));
+    assert.deepEqual(zipMemberNames(archive), ['members/wiki-only.md']);
+    assert.match(readFileSync(path.join(fixture, '.graphoxideignore'), 'utf8'), /^ignored\/\nprovenance\/\n$/);
+    assert.throws(() => readFileSync(path.join(fixture, 'members', 'wiki-only.md')), /ENOENT/);
+    assert.equal(readFileSync(path.join(fixture, 'ignored', 'private.md'), 'utf8'), 'Ignored by fixture policy.\n');
+    assert.equal(describeFixture(fixture).file_count, 15);
+    assert.equal(readFileSync(path.join(fixture, '.env'), 'utf8'), 'TOKEN=not-for-indexing\n');
+    assert.match(readFileSync(path.join(fixture, 'metadata', 'malformed.json'), 'utf8'), /not valid JSON/);
+    assert.deepEqual(profileForScenario('catalog-wiki').format_families, [
+      'markdown',
+      'structured-json',
+      'configuration',
+      'office-document',
+      'pdf',
+      'container',
+      'catalog-metadata',
+    ]);
+  } finally {
+    rmSync(fixture, { recursive: true, force: false });
+  }
+});
+
+test('catalog/wiki V2 qualification accepts only active captures with a 4GB graph cap', {
+  skip: !process.env.GRAPHOXIDE_QUALIFICATION_BINARY,
+}, () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(repositoryRoot, 'scripts', 'benchmark-graph-build.mjs'),
+      '--runs',
+      '1',
+      '--scenario',
+      'catalog-wiki',
+      '--binary',
+      process.env.GRAPHOXIDE_QUALIFICATION_BINARY,
+    ],
+    {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: { ...process.env, GRAPHOXIDE_MAX_GRAPH_BYTES: '4GB' },
+    },
+  );
+  assert.equal(result.status, 0, `${result.error?.message ?? ''}\n${result.stderr}\n${result.stdout}`);
+  const sample = JSON.parse(result.stdout).samples[0];
+  assert.equal(sample.incremental_update.cli_report.files.changed, 1);
+  assert.equal(sample.incremental_update.cli_report.files.processed, 1);
+  assert.equal(sample.catalog_only.runtime_telemetry.work.parses, 0);
+  assert.equal(sample.catalog_only.runtime_telemetry.cache.misses, 0);
+  assert.equal(
+    sample.catalog_only.artifacts.manifest_sha256,
+    sample.incremental_update.artifacts.manifest_sha256,
+  );
+  assert.deepEqual(sample.catalog_only.cache_tree.before, sample.catalog_only.cache_tree.after);
 });
 
 test('parseArguments rejects unbounded or malformed runs', () => {
@@ -268,6 +398,299 @@ test('buildBenchmarkReport preserves a generated profile, fixture digest, runtim
     () => buildBenchmarkReport({ ...{ options, materialized, samples: samples.slice(0, 1), metadata: {} }, fixture: {} }),
     /sample count/,
   );
+});
+
+test('buildBenchmarkReport records the catalog/wiki cold, warm, source-incremental, and catalog-only workflow', () => {
+  const options = parseArguments(['--runs', '1', '--scenario', 'catalog-wiki'], repositoryRoot);
+  const materialized = {
+    fixture: '/tmp/generated-catalog-wiki',
+    generated: true,
+    scenario: profileForScenario('catalog-wiki'),
+  };
+  const report = buildBenchmarkReport({
+    options,
+    materialized,
+    fixture: { sha256: 'b'.repeat(64), file_count: 14, total_bytes: 990 },
+    samples: [
+      {
+        full_build: { external_wall_ms: 12, reported_elapsed_ms: 10 },
+        warm_build: { external_wall_ms: 8, reported_elapsed_ms: 6 },
+        incremental_update: { external_wall_ms: 7, reported_elapsed_ms: 5 },
+        catalog_only: { external_wall_ms: 4, reported_elapsed_ms: 3 },
+        wiki_index: { external_wall_ms: 2 },
+        wiki_check: { external_wall_ms: 1 },
+      },
+    ],
+    metadata: { test: true },
+  });
+
+  assert.deepEqual(report.commands.catalog_only, [
+    'graphoxide',
+    'index',
+    '.',
+    '--catalog',
+    'provenance',
+    '--json',
+  ]);
+  assert.deepEqual(report.commands.full_build, report.commands.catalog_only);
+  assert.deepEqual(report.commands.warm_build, report.commands.catalog_only);
+  assert.deepEqual(report.commands.incremental_update, report.commands.catalog_only);
+  assert.deepEqual(report.fixture.mutation, {
+    preferred_path: 'src/benchmark.rs',
+    method: 'append one deterministic source declaration in the temporary copy',
+  });
+  assert.deepEqual(report.commands.wiki_index, ['graphoxide', 'wiki', 'index', '.', '--config', 'wiki.json']);
+  assert.deepEqual(report.commands.wiki_check, [
+    'graphoxide',
+    'wiki',
+    'check',
+    '.',
+    '--config',
+    'wiki.json',
+    '--catalog',
+    'provenance',
+    '--graph',
+    'graphoxide-out/graph.json',
+  ]);
+  assert.equal(report.summary.warm_build.reported_elapsed_ms.median, 6);
+  assert.equal(report.summary.catalog_only.external_wall_ms.median, 4);
+  assert.ok(report.notes.some((note) => note.includes('catalog-only')));
+  assert.ok(!report.notes.some((note) => note.includes('remain deferred')));
+});
+
+test('catalog/wiki benchmark enforces fixture coverage and pins an explicit binary without Cargo', () => {
+  const parent = mkdtempSync(path.join(os.tmpdir(), 'graphoxide-benchmark-wrapper-'));
+  const binary = path.join(parent, 'graphoxide');
+  const cargo = path.join(parent, 'cargo');
+  const record = path.join(parent, 'commands.jsonl');
+  const cargoCalled = path.join(parent, 'cargo-called');
+  try {
+    writeFileSync(
+      binary,
+      `#!${process.execPath}
+const { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } = require('node:fs');
+const { createHash } = require('node:crypto');
+const path = require('node:path');
+const args = process.argv.slice(2);
+appendFileSync(process.env.CATALOG_WRAPPER_RECORD, JSON.stringify(args) + '\\n');
+if (args[0] === '--version') {
+  process.stdout.write('graphoxide recording wrapper\\n');
+  process.exit(0);
+}
+if (args[0] === 'wiki') {
+  if (args[1] === 'index') {
+    writeFileSync(path.join(process.cwd(), 'llms.txt'), '# Runbook\\n');
+    if (process.env.CATALOG_WRAPPER_REPLACEMENT) {
+      renameSync(process.env.CATALOG_WRAPPER_REPLACEMENT, process.argv[1]);
+    }
+    process.stdout.write('Indexed 1 wiki pages into ' + path.join(process.cwd(), 'llms.txt') + '\\n');
+    process.exit(0);
+  }
+  if (args[1] === 'check') {
+    const source = JSON.parse(readFileSync(path.join(process.cwd(), 'provenance', 'catalog.json'), 'utf8')).sources[0];
+    if (source.location.endsWith('stale-check.md')) {
+      process.exit(92);
+    }
+    process.stdout.write('Checked 1 wiki pages\\n');
+    process.exit(0);
+  }
+}
+if (args[0] !== 'index') process.exit(90);
+const output = path.join(process.cwd(), 'graphoxide-out');
+const graph = path.join(output, 'graph.json');
+const manifest = path.join(output, 'manifest.json');
+const cache = path.join(output, 'cache', 'runtime-v2', 'cache-entry');
+const runtimePath = args[args.indexOf('--runtime-report') + 1];
+if (!runtimePath) process.exit(91);
+mkdirSync(output, { recursive: true });
+mkdirSync(path.dirname(cache), { recursive: true });
+if (!existsSync(cache)) writeFileSync(cache, 'stable extraction cache\\n');
+if (process.env.CATALOG_WRAPPER_BAD_OUTCOME === 'cache' && runtimePath.endsWith('catalog-only.json')) {
+  writeFileSync(cache, 'catalog-only cache mutation\\n');
+}
+const sourceHash = createHash('sha256').update(readFileSync(path.join(process.cwd(), 'raw', 'active.md'))).digest('hex');
+const prior = existsSync(manifest) ? JSON.parse(readFileSync(manifest, 'utf8')).source_hash : null;
+const changed = prior === null ? 10 : prior === sourceHash ? 0 : 1;
+const mode = existsSync(graph) ? 'incremental' : 'full';
+const source = JSON.parse(readFileSync(path.join(process.cwd(), 'provenance', 'catalog.json'), 'utf8')).sources[0];
+const capture = JSON.parse(readFileSync(path.join(process.cwd(), 'provenance', 'catalog.json'), 'utf8')).captures.find((entry) => entry.capture_id === source.active_capture_id);
+const catalog = { ...source, ...capture };
+delete catalog.captures;
+const build = { schema_version: 1, operation: 'index', mode, status: 'rebuilt', elapsed_ms: 1, files: { changed, processed: changed }, graph: { nodes: 2, edges: 0 } };
+const cacheHit = changed === 0 ? 2 : 0;
+const sourceRead = changed === 0 ? 0 : 2;
+const badOutcome = process.env.CATALOG_WRAPPER_BAD_OUTCOME;
+const nodes = [
+  { source_file: badOutcome === 'misplaced-catalog' ? 'metadata/services.json' : 'raw/active.md', catalog },
+  { source_file: badOutcome === 'misplaced-catalog' ? 'metadata/services.json' : 'raw/active.md', label: 'Full Derived Knowledge', catalog },
+  { source_file: 'src/benchmark.rs', source_hash: sourceHash },
+  ...(badOutcome === 'malformed' ? [] : [{ source_file: 'metadata/malformed.json' }]),
+  ...(badOutcome === 'archive' ? [] : [{ source_file: 'archives/wiki-only.zip!/members/wiki-only.md' }]),
+  ...(badOutcome === 'sensitive' ? [{ source_file: '.env' }] : []),
+];
+const runtime = {
+  schema_version: 2,
+  build,
+  runtime: {
+    execution_model: 'isolated', io_backend: 'threaded', io_backend_request: 'auto', io_backend_fallback: null,
+    memory_budget_bytes: 1, io_workers: 1, compute_workers: 1, read_batch_bytes: 1, cache_partitions: 1,
+    admission: { admitted_requests: 2, effective_io_workers: 1, effective_compute_workers: 1, effective_read_batch_bytes: 1, io_pool_bytes_per_worker: 1, io_buffers_bytes: 0, ready_inputs_bytes: 0, cpu_arenas_bytes: 0, cache_and_runs_bytes: 0, query_reserve_bytes: 0, emergency_reserve_bytes: 0 },
+  },
+  io: { sources_selected: 2, source_bytes_selected: 2, sources_read: sourceRead, source_bytes_read: sourceRead, sources_delivered: sourceRead, source_bytes_delivered: sourceRead, source_bytes_avoided: 2 - sourceRead, read_failures: 0, peak_ready_bytes: 0, peak_ready_items: 0 },
+  work: { parses: sourceRead },
+  cache: { enabled: true, metadata_hits: cacheHit, runtime_hits: 0, legacy_hits: 0, misses: sourceRead, bypasses: 0, stale_or_corrupt: 0, probe_failures: 0, payload_reads_avoided: cacheHit, parses_avoided: cacheHit, stores: 0, already_present: 0, store_failures: 0, payload_bytes_read: 0, payload_bytes_written: 0, artifact_bytes_read: 0, artifact_bytes_written: 0, peak_in_flight_transfer_bytes: 0 },
+  process: { peak_rss_bytes: 1, peak_rss_source: 'getrusage_maxrss_bytes' },
+  simd: { architecture: 'test', detected_features: [], enabled_kernels: [] },
+};
+build.graph.nodes = nodes.length;
+const coverage = [
+  { path: '.env', status: badOutcome === 'sensitive' ? 'covered' : 'excluded_sensitive' },
+  { path: 'archives/wiki-only.zip', status: badOutcome === 'archive' ? 'unsupported' : 'covered', format_id: 'zip-archive', declared_capability: 'structural_partial' },
+  { path: 'metadata/malformed.json', status: badOutcome === 'malformed' ? 'unsupported' : 'covered', format_id: 'json', declared_capability: 'semantic_full' },
+];
+if (badOutcome === 'ignored') coverage.push({ path: 'ignored/private.md', status: 'covered' });
+writeFileSync(graph, JSON.stringify({ nodes, links: [] }));
+writeFileSync(manifest, JSON.stringify({ source_hash: sourceHash }));
+writeFileSync(runtimePath, JSON.stringify(runtime));
+writeFileSync(path.join(output, 'coverage.json'), JSON.stringify({ files: coverage }));
+process.stdout.write(JSON.stringify({ schema_version: 1, build, coverage: { complete: true } }) + '\\n');
+`,
+    );
+    writeFileSync(
+      cargo,
+      `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.CARGO_CALLED, 'called'); process.exit(97);\n`,
+    );
+    chmodSync(binary, 0o755);
+    chmodSync(cargo, 0o755);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(repositoryRoot, 'scripts', 'benchmark-graph-build.mjs'),
+        '--runs',
+        '1',
+        '--scenario',
+        'catalog-wiki',
+        '--binary',
+        binary,
+      ],
+      {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: parent,
+          CATALOG_WRAPPER_RECORD: record,
+          CARGO_CALLED: cargoCalled,
+        },
+      },
+    );
+    assert.equal(result.status, 0, `${result.error?.message ?? ''}\n${result.stderr}\n${result.stdout}`);
+    assert.equal(existsSync(cargoCalled), false, 'an explicit binary must bypass Cargo');
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(report.samples[0]).filter((key) => key.endsWith('build') || key.endsWith('only')).sort(), [
+      'catalog_only',
+      'full_build',
+      'warm_build',
+    ]);
+    assert.equal(report.samples[0].incremental_update.cli_report.files.changed, 1);
+    assert.equal(report.samples[0].catalog_only.runtime_telemetry.work.parses, 0);
+    assert.equal(report.samples[0].catalog_only.runtime_telemetry.cache.misses, 0);
+    assert.equal(
+      report.samples[0].catalog_only.artifacts.manifest_sha256,
+      report.samples[0].incremental_update.artifacts.manifest_sha256,
+    );
+    assert.notEqual(
+      report.samples[0].catalog_only.artifacts.graph_sha256,
+      report.samples[0].incremental_update.artifacts.graph_sha256,
+    );
+    assert.deepEqual(
+      report.samples[0].catalog_only.cache_tree.before,
+      report.samples[0].catalog_only.cache_tree.after,
+      'catalog-only indexing must leave the extraction cache tree unchanged',
+    );
+    assert.equal(report.samples[0].catalog_only.cache_tree.before.file_count, 1);
+    assert.equal(report.samples[0].wiki_index.external_wall_ms >= 0, true);
+    assert.equal(report.samples[0].wiki_check.external_wall_ms >= 0, true);
+    const commands = readFileSync(record, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(commands.filter(([command]) => command === 'index').length, 4);
+    assert.ok(commands.some((command) => command[0] === 'wiki' && command[1] === 'index'));
+    assert.ok(commands.some((command) => command[0] === 'wiki' && command[1] === 'check'));
+
+    for (const outcome of ['sensitive', 'ignored', 'malformed', 'archive', 'misplaced-catalog', 'cache']) {
+      const invalid = spawnSync(
+        process.execPath,
+        [
+          path.join(repositoryRoot, 'scripts', 'benchmark-graph-build.mjs'),
+          '--runs',
+          '1',
+          '--scenario',
+          'catalog-wiki',
+          '--binary',
+          binary,
+        ],
+        {
+          cwd: repositoryRoot,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: parent,
+            CATALOG_WRAPPER_RECORD: record,
+            CARGO_CALLED: cargoCalled,
+            CATALOG_WRAPPER_BAD_OUTCOME: outcome,
+          },
+        },
+      );
+      assert.notEqual(invalid.status, 0, `${outcome} outcome must fail qualification`);
+      assert.match(
+        invalid.stderr,
+        outcome === 'cache' ? /changed extraction cache tree/ : /catalog\/wiki/,
+      );
+    }
+
+    const replacingBinary = path.join(parent, 'graphoxide-replacing');
+    const replacement = path.join(parent, 'graphoxide-replacement');
+    cpSync(binary, replacingBinary);
+    writeFileSync(
+      replacement,
+      `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args[0] === 'wiki' && args[1] === 'check') {
+  process.stdout.write('Checked 1 wiki pages\\n');
+  process.exit(0);
+}
+process.exit(98);
+`,
+    );
+    chmodSync(replacement, 0o755);
+    const replaced = spawnSync(
+      process.execPath,
+      [
+        path.join(repositoryRoot, 'scripts', 'benchmark-graph-build.mjs'),
+        '--runs',
+        '1',
+        '--scenario',
+        'catalog-wiki',
+        '--binary',
+        replacingBinary,
+      ],
+      {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: parent,
+          CATALOG_WRAPPER_RECORD: record,
+          CARGO_CALLED: cargoCalled,
+          CATALOG_WRAPPER_REPLACEMENT: replacement,
+        },
+      },
+    );
+    assert.notEqual(replaced.status, 0, 'a replacement between wiki phases must fail qualification');
+    assert.match(replaced.stderr, /Graphoxide binary changed after graphoxide wiki index/);
+  } finally {
+    rmSync(parent, { recursive: true, force: false });
+  }
 });
 
 test('mutateCopiedFixture changes only the deterministic source in a copy', () => {
@@ -439,6 +862,19 @@ test('parseCliReport requires one JSON object with elapsed_ms', () => {
   assert.throws(() => parseCliReport('[]'), /must be an object/);
   assert.throws(() => parseCliReport('{"elapsed_ms":-1}'), /finite non-negative elapsed_ms/);
   assert.throws(() => parseCliReport('{"elapsed_ms":"1"}'), /finite non-negative elapsed_ms/);
+});
+
+test('parseCliReport normalizes the index build envelope for the shared artifact checks', () => {
+  assert.deepEqual(
+    parseCliReport(
+      JSON.stringify({
+        schema_version: 1,
+        build: { operation: 'index', mode: 'full', status: 'rebuilt', elapsed_ms: 12 },
+        coverage: { complete: true },
+      }),
+    ),
+    { operation: 'index', mode: 'full', status: 'rebuilt', elapsed_ms: 12 },
+  );
 });
 
 test('validateCliReport rejects the wrong build path and no-op incremental updates', () => {

@@ -52,6 +52,20 @@ registrations are not deleted when managed mode is disabled.
 
 By default, the extension reads `graphoxide-out/graph.json`. Configure **Graphoxide: Graph Path** if the graph lives elsewhere.
 
+For a Registry v1-backed source tree, set **Graphoxide: Registry Binding** in the
+workspace settings. The extension appends the binding to every extract, index,
+update, and watch command; the CLI then verifies the registry checkout and the local
+origin binding before it can publish a graph.
+
+```json
+{
+  "graphoxide.registryBinding": {
+    "tree": "../graphoxide-catalog",
+    "origin": "team-docs"
+  }
+}
+```
+
 ## Run the extension from source
 
 The repository includes a one-click Extension Development Host configuration and an architecture-rich sample application.
@@ -285,6 +299,7 @@ Core extraction, clustering, querying, visualization, and reports are offline an
 Open **Graphoxide: Open Settings** to configure:
 
 - Executable and graph paths
+- Optional per-workspace Registry v1 binding (`tree` and logical `origin`)
 - Query token budget and BFS/DFS traversal
 - Affected-node traversal depth
 - Automatic graph refresh and update-on-save debounce

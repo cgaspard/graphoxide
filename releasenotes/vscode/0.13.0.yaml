@@ -1,0 +1,14 @@
+version: 0.13.0
+date: 2026-08-29
+highlights:
+  - The bundled CLI can now build an incremental, provenance-bound LLM wiki without copying raw source files into the wiki or its Git-tracked registry. The extension exposes seven new read-only MCP wiki tools so AI agents can inspect wiki state, freshness, search, pages, evidence, draft validation, and deterministic review attestations.
+  - A new `graphoxide.registryBinding` workspace setting lets a project bind a local origin from a validated Registry v1 tree, which is appended to extract, index, update, and watch commands.
+added:
+  - The bundled graphoxide CLI now includes a `wiki` command group: `plan` (propose a reviewer-owned canonical wiki plan from graph metadata), `draft` (catalog-cited local-Ollama Markdown drafts with immutable frontmatter and evidence-block references), `render` (deterministic graph-derived Markdown; canonical rendering never reads raw source files), `materialize` (publishes graph-only `source-ready` pages per capture, atomically advances `wiki-manifest.json`, reconciles navigation), `check` (validate pages and `llms.txt` freshness, citations, graph annotations, and canonical plan), `index` (generate the deterministic `llms.txt`), and `openapi` (validate and fetch against a pinned, allowlisted, read-only private OpenAPI contract).
+  - The bundled graphoxide CLI now includes a `registry` command group for a Git-trackable, metadata-only Registry v1 tree: `init`, `origin` (add/bind/list/remove), `discover` (deterministic safe untracked file discovery with optional acceptance), `scan` (changed/verify modes), `publish` (commit local scan observations as a capture), `validate`, `freshness` (queue only missing, failed, or expired model work from `policies/freshness.json`), `list`, `retire`, `restore`, `rename`, `resolve-source`, and `run record` (append-only secret-free model-run records—never prompts or credentials).
+  - Seven new read-only MCP tools are available over the extension's MCP connection: `wiki_status`, `wiki_freshness`, `wiki_search`, `wiki_get_page`, `wiki_get_evidence`, `wiki_validate_draft`, and `wiki_attest_review`.
+  - New `graphoxide.registryBinding` workspace setting (object or null, per-workspace scope) with `tree` (path to the checked-out Registry v1 tree, relative to the workspace unless absolute) and `origin` (logical Registry v1 origin ID). When set, the binding is appended to extract, index, update, and watch commands; source locations and secrets remain outside the shared registry.
+changed:
+  - The extension test script now honors an optional `GRAPHOXIDE_TEST_CONCURRENCY` environment variable for `node --test --test-concurrency`, so extension unit tests can be run with controlled parallelism.
+  - The extension's bundled CLI gains catalog-aware graph annotation support: extraction can accept a read-only PostgreSQL catalog directory and apply validated catalog metadata as post-build graph annotations.
+removed: []

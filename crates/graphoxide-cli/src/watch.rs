@@ -339,6 +339,13 @@ pub fn merge_changed_paths(sources: &[Option<&[PathBuf]>]) -> Vec<PathBuf> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedRegistryBinding {
+    pub catalog_id: String,
+    pub tree_sha256: String,
+    pub origin_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedBuildConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<String>,
@@ -350,6 +357,10 @@ pub struct PersistedBuildConfig {
     pub honor_gitignore: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub cluster: bool,
+    /// Metadata-only registry identity. Local source locations and raw content
+    /// never enter the managed build configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_binding: Option<PersistedRegistryBinding>,
 }
 
 const fn default_true() -> bool {
@@ -366,6 +377,7 @@ impl Default for PersistedBuildConfig {
             excludes: Vec::new(),
             honor_gitignore: true,
             cluster: true,
+            registry_binding: None,
         }
     }
 }
@@ -396,6 +408,23 @@ pub fn write_build_config_with_cluster(
     honor_gitignore: Option<bool>,
     cluster: Option<bool>,
 ) -> anyhow::Result<PersistedBuildConfig> {
+    let registry_binding = read_build_config(out).registry_binding;
+    write_build_config_with_cluster_and_registry_binding(
+        out,
+        excludes,
+        honor_gitignore,
+        cluster,
+        registry_binding,
+    )
+}
+
+pub fn write_build_config_with_cluster_and_registry_binding(
+    out: &Path,
+    excludes: Option<&[String]>,
+    honor_gitignore: Option<bool>,
+    cluster: Option<bool>,
+    registry_binding: Option<PersistedRegistryBinding>,
+) -> anyhow::Result<PersistedBuildConfig> {
     let mut config = read_build_config(out);
     if let Some(excludes) = excludes {
         config.excludes = excludes.to_vec();
@@ -406,6 +435,7 @@ pub fn write_build_config_with_cluster(
     if let Some(cluster) = cluster {
         config.cluster = cluster;
     }
+    config.registry_binding = registry_binding;
     fs::create_dir_all(out)?;
     for name in [BUILD_CONFIG, COMPAT_BUILD_CONFIG] {
         graphoxide_core::write_json_atomic(out.join(name), &config, false)?;
@@ -458,6 +488,7 @@ pub struct WatchEventFilter {
     root: PathBuf,
     output_directory: Option<PathBuf>,
     patterns: Vec<detect::IgnorePattern>,
+    tracked_paths: BTreeSet<String>,
 }
 
 impl WatchEventFilter {
@@ -470,6 +501,20 @@ impl WatchEventFilter {
         honor_gitignore: bool,
         output_directory: Option<&Path>,
     ) -> Self {
+        Self::with_output_directory_and_tracked_paths(
+            root,
+            honor_gitignore,
+            output_directory,
+            Vec::new(),
+        )
+    }
+
+    pub fn with_output_directory_and_tracked_paths(
+        root: &Path,
+        honor_gitignore: bool,
+        output_directory: Option<&Path>,
+        tracked_paths: Vec<String>,
+    ) -> Self {
         let lexical_root = root.to_path_buf();
         let root = fs::canonicalize(root).unwrap_or_else(|_| lexical_root.clone());
         let patterns = detect::load_ignore_patterns(&root, honor_gitignore);
@@ -481,6 +526,15 @@ impl WatchEventFilter {
             root,
             output_directory,
             patterns,
+            tracked_paths: tracked_paths
+                .into_iter()
+                .filter(|path| {
+                    !path.is_empty()
+                        && Path::new(path)
+                            .components()
+                            .all(|component| matches!(component, Component::Normal(_)))
+                })
+                .collect(),
         }
     }
 
@@ -496,20 +550,35 @@ impl WatchEventFilter {
         {
             return false;
         }
-        if is_directory || detect::is_ignored(&anchored, &self.root, &self.patterns) {
-            return false;
-        }
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        if !is_watched_extension(extension) {
+        if is_directory {
             return false;
         }
         let relative = path
             .strip_prefix(&self.lexical_root)
             .or_else(|_| anchored.strip_prefix(&self.root))
             .unwrap_or(path);
+        let tracked = relative
+            .to_str()
+            .map(slash)
+            .is_some_and(|path| self.tracked_paths.contains(&path));
+        if !tracked && detect::is_ignored(&anchored, &self.root, &self.patterns) {
+            return false;
+        }
+        let extension = relative
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if !tracked && !is_watched_extension(extension) {
+            return false;
+        }
+        if tracked {
+            return !relative.components().any(|component| {
+                matches!(
+                    component.as_os_str().to_str(),
+                    Some(OUTPUT_DIRECTORY | "graphify-out" | ".git")
+                )
+            });
+        }
         !relative.components().any(|component| {
             let value = component.as_os_str().to_string_lossy();
             value.starts_with('.')
@@ -1498,6 +1567,33 @@ where
     }
     result.timings.total_ms = elapsed_millis(total_started);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracked_registry_paths_bypass_extension_and_ignore_filters_but_not_git() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let tracked = "inventory/.opaque-registry-input";
+        assert!(!is_watched_extension("opaque-registry-input"));
+        let filter = WatchEventFilter::with_output_directory_and_tracked_paths(
+            root.path(),
+            true,
+            None,
+            vec![tracked.to_owned(), ".git/config".to_owned()],
+        );
+
+        assert!(filter.accepts(&root.path().join(tracked), false));
+        assert!(!filter.accepts(
+            &root
+                .path()
+                .join("inventory/untracked.opaque-registry-input"),
+            false
+        ));
+        assert!(!filter.accepts(&root.path().join(".git/config"), false));
+    }
 }
 
 pub fn rebuild_project_with_observer<F>(

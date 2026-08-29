@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.13.0 — 2026-08-29
+
+- The bundled CLI now builds an incremental, provenance-bound LLM wiki without
+  copying raw source files into the wiki or its Git-tracked registry. New
+  `graphoxide wiki` commands (`plan`, `draft`, `render`, `materialize`,
+  `check`, `index`, `openapi`) produce deterministic graph-derived Markdown with
+  an `llms.txt`, a manifest, and a lexical search index; canonical rendering
+  reads only graph, catalog metadata, and the reviewed plan.
+- New `graphoxide registry` commands manage a Git-trackable, metadata-only
+  Registry v1 tree: logical origins whose local locations never enter Git,
+  deterministic discovery and scanning, capture publishing, freshness policies,
+  lifecycle management, and append-only secret-free model-run records.
+- Seven new read-only MCP tools expose wiki state to AI agents: `wiki_status`,
+  `wiki_freshness`, `wiki_search`, `wiki_get_page`, `wiki_get_evidence`,
+  `wiki_validate_draft`, and `wiki_attest_review`.
+- New `graphoxide.registryBinding` workspace setting optionally binds a local
+  origin from a validated Registry v1 tree to extract, index, update, and watch
+  commands. Source locations and secrets remain outside the shared registry.
+
 ## 0.12.0 — 2026-08-25
 
 - The bundled CLI now links IDL and schema type relationships across files:

@@ -168,6 +168,9 @@ const SKIP_FILES: &[&str] = &[
     "composer.lock",
     "go.sum",
     "go.work.sum",
+    ".gitignore",
+    ".graphifyignore",
+    ".graphoxideignore",
     ".graphifyinclude",
     ".graphoxideinclude",
 ];
@@ -224,6 +227,11 @@ pub struct DetectOptions {
     /// first pass through runtime byte admission and bounded adapters.
     pub convert_office_sidecars: bool,
     pub extra_excludes: Vec<String>,
+    /// Exact project-relative paths selected by a trusted source registry.
+    /// Selection admits those raw files even when their names match the normal
+    /// sensitive-path heuristic; it never relaxes regular-file or no-follow
+    /// safety checks.
+    pub tracked_paths: Vec<String>,
     pub output_dir: Option<PathBuf>,
     pub honor_gitignore: bool,
 }
@@ -235,6 +243,7 @@ impl Default for DetectOptions {
             google_workspace: false,
             convert_office_sidecars: true,
             extra_excludes: Vec::new(),
+            tracked_paths: Vec::new(),
             output_dir: None,
             honor_gitignore: true,
         }
@@ -409,7 +418,8 @@ pub(crate) fn classify_admitted_source(logical_path: &Path, source: &[u8]) -> Op
                     .any(|candidate| candidate.eq_ignore_ascii_case(&interpreter))
                     .then_some(FileType::Code)
             })
-            .or_else(registered_fallback);
+            .or_else(registered_fallback)
+            .or(Some(FileType::Document));
     }
     if extension == "ts" && is_mpeg_transport_stream_bytes(logical_path, source) {
         return Some(FileType::Video);
@@ -417,7 +427,8 @@ pub(crate) fn classify_admitted_source(logical_path: &Path, source: &[u8]) -> Op
     if registry.classify_extension(&extension) == Some(FileType::Paper) {
         return (!is_asset_paper_path(logical_path))
             .then_some(FileType::Paper)
-            .or_else(registered_fallback);
+            .or_else(registered_fallback)
+            .or(Some(FileType::Document));
     }
     if registry.is_document_heuristic_extension(&extension) {
         return Some(if looks_like_paper_bytes(source) {
@@ -429,6 +440,7 @@ pub(crate) fn classify_admitted_source(logical_path: &Path, source: &[u8]) -> Op
     registry
         .classify_extension(&extension)
         .or_else(registered_fallback)
+        .or(Some(FileType::Document))
 }
 
 fn is_asset_paper_path(path: &Path) -> bool {
@@ -853,7 +865,7 @@ fn open_probe_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
     Ok(file)
 }
 
-fn open_ignore_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn open_control_file_nofollow(path: &Path) -> std::io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -872,7 +884,7 @@ fn open_ignore_source_nofollow(path: &Path) -> std::io::Result<fs::File> {
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "ignore source is not a regular file",
+            "control file is not a regular file",
         ));
     }
     Ok(file)
@@ -1934,7 +1946,7 @@ fn read_ignore_file(
         ));
         return result;
     }
-    let Ok(file) = open_ignore_source_nofollow(path) else {
+    let Ok(file) = open_control_file_nofollow(path) else {
         let mut result = IgnoreLoadResult::default();
         result.record_truncation(format!(
             "{}: ignore source could not be opened safely; no rules from this source were applied",
@@ -2043,10 +2055,19 @@ fn find_vcs_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn is_vcs_root(directory: &Path) -> bool {
-    fs::symlink_metadata(directory.join(".git")).is_ok()
-        || [".hg", ".svn", "_darcs", ".fossil"]
-            .iter()
-            .any(|marker| directory.join(marker).exists())
+    let dot_git = directory.join(".git");
+    matches!(
+        fs::symlink_metadata(&dot_git),
+        Ok(metadata)
+            if metadata.is_file() && !metadata.file_type().is_symlink()
+                || metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && fs::symlink_metadata(dot_git.join("HEAD")).is_ok_and(|head| {
+                        head.is_file() && !head.file_type().is_symlink()
+                    })
+    ) || [".hg", ".svn", "_darcs", ".fossil"]
+        .iter()
+        .any(|marker| directory.join(marker).exists())
 }
 
 fn read_git_control_file(path: &Path) -> std::io::Result<Option<String>> {
@@ -2061,7 +2082,7 @@ fn read_git_control_file(path: &Path) -> std::io::Result<Option<String>> {
             "Git control path is not a regular non-symlink file",
         ));
     }
-    let mut file = open_ignore_source_nofollow(path)?;
+    let mut file = open_control_file_nofollow(path)?;
     let mut bytes = Vec::new();
     file.by_ref()
         .take(
@@ -2633,6 +2654,7 @@ struct WalkState<'a> {
     fatal_ignore_error: Option<String>,
     active_targets: HashSet<PathBuf>,
     ignore_cache: HashMap<PathBuf, bool>,
+    tracked_paths: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2642,6 +2664,27 @@ struct DiscoveredPath {
 }
 
 impl WalkState<'_> {
+    fn explicitly_tracked(&self, path: &Path) -> bool {
+        path.strip_prefix(self.root)
+            .ok()
+            .and_then(Path::to_str)
+            .is_some_and(|path| self.tracked_paths.contains(path))
+    }
+
+    fn contains_tracked_descendant(&self, path: &Path) -> bool {
+        let Some(path) = path.strip_prefix(self.root).ok().and_then(Path::to_str) else {
+            return false;
+        };
+        if path.is_empty() {
+            return !self.tracked_paths.is_empty();
+        }
+        let prefix = format!("{path}/");
+        self.tracked_paths
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|tracked| tracked.starts_with(&prefix))
+    }
+
     fn extend_ignore_policy(&mut self, mut loaded: IgnoreLoadResult) -> Option<String> {
         let truncated = loaded.truncated_sources > 0;
         let fatal = truncated.then(|| {
@@ -2759,7 +2802,7 @@ impl WalkState<'_> {
                     ));
                     continue;
                 }
-                if is_sensitive_directory(&path) {
+                if is_sensitive_directory(&path) && !self.contains_tracked_descendant(&path) {
                     self.skipped_sensitive
                         .push(format!("{} [sensitive directory]", path.display()));
                     continue;
@@ -2770,7 +2813,10 @@ impl WalkState<'_> {
                         .zip(fs::canonicalize(&self.configured_output).ok())
                         .is_some_and(|(left, right)| left == right)
                         || path == self.configured_output;
-                    if configured || is_noise_dir(&name, Some(directory)) {
+                    if configured
+                        || (is_noise_dir(&name, Some(directory))
+                            && !self.contains_tracked_descendant(&path))
+                    {
                         self.pruned_noise.push(format!("{}/", path.display()));
                         continue;
                     }
@@ -2779,7 +2825,8 @@ impl WalkState<'_> {
                         self.root,
                         &self.patterns,
                         &mut self.ignore_cache,
-                    ) {
+                    ) && !self.contains_tracked_descendant(&path)
+                    {
                         self.ignored.push(format!("{}/", path.display()));
                         continue;
                     }
@@ -2841,13 +2888,15 @@ impl WalkState<'_> {
                         .push(path.to_string_lossy().into_owned());
                     continue;
                 }
-                if !SKIP_FILES.contains(&name.as_str()) {
+                if !SKIP_FILES.contains(&name.as_str()) || self.explicitly_tracked(&path) {
                     self.paths.push(DiscoveredPath {
                         logical: path,
                         physical,
                     });
                 }
-            } else if kind.is_file() && !SKIP_FILES.contains(&name.as_str()) {
+            } else if kind.is_file()
+                && (!SKIP_FILES.contains(&name.as_str()) || self.explicitly_tracked(&path))
+            {
                 let Ok(physical) = fs::canonicalize(&path) else {
                     self.errors.push(format!(
                         "{}: unable to resolve regular source",
@@ -2890,6 +2939,17 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
         );
     }
     let configured_output = output_dir(&root, options);
+    let tracked_paths = options
+        .tracked_paths
+        .iter()
+        .map(|path| {
+            anyhow::ensure!(
+                crate::project_path::normalize_project_path(path).as_deref() == Some(path),
+                "tracked detector path must be normalized and project-relative"
+            );
+            Ok(path.clone())
+        })
+        .collect::<anyhow::Result<BTreeSet<_>>>()?;
     let mut ignore_policy = load_ignore_patterns_bounded(&root, options.honor_gitignore);
     let remaining = MAX_IGNORE_PATTERNS.saturating_sub(ignore_policy.patterns.len());
     let remaining_bytes = MAX_IGNORE_RETAINED_BYTES.saturating_sub(ignore_policy.retained_bytes);
@@ -2923,6 +2983,7 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
         fatal_ignore_error: None,
         active_targets: HashSet::new(),
         ignore_cache: HashMap::new(),
+        tracked_paths,
     };
     state.walk(&root, false);
     if state.fatal_ignore_error.is_none()
@@ -2957,9 +3018,18 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
     let mut word_count_truncations = Vec::new();
     let mut physical_sources = BTreeMap::new();
     let converted = configured_output.join("converted");
+    let tracked_paths = state.tracked_paths.clone();
     for discovered in state.paths {
         let path = discovered.logical;
         let physical = discovered.physical;
+        let explicitly_tracked = path
+            .strip_prefix(&root)
+            .ok()
+            .and_then(Path::to_str)
+            .is_some_and(|path| tracked_paths.contains(path));
+        if !tracked_paths.is_empty() && !explicitly_tracked {
+            continue;
+        }
         let in_memory = memory
             .as_ref()
             .is_some_and(|memory| path.starts_with(memory));
@@ -2968,6 +3038,7 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
         }
         if !in_memory
             && is_ignored_with_cache(&path, &root, &state.patterns, &mut state.ignore_cache)
+            && !explicitly_tracked
         {
             state.ignored.push(path.to_string_lossy().into_owned());
             continue;
@@ -2982,7 +3053,7 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
             ));
             continue;
         }
-        if is_sensitive(&path) || is_sensitive(&physical) {
+        if (is_sensitive(&path) || is_sensitive(&physical)) && !explicitly_tracked {
             state
                 .skipped_sensitive
                 .push(path.to_string_lossy().into_owned());
@@ -2992,15 +3063,7 @@ pub fn detect(root: &Path, options: &DetectOptions) -> anyhow::Result<DetectResu
         // but admit registered byte-only formats into the document work queue.
         // This adds no watch suffixes and retains `None` for callers that ask
         // whether a path belongs to the historical classification contract.
-        let kind = classify_file_at(&path, &physical).or_else(|| {
-            format_registry()
-                .find_by_path(&path)
-                .map(|_| FileType::Document)
-        });
-        let Some(kind) = kind else {
-            unclassified.push(path.to_string_lossy().into_owned());
-            continue;
-        };
+        let kind = classify_file_at(&path, &physical).unwrap_or(FileType::Document);
         if format_registry().is_google_workspace_extension(&lower_extension(&path)) {
             if !options.google_workspace {
                 state.skipped_sensitive.push(format!(

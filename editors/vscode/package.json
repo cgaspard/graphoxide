@@ -2,7 +2,7 @@
   "name": "graphoxide-vscode",
   "displayName": "Graphoxide",
   "description": "Explore, query, and maintain Graphoxide code knowledge graphs without leaving VS Code.",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "publisher": "cgaspard",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -47,7 +47,7 @@
     "compile:webview": "tsc -p tsconfig.webview.json",
     "watch": "tsc -b -w tsconfig.json tsconfig.webview.json",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"webview/**/*.ts\"",
-    "test": "npm run compile && node --test dist/test/**/*.test.js",
+    "test": "npm run compile && node --test ${GRAPHOXIDE_TEST_CONCURRENCY:+--test-concurrency=$GRAPHOXIDE_TEST_CONCURRENCY} dist/test/**/*.test.js",
     "test:control-center:browser": "node scripts/run-control-center-browser-tests.mjs",
     "test:control-center:build-summary:browser": "node scripts/run-control-center-build-summary-browser-tests.mjs",
     "test:visualizer:browser": "npm run compile && node scripts/run-visualizer-browser-tests.mjs",
@@ -334,6 +334,30 @@
           "default": "graphoxide-out/graph.json",
           "scope": "resource",
           "description": "Graph path, relative to the workspace folder unless absolute. Build and automatic update controls require the file name graph.json inside a dedicated output directory that is neither the workspace root nor one of its ancestors."
+        },
+        "graphoxide.registryBinding": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "scope": "resource",
+          "additionalProperties": false,
+          "properties": {
+            "tree": {
+              "type": "string",
+              "description": "Path to the checked-out Registry v1 tree, relative to this workspace unless absolute."
+            },
+            "origin": {
+              "type": "string",
+              "description": "Logical Registry v1 origin ID bound to this workspace."
+            }
+          },
+          "required": [
+            "tree",
+            "origin"
+          ],
+          "description": "Optional Registry v1 binding appended to extract, index, update, and watch. The binding is project-scoped; source locations and secrets remain outside the shared registry."
         },
         "graphoxide.defaultTokenBudget": {
           "type": "integer",

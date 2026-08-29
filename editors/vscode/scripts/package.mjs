@@ -11,7 +11,7 @@ const target = options.target ?? hostTarget();
 const executableName = target.startsWith('win32-') ? 'graphoxide.exe' : 'graphoxide';
 const source = options.binary
   ? path.resolve(process.cwd(), options.binary)
-  : path.join(repositoryRoot, 'target', 'release', process.platform === 'win32' ? 'graphoxide.exe' : 'graphoxide');
+  : path.resolve(repositoryRoot, process.env.CARGO_TARGET_DIR ?? 'target', 'release', executableName);
 const binDirectory = path.join(extensionRoot, 'bin');
 const destination = path.join(binDirectory, executableName);
 const thirdPartySource = path.join(repositoryRoot, 'THIRD_PARTY_LICENSES.html');

@@ -7,6 +7,7 @@
 
 # graphoxide's own output when run on itself
 /graphoxide-out
+/.worktrees/
 /editors/vscode/bin/
 /node_modules/
 /editors/vscode/*.vsix

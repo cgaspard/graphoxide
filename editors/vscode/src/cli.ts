@@ -1,6 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import * as vscode from 'vscode';
-import { workspaceGraphMutationAllowed } from './build';
+import { registryBindingArguments, workspaceGraphMutationAllowed } from './build';
 import {
   BUILD_PROGRESS_NONCE_ENV,
   BuildCompletedEvent,
@@ -219,7 +219,8 @@ export class GraphoxideCli implements vscode.Disposable {
   }
 
   async run(options: RunOptions): Promise<RunResult> {
-    const buildOperation = options.progressTarget ? buildOperationFromArgs(options.args) : undefined;
+    const requestedBuildOperation = buildOperationFromArgs(options.args);
+    const buildOperation = options.progressTarget ? requestedBuildOperation : undefined;
     const buildProgressEnabled = buildOperation !== undefined;
     const execute = async (
       token?: vscode.CancellationToken,
@@ -233,7 +234,10 @@ export class GraphoxideCli implements vscode.Disposable {
         : extensionInvocation(this.extensionUri, options.folder);
       const executable = invocation.command;
       const prefix = useTrustedExecutable ? invocation.args : invocation.args.slice(0, -1);
-      const args = [...prefix, ...options.args, ...(buildProgressEnabled ? ['--progress=json'] : [])];
+      const registryArguments = requestedBuildOperation
+        ? registryBindingArguments(options.folder.uri.fsPath, config.get<unknown>('registryBinding'))
+        : [];
+      const args = [...prefix, ...options.args, ...registryArguments, ...(buildProgressEnabled ? ['--progress=json'] : [])];
       this.logInfo(`$ ${executable} ${args.map(formatArgument).join(' ')}`);
       const progressNonce = buildProgressEnabled ? createBuildProgressNonce() : undefined;
       const progressDecoder = progressNonce ? new BuildProgressDecoder(progressNonce) : undefined;
@@ -412,7 +416,17 @@ export class GraphoxideCli implements vscode.Disposable {
     }
     const invocation = extensionInvocation(this.extensionUri, folder);
     const executable = invocation.command;
-    const args = [...invocation.args.slice(0, -1), 'watch', folder.uri.fsPath, '--progress=json'];
+    const registryArguments = registryBindingArguments(
+      folder.uri.fsPath,
+      vscode.workspace.getConfiguration('graphoxide', folder.uri).get<unknown>('registryBinding'),
+    );
+    const args = [
+      ...invocation.args.slice(0, -1),
+      'watch',
+      folder.uri.fsPath,
+      ...registryArguments,
+      '--progress=json',
+    ];
     const outputDirectory = environment.GRAPHOXIDE_OUT;
     if (!outputDirectory) throw new Error('Graphoxide watch mode requires a managed output directory.');
     const progressNonce = createBuildProgressNonce();

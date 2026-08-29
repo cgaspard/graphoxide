@@ -38,7 +38,7 @@ pub use build::{
 };
 pub use cluster::{
     cluster, cohesion_score, communities, community_member_sigs, label_communities_by_hub,
-    remap_communities_to_previous, remap_community_map, score_all,
+    partition_weighted_labels, remap_communities_to_previous, remap_community_map, score_all,
 };
 pub use dedup::{
     deduplicate, deduplicate_entities, defines_id, is_variant_pair, label_entropy,

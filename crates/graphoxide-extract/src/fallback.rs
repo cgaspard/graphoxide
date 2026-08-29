@@ -979,44 +979,88 @@ fn extract_markdown_with_path_probe(
             }
         }
 
-        let Some(capture) = heading.captures(line_text) else {
+        if let Some(capture) = heading.captures(line_text) {
+            let level = capture[1].len();
+            let title = capture[2].trim();
+            let mut heading_id = make_id(&[&stem, title]);
+            if seen_ids.contains(&heading_id) {
+                heading_id = make_id(&[&stem, title, &line.to_string()]);
+            }
+            if !seen_ids.insert(heading_id.clone()) {
+                continue;
+            }
+            nodes.push(node(
+                heading_id.clone(),
+                title,
+                source_file,
+                line,
+                "document",
+            ));
+            while heading_stack
+                .last()
+                .is_some_and(|(parent_level, _)| *parent_level >= level)
+            {
+                heading_stack.pop();
+            }
+            let parent = heading_stack
+                .last()
+                .map(|(_, id)| id.clone())
+                .unwrap_or_else(|| file_id.clone());
+            edges.push(edge(
+                parent,
+                heading_id.clone(),
+                "contains",
+                source_file,
+                line,
+                Confidence::Extracted,
+            ));
+            heading_stack.push((level, heading_id));
             continue;
-        };
-        let level = capture[1].len();
-        let title = capture[2].trim();
-        let mut heading_id = make_id(&[&stem, title]);
-        if seen_ids.contains(&heading_id) {
-            heading_id = make_id(&[&stem, title, &line.to_string()]);
         }
-        if !seen_ids.insert(heading_id.clone()) {
+
+        let text = line_text.trim();
+        if text.is_empty() {
             continue;
         }
-        nodes.push(node(
-            heading_id.clone(),
-            title,
+        let paragraph_id = make_id(&[&stem, "document_paragraph", &line.to_string()]);
+        if !seen_ids.insert(paragraph_id.clone()) {
+            continue;
+        }
+        let (text, truncated) = bounded_markdown_evidence(text);
+        let mut paragraph = node(
+            paragraph_id.clone(),
+            "paragraph",
             source_file,
             line,
             "document",
-        ));
-        while heading_stack
-            .last()
-            .is_some_and(|(parent_level, _)| *parent_level >= level)
-        {
-            heading_stack.pop();
+        );
+        paragraph
+            .extra
+            .insert("type".into(), "document_paragraph".into());
+        paragraph
+            .extra
+            .insert("structured_text".into(), text.into());
+        paragraph
+            .extra
+            .insert("structured_text_type".into(), "string".into());
+        if truncated {
+            paragraph
+                .extra
+                .insert("structured_text_truncated".into(), true.into());
         }
+        nodes.push(paragraph);
         let parent = heading_stack
             .last()
             .map(|(_, id)| id.clone())
             .unwrap_or_else(|| file_id.clone());
         edges.push(edge(
             parent,
-            heading_id.clone(),
+            paragraph_id,
             "contains",
             source_file,
             line,
             Confidence::Extracted,
         ));
-        heading_stack.push((level, heading_id));
     }
 
     Ok(Extraction {
@@ -1029,6 +1073,19 @@ fn extract_markdown_with_path_probe(
 struct MarkdownTarget {
     id: String,
     existing_source_file: Option<String>,
+}
+
+const MAX_MARKDOWN_EVIDENCE_BYTES: usize = 4 * 1024;
+
+fn bounded_markdown_evidence(text: &str) -> (String, bool) {
+    if text.len() <= MAX_MARKDOWN_EVIDENCE_BYTES {
+        return (text.to_owned(), false);
+    }
+    let mut end = MAX_MARKDOWN_EVIDENCE_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), true)
 }
 
 fn resolve_markdown_link(
@@ -1512,6 +1569,21 @@ mod tests {
     }
 
     #[test]
+    fn markdown_retains_document_text_for_wiki_evidence() {
+        let result = extract_markdown(
+            "# Guide\n\nUse the approved installation command.\n",
+            "guide.md",
+            Path::new("guide.md"),
+        )
+        .expect("extract Markdown");
+        assert!(result.nodes.iter().any(|node| {
+            node.extra.get("type").and_then(serde_json::Value::as_str) == Some("document_paragraph")
+                && node.extra.get("structured_text")
+                    == Some(&"Use the approved installation command.".into())
+        }));
+    }
+
+    #[test]
     fn upstream_test_markdown_no_dangling_edges() {
         let result = deploy_guide();
         let node_ids: HashSet<_> = result.nodes.iter().map(|node| node.id.as_str()).collect();
@@ -1542,9 +1614,13 @@ mod tests {
                 "missing local document target {expected}: {targets:?}"
             );
         }
-        assert_eq!(
-            result.nodes.len(),
-            2,
+        let node_ids = result
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<HashSet<_>>();
+        assert!(
+            targets.iter().all(|target| !node_ids.contains(target)),
             "local links must not fabricate target document nodes"
         );
     }

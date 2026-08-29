@@ -4,6 +4,7 @@ use crate::provenance::origin_is_structural;
 use graphoxide_core::{
     normalize_id, Edge, Extraction, KnowledgeGraph, Node, CONTAINER_SOURCE_ATTRIBUTE,
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -403,6 +404,9 @@ pub fn build_graph_with_report_and_options_and_root_with_callback(
     on_sub_stage: Option<&BuildSubStageCallback<'_>>,
 ) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
     let root = root.as_ref();
+    if let Some(cb) = on_sub_stage {
+        cb(BuildSubStage::Normalizing);
+    }
     let normalized = normalize_extractions(extractions, Some(root));
     build_graph_with_report_normalized(&normalized, options, on_sub_stage)
 }
@@ -443,55 +447,58 @@ fn normalize_extractions(
     extractions: &[Extraction],
     root: Option<&std::path::Path>,
 ) -> Vec<Extraction> {
-    let mut normalized = extractions.to_vec();
-    for extraction in &mut normalized {
-        for node in &mut extraction.nodes {
-            let original_source = node.source_file.replace('\\', "/");
-            node.source_file = match root {
-                Some(root) => relativize_source_file(&node.source_file, root),
-                None => original_source.clone(),
-            };
-            if root.is_some()
-                && std::path::Path::new(&original_source).is_absolute()
-                && original_source != node.source_file
-            {
-                let mut absolute_stem = std::path::PathBuf::from(&original_source);
-                absolute_stem.set_extension("");
-                node.extra.insert(
-                    "_absolute_source_stem".into(),
-                    normalize_id(&absolute_stem.to_string_lossy()).into(),
-                );
-            }
-            normalize_container_source(&mut node.extra, root);
-            node.file_type = canonical_file_type(&node.file_type).to_owned();
-        }
-        for edge in &mut extraction.edges {
-            edge.source_file = match root {
-                Some(root) => relativize_source_file(&edge.source_file, root),
-                None => edge.source_file.replace('\\', "/"),
-            };
-            normalize_container_source(&mut edge.extra, root);
-        }
-        for hyperedge in &mut extraction.hyperedges {
-            let Some(object) = hyperedge.as_object_mut() else {
-                continue;
-            };
-            for key in ["source_file", CONTAINER_SOURCE_ATTRIBUTE] {
-                if let Some(source_file) = object
-                    .get(key)
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned)
+    extractions
+        .par_iter()
+        .map(|source| {
+            let mut extraction = source.clone();
+            for node in &mut extraction.nodes {
+                let original_source = node.source_file.replace('\\', "/");
+                node.source_file = match root {
+                    Some(root) => relativize_source_file(&node.source_file, root),
+                    None => original_source.clone(),
+                };
+                if root.is_some()
+                    && std::path::Path::new(&original_source).is_absolute()
+                    && original_source != node.source_file
                 {
-                    let normalized = match root {
-                        Some(root) => relativize_source_file(&source_file, root),
-                        None => source_file.replace('\\', "/"),
-                    };
-                    object.insert(key.into(), normalized.into());
+                    let mut absolute_stem = std::path::PathBuf::from(&original_source);
+                    absolute_stem.set_extension("");
+                    node.extra.insert(
+                        "_absolute_source_stem".into(),
+                        normalize_id(&absolute_stem.to_string_lossy()).into(),
+                    );
+                }
+                normalize_container_source(&mut node.extra, root);
+                node.file_type = canonical_file_type(&node.file_type).to_owned();
+            }
+            for edge in &mut extraction.edges {
+                edge.source_file = match root {
+                    Some(root) => relativize_source_file(&edge.source_file, root),
+                    None => edge.source_file.replace('\\', "/"),
+                };
+                normalize_container_source(&mut edge.extra, root);
+            }
+            for hyperedge in &mut extraction.hyperedges {
+                let Some(object) = hyperedge.as_object_mut() else {
+                    continue;
+                };
+                for key in ["source_file", CONTAINER_SOURCE_ATTRIBUTE] {
+                    if let Some(source_file) = object
+                        .get(key)
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                    {
+                        let normalized = match root {
+                            Some(root) => relativize_source_file(&source_file, root),
+                            None => source_file.replace('\\', "/"),
+                        };
+                        object.insert(key.into(), normalized.into());
+                    }
                 }
             }
-        }
-    }
-    normalized
+            extraction
+        })
+        .collect()
 }
 
 pub(crate) fn canonical_file_type(value: &str) -> &'static str {
@@ -1444,6 +1451,25 @@ mod tests {
     }
 
     #[test]
+    fn document_evidence_blocks_keep_their_location_specific_identity() {
+        let mut first = node_at("first", "paragraph", "document", "guide.html");
+        first
+            .extra
+            .insert("type".into(), "document_paragraph".into());
+        let mut second = node_at("second", "paragraph", "document", "guide.html");
+        second
+            .extra
+            .insert("type".into(), "document_paragraph".into());
+
+        let graph = build_graph(&[Extraction {
+            nodes: vec![first, second],
+            ..Extraction::default()
+        }])
+        .unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+    }
+
+    #[test]
     fn repairs_normalized_endpoints_and_drops_dangling() {
         let extraction = Extraction {
             nodes: vec![node("foo_bar"), node("target")],
@@ -1882,5 +1908,97 @@ mod tests {
                 .unwrap()["nodes"],
             serde_json::json!(["foo_bar", "ast"])
         );
+    }
+
+    #[test]
+    fn root_aware_build_reports_normalization_first_and_is_worker_deterministic() {
+        let extractions = vec![
+            Extraction {
+                nodes: vec![
+                    node_at("shared", "First", "technology", "/repo/src/03-first.rs"),
+                    node_at("target", "Target", "code", "/repo/src/03-first.rs"),
+                ],
+                edges: vec![edge("shared", "target", "calls")],
+                hyperedges: vec![serde_json::json!({
+                    "id": "group",
+                    "nodes": ["shared", "target"],
+                    "source_file": "/repo/src/03-first.rs"
+                })],
+            },
+            Extraction {
+                nodes: vec![node_at(
+                    "middle",
+                    "Middle",
+                    "code",
+                    "/repo/src/01-middle.rs",
+                )],
+                ..Extraction::default()
+            },
+            Extraction {
+                nodes: vec![node_at(
+                    "shared",
+                    "Last",
+                    "technology",
+                    "/repo/src/02-last.rs",
+                )],
+                ..Extraction::default()
+            },
+        ];
+        let build = |threads| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let normalized =
+                pool.install(|| normalize_extractions(&extractions, Some("/repo".as_ref())));
+            let source_order = normalized
+                .iter()
+                .map(|extraction| extraction.nodes[0].source_file.clone())
+                .collect::<Vec<_>>();
+            let stages = std::sync::Mutex::new(Vec::new());
+            let callback = |stage| stages.lock().unwrap().push(stage);
+            let graph = pool.install(|| {
+                build_graph_with_report_and_options_and_root_with_callback(
+                    &extractions,
+                    "/repo",
+                    BuildOptions::default(),
+                    Some(&callback),
+                )
+                .unwrap()
+                .0
+            });
+            assert_eq!(
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == "shared")
+                    .unwrap()
+                    .label,
+                "Last"
+            );
+            (
+                serde_json::to_vec(&graph).unwrap(),
+                source_order,
+                stages.into_inner().unwrap(),
+            )
+        };
+
+        let (serial_bytes, serial_order, serial_stages) = build(1);
+        let (parallel_bytes, parallel_order, parallel_stages) = build(4);
+        let expected_order = ["src/03-first.rs", "src/01-middle.rs", "src/02-last.rs"];
+
+        assert_eq!(serial_order, expected_order);
+        assert_eq!(parallel_order, expected_order);
+        assert_eq!(serial_bytes, parallel_bytes);
+        for stages in [serial_stages, parallel_stages] {
+            assert_eq!(stages.first(), Some(&BuildSubStage::Normalizing));
+            assert_eq!(
+                stages
+                    .iter()
+                    .filter(|stage| **stage == BuildSubStage::Normalizing)
+                    .count(),
+                1
+            );
+        }
     }
 }

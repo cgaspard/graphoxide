@@ -2536,6 +2536,7 @@ export async function runQualification(options, progress = () => {}) {
       'Cold means a fresh materialized project with no Graphoxide managed state; operating-system caches are uncontrolled unless controlled_os_cold is explicitly selected.',
       'Warm preserves manifest, cache, coverage, and build policy and removes only graphoxide-out/graph.json before the measured full rebuild.',
       'Incremental starts from warm state and replaces exactly one source with a same-size deterministic mutation.',
+      'The benchmark catalog-wiki profile qualifies catalog annotations and wiki index/check; this content-addressed corpus independently tests generic manifest behavior.',
       'Runtime stage durations can overlap and must not be summed.',
       'peak_ready_bytes, peak_ready_items, and peak_in_flight_transfer_bytes are peak live reserved admission credits, including pre-open or maximum-bound reservations; they are not resident payload bytes or completed transfer totals.',
       'Completed cache-transfer totals are recorded separately by payload_bytes_read, payload_bytes_written, artifact_bytes_read, and artifact_bytes_written.',

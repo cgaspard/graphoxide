@@ -190,6 +190,26 @@ test('checked-in corpus is fully content-addressed and reconstructable', () => {
   assert.notEqual(profile.mutation.before_sha256, profile.mutation.after_sha256);
 });
 
+test('catalog-only annotation changes catalog identity without changing the pinned manifest or source mutation', () => {
+  const parent = temporary('catalog-annotation');
+  const copy = path.join(parent, 'universal');
+  try {
+    cpSync(path.join(root, 'benchmarks', 'universal'), copy, { recursive: true });
+    const copiedCatalog = path.join(copy, 'catalog.json');
+    const baseline = loadCorpusProfile(copiedCatalog, 'ci-mixed-v1');
+    const annotation = JSON.parse(readFileSync(copiedCatalog, 'utf8'));
+    annotation.profiles[0].description = 'Catalog-only metadata annotation for later catalog/wiki qualification.';
+    writeFileSync(copiedCatalog, `${JSON.stringify(annotation, null, 2)}\n`);
+    const annotated = loadCorpusProfile(copiedCatalog, 'ci-mixed-v1');
+    assert.notEqual(annotated.catalog_sha256, baseline.catalog_sha256);
+    assert.equal(annotated.manifest_sha256, baseline.manifest_sha256);
+    assert.deepEqual(annotated.mutation, baseline.mutation);
+    assert.equal(validateCatalogClosure(copiedCatalog).object_count, 12);
+  } finally {
+    rmSync(parent, { recursive: true, force: false });
+  }
+});
+
 test('git attributes preserve canonical metadata and byte-exact objects', () => {
   const manifest = 'benchmarks/universal/manifests/e9160a70af5454989d64c33dbf2fa4eca8d2ecd842568fce31830d69d67ced0d.json';
   const object = 'benchmarks/universal/objects/sha256/d0/d02f2cddbff360dc2c0bdb5dd20dfd3bbcbee276fb317fbc37c44e0f054e02df';

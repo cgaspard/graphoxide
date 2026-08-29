@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_project_path_is_optional_on_every_tool() {
+    async fn test_tools_declare_their_required_graph_or_wiki_context() {
         let directory = tempfile::tempdir().expect("temp directory");
         let app = build_http_app(
             sample_graph(directory.path()),
@@ -638,14 +638,28 @@ mod tests {
             let properties = tool["inputSchema"]["properties"]
                 .as_object()
                 .unwrap_or_else(|| panic!("{} missing properties", tool["name"]));
-            assert!(
-                properties.contains_key("project_path"),
-                "{} missing project_path",
-                tool["name"]
-            );
-            assert!(!tool["inputSchema"]["required"]
+            let required = tool["inputSchema"]["required"]
                 .as_array()
-                .is_some_and(|required| required.iter().any(|field| field == "project_path")));
+                .cloned()
+                .unwrap_or_default();
+            if tool["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("wiki_"))
+            {
+                assert!(
+                    properties.contains_key("wiki_root"),
+                    "{} missing wiki_root",
+                    tool["name"]
+                );
+                assert!(required.iter().any(|field| field == "wiki_root"));
+            } else {
+                assert!(
+                    properties.contains_key("project_path"),
+                    "{} missing project_path",
+                    tool["name"]
+                );
+                assert!(!required.iter().any(|field| field == "project_path"));
+            }
         }
     }
 

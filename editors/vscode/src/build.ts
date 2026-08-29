@@ -7,6 +7,22 @@ export interface GraphBuildState {
   readonly hasValidBaseline: boolean;
 }
 
+/** Resolve the optional project-scoped Registry v1 binding for CLI builds. */
+export function registryBindingArguments(workspacePath: string, binding: unknown): readonly string[] {
+  if (binding === undefined || binding === null) return [];
+  if (typeof binding !== 'object' || Array.isArray(binding)) {
+    throw new Error('Graphoxide: Registry Binding must be an object with string tree and origin fields.');
+  }
+  const record = binding as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== 'tree' && key !== 'origin')
+    || typeof record.tree !== 'string' || !record.tree.trim()
+    || typeof record.origin !== 'string' || !record.origin.trim()
+    || record.tree.includes('\0') || record.origin.includes('\0')) {
+    throw new Error('Graphoxide: Registry Binding must contain only non-empty string tree and origin fields.');
+  }
+  return ['--registry', path.resolve(workspacePath, record.tree), '--registry-origin', record.origin];
+}
+
 export interface GraphBuildRun {
   readonly kind: 'run';
   readonly args: readonly string[];

@@ -11,13 +11,16 @@ use graphoxide_cli::build_progress::{
     BuildProgressFactory, BuildProgressMode, BuildProgressPhase, BuildProgressReporter,
 };
 use graphoxide_cli::watch as watch_service;
+use sha2::{Digest as _, Sha256};
 use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+const MAX_REGISTRY_RECORD_INPUT_BYTES: u64 = 256 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +44,9 @@ struct RuntimeOptions {
     /// completed-output admission, caches, and graph staging, in bytes.
     #[arg(long, value_name = "BYTES")]
     memory_budget_bytes: Option<usize>,
+    /// Maximum accepted logical size for one isolated source, in bytes.
+    #[arg(long, value_name = "BYTES")]
+    max_input_bytes: Option<usize>,
     /// Number of dedicated filesystem/cache I/O workers.
     #[arg(long, value_name = "COUNT")]
     io_workers: Option<usize>,
@@ -83,6 +89,7 @@ impl From<ProgressModeArg> for BuildProgressMode {
 impl RuntimeOptions {
     fn is_empty(&self) -> bool {
         self.memory_budget_bytes.is_none()
+            && self.max_input_bytes.is_none()
             && self.io_workers.is_none()
             && self.compute_workers.is_none()
             && self.io_backend.is_none()
@@ -93,6 +100,9 @@ impl RuntimeOptions {
         let mut config = graphoxide_index_runtime::IndexRuntimeConfig::default();
         if let Some(memory_budget_bytes) = self.memory_budget_bytes {
             config.memory_budget_bytes = memory_budget_bytes;
+        }
+        if let Some(max_input_bytes) = self.max_input_bytes {
+            config.max_input_bytes = max_input_bytes;
         }
         if let Some(io_workers) = self.io_workers {
             config.io_workers = io_workers;
@@ -157,6 +167,16 @@ enum Command {
         #[command(flatten)]
         build: ProjectBuildOptions,
     },
+    /// Build, validate, or draft a checked-in Markdown wiki.
+    Wiki {
+        #[command(subcommand)]
+        command: WikiCommand,
+    },
+    /// Validate a Git-tracked, metadata-only LLM-wiki source registry.
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommand,
+    },
     /// Audit graph integrity or report bounded file-indexing coverage
     #[command(
         after_help = "Coverage report: graphoxide audit coverage [PATH] [--json] [--strict]\nGraph-audit a directory literally named coverage with: graphoxide audit ./coverage"
@@ -211,6 +231,15 @@ enum Command {
         /// default dedicated I/O and CPU execution runtime.
         #[arg(long)]
         legacy_executor: bool,
+        /// Bind one local origin from a validated Registry v1 tree.
+        ///
+        /// Registry-bound updates use the isolated executor so capture
+        /// verification happens before every managed publication.
+        #[arg(long, value_name = "DIRECTORY", requires = "registry_origin")]
+        registry: Option<PathBuf>,
+        /// Logical registry origin whose local binding must match PATH.
+        #[arg(long, value_name = "ID", requires = "registry")]
+        registry_origin: Option<String>,
         #[command(flatten)]
         runtime: RuntimeOptions,
     },
@@ -437,6 +466,12 @@ enum Command {
         /// default dedicated I/O and CPU execution runtime.
         #[arg(long)]
         legacy_executor: bool,
+        /// Bind one local origin from a validated Registry v1 tree.
+        #[arg(long, value_name = "DIRECTORY", requires = "registry_origin")]
+        registry: Option<PathBuf>,
+        /// Logical registry origin whose local binding must match PATH.
+        #[arg(long, value_name = "ID", requires = "registry")]
+        registry_origin: Option<String>,
         #[command(flatten)]
         runtime: RuntimeOptions,
     },
@@ -586,6 +621,15 @@ struct ProjectBuildOptions {
     /// Include a read-only PostgreSQL catalog, optionally using this DSN.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     postgres: Option<String>,
+    /// Apply validated catalog metadata as post-build graph annotations.
+    #[arg(long, value_name = "DIRECTORY", conflicts_with = "registry")]
+    catalog: Option<PathBuf>,
+    /// Bind one local origin from a validated Registry v1 tree.
+    #[arg(long, value_name = "DIRECTORY", requires = "registry_origin")]
+    registry: Option<PathBuf>,
+    /// Logical registry origin whose local binding must match PATH.
+    #[arg(long, value_name = "ID", requires = "registry")]
+    registry_origin: Option<String>,
     /// Permit a known-incomplete extraction to bypass shrink protection.
     #[arg(long)]
     allow_partial: bool,
@@ -615,6 +659,377 @@ struct ProjectBuildOptions {
     /// Ignore VCS ignore files while continuing to honor .graphoxideignore/.graphifyignore.
     #[arg(long)]
     no_gitignore: bool,
+}
+
+#[derive(Subcommand)]
+enum WikiCommand {
+    /// Validate a manifest-driven, read-only private OpenAPI contract.
+    Openapi {
+        #[command(subcommand)]
+        command: WikiOpenapiCommand,
+    },
+    /// Generate the deterministic llms.txt file defined by the wiki config.
+    Index {
+        #[arg(value_name = "WIKI_ROOT")]
+        root: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        config: PathBuf,
+    },
+    /// Validate wiki pages and require the generated llms.txt file to be current.
+    Check {
+        #[arg(value_name = "WIKI_ROOT")]
+        root: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        config: PathBuf,
+        /// Validate page citations against a catalog directory.
+        #[arg(long, value_name = "DIRECTORY")]
+        catalog: Option<PathBuf>,
+        /// Project root that owns --catalog; defaults to WIKI_ROOT.
+        #[arg(long, value_name = "DIRECTORY", requires = "catalog")]
+        catalog_root: Option<PathBuf>,
+        /// Validate graph catalog annotations against --catalog.
+        #[arg(long, value_name = "FILE", requires = "catalog")]
+        graph: Option<PathBuf>,
+        /// Require the wiki to match an exact reviewed canonical plan render.
+        #[arg(long, value_name = "FILE", requires_all = ["catalog", "graph"])]
+        plan: Option<PathBuf>,
+        /// Write the machine-readable validation report to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Propose a reviewer-owned canonical wiki plan from graph metadata.
+    Plan {
+        #[arg(long, value_name = "FILE")]
+        graph: PathBuf,
+        #[arg(long, value_name = "DIRECTORY")]
+        catalog: PathBuf,
+        /// New .proposed.json file; Graphoxide never overwrites a reviewed plan.
+        #[arg(long, value_name = "FILE")]
+        output: PathBuf,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        consent: String,
+        #[arg(long, default_value = graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL)]
+        ollama_url: String,
+        /// Use Ollama's native /api/chat endpoint instead of its OpenAI-compatible API.
+        #[arg(long)]
+        ollama_native: bool,
+        /// Versioned JSON profile for an OpenAI-compatible, Anthropic, native Ollama, or MCP agent provider.
+        #[arg(long, value_name = "FILE")]
+        provider_profile: Option<PathBuf>,
+        /// Optional Registry v1 tree that receives append-only secret-free model-run records.
+        #[arg(long, value_name = "DIRECTORY")]
+        registry_tree: Option<PathBuf>,
+    },
+    /// Render deterministic graph-derived Markdown into a new directory.
+    Render {
+        /// Raw snapshot root for legacy rendering. Omit with --plan: canonical
+        /// rendering reads only graph, catalog metadata, and the reviewed plan.
+        #[arg(value_name = "SOURCE_ROOT")]
+        source_root: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        graph: PathBuf,
+        /// Bind rendered output to active captures in this catalog directory.
+        #[arg(long, value_name = "DIRECTORY")]
+        catalog: Option<PathBuf>,
+        /// Render the reviewed canonical plan without reading raw source files.
+        #[arg(long, value_name = "FILE", requires = "catalog")]
+        plan: Option<PathBuf>,
+        #[arg(long, value_name = "DIRECTORY")]
+        output: PathBuf,
+    },
+    /// Publish graph-only source pages immediately, then reconcile canonical navigation.
+    Materialize {
+        /// Clean Git checkout containing the Registry v1 tree.
+        #[arg(long, value_name = "DIRECTORY")]
+        registry_repo: PathBuf,
+        /// Exact commit object ID currently checked out by --registry-repo.
+        #[arg(long, value_name = "COMMIT")]
+        registry_rev: String,
+        #[arg(long, value_name = "ID")]
+        origin: String,
+        #[arg(long, value_name = "FILE")]
+        graph: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        plan: PathBuf,
+        #[arg(long, value_name = "DIRECTORY")]
+        output: PathBuf,
+        /// Optional validated canonical draft tree; only evidence-bound article prose is adopted.
+        #[arg(long, value_name = "DIRECTORY")]
+        drafts: Option<PathBuf>,
+        /// Optional pinned freshness policy from policies/freshness.json.
+        #[arg(long, value_name = "FILE")]
+        policy: Option<PathBuf>,
+        /// Reserved model-work budget; this deterministic release requires one.
+        #[arg(long, default_value_t = 1)]
+        agent_jobs: usize,
+        #[arg(long, value_enum, default_value_t = graphoxide_cli::wiki_materialize::MaterializeProgress::Jsonl)]
+        progress: graphoxide_cli::wiki_materialize::MaterializeProgress,
+    },
+    /// Create catalog-cited, local-Ollama Markdown drafts in a new directory.
+    Draft {
+        #[arg(value_name = "SOURCE_ROOT")]
+        source_root: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        graph: PathBuf,
+        /// Bind draft output to active captures in this catalog directory.
+        #[arg(long, value_name = "DIRECTORY")]
+        catalog: Option<PathBuf>,
+        /// Synthesize reviewed canonical articles from graph evidence.
+        #[arg(long, value_name = "FILE", requires = "catalog")]
+        plan: Option<PathBuf>,
+        #[arg(long, value_name = "DIRECTORY")]
+        output: PathBuf,
+        #[arg(long)]
+        model: String,
+        /// Draft one or more graph-derived page scopes (source, community, or topic).
+        #[arg(
+            long = "scope",
+            value_name = "SCOPE",
+            value_parser = ["source", "community", "topic"]
+        )]
+        scopes: Vec<String>,
+        #[arg(long)]
+        consent: String,
+        #[arg(long, default_value = graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL)]
+        ollama_url: String,
+        /// Use Ollama's native /api/chat endpoint instead of its OpenAI-compatible API.
+        #[arg(long)]
+        ollama_native: bool,
+        /// Versioned JSON profile for an OpenAI-compatible, Anthropic, native Ollama, or MCP agent provider.
+        #[arg(long, value_name = "FILE")]
+        provider_profile: Option<PathBuf>,
+        /// Optional Registry v1 tree that receives append-only secret-free model-run records.
+        #[arg(long, value_name = "DIRECTORY")]
+        registry_tree: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WikiOpenapiCommand {
+    /// Verify the manifest, pinned specification digest, and every allowlisted operation.
+    Validate {
+        #[arg(long, value_name = "FILE")]
+        manifest: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        spec: PathBuf,
+    },
+    /// Make one allowlisted read and emit response metadata without saving content.
+    Fetch {
+        #[arg(long, value_name = "FILE")]
+        manifest: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        spec: PathBuf,
+        #[arg(long, value_name = "OPERATION_ID")]
+        operation: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCommand {
+    /// Initialize an empty, Git-trackable Registry v1 tree.
+    Init {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        catalog_id: String,
+    },
+    /// Manage logical origins. Their local locations are never stored in Git.
+    Origin {
+        #[command(subcommand)]
+        command: RegistryOriginCommand,
+    },
+    /// Add an explicit source head without reading or copying its raw content.
+    Track {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: String,
+        #[arg(long, value_name = "ID")]
+        source_id: String,
+        #[arg(long, value_name = "PATH")]
+        relative_path: String,
+    },
+    /// List safe untracked files below a bound origin; accept candidates only when requested.
+    Discover {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: String,
+        /// Add each discovered candidate as a pending-verification source head.
+        #[arg(long)]
+        accept_discovered: bool,
+        /// Select at most this many candidates after deterministic family selection.
+        #[arg(long)]
+        max_files: Option<usize>,
+        /// Select at most this many candidates from each registered format family.
+        #[arg(long)]
+        max_per_format_family: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop scanning or scheduling a source while retaining all history.
+    Retire {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        source_id: String,
+    },
+    /// Move a source head to a new logical location and require re-verification.
+    Rename {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        source_id: String,
+        #[arg(long, value_name = "PATH")]
+        relative_path: String,
+    },
+    /// Restore a retired source by explicitly selecting one immutable capture.
+    Restore {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        source_id: String,
+        #[arg(long, value_name = "ID")]
+        capture_id: String,
+    },
+    /// Resolve a conflicting source head by explicitly selecting one immutable capture.
+    ResolveSource {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        source_id: String,
+        #[arg(long, value_name = "ID")]
+        choose: String,
+    },
+    /// Scan one bound origin and queue only source work that needs attention.
+    Scan {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: String,
+        #[arg(long, value_enum, default_value_t = RegistryScanMode::Changed)]
+        mode: RegistryScanMode,
+        /// Emit a machine-readable scan summary without raw paths or content.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Publish changed, locally scanned digests as immutable metadata-only captures.
+    Publish {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: String,
+        /// Require local SQLite scan observations; source bytes are never read here.
+        #[arg(long)]
+        from_local_state: bool,
+        /// UTC RFC3339 timestamp to bind into each newly published capture.
+        #[arg(long, value_name = "RFC3339")]
+        observed_at: String,
+        /// Emit a machine-readable summary without raw paths or content.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Query shared source metadata together with the current local scan facts.
+    List {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: Option<String>,
+        /// Registered format identifier, such as markdown, sqlite, or unknown.
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+        #[arg(long, value_name = "BYTES")]
+        min_size_bytes: Option<u64>,
+        #[arg(long, value_name = "BYTES")]
+        max_size_bytes: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the deterministic local queue and source availability for a registry revision.
+    Freshness {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: Option<String>,
+        /// UTC RFC3339 timestamp for deterministic policy evaluation; defaults to now.
+        #[arg(long, value_name = "TIMESTAMP")]
+        now: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record immutable processing provenance without raw prompts or credentials.
+    Run {
+        #[command(subcommand)]
+        command: RegistryRunCommand,
+    },
+    /// Record an immutable article review decision without raw source content.
+    Review {
+        #[command(subcommand)]
+        command: RegistryReviewCommand,
+    },
+    /// Validate every record and reference in a checked-out Registry v1 tree.
+    Validate {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        /// Emit a machine-readable registry summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryRunCommand {
+    /// Validate and append one secret-free processing run JSON record.
+    Record {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        input: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryReviewCommand {
+    /// Validate and append one secret-free review JSON record.
+    Record {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        input: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryOriginCommand {
+    /// Add a logical origin. Bind its real location in local state, not Git.
+    Add {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: String,
+        #[arg(long, value_name = "KIND")]
+        kind: String,
+        #[arg(long, value_name = "NAME")]
+        logical_name: String,
+    },
+    /// Bind an origin to a local path in the rebuildable local SQLite cache.
+    Bind {
+        #[arg(long, value_name = "DIRECTORY")]
+        tree: PathBuf,
+        #[arg(long, value_name = "ID")]
+        origin_id: String,
+        #[arg(long, value_name = "DIRECTORY")]
+        local_root: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum RegistryScanMode {
+    #[default]
+    Changed,
+    Verify,
 }
 
 #[derive(Subcommand)]
@@ -712,6 +1127,103 @@ fn graph_budget_after_pending_manifest(
                 "pending manifest retains {pending_manifest_retained_bytes} bytes, exhausting the {cache_and_runs_bytes}-byte cache/run memory budget; increase --memory-budget-bytes or request a full rebuild"
             )
         })
+}
+
+/// Reserve the bounded catalog loader and post-build annotation payload before
+/// extraction so catalog metadata cannot bypass the managed graph budget.
+fn graph_budget_after_catalog(
+    cache_and_runs_bytes: usize,
+    has_catalog: bool,
+) -> anyhow::Result<usize> {
+    if !has_catalog {
+        return Ok(cache_and_runs_bytes);
+    }
+    let reservation = graphoxide_extract::catalog::Catalog::memory_reservation_bytes();
+    cache_and_runs_bytes
+        .checked_sub(reservation)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "catalog reserves {reservation} bytes for bounded loading and annotations, exhausting the {cache_and_runs_bytes}-byte cache/run memory budget; increase --memory-budget-bytes"
+            )
+        })
+}
+
+fn verify_catalog_before_publication(
+    catalog: Option<&graphoxide_extract::catalog::Catalog>,
+) -> anyhow::Result<()> {
+    if let Some(catalog) = catalog {
+        catalog.verify_sources()?;
+    }
+    Ok(())
+}
+
+fn ensure_persisted_registry_binding(
+    persisted: &watch_service::PersistedBuildConfig,
+    supplied: Option<&watch_service::PersistedRegistryBinding>,
+) -> anyhow::Result<()> {
+    if persisted.registry_binding.is_some() && supplied.is_none() {
+        anyhow::bail!(
+            "managed output is registry-bound; supply --registry and --registry-origin before update/watch can publish"
+        );
+    }
+    Ok(())
+}
+
+/// Resolve one machine-local origin binding and project the active registry
+/// captures through the existing catalog verification and annotation path.
+struct LoadedRegistryCatalogBinding {
+    catalog: graphoxide_extract::catalog::Catalog,
+    persisted: watch_service::PersistedRegistryBinding,
+}
+
+fn load_registry_catalog_binding(
+    project_root: &Path,
+    registry_tree: &Path,
+    origin_id: &str,
+) -> anyhow::Result<LoadedRegistryCatalogBinding> {
+    let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(registry_tree)?;
+    anyhow::ensure!(
+        snapshot.origins().contains_key(origin_id),
+        "registry origin does not exist"
+    );
+    let local_state = graphoxide_extract::registry_state::RegistryLocalState::open(
+        snapshot.catalog_id(),
+        snapshot.tree_sha256(),
+    )?;
+    let local_root = local_state
+        .origin_binding(origin_id)?
+        .context("registry origin has no local binding; run `graphoxide registry origin bind`")?;
+    anyhow::ensure!(
+        fs::canonicalize(project_root)? == fs::canonicalize(&local_root)?,
+        "project source root must match the bound registry origin"
+    );
+    Ok(LoadedRegistryCatalogBinding {
+        catalog: graphoxide_extract::catalog::Catalog::from_registry_origin(
+            project_root,
+            &snapshot,
+            origin_id,
+        )?,
+        persisted: watch_service::PersistedRegistryBinding {
+            catalog_id: snapshot.catalog_id().to_owned(),
+            tree_sha256: snapshot.tree_sha256().to_owned(),
+            origin_id: origin_id.to_owned(),
+        },
+    })
+}
+
+fn load_optional_registry_catalog_binding(
+    project_root: &Path,
+    registry_tree: Option<&Path>,
+    origin_id: Option<&str>,
+) -> anyhow::Result<Option<LoadedRegistryCatalogBinding>> {
+    match (registry_tree, origin_id) {
+        (Some(tree), Some(origin_id)) => {
+            load_registry_catalog_binding(project_root, tree, origin_id).map(Some)
+        }
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("--registry and --registry-origin must be supplied together"),
+    }
 }
 
 /// Reserve baseline headroom while the fresh extraction vector is still live.
@@ -1370,6 +1882,9 @@ fn run_project_build_with_cancellation(
         no_cluster,
         force,
         postgres,
+        catalog,
+        registry,
+        registry_origin,
         allow_partial,
         timing,
         json,
@@ -1392,6 +1907,37 @@ fn run_project_build_with_cancellation(
         path.display()
     );
     let legacy_executor = workflow.legacy_executor();
+    let runtime_config = if workflow.is_index() {
+        Some(runtime.resolve()?)
+    } else {
+        runtime.resolve_for_executor(legacy_executor)?
+    };
+    let graph_memory_budget = runtime_config.map_or(
+        graphoxide_graph::DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
+        |config| config.memory_budget().cache_and_runs_bytes,
+    );
+    let graph_memory_budget =
+        graph_budget_after_catalog(graph_memory_budget, catalog.is_some() || registry.is_some())?;
+    let (catalog, registry_binding) = match (catalog.as_deref(), registry.as_deref()) {
+        (Some(directory), None) => (
+            Some(graphoxide_extract::catalog::Catalog::load(
+                &path, directory,
+            )?),
+            None,
+        ),
+        (None, Some(tree)) => {
+            let binding = load_registry_catalog_binding(
+                &path,
+                tree,
+                registry_origin
+                    .as_deref()
+                    .context("--registry requires --registry-origin")?,
+            )?;
+            (Some(binding.catalog), Some(binding.persisted))
+        }
+        (None, None) => (None, None),
+        (Some(_), Some(_)) => anyhow::bail!("--catalog and --registry cannot be combined"),
+    };
     let total_started = std::time::Instant::now();
     let effective_force = graphoxide_cli::extract_cli::force_enabled(
         force,
@@ -1468,7 +2014,7 @@ fn run_project_build_with_cancellation(
     } else {
         watch_service::read_build_config(&output_directory)
     };
-    let prepared_index_build_config = if workflow.is_index() {
+    let mut prepared_index_build_config = if workflow.is_index() {
         Some(graphoxide_cli::index::prepare_index_build_config(
             persisted.clone(),
             (!exclude.is_empty()).then_some(exclude.as_slice()),
@@ -1478,24 +2024,32 @@ fn run_project_build_with_cancellation(
     } else {
         None
     };
+    if let Some(config) = prepared_index_build_config.as_mut() {
+        config.registry_binding = registry_binding.clone();
+    }
     let effective_excludes = if exclude.is_empty() {
         persisted.excludes.clone()
     } else {
         exclude.clone()
     };
+    let mut scan_excludes = effective_excludes.clone();
+    if let Some(catalog) = &catalog {
+        for exclusion in catalog.scan_exclusions() {
+            if !scan_excludes.iter().any(|pattern| pattern == &exclusion) {
+                scan_excludes.push(exclusion);
+            }
+        }
+    }
+    let tracked_paths = catalog
+        .as_ref()
+        .filter(|catalog| catalog.restricts_scan_to_active_sources())
+        .map(|catalog| catalog.active_source_paths().map(str::to_owned).collect())
+        .unwrap_or_default();
     let honor_gitignore = !no_gitignore && persisted.honor_gitignore;
-    let runtime_config = if workflow.is_index() {
-        Some(runtime.resolve()?)
-    } else {
-        runtime.resolve_for_executor(legacy_executor)?
-    };
-    let graph_memory_budget = runtime_config.map_or(
-        graphoxide_graph::DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
-        |config| config.memory_budget().cache_and_runs_bytes,
-    );
     let scan_started = std::time::Instant::now();
     let detect_options = graphoxide_extract::detect::DetectOptions {
-        extra_excludes: effective_excludes,
+        extra_excludes: scan_excludes,
+        tracked_paths,
         output_dir: Some(output_directory.clone()),
         honor_gitignore,
         ..Default::default()
@@ -1630,6 +2184,10 @@ fn run_project_build_with_cancellation(
             )
         }
     };
+    if let Some(report) = coverage_report.as_mut() {
+        report.record_extraction_failures(&scan.failed_sources)?;
+        graphoxide_cli::index::validate_coverage_for_index(report, allow_partial)?;
+    }
     progress_reporter.set_indexed_inputs(scan.progress.succeeded);
     let runtime_telemetry = runtime_config
         .map(|config| isolated_runtime_configuration(config, scan.detection.total_files));
@@ -1800,12 +2358,18 @@ fn run_project_build_with_cancellation(
                     )?];
         }
         extractions = vec![graphoxide_graph::dedupe_raw_extractions(&extractions)];
+        if let Some(catalog) = &catalog {
+            for extraction in &mut extractions {
+                catalog.apply_to_nodes(&mut extraction.nodes)?;
+            }
+        }
         telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
         // An incomplete-build shrink check may read the committed
         // graph again. Release the inspected baseline first so that
         // check cannot create a second retained whole-graph copy.
         drop(previous);
         progress_reporter.phase(BuildProgressPhase::Publishing);
+        verify_catalog_before_publication(catalog.as_ref())?;
         let write_started = std::time::Instant::now();
         let mut published_coverage = None;
         let outcome = if workflow.is_index() {
@@ -1860,6 +2424,7 @@ fn run_project_build_with_cancellation(
                 true,
                 (!exclude.is_empty()).then_some(exclude.as_slice()),
                 no_gitignore.then_some(false),
+                registry_binding.as_ref(),
             )?;
         }
         telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
@@ -1990,8 +2555,12 @@ fn run_project_build_with_cancellation(
         graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
     }
     drop(previous);
+    if let Some(catalog) = &catalog {
+        catalog.apply_to_nodes(&mut graph.nodes)?;
+    }
     telemetry.stages_ms.cluster = graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
     progress_reporter.phase(BuildProgressPhase::Publishing);
+    verify_catalog_before_publication(catalog.as_ref())?;
     let write_started = std::time::Instant::now();
     let mut published_coverage = None;
     let outcome = if workflow.is_index() {
@@ -2043,6 +2612,7 @@ fn run_project_build_with_cancellation(
             false,
             (!exclude.is_empty()).then_some(exclude.as_slice()),
             no_gitignore.then_some(false),
+            registry_binding.as_ref(),
         )?;
     }
     telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
@@ -2089,6 +2659,8 @@ fn main() -> anyhow::Result<()> {
             legacy_executor,
         } => run_project_build(build, ProjectBuildWorkflow::Extract { legacy_executor }),
         Command::Index { build } => run_project_build(build, ProjectBuildWorkflow::Index),
+        Command::Wiki { command } => wiki(command),
+        Command::Registry { command } => registry(command),
         Command::Audit {
             path,
             coverage_path,
@@ -2293,17 +2865,28 @@ fn main() -> anyhow::Result<()> {
             progress,
             runtime_report,
             legacy_executor,
+            registry,
+            registry_origin,
             runtime,
-        } => rebuild(
-            &path,
-            no_cluster,
-            force,
-            json,
-            progress,
-            runtime_report.as_deref(),
-            legacy_executor,
-            runtime,
-        ),
+        } => {
+            let binding = load_optional_registry_catalog_binding(
+                &path,
+                registry.as_deref(),
+                registry_origin.as_deref(),
+            )?;
+            rebuild(
+                &path,
+                no_cluster,
+                force,
+                json,
+                progress,
+                runtime_report.as_deref(),
+                legacy_executor,
+                runtime,
+                binding.as_ref().map(|binding| &binding.catalog),
+                binding.as_ref().map(|binding| &binding.persisted),
+            )
+        }
         Command::ClusterOnly {
             path,
             graph: graph_override,
@@ -2483,16 +3066,26 @@ fn main() -> anyhow::Result<()> {
             runtime_report,
             progress,
             legacy_executor,
+            registry,
+            registry_origin,
             runtime,
-        } => watch(
-            path,
-            force,
-            no_cluster,
-            runtime_report.as_deref(),
-            progress,
-            legacy_executor,
-            runtime,
-        ),
+        } => {
+            let binding = load_optional_registry_catalog_binding(
+                &path,
+                registry.as_deref(),
+                registry_origin.as_deref(),
+            )?;
+            watch(
+                path,
+                force,
+                no_cluster,
+                runtime_report.as_deref(),
+                progress,
+                legacy_executor,
+                runtime,
+                binding,
+            )
+        }
         Command::Install {
             platform,
             platform_flag,
@@ -2571,6 +3164,1045 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Site { path, port } => site::serve(&path, port),
     }
+}
+
+fn registry(command: RegistryCommand) -> anyhow::Result<()> {
+    match command {
+        RegistryCommand::Init { tree, catalog_id } => {
+            let snapshot = graphoxide_extract::registry::initialize_tree(&tree, &catalog_id)?;
+            write_output(&format!("Initialized registry {}", snapshot.catalog_id()))
+        }
+        RegistryCommand::Origin { command } => match command {
+            RegistryOriginCommand::Add {
+                tree,
+                origin_id,
+                kind,
+                logical_name,
+            } => {
+                graphoxide_extract::registry::add_origin(
+                    &tree,
+                    graphoxide_extract::registry::RegistryOrigin {
+                        version: 1,
+                        origin_id,
+                        kind,
+                        logical_name,
+                    },
+                )?;
+                write_output("Added registry origin")
+            }
+            RegistryOriginCommand::Bind {
+                tree,
+                origin_id,
+                local_root,
+            } => {
+                let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(&tree)?;
+                anyhow::ensure!(
+                    snapshot.origins().contains_key(&origin_id),
+                    "registry origin does not exist"
+                );
+                let state = graphoxide_extract::registry_state::RegistryLocalState::open(
+                    snapshot.catalog_id(),
+                    snapshot.tree_sha256(),
+                )?;
+                state.bind_origin(&origin_id, &local_root)?;
+                write_output("Bound registry origin in local state")
+            }
+        },
+        RegistryCommand::Track {
+            tree,
+            origin_id,
+            source_id,
+            relative_path,
+        } => {
+            graphoxide_extract::registry::track_source(
+                &tree,
+                &source_id,
+                &origin_id,
+                &relative_path,
+            )?;
+            write_output("Tracked registry source as pending verification")
+        }
+        RegistryCommand::Discover {
+            tree,
+            origin_id,
+            accept_discovered,
+            max_files,
+            max_per_format_family,
+            json,
+        } => registry_discover(
+            &tree,
+            &origin_id,
+            accept_discovered,
+            max_files,
+            max_per_format_family,
+            json,
+        ),
+        RegistryCommand::Retire { tree, source_id } => {
+            graphoxide_extract::registry::retire_source(&tree, &source_id)?;
+            write_output("Retired registry source")
+        }
+        RegistryCommand::Rename {
+            tree,
+            source_id,
+            relative_path,
+        } => {
+            graphoxide_extract::registry::rename_source(&tree, &source_id, &relative_path)?;
+            write_output("Renamed registry source; it is pending verification")
+        }
+        RegistryCommand::Restore {
+            tree,
+            source_id,
+            capture_id,
+        } => {
+            graphoxide_extract::registry::activate_capture(&tree, &source_id, &capture_id)?;
+            write_output("Restored registry source to the selected capture")
+        }
+        RegistryCommand::ResolveSource {
+            tree,
+            source_id,
+            choose,
+        } => {
+            graphoxide_extract::registry::activate_capture(&tree, &source_id, &choose)?;
+            write_output("Resolved registry source to the selected capture")
+        }
+        RegistryCommand::Scan {
+            tree,
+            origin_id,
+            mode,
+            json,
+        } => registry_scan(&tree, &origin_id, mode, json),
+        RegistryCommand::Publish {
+            tree,
+            origin_id,
+            from_local_state,
+            observed_at,
+            json,
+        } => registry_publish(&tree, &origin_id, from_local_state, &observed_at, json),
+        RegistryCommand::List {
+            tree,
+            origin_id,
+            format,
+            min_size_bytes,
+            max_size_bytes,
+            json,
+        } => registry_list(
+            &tree,
+            origin_id.as_deref(),
+            format.as_deref(),
+            min_size_bytes,
+            max_size_bytes,
+            json,
+        ),
+        RegistryCommand::Freshness {
+            tree,
+            origin_id,
+            now,
+            json,
+        } => registry_freshness(&tree, origin_id.as_deref(), now.as_deref(), json),
+        RegistryCommand::Run { command } => match command {
+            RegistryRunCommand::Record { tree, input } => {
+                let bytes = read_registry_record_input(&input, "run")?;
+                graphoxide_extract::registry::record_run(&tree, &bytes)?;
+                write_output("Recorded registry processing run")
+            }
+        },
+        RegistryCommand::Review { command } => match command {
+            RegistryReviewCommand::Record { tree, input } => {
+                let bytes = read_registry_record_input(&input, "review")?;
+                graphoxide_extract::registry::record_review(&tree, &bytes)?;
+                write_output("Recorded registry review")
+            }
+        },
+        RegistryCommand::Validate { tree, json } => {
+            let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(&tree)?;
+            if json {
+                return write_output(&serde_json::to_string_pretty(&serde_json::json!({
+                    "catalog_id": snapshot.catalog_id(),
+                    "tree_sha256": snapshot.tree_sha256(),
+                    "origins": snapshot.origins().len(),
+                    "sources": snapshot.sources().len(),
+                    "captures": snapshot.captures().len(),
+                    "active_captures": snapshot.active_captures().len(),
+                }))?);
+            }
+            write_output(&format!(
+                "Validated registry {}: {} origins, {} sources, {} captures ({} active)",
+                snapshot.catalog_id(),
+                snapshot.origins().len(),
+                snapshot.sources().len(),
+                snapshot.captures().len(),
+                snapshot.active_captures().len(),
+            ))
+        }
+    }
+}
+
+fn read_registry_record_input(input: &Path, kind: &str) -> anyhow::Result<Vec<u8>> {
+    let before = fs::symlink_metadata(input)?;
+    anyhow::ensure!(
+        before.file_type().is_file()
+            && !before.file_type().is_symlink()
+            && before.len() <= MAX_REGISTRY_RECORD_INPUT_BYTES,
+        "registry {kind} input must be a bounded regular file"
+    );
+    let bytes = fs::read(input)?;
+    let after = fs::symlink_metadata(input)?;
+    anyhow::ensure!(
+        after.file_type().is_file()
+            && !after.file_type().is_symlink()
+            && before.len() == after.len()
+            && bytes.len() as u64 == after.len(),
+        "registry {kind} input changed or is unsafe"
+    );
+    Ok(bytes)
+}
+
+fn registry_discover(
+    tree: &Path,
+    origin_id: &str,
+    accept_discovered: bool,
+    max_files: Option<usize>,
+    max_per_format_family: Option<usize>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(tree)?;
+    anyhow::ensure!(
+        snapshot.origins().contains_key(origin_id),
+        "registry origin does not exist"
+    );
+    let state = graphoxide_extract::registry_state::RegistryLocalState::open(
+        snapshot.catalog_id(),
+        snapshot.tree_sha256(),
+    )?;
+    let root = state
+        .origin_binding(origin_id)?
+        .context("registry origin has no local binding; run `graphoxide registry origin bind`")?;
+    let root = PathBuf::from(root);
+    let root_metadata = fs::symlink_metadata(&root)?;
+    anyhow::ensure!(
+        root_metadata.file_type().is_dir() && !root_metadata.file_type().is_symlink(),
+        "registry origin binding must be a non-symlinked directory"
+    );
+    let root = fs::canonicalize(root)?;
+    let formats = graphoxide_extract::format_registry::format_registry();
+    let mut candidates = Vec::new();
+    let walker = ignore::WalkBuilder::new(&root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
+        .follow_links(false)
+        .build();
+    for entry in walker {
+        let entry = entry.context("walk locally bound registry origin")?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(&root)
+            .context("discovered path escaped origin")?;
+        let relative = relative
+            .to_str()
+            .context("discovered path is not UTF-8")?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        if relative.is_empty() || relative.split('/').any(|component| component == ".git") {
+            continue;
+        }
+        let source_id = format!(
+            "source-{}",
+            &hex::encode(Sha256::digest(
+                format!("{origin_id}\0{relative}").as_bytes()
+            ))[..24]
+        );
+        if let Some(source) = snapshot.sources().get(&source_id) {
+            anyhow::ensure!(
+                source.origin_id == origin_id && source.relative_path == relative,
+                "discovered source ID collision requires an explicit source ID"
+            );
+            continue;
+        }
+        if snapshot
+            .sources()
+            .values()
+            .any(|source| source.origin_id == origin_id && source.relative_path == relative)
+        {
+            continue;
+        }
+        let family = formats
+            .find_by_path(Path::new(&relative))
+            .map(|format| format.id.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        candidates.push((source_id, relative, family));
+    }
+    candidates.sort_by(|left, right| left.1.cmp(&right.1));
+    let mut family_counts = std::collections::BTreeMap::<String, usize>::new();
+    candidates.retain(|(_, _, family)| {
+        let count = family_counts.entry(family.clone()).or_default();
+        if max_per_format_family.is_some_and(|maximum| *count >= maximum) {
+            return false;
+        }
+        *count += 1;
+        true
+    });
+    if let Some(maximum) = max_files {
+        candidates.truncate(maximum);
+    }
+    if accept_discovered {
+        for (source_id, relative_path, _) in &candidates {
+            graphoxide_extract::registry::track_source(tree, source_id, origin_id, relative_path)?;
+        }
+    }
+    if json {
+        return write_output(&serde_json::to_string_pretty(&serde_json::json!({
+            "origin_id": origin_id,
+            "accepted": accept_discovered,
+            "candidates": candidates.into_iter().map(|(source_id, relative_path, format_family)| serde_json::json!({
+                "source_id": source_id,
+                "relative_path": relative_path,
+                "format_family": format_family,
+            })).collect::<Vec<_>>(),
+        }))?);
+    }
+    if accept_discovered {
+        write_output("Accepted discovered registry sources")
+    } else {
+        write_output("Listed discovered registry source candidates")
+    }
+}
+
+fn registry_scan(
+    tree: &Path,
+    origin_id: &str,
+    mode: RegistryScanMode,
+    json: bool,
+) -> anyhow::Result<()> {
+    use graphoxide_extract::{
+        registry::RegistrySourceState,
+        registry_state::{
+            scan_bound_file, stat_bound_file, Availability, QueueReason, RegistryLocalState,
+            ScanDisposition,
+        },
+    };
+
+    let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(tree)?;
+    anyhow::ensure!(
+        snapshot.origins().contains_key(origin_id),
+        "registry origin does not exist"
+    );
+    let state = RegistryLocalState::open(snapshot.catalog_id(), snapshot.tree_sha256())?;
+    let local_root = state
+        .origin_binding(origin_id)?
+        .context("registry origin has no local binding; run `graphoxide registry origin bind`")?;
+    let local_root = PathBuf::from(local_root);
+    let enqueued_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs();
+    let enqueued_at = i64::try_from(enqueued_at).context("system clock exceeds SQLite range")?;
+    let mut scanned = 0_u64;
+    let mut hashed = 0_u64;
+    let mut unchanged = 0_u64;
+    let mut missing = 0_u64;
+    let mut inaccessible = 0_u64;
+    let mut queued = 0_u64;
+
+    for source in snapshot.sources().values().filter(|source| {
+        source.origin_id == origin_id && source.state != RegistrySourceState::Retired
+    }) {
+        scanned += 1;
+        let stat = stat_bound_file(&local_root, &source.relative_path)?;
+        let disposition = state.scan_disposition(
+            &source.source_id,
+            &source.origin_id,
+            &source.relative_path,
+            &stat,
+        )?;
+        let should_hash = mode == RegistryScanMode::Verify
+            || matches!(disposition, ScanDisposition::HashRequired);
+        let observation = if should_hash {
+            let observation = scan_bound_file(&local_root, &source.relative_path)?;
+            if observation.availability == Availability::Available {
+                hashed += 1;
+            }
+            state.record_observation(
+                &source.source_id,
+                &source.origin_id,
+                &source.relative_path,
+                &observation,
+            )?;
+            observation
+        } else {
+            if disposition == ScanDisposition::Unchanged {
+                unchanged += 1;
+            }
+            if matches!(
+                disposition,
+                ScanDisposition::Missing | ScanDisposition::Inaccessible
+            ) {
+                state.record_observation(
+                    &source.source_id,
+                    &source.origin_id,
+                    &source.relative_path,
+                    &stat,
+                )?;
+            }
+            state
+                .observation(&source.source_id)?
+                .context("local registry observation disappeared during scan")?
+        };
+
+        match observation.availability {
+            Availability::Missing => missing += 1,
+            Availability::Inaccessible => inaccessible += 1,
+            Availability::Available => {
+                let expected_sha256 = source.active_capture_id.as_ref().and_then(|capture_id| {
+                    snapshot
+                        .captures()
+                        .get(capture_id)
+                        .map(|capture| capture.sha256.as_str())
+                });
+                let reason = match expected_sha256 {
+                    None => Some(QueueReason::MissingExtraction),
+                    Some(expected) if observation.sha256.as_deref() != Some(expected) => {
+                        Some(QueueReason::Changed)
+                    }
+                    Some(_) => None,
+                };
+                if let Some(reason) = reason {
+                    state.enqueue(&source.source_id, "extract", reason, 0, enqueued_at)?;
+                    queued += 1;
+                }
+            }
+        }
+    }
+
+    if json {
+        return write_output(&serde_json::to_string_pretty(&serde_json::json!({
+            "catalog_id": snapshot.catalog_id(),
+            "tree_sha256": snapshot.tree_sha256(),
+            "origin_id": origin_id,
+            "mode": match mode { RegistryScanMode::Changed => "changed", RegistryScanMode::Verify => "verify" },
+            "scanned": scanned,
+            "hashed": hashed,
+            "unchanged": unchanged,
+            "missing": missing,
+            "inaccessible": inaccessible,
+            "queued": queued,
+        }))?);
+    }
+    write_output(&format!(
+        "Scanned {scanned} registry sources: {hashed} hashed, {unchanged} unchanged, {queued} queued"
+    ))
+}
+
+fn registry_publish(
+    tree: &Path,
+    origin_id: &str,
+    from_local_state: bool,
+    observed_at: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    use graphoxide_extract::{
+        format_registry::format_registry,
+        registry::{RegistryCapture, RegistrySourceState},
+        registry_state::{Availability, RegistryLocalState},
+    };
+
+    anyhow::ensure!(
+        from_local_state,
+        "registry publish requires --from-local-state; it never reads raw source bytes"
+    );
+    let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(tree)?;
+    anyhow::ensure!(
+        snapshot.origins().contains_key(origin_id),
+        "registry origin does not exist"
+    );
+    let state = RegistryLocalState::open(snapshot.catalog_id(), snapshot.tree_sha256())?;
+    let mut published = 0_u64;
+    let mut reactivated = 0_u64;
+    let mut unchanged = 0_u64;
+    let mut unavailable = 0_u64;
+    let mut unobserved = 0_u64;
+
+    for source in snapshot.sources().values().filter(|source| {
+        source.origin_id == origin_id && source.state != RegistrySourceState::Retired
+    }) {
+        let Some(observation) = state.observation(&source.source_id)? else {
+            unobserved += 1;
+            continue;
+        };
+        if observation.availability != Availability::Available {
+            unavailable += 1;
+            continue;
+        }
+        let sha256 = observation
+            .sha256
+            .as_deref()
+            .context("available local registry observation lacks SHA-256")?;
+        let current = source
+            .active_capture_id
+            .as_ref()
+            .and_then(|capture_id| snapshot.captures().get(capture_id));
+        if current.is_some_and(|capture| {
+            capture.sha256 == sha256 && capture.relative_path == source.relative_path
+        }) {
+            unchanged += 1;
+            continue;
+        }
+        if let Some(capture) = snapshot.captures().values().find(|capture| {
+            capture.source_id == source.source_id
+                && capture.relative_path == source.relative_path
+                && capture.sha256 == sha256
+        }) {
+            graphoxide_extract::registry::activate_capture(
+                tree,
+                &source.source_id,
+                &capture.capture_id,
+            )?;
+            reactivated += 1;
+            continue;
+        }
+        let representation = format_registry()
+            .find_by_path(Path::new(&source.relative_path))
+            .map(|format| format.id.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        graphoxide_extract::registry::append_capture_and_activate(
+            tree,
+            RegistryCapture {
+                version: 1,
+                capture_id: published_capture_id(&source.source_id, &source.relative_path, sha256),
+                source_id: source.source_id.clone(),
+                relative_path: source.relative_path.clone(),
+                sha256: sha256.to_owned(),
+                observed_at: observed_at.to_owned(),
+                representation,
+            },
+            None,
+        )?;
+        published += 1;
+    }
+
+    if json {
+        return write_output(&serde_json::to_string_pretty(&serde_json::json!({
+            "catalog_id": snapshot.catalog_id(),
+            "tree_sha256": snapshot.tree_sha256(),
+            "origin_id": origin_id,
+            "published": published,
+            "reactivated": reactivated,
+            "unchanged": unchanged,
+            "unavailable": unavailable,
+            "unobserved": unobserved,
+        }))?);
+    }
+    write_output(&format!(
+        "Published {published} registry capture(s): {reactivated} reactivated, {unchanged} unchanged, {unavailable} unavailable, {unobserved} unobserved"
+    ))
+}
+
+fn published_capture_id(source_id: &str, relative_path: &str, sha256: &str) -> String {
+    let mut location = Sha256::new();
+    location.update(source_id.as_bytes());
+    location.update([0]);
+    location.update(relative_path.as_bytes());
+    format!("capture-{sha256}-{}", hex::encode(location.finalize()))
+}
+
+fn registry_list(
+    tree: &Path,
+    origin_id: Option<&str>,
+    requested_format: Option<&str>,
+    min_size_bytes: Option<u64>,
+    max_size_bytes: Option<u64>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use graphoxide_extract::{
+        format_registry::format_registry, registry_state::RegistryLocalState,
+    };
+
+    anyhow::ensure!(
+        min_size_bytes
+            .zip(max_size_bytes)
+            .is_none_or(|(min, max)| min <= max),
+        "--min-size-bytes cannot exceed --max-size-bytes"
+    );
+    let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(tree)?;
+    if let Some(origin_id) = origin_id {
+        anyhow::ensure!(
+            snapshot.origins().contains_key(origin_id),
+            "registry origin does not exist"
+        );
+    }
+    let observations =
+        RegistryLocalState::open(snapshot.catalog_id(), snapshot.tree_sha256())?.observations()?;
+    let mut sources = Vec::new();
+    for source in snapshot.sources().values() {
+        if origin_id.is_some_and(|origin_id| source.origin_id != origin_id) {
+            continue;
+        }
+        let format = format_registry()
+            .find_by_path(Path::new(&source.relative_path))
+            .map(|format| format.id.as_str())
+            .unwrap_or("unknown");
+        if requested_format.is_some_and(|requested| !format.eq_ignore_ascii_case(requested)) {
+            continue;
+        }
+        let observation = observations.get(&source.source_id);
+        let size_bytes = observation.and_then(|observation| observation.size_bytes);
+        let last_runs = source
+            .active_capture_id
+            .as_deref()
+            .map(|capture_id| snapshot.latest_runs_for_capture(capture_id))
+            .unwrap_or_default();
+        if min_size_bytes.is_some_and(|min| size_bytes.is_none_or(|size| size < min))
+            || max_size_bytes.is_some_and(|max| size_bytes.is_none_or(|size| size > max))
+        {
+            continue;
+        }
+        sources.push(serde_json::json!({
+            "source_id": source.source_id,
+            "origin_id": source.origin_id,
+            "relative_path": source.relative_path,
+            "state": source.state.as_str(),
+            "active_capture_id": source.active_capture_id,
+            "format": format,
+            "availability": observation.map(|observation| observation.availability.as_str()),
+            "size_bytes": size_bytes,
+            "mtime_ns": observation.and_then(|observation| observation.mtime_ns),
+            "ctime_ns": observation.and_then(|observation| observation.ctime_ns),
+            "sha256": observation.and_then(|observation| observation.sha256.as_deref()),
+            "last_runs": last_runs,
+        }));
+    }
+    if json {
+        return write_output(&serde_json::to_string_pretty(&serde_json::json!({
+            "catalog_id": snapshot.catalog_id(),
+            "tree_sha256": snapshot.tree_sha256(),
+            "sources": sources,
+        }))?);
+    }
+    write_output(
+        &sources
+            .iter()
+            .map(|source| {
+                format!(
+                    "{} {} {} {}",
+                    source["source_id"].as_str().unwrap_or_default(),
+                    source["state"].as_str().unwrap_or_default(),
+                    source["format"].as_str().unwrap_or_default(),
+                    source["relative_path"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn registry_freshness(
+    tree: &Path,
+    origin_id: Option<&str>,
+    now: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use graphoxide_extract::{
+        registry::{utc_timestamp_to_unix_seconds, RegistryRunStatus, RegistrySourceState},
+        registry_state::{Availability, QueueReason, RegistryLocalState},
+    };
+
+    let snapshot = graphoxide_extract::registry::RegistrySnapshot::load(tree)?;
+    if let Some(origin_id) = origin_id {
+        anyhow::ensure!(
+            snapshot.origins().contains_key(origin_id),
+            "registry origin does not exist"
+        );
+    }
+    let sources = snapshot
+        .sources()
+        .values()
+        .filter(|source| origin_id.is_none_or(|origin_id| source.origin_id == origin_id))
+        .map(|source| source.source_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let evaluated_at = match now {
+        Some(value) => utc_timestamp_to_unix_seconds(value)?,
+        None => i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("system clock is before the Unix epoch")?
+                .as_secs(),
+        )
+        .context("system clock exceeds SQLite range")?,
+    };
+    let state = RegistryLocalState::open(snapshot.catalog_id(), snapshot.tree_sha256())?;
+    let observations = state.observations()?;
+    let existing = state.queued_work()?;
+    let extract_queued = existing
+        .iter()
+        .filter(|item| item.stage == "extract")
+        .map(|item| item.source_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(policy) = snapshot.freshness_policy() {
+        for source in snapshot.sources().values().filter(|source| {
+            origin_id.is_none_or(|origin_id| source.origin_id == origin_id)
+                && source.state == RegistrySourceState::Active
+        }) {
+            if extract_queued.contains(source.source_id.as_str())
+                || observations
+                    .get(&source.source_id)
+                    .is_some_and(|observation| {
+                        matches!(
+                            observation.availability,
+                            Availability::Missing | Availability::Inaccessible
+                        )
+                    })
+            {
+                continue;
+            }
+            let Some(capture_id) = source.active_capture_id.as_deref() else {
+                continue;
+            };
+            let reason = match snapshot.latest_run_for_capture(capture_id, &policy.model_stage) {
+                None => Some(QueueReason::MissingModel),
+                Some(run) if run.status == RegistryRunStatus::Failed => {
+                    Some(QueueReason::Retryable)
+                }
+                Some(run) => {
+                    let finished_at = run
+                        .finished_at
+                        .as_deref()
+                        .expect("successful registry runs require finished_at");
+                    let finished_at = utc_timestamp_to_unix_seconds(finished_at)?;
+                    (evaluated_at.saturating_sub(finished_at)
+                        >= i64::try_from(policy.model_max_age_seconds)
+                            .expect("freshness maximum fits i64"))
+                    .then_some(QueueReason::Expired)
+                }
+            };
+            if let Some(reason) = reason {
+                state.enqueue(
+                    &source.source_id,
+                    &policy.model_stage,
+                    reason,
+                    policy
+                        .source_priorities
+                        .get(&source.source_id)
+                        .copied()
+                        .unwrap_or_default(),
+                    evaluated_at,
+                )?;
+            }
+        }
+    }
+    let mut availability = std::collections::BTreeMap::<&str, u64>::new();
+    let mut observed = 0_u64;
+    for source_id in &sources {
+        if let Some(observation) = observations.get(*source_id) {
+            observed += 1;
+            *availability
+                .entry(observation.availability.as_str())
+                .or_default() += 1;
+        }
+    }
+    let queued = state
+        .queued_work()?
+        .into_iter()
+        .filter(|item| sources.contains(item.source_id.as_str()))
+        .map(|item| {
+            serde_json::json!({
+                "source_id": item.source_id,
+                "stage": item.stage,
+                "reason": item.reason.as_str(),
+                "tag_priority": item.tag_priority,
+            })
+        })
+        .collect::<Vec<_>>();
+    let output = serde_json::json!({
+        "catalog_id": snapshot.catalog_id(),
+        "tree_sha256": snapshot.tree_sha256(),
+        "freshness_policy": snapshot.freshness_policy().map(|policy| serde_json::json!({
+            "model_stage": policy.model_stage.as_str(),
+            "model_max_age_seconds": policy.model_max_age_seconds,
+        })),
+        "evaluated_at": now,
+        "tracked": sources.len(),
+        "observed": observed,
+        "unobserved": sources.len().saturating_sub(observed as usize),
+        "availability": availability,
+        "queued": queued,
+    });
+    if json {
+        write_output(&serde_json::to_string_pretty(&output)?)
+    } else {
+        write_output(&format!(
+            "{} tracked, {} observed, {} queued",
+            output["tracked"],
+            output["observed"],
+            output["queued"].as_array().map_or(0, Vec::len)
+        ))
+    }
+}
+
+fn wiki(command: WikiCommand) -> anyhow::Result<()> {
+    match command {
+        WikiCommand::Openapi { command } => match command {
+            WikiOpenapiCommand::Validate { manifest, spec } => {
+                let manifest =
+                    graphoxide_cli::wiki_openapi::OpenApiServiceManifest::from_path(&manifest)?;
+                let metadata = fs::symlink_metadata(&spec)?;
+                anyhow::ensure!(
+                    metadata.file_type().is_file()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.len() <= 8 * 1024 * 1024,
+                    "OpenAPI specification must be a bounded regular file"
+                );
+                manifest.validate_spec(&fs::read(&spec)?)?;
+                write_output("Validated read-only OpenAPI service contract")
+            }
+            WikiOpenapiCommand::Fetch {
+                manifest,
+                spec,
+                operation,
+            } => {
+                let manifest =
+                    graphoxide_cli::wiki_openapi::OpenApiServiceManifest::from_path(&manifest)?;
+                let metadata = fs::symlink_metadata(&spec)?;
+                anyhow::ensure!(
+                    metadata.file_type().is_file()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.len() <= 8 * 1024 * 1024,
+                    "OpenAPI specification must be a bounded regular file"
+                );
+                let request = manifest.resolve_read(&fs::read(&spec)?, &operation)?;
+                write_output(&serde_json::to_string(&request.fetch_metadata()?)?)
+            }
+        },
+        WikiCommand::Index { root, config } => {
+            let report = graphoxide_cli::wiki::index(&root, &config)?;
+            write_output(&format!(
+                "Indexed {} wiki pages into {}",
+                report.page_count,
+                report.output.display()
+            ))
+        }
+        WikiCommand::Check {
+            root,
+            config,
+            catalog,
+            catalog_root,
+            graph,
+            plan,
+            json,
+        } => {
+            let catalog = catalog
+                .as_deref()
+                .map(|directory| {
+                    if let Some(catalog_root) = catalog_root.as_deref() {
+                        let catalog =
+                            graphoxide_extract::catalog::Catalog::load(catalog_root, directory)?;
+                        catalog.verify_sources()?;
+                        return Ok::<_, anyhow::Error>(catalog);
+                    }
+                    let catalog =
+                        graphoxide_extract::catalog::Catalog::load_metadata(&root, directory)?;
+                    if catalog.version() == 1 {
+                        let catalog = graphoxide_extract::catalog::Catalog::load(&root, directory)?;
+                        catalog.verify_sources()?;
+                        Ok::<_, anyhow::Error>(catalog)
+                    } else {
+                        Ok::<_, anyhow::Error>(catalog)
+                    }
+                })
+                .transpose()?;
+            let graph = graph
+                .as_deref()
+                .map(graphoxide_core::read_graph)
+                .transpose()?;
+            if let (Some(catalog), Some(graph)) = (&catalog, &graph) {
+                catalog.validate_graph_annotations(graph)?;
+            }
+            let citations = catalog.as_ref().map(|catalog| catalog.citation_keys());
+            let active_annotations = catalog
+                .as_ref()
+                .zip(graph.as_ref())
+                .map(|(catalog, _)| catalog.active_annotations());
+            let (report, quality) = if let Some(plan_path) = plan {
+                let catalog = catalog.as_ref().context("--plan requires --catalog")?;
+                let graph = graph.as_ref().context("--plan requires --graph")?;
+                let plan = graphoxide_cli::wiki::load_canonical_plan(
+                    &root,
+                    &plan_path,
+                    &catalog.citation_keys(),
+                )?;
+                let expected = graphoxide_export::render_canonical_wiki(
+                    graph,
+                    &plan,
+                    &catalog.active_annotations(),
+                )?;
+                graphoxide_cli::wiki::check_with_canonical_plan_quality(
+                    &root,
+                    &config,
+                    &catalog.citation_keys(),
+                    graph,
+                    &catalog.active_annotations(),
+                    &expected,
+                )?
+            } else {
+                let report = graphoxide_cli::wiki::check_with_graph(
+                    &root,
+                    &config,
+                    citations.as_ref(),
+                    graph.as_ref(),
+                    active_annotations.as_ref(),
+                )?;
+                let quality = serde_json::json!({
+                    "status": "ok",
+                    "page_count": report.page_count,
+                    "output": report.output,
+                    "diagnostics": [],
+                });
+                (report, quality)
+            };
+            if json {
+                write_output(&serde_json::to_string(&quality)?)
+            } else {
+                write_output(&format!("Checked {} wiki pages", report.page_count))
+            }
+        }
+        WikiCommand::Render {
+            source_root,
+            graph,
+            catalog,
+            plan,
+            output,
+        } => {
+            if let Some(plan) = plan {
+                anyhow::ensure!(
+                    source_root.is_none(),
+                    "canonical wiki render does not accept SOURCE_ROOT"
+                );
+                let catalog = catalog.context("--plan requires --catalog")?;
+                graphoxide_cli::wiki_draft::render_canonical(
+                    graphoxide_cli::wiki_draft::CanonicalRenderArgs {
+                        graph,
+                        catalog,
+                        plan,
+                        output: output.clone(),
+                    },
+                )?;
+            } else {
+                let source_root = source_root
+                    .context("wiki render requires SOURCE_ROOT unless --plan is supplied")?;
+                graphoxide_cli::wiki_draft::render(graphoxide_cli::wiki_draft::RenderArgs {
+                    source_root,
+                    graph,
+                    catalog,
+                    output: output.clone(),
+                })?;
+            }
+            write_output(&format!("Rendered wiki to {}", output.display()))
+        }
+        WikiCommand::Materialize {
+            registry_repo,
+            registry_rev,
+            origin,
+            graph,
+            plan,
+            output,
+            drafts,
+            policy,
+            agent_jobs,
+            progress,
+        } => {
+            graphoxide_cli::wiki_materialize::materialize(
+                graphoxide_cli::wiki_materialize::MaterializeArgs {
+                    registry_repo,
+                    registry_rev,
+                    origin_id: origin,
+                    graph,
+                    plan,
+                    output: output.clone(),
+                    drafts,
+                    policy,
+                    agent_jobs,
+                    progress,
+                },
+            )?;
+            write_output(&format!("Materialized live wiki to {}", output.display()))
+        }
+        WikiCommand::Plan {
+            graph,
+            catalog,
+            output,
+            model,
+            consent,
+            ollama_url,
+            ollama_native,
+            provider_profile,
+            registry_tree,
+        } => {
+            graphoxide_cli::wiki_draft::propose_plan(graphoxide_cli::wiki_draft::PlanArgs {
+                graph,
+                catalog,
+                output: output.clone(),
+                model,
+                consent,
+                ollama_url,
+                ollama_native,
+                provider_profile,
+                registry_tree,
+            })?;
+            write_output(&format!("Wrote wiki plan proposal to {}", output.display()))
+        }
+        WikiCommand::Draft {
+            source_root,
+            graph,
+            catalog,
+            plan,
+            output,
+            model,
+            scopes,
+            consent,
+            ollama_url,
+            ollama_native,
+            provider_profile,
+            registry_tree,
+        } => {
+            graphoxide_cli::wiki_draft::draft(graphoxide_cli::wiki_draft::DraftArgs {
+                source_root,
+                graph,
+                catalog,
+                plan,
+                output: output.clone(),
+                model,
+                scopes: parse_draft_scopes(scopes)?,
+                consent,
+                ollama_url,
+                ollama_native,
+                provider_profile,
+                registry_tree,
+            })?;
+            write_output(&format!("Wrote wiki drafts to {}", output.display()))
+        }
+    }
+}
+
+fn parse_draft_scopes(
+    scopes: Vec<String>,
+) -> anyhow::Result<std::collections::BTreeSet<graphoxide_cli::wiki_draft::DraftScope>> {
+    scopes
+        .into_iter()
+        .map(|scope| match scope.as_str() {
+            "source" => Ok(graphoxide_cli::wiki_draft::DraftScope::Source),
+            "community" => Ok(graphoxide_cli::wiki_draft::DraftScope::Community),
+            "topic" => Ok(graphoxide_cli::wiki_draft::DraftScope::Topic),
+            _ => Err(anyhow::anyhow!(
+                "--scope must be source, community, or topic"
+            )),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3158,6 +4790,7 @@ fn render_audit_report(report: &AuditReport) -> anyhow::Result<String> {
     Ok(output.trim_end().to_owned())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn watch(
     path: PathBuf,
     force: bool,
@@ -3166,16 +4799,30 @@ fn watch(
     progress: ProgressModeArg,
     legacy_executor: bool,
     runtime: RuntimeOptions,
+    binding: Option<LoadedRegistryCatalogBinding>,
 ) -> anyhow::Result<()> {
     use notify::{RecursiveMode, Watcher};
+    let catalog = binding.as_ref().map(|binding| &binding.catalog);
+    let registry_binding = binding.as_ref().map(|binding| &binding.persisted);
+    anyhow::ensure!(
+        !(legacy_executor && registry_binding.is_some()),
+        "--registry is not supported with --legacy-executor; omit --legacy-executor so capture verification guards publication"
+    );
     let progress_factory = BuildProgressFactory::new(progress.into())?;
     let runtime_config = runtime.resolve_for_executor(legacy_executor)?;
     let output_directory = managed_output_directory(&path, None);
+    ensure_persisted_registry_binding(
+        &watch_service::read_build_config(&output_directory),
+        registry_binding,
+    )?;
     watch_service::validate_watch_output_directory(&path, &output_directory)?;
-    let filter = watch_service::WatchEventFilter::with_output_directory(
+    let filter = watch_service::WatchEventFilter::with_output_directory_and_tracked_paths(
         &path,
         watch_service::read_build_config(&output_directory).honor_gitignore,
         Some(&output_directory),
+        catalog
+            .map(|catalog| catalog.active_source_paths().map(str::to_owned).collect())
+            .unwrap_or_default(),
     );
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(sender)?;
@@ -3229,7 +4876,7 @@ fn watch(
         let mut structural_changes = Vec::new();
         let mut has_notify_only_change = false;
         for changed in &changed {
-            if watch_change_requires_structural_rebuild(changed) {
+            if watch_change_requires_structural_rebuild_for_catalog(changed, &path, catalog) {
                 structural_changes.push(changed.clone());
             } else {
                 has_notify_only_change = true;
@@ -3251,6 +4898,8 @@ fn watch(
                 runtime_config,
                 runtime_report,
                 &progress_factory,
+                catalog,
+                registry_binding,
             );
             match rebuild {
                 Ok(result) => {
@@ -3282,6 +4931,28 @@ fn watch_change_requires_structural_rebuild(path: &std::path::Path) -> bool {
         == Some(graphoxide_extract::detect::FileType::Code)
 }
 
+fn watch_change_requires_structural_rebuild_for_catalog(
+    changed: &std::path::Path,
+    root: &std::path::Path,
+    catalog: Option<&graphoxide_extract::catalog::Catalog>,
+) -> bool {
+    catalog.is_some_and(|catalog| {
+        let canonical_root = std::fs::canonicalize(root).ok();
+        changed
+            .strip_prefix(root)
+            .ok()
+            .or_else(|| {
+                canonical_root
+                    .as_deref()
+                    .and_then(|root| changed.strip_prefix(root).ok())
+            })
+            .or_else(|| (!changed.is_absolute()).then_some(changed))
+            .and_then(|relative| relative.to_str())
+            .map(|relative| relative.replace('\\', "/"))
+            .is_some_and(|relative| catalog.active_source_paths().any(|path| path == relative))
+    }) || watch_change_requires_structural_rebuild(changed)
+}
+
 /// Execute one admitted watch rebuild. The filesystem-notification loop above
 /// is intentionally thin; this boundary keeps the durable lock/journal state
 /// in `watch` while making the default isolated executor directly testable.
@@ -3299,6 +4970,8 @@ fn rebuild_watch_project(
         runtime_config,
         runtime_report,
         &progress_factory,
+        None,
+        None,
     )
 }
 
@@ -3308,7 +4981,23 @@ fn rebuild_watch_project_with_progress_factory(
     runtime_config: Option<graphoxide_index_runtime::IndexRuntimeConfig>,
     runtime_report: Option<&std::path::Path>,
     progress_factory: &BuildProgressFactory,
+    catalog: Option<&graphoxide_extract::catalog::Catalog>,
+    registry_binding: Option<&watch_service::PersistedRegistryBinding>,
 ) -> anyhow::Result<watch_service::RebuildResult> {
+    let persisted_output = options.output_directory.as_ref().map_or_else(
+        || managed_output_directory(path, None),
+        |output| {
+            if output.is_absolute() {
+                output.clone()
+            } else {
+                path.join(output)
+            }
+        },
+    );
+    ensure_persisted_registry_binding(
+        &watch_service::read_build_config(&persisted_output),
+        registry_binding,
+    )?;
     if let Some(runtime_config) = runtime_config {
         let mut first_progress = Some(
             if options.changed_paths.is_none() && options.scope == watch_service::RebuildScope::Full
@@ -3353,6 +5042,8 @@ fn rebuild_watch_project_with_progress_factory(
                 runtime_config,
                 collect_runtime_telemetry: runtime_report.is_some(),
                 progress_reporter,
+                catalog,
+                registry_binding,
             })?;
             if runtime_report.is_some() {
                 hydrate_unchanged_graph_report(&mut outcome)?;
@@ -3482,8 +5173,8 @@ fn label_communities(
             "No LLM backend configured; keeping current community labels. Pass --backend or set an API key.",
         );
     };
-    let transport = LabelHttpTransport::new(&backend, model, timeout_seconds)?;
-    if let Some(warning) = &transport.warning {
+    let transport = LabelTransport::new(&backend, model, timeout_seconds)?;
+    if let Some(warning) = transport.warning() {
         eprintln!("[graphoxide] warning: {warning}");
     }
     let mut options = graphoxide_graph::LabelingOptions::new(&backend);
@@ -3572,6 +5263,46 @@ struct LabelHttpTransport {
     timeout: std::time::Duration,
     warning: Option<String>,
     require_success_status: bool,
+}
+
+#[derive(Debug)]
+enum LabelTransport {
+    Http(LabelHttpTransport),
+    Ollama(graphoxide_cli::ollama_transport::OllamaTransport),
+}
+
+impl LabelTransport {
+    fn new(
+        backend: &str,
+        requested_model: Option<&str>,
+        timeout_seconds: Option<f64>,
+    ) -> anyhow::Result<Self> {
+        if backend == "ollama" {
+            return graphoxide_cli::ollama_transport::OllamaTransport::for_labeling(
+                requested_model,
+                timeout_seconds,
+            )
+            .map(Self::Ollama);
+        }
+        LabelHttpTransport::new(backend, requested_model, timeout_seconds).map(Self::Http)
+    }
+
+    fn warning(&self) -> Option<&str> {
+        match self {
+            Self::Http(transport) => transport.warning.as_deref(),
+            Self::Ollama(transport) => transport.warning(),
+        }
+    }
+
+    fn call(
+        &self,
+        request: &graphoxide_graph::LabelRequest,
+    ) -> anyhow::Result<graphoxide_graph::LabelResponse> {
+        match self {
+            Self::Http(transport) => transport.call(request),
+            Self::Ollama(transport) => transport.call_label(request),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3759,7 +5490,7 @@ impl LabelHttpTransport {
         let inputs = resolve_label_transport_inputs(backend, requested_model, |name| {
             std::env::var(name).ok()
         })?;
-        let timeout = label_request_timeout(timeout_seconds)?;
+        let timeout = graphoxide_cli::ollama_transport::label_timeout(timeout_seconds)?;
         let mut client = reqwest::blocking::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(timeout);
@@ -3847,34 +5578,6 @@ impl LabelHttpTransport {
             },
         })
     }
-}
-
-fn label_request_timeout(explicit: Option<f64>) -> anyhow::Result<std::time::Duration> {
-    let (source, seconds) = if let Some(seconds) = explicit {
-        ("--timeout-seconds", seconds)
-    } else if let Ok(value) = std::env::var("GRAPHOXIDE_LLM_TIMEOUT_SECONDS") {
-        (
-            "GRAPHOXIDE_LLM_TIMEOUT_SECONDS",
-            value.parse::<f64>().map_err(|error| {
-                anyhow::anyhow!("GRAPHOXIDE_LLM_TIMEOUT_SECONDS must be a number: {error}")
-            })?,
-        )
-    } else if let Ok(value) = std::env::var("GRAPHIFY_API_TIMEOUT") {
-        (
-            "GRAPHIFY_API_TIMEOUT",
-            value.parse::<f64>().map_err(|error| {
-                anyhow::anyhow!("GRAPHIFY_API_TIMEOUT must be a number: {error}")
-            })?,
-        )
-    } else {
-        ("default", 600.0)
-    };
-    anyhow::ensure!(
-        seconds.is_finite() && seconds > 0.0,
-        "{source} must be a finite number greater than zero"
-    );
-    std::time::Duration::try_from_secs_f64(seconds)
-        .map_err(|error| anyhow::anyhow!("{source} is not a valid timeout: {error}"))
 }
 
 fn install_agent_platform(
@@ -4192,6 +5895,8 @@ fn rebuild(
     runtime_report: Option<&std::path::Path>,
     legacy_executor: bool,
     runtime: RuntimeOptions,
+    catalog: Option<&graphoxide_extract::catalog::Catalog>,
+    registry_binding: Option<&watch_service::PersistedRegistryBinding>,
 ) -> anyhow::Result<()> {
     rebuild_with_executor(
         path,
@@ -4202,6 +5907,8 @@ fn rebuild(
         runtime_report,
         legacy_executor,
         runtime,
+        catalog,
+        registry_binding,
     )
 }
 
@@ -4215,8 +5922,18 @@ fn rebuild_with_executor(
     runtime_report: Option<&std::path::Path>,
     legacy_executor: bool,
     runtime: RuntimeOptions,
+    catalog: Option<&graphoxide_extract::catalog::Catalog>,
+    registry_binding: Option<&watch_service::PersistedRegistryBinding>,
 ) -> anyhow::Result<()> {
     if legacy_executor {
+        anyhow::ensure!(
+            catalog.is_none(),
+            "--registry is not supported with --legacy-executor; omit --legacy-executor so capture verification guards publication"
+        );
+        ensure_persisted_registry_binding(
+            &watch_service::read_build_config(&managed_output_directory(path, None)),
+            None,
+        )?;
         runtime.resolve_for_executor(true)?;
         return rebuild_legacy(path, no_cluster, force, json, progress, runtime_report);
     }
@@ -4228,6 +5945,8 @@ fn rebuild_with_executor(
         progress,
         runtime_report,
         runtime.resolve()?,
+        catalog,
+        registry_binding,
     )
 }
 
@@ -4382,6 +6101,7 @@ fn legacy_rebuild_telemetry(
     telemetry
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_isolated(
     path: &std::path::Path,
     no_cluster: bool,
@@ -4390,6 +6110,8 @@ fn rebuild_isolated(
     progress: ProgressModeArg,
     runtime_report: Option<&std::path::Path>,
     runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
+    catalog: Option<&graphoxide_extract::catalog::Catalog>,
+    registry_binding: Option<&watch_service::PersistedRegistryBinding>,
 ) -> anyhow::Result<()> {
     let mut progress_reporter = BuildProgressReporter::new_adaptive(
         graphoxide_cli::build_telemetry::BuildOperation::Update,
@@ -4420,6 +6142,8 @@ fn rebuild_isolated(
         runtime_config,
         collect_runtime_telemetry: runtime_report.is_some(),
         progress_reporter,
+        catalog,
+        registry_binding,
     })?;
     if json || runtime_report.is_some() {
         hydrate_unchanged_graph_report(&mut outcome)?;
@@ -4614,6 +6338,8 @@ struct IsolatedRebuildRequest<'a> {
     runtime_config: graphoxide_index_runtime::IndexRuntimeConfig,
     collect_runtime_telemetry: bool,
     progress_reporter: BuildProgressReporter,
+    catalog: Option<&'a graphoxide_extract::catalog::Catalog>,
+    registry_binding: Option<&'a watch_service::PersistedRegistryBinding>,
 }
 
 fn telemetry_status(
@@ -4665,15 +6391,22 @@ fn rebuild_isolated_pass(
         runtime_config,
         collect_runtime_telemetry,
         mut progress_reporter,
+        catalog,
+        registry_binding,
     } = request;
     let started = std::time::Instant::now();
     let output = output_directory.join("graph.json");
     let manifest_path = output_directory.join("manifest.json");
     let persisted = watch_service::read_build_config(output_directory);
+    ensure_persisted_registry_binding(&persisted, registry_binding)?;
     let scan_started = std::time::Instant::now();
     let detect_options = graphoxide_extract::detect::DetectOptions {
         output_dir: Some(output_directory.to_path_buf()),
         extra_excludes: persisted.excludes,
+        tracked_paths: catalog
+            .filter(|catalog| catalog.restricts_scan_to_active_sources())
+            .map(|catalog| catalog.active_source_paths().map(str::to_owned).collect())
+            .unwrap_or_default(),
         honor_gitignore: persisted.honor_gitignore,
         ..Default::default()
     };
@@ -4885,6 +6618,7 @@ fn rebuild_isolated_pass(
         });
     if unchanged_candidate && !needs_ambiguous_baseline_audit {
         progress_reporter.phase(BuildProgressPhase::Publishing);
+        verify_catalog_before_publication(catalog)?;
         pending_manifest.commit()?;
         watch_service::clear_needs_update(output_directory)?;
         result.status = watch_service::RebuildStatus::Unchanged;
@@ -4951,6 +6685,7 @@ fn rebuild_isolated_pass(
     }
     if unchanged_candidate {
         progress_reporter.phase(BuildProgressPhase::Publishing);
+        verify_catalog_before_publication(catalog)?;
         pending_manifest.commit()?;
         watch_service::clear_needs_update(output_directory)?;
         result.status = watch_service::RebuildStatus::Unchanged;
@@ -5060,6 +6795,9 @@ fn rebuild_isolated_pass(
         for node in &mut graph.nodes {
             node.community = None;
         }
+        if let Some(catalog) = catalog {
+            catalog.apply_to_nodes(&mut graph.nodes)?;
+        }
         telemetry.stages_ms.build = graphoxide_cli::build_telemetry::elapsed_millis(build_started);
         result.stats.nodes = graph.nodes.len();
         result.stats.edges = graph.links.len();
@@ -5069,6 +6807,7 @@ fn rebuild_isolated_pass(
             .is_some_and(|existing| watch_service::same_topology(existing, &graph))
         {
             let write_started = std::time::Instant::now();
+            verify_catalog_before_publication(catalog)?;
             pending_manifest.commit()?;
             watch_service::clear_needs_update(output_directory)?;
             telemetry.stages_ms.write =
@@ -5084,6 +6823,7 @@ fn rebuild_isolated_pass(
         }
         drop(previous);
         let write_started = std::time::Instant::now();
+        verify_catalog_before_publication(catalog)?;
         let outcome = graphoxide_cli::build_guard::commit_build(
             &output,
             graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
@@ -5109,7 +6849,7 @@ fn rebuild_isolated_pass(
         telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
         telemetry.graph.nodes = result.stats.nodes;
         telemetry.graph.edges = result.stats.edges;
-        save_build_config_in(output_directory, true, None, None)?;
+        save_build_config_in(output_directory, true, None, None, registry_binding)?;
         watch_service::clear_needs_update(output_directory)?;
         result.clustered = false;
         return Ok(finish(
@@ -5131,6 +6871,7 @@ fn rebuild_isolated_pass(
     {
         progress_reporter.phase(BuildProgressPhase::Publishing);
         let write_started = std::time::Instant::now();
+        verify_catalog_before_publication(catalog)?;
         pending_manifest.commit()?;
         watch_service::clear_needs_update(output_directory)?;
         telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
@@ -5150,9 +6891,13 @@ fn rebuild_isolated_pass(
         graphoxide_graph::cluster::remap_communities_to_previous(&mut graph, previous);
     }
     drop(previous);
+    if let Some(catalog) = catalog {
+        catalog.apply_to_nodes(&mut graph.nodes)?;
+    }
     telemetry.stages_ms.cluster = graphoxide_cli::build_telemetry::elapsed_millis(cluster_started);
     progress_reporter.phase(BuildProgressPhase::Publishing);
     let write_started = std::time::Instant::now();
+    verify_catalog_before_publication(catalog)?;
     let outcome = graphoxide_cli::build_guard::commit_build(
         &output,
         graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
@@ -5174,7 +6919,7 @@ fn rebuild_isolated_pass(
             progress_reporter,
         ));
     }
-    save_build_config_in(output_directory, false, None, None)?;
+    save_build_config_in(output_directory, false, None, None, registry_binding)?;
     telemetry.stages_ms.write = graphoxide_cli::build_telemetry::elapsed_millis(write_started);
     telemetry.graph.nodes = result.stats.nodes;
     telemetry.graph.edges = result.stats.edges;
@@ -5193,12 +6938,14 @@ fn save_build_config_in(
     no_cluster: bool,
     excludes: Option<&[String]>,
     honor_gitignore: Option<bool>,
+    registry_binding: Option<&watch_service::PersistedRegistryBinding>,
 ) -> anyhow::Result<()> {
-    watch_service::write_build_config_with_cluster(
+    watch_service::write_build_config_with_cluster_and_registry_binding(
         output_directory,
         excludes,
         honor_gitignore,
         Some(!no_cluster),
+        registry_binding.cloned(),
     )?;
     Ok(())
 }
@@ -5933,13 +7680,18 @@ mod tests {
         incremental_graph_budget_after_retained_scan, load_learning_overlay,
         optional_baseline_leaves_full_graph_headroom, read_incremental_baseline,
         relevant_watch_paths, resolve_label_transport_inputs, run_project_build_with_cancellation,
-        stale_local_sources, watch_change_requires_structural_rebuild, Cli, Command,
-        IncrementalGraphBudget, ProgressModeArg, ProjectBuildOptions, ProjectBuildWorkflow,
-        RuntimeIoBackendArg, RuntimeOptions,
+        stale_local_sources, verify_catalog_before_publication,
+        watch_change_requires_structural_rebuild, Cli, Command, IncrementalGraphBudget,
+        ProgressModeArg, ProjectBuildOptions, ProjectBuildWorkflow, RuntimeIoBackendArg,
+        RuntimeOptions, WikiCommand,
     };
     use clap::Parser;
     use graphoxide_cli::build_progress::{BuildProgressMode, BuildProgressReporter};
-    use std::path::{Path, PathBuf};
+    use sha2::{Digest as _, Sha256};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     fn god_test_graph() -> graphoxide_core::KnowledgeGraph {
         let node = |id: &str, label: &str, source: &str| graphoxide_core::Node {
@@ -5981,6 +7733,104 @@ mod tests {
             extra: Default::default(),
         });
         graph
+    }
+
+    #[test]
+    fn catalog_source_change_blocks_raw_and_clustered_publication() {
+        for raw in [true, false] {
+            let fixture = tempfile::tempdir().expect("fixture");
+            let project = fixture.path().join("project");
+            let source = project.join("docs/page.md");
+            fs::create_dir_all(source.parent().expect("source parent")).expect("source parent");
+            fs::write(&source, b"captured source").expect("source");
+            let digest = hex::encode(Sha256::digest(b"captured source"));
+            fs::create_dir(project.join("catalog")).expect("catalog directory");
+            fs::write(
+                project.join("catalog/catalog.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "version": 1,
+                    "entries": [{
+                        "source_id": "source-one",
+                        "capture_id": "capture-one",
+                        "source_path": "docs/page.md",
+                        "sha256": digest,
+                        "captured_at": "2026-08-24T12:34:56Z",
+                        "accessed_at": "2026-08-24T12:35:56Z",
+                        "updated_at": "2026-08-24T12:35:56Z",
+                        "representation": "markdown",
+                        "source_system": "sharepoint",
+                        "url": "https://sharepoint.example.test/sites/team/source",
+                        "location": "Team/Knowledge/source.md"
+                    }]
+                }))
+                .expect("catalog JSON"),
+            )
+            .expect("catalog");
+            let catalog =
+                graphoxide_extract::catalog::Catalog::load(&project, Path::new("catalog"))
+                    .expect("catalog admission");
+            fs::write(&source, b"changed source").expect("source mutation after admission");
+
+            let output = project.join("graph.json");
+            let manifest = project.join("manifest.json");
+            fs::write(&output, b"accepted graph").expect("accepted graph");
+            fs::write(&manifest, b"accepted manifest").expect("accepted manifest");
+            let node = graphoxide_core::Node {
+                id: "page".into(),
+                label: "Page".into(),
+                file_type: "document".into(),
+                source_file: "docs/page.md".into(),
+                source_location: None,
+                community: None,
+                extra: Default::default(),
+            };
+            let result = verify_catalog_before_publication(Some(&catalog)).and_then(|_| {
+                if raw {
+                    let extraction = graphoxide_core::Extraction {
+                        nodes: vec![node],
+                        ..Default::default()
+                    };
+                    graphoxide_cli::build_guard::commit_build(
+                        &output,
+                        graphoxide_cli::build_guard::BuildArtifact::Raw(&[extraction]),
+                        graphoxide_cli::build_guard::BuildProgress::complete(),
+                        true,
+                        || {
+                            fs::write(&manifest, b"new manifest")?;
+                            Ok(())
+                        },
+                    )
+                    .map(|_| ())
+                } else {
+                    let graph = graphoxide_core::KnowledgeGraph {
+                        nodes: vec![node],
+                        ..Default::default()
+                    };
+                    graphoxide_cli::build_guard::commit_build(
+                        &output,
+                        graphoxide_cli::build_guard::BuildArtifact::Graph(&graph),
+                        graphoxide_cli::build_guard::BuildProgress::complete(),
+                        true,
+                        || {
+                            fs::write(&manifest, b"new manifest")?;
+                            Ok(())
+                        },
+                    )
+                    .map(|_| ())
+                }
+            });
+
+            let error = result.expect_err("changed catalog source must block publication");
+            assert!(error.to_string().contains("catalog sha256"), "{error:#}");
+            assert_eq!(
+                fs::read(&output).expect("graph after rejection"),
+                b"accepted graph"
+            );
+            assert_eq!(
+                fs::read(&manifest).expect("manifest after rejection"),
+                b"accepted manifest"
+            );
+        }
     }
 
     #[test]
@@ -6279,6 +8129,7 @@ mod tests {
             Command::Update {
                 runtime: RuntimeOptions {
                     memory_budget_bytes: Some(1_048_576),
+                    max_input_bytes: None,
                     io_workers: Some(1),
                     compute_workers: Some(1),
                     io_backend: Some(RuntimeIoBackendArg::Threaded),
@@ -6304,6 +8155,7 @@ mod tests {
             Command::Watch {
                 runtime: RuntimeOptions {
                     memory_budget_bytes: Some(1_048_576),
+                    max_input_bytes: None,
                     io_workers: Some(1),
                     compute_workers: Some(1),
                     io_backend: Some(RuntimeIoBackendArg::Threaded),
@@ -6312,6 +8164,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn configured_input_cap_resolves_exactly_and_rejects_the_legacy_executor() {
+        let extract = Cli::try_parse_from([
+            "graphoxide",
+            "extract",
+            ".",
+            "--max-input-bytes",
+            "134217728",
+        ])
+        .expect("parse configured source cap");
+        let Command::Extract {
+            build: ProjectBuildOptions { runtime, .. },
+            ..
+        } = extract.command
+        else {
+            panic!("expected extract command");
+        };
+
+        assert_eq!(runtime.max_input_bytes, Some(134_217_728));
+        assert_eq!(
+            runtime
+                .resolve()
+                .expect("resolve configured source cap")
+                .max_input_bytes,
+            134_217_728
+        );
+        assert!(runtime.resolve_for_executor(true).is_err());
     }
 
     #[test]
@@ -6379,6 +8260,265 @@ mod tests {
     }
 
     #[test]
+    fn catalog_and_wiki_commands_parse_with_the_expected_contract() {
+        let index =
+            Cli::try_parse_from(["graphoxide", "index", "sources", "--catalog", "metadata"])
+                .expect("parse catalog-aware index");
+        assert!(matches!(
+            index.command,
+            Command::Index {
+                build: ProjectBuildOptions {
+                    path,
+                    catalog: Some(catalog),
+                    ..
+                },
+            } if path == Path::new("sources") && catalog == Path::new("metadata")
+        ));
+
+        let wiki_index = Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "index",
+            "wiki",
+            "--config",
+            "wiki.json",
+        ])
+        .expect("parse wiki index");
+        assert!(matches!(
+            wiki_index.command,
+            Command::Wiki {
+                command: WikiCommand::Index { root, config },
+            } if root == Path::new("wiki") && config == Path::new("wiki.json")
+        ));
+
+        let wiki_check = Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "check",
+            "wiki",
+            "--config",
+            "wiki.json",
+            "--catalog",
+            "catalog",
+            "--catalog-root",
+            "raw",
+            "--graph",
+            "graph.json",
+        ])
+        .expect("parse catalog-backed wiki check");
+        assert!(matches!(
+            wiki_check.command,
+            Command::Wiki {
+                command: WikiCommand::Check {
+                    root,
+                    config,
+                    catalog: Some(catalog),
+                    catalog_root: Some(catalog_root),
+                    graph: Some(graph),
+                    plan: None,
+                    json: false,
+                },
+            } if root == Path::new("wiki")
+                && config == Path::new("wiki.json")
+                && catalog == Path::new("catalog")
+                && catalog_root == Path::new("raw")
+                && graph == Path::new("graph.json")
+        ));
+
+        let render = Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "render",
+            "raw",
+            "--graph",
+            "graph.json",
+            "--catalog",
+            "catalog",
+            "--output",
+            "wiki",
+        ])
+        .expect("parse wiki render");
+        assert!(matches!(
+            render.command,
+            Command::Wiki {
+                command: WikiCommand::Render {
+                    source_root,
+                    graph,
+                    catalog: Some(catalog),
+                    plan: None,
+                    output,
+                },
+            } if source_root == Some(PathBuf::from("raw"))
+                && graph == Path::new("graph.json")
+                && catalog == Path::new("catalog")
+                && output == Path::new("wiki")
+        ));
+
+        let canonical_render = Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "render",
+            "--graph",
+            "graph.json",
+            "--catalog",
+            "catalog",
+            "--plan",
+            "wiki-plan.json",
+            "--output",
+            "wiki",
+        ])
+        .expect("parse canonical wiki render");
+        assert!(matches!(
+            canonical_render.command,
+            Command::Wiki {
+                command: WikiCommand::Render {
+                    source_root: None,
+                    graph,
+                    catalog: Some(catalog),
+                    plan: Some(plan),
+                    output,
+                },
+            } if graph == Path::new("graph.json")
+                && catalog == Path::new("catalog")
+                && plan == Path::new("wiki-plan.json")
+                && output == Path::new("wiki")
+        ));
+
+        let plan = Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "plan",
+            "--graph",
+            "graph.json",
+            "--catalog",
+            "catalog",
+            "--output",
+            "wiki-plan.proposed.json",
+            "--model",
+            "llama3",
+            "--consent",
+            "send-source-text-to-local-ollama",
+            "--ollama-native",
+        ])
+        .expect("parse wiki plan proposal");
+        assert!(matches!(
+            plan.command,
+            Command::Wiki {
+                command: WikiCommand::Plan {
+                    graph,
+                    catalog,
+                    output,
+                    model,
+                    consent,
+                    ollama_url,
+                    ollama_native,
+                    provider_profile,
+                    registry_tree,
+                },
+            } if graph == Path::new("graph.json")
+                && catalog == Path::new("catalog")
+                && output == Path::new("wiki-plan.proposed.json")
+                && model == "llama3"
+                && consent == "send-source-text-to-local-ollama"
+                && ollama_url == graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL
+                && ollama_native
+                && provider_profile.is_none()
+                && registry_tree.is_none()
+        ));
+
+        let draft = Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "draft",
+            "raw",
+            "--graph",
+            "graph.json",
+            "--catalog",
+            "catalog",
+            "--output",
+            "drafts",
+            "--model",
+            "llama3",
+            "--scope",
+            "source",
+            "--scope",
+            "topic",
+            "--consent",
+            "send-source-text-to-local-ollama",
+        ])
+        .expect("parse wiki draft");
+        assert!(matches!(
+            draft.command,
+            Command::Wiki {
+                command: WikiCommand::Draft {
+                    source_root,
+                    graph,
+                    catalog: Some(catalog),
+                    plan: None,
+                    output,
+                    model,
+                    scopes,
+                    consent,
+                    ollama_url,
+                    ollama_native,
+                    provider_profile,
+                    registry_tree,
+                },
+            } if source_root == Path::new("raw")
+                && graph == Path::new("graph.json")
+                && catalog == Path::new("catalog")
+                && output == Path::new("drafts")
+                && model == "llama3"
+                && scopes == vec!["source", "topic"]
+                && consent == "send-source-text-to-local-ollama"
+                && ollama_url == graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL
+                && !ollama_native
+                && provider_profile.is_none()
+                && registry_tree.is_none()
+        ));
+
+        let no_scope = Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "draft",
+            "raw",
+            "--graph",
+            "graph.json",
+            "--output",
+            "drafts",
+            "--model",
+            "llama3",
+            "--consent",
+            "send-source-text-to-local-ollama",
+        ])
+        .expect("parse wiki draft without a scope");
+        assert!(matches!(
+            no_scope.command,
+            Command::Wiki {
+                command: WikiCommand::Draft { scopes, .. },
+            } if scopes.is_empty()
+        ));
+
+        assert!(Cli::try_parse_from([
+            "graphoxide",
+            "wiki",
+            "draft",
+            "raw",
+            "--graph",
+            "graph.json",
+            "--output",
+            "drafts",
+            "--model",
+            "llama3",
+            "--consent",
+            "send-source-text-to-local-ollama",
+            "--scope",
+            "unsupported",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn cancelled_index_cli_path_preserves_seeded_artifacts() {
         use std::fs;
 
@@ -6404,6 +8544,9 @@ mod tests {
                 no_cluster: false,
                 force: false,
                 postgres: None,
+                catalog: None,
+                registry: None,
+                registry_origin: None,
                 allow_partial: false,
                 timing: false,
                 json: false,
@@ -6542,6 +8685,8 @@ mod tests {
                 BuildProgressMode::Never,
             )
             .expect("silent progress reporter"),
+            catalog: None,
+            registry_binding: None,
         })
         .expect("isolated watch pass");
         assert_eq!(
@@ -6584,6 +8729,8 @@ mod tests {
                 BuildProgressMode::Never,
             )
             .expect("silent progress reporter"),
+            catalog: None,
+            registry_binding: None,
         })
         .expect("unchanged isolated watch pass");
         assert_eq!(
@@ -6727,6 +8874,8 @@ mod tests {
                 BuildProgressMode::Never,
             )
             .expect("silent progress reporter"),
+            catalog: None,
+            registry_binding: None,
         })
         .expect("initial isolated pass");
 
@@ -6763,6 +8912,7 @@ mod tests {
                 compute_workers: 1,
                 io_backend: graphoxide_index_runtime::IoBackendSelection::Threaded,
                 read_batch_bytes: 4 * 1024,
+                max_input_bytes: graphoxide_index_runtime::DEFAULT_MAX_INPUT_BYTES,
             },
             collect_runtime_telemetry: false,
             progress_reporter: BuildProgressReporter::new_adaptive(
@@ -6770,6 +8920,8 @@ mod tests {
                 BuildProgressMode::Never,
             )
             .expect("silent progress reporter"),
+            catalog: None,
+            registry_binding: None,
         }) {
             Ok(_) => panic!("oversized baseline must fail"),
             Err(error) => error,
@@ -6814,6 +8966,8 @@ mod tests {
                     BuildProgressMode::Never,
                 )
                 .expect("silent progress reporter"),
+                catalog: None,
+                registry_binding: None,
             };
             super::rebuild_isolated_pass(request(false)).expect("initial Code baseline");
             let manifest_path = output.join("manifest.json");
@@ -6967,6 +9121,8 @@ mod tests {
                     BuildProgressMode::Never,
                 )
                 .expect("silent progress reporter"),
+                catalog: None,
+                registry_binding: None,
             };
             super::rebuild_isolated_pass(request(false)).expect("initial Code baseline");
             let graph_path = output.join("graph.json");

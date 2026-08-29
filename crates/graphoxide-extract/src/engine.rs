@@ -413,10 +413,16 @@ fn extract_as_with_path_probes(
         lang = crate::languages::named(prepared.language);
     }
     let Some(lang) = lang else {
-        if allow_path_probes {
-            return crate::fallback::extract_text(path, source_file);
-        }
-        return crate::fallback::extract_text_bytes(path, source_file, source);
+        let fallback = if allow_path_probes {
+            crate::fallback::extract_text(path, source_file)
+        } else {
+            crate::fallback::extract_text_bytes(path, source_file, source)
+        };
+        return fallback.or_else(|error| {
+            UNSUPPORTED_FILE_INVENTORY_ENABLED
+                .then(|| unsupported_file_inventory(path, source_file, source))
+                .ok_or(error)
+        });
     };
     if matches!(lang.name, "bash" | "json") {
         if allow_path_probes {
@@ -5184,6 +5190,19 @@ mod tests {
         assert_eq!(extraction.nodes[0].extra["type"], "format_inventory");
         graphoxide_core::validate::validate_extraction(&extraction)
             .expect("engine-emitted unsupported inventory must be schema-valid");
+    }
+
+    #[test]
+    fn unknown_binary_extensions_emit_t0_inventory_instead_of_failing_utf8_fallback() {
+        let extraction = extract_as_bytes(
+            Path::new("data/controller.electrical"),
+            "data/controller.electrical",
+            &[0xff, 0x00, 0x81, 0x42],
+        )
+        .expect("unknown binary inventory");
+        assert_eq!(extraction.nodes.len(), 1);
+        assert_eq!(extraction.nodes[0].extra["format"], "unsupported_file");
+        assert_eq!(extraction.nodes[0].extra["parse_status"], "inventory_only");
     }
 
     #[test]

@@ -158,7 +158,7 @@ fn graph_audit_uses_the_configured_output_for_cache_and_schema_migration() {
     let _: Value = serde_json::from_slice(&audit.stdout).expect("graph audit JSON");
     assert!(!retired.exists(), "pre-redaction cache was not retired");
     assert!(output.join("manifest.json").is_file());
-    let current = output.join("cache/ast/v31");
+    let current = output.join("cache/ast/v32");
     assert!(
         current
             .read_dir()
@@ -174,11 +174,15 @@ fn graph_audit_uses_the_configured_output_for_cache_and_schema_migration() {
     for secret in [SOURCE_SECRET, RETIRED_SECRET] {
         assert!(!stdout(&audit).contains(secret));
         assert!(!stderr(&audit).contains(secret));
-        assert!(
-            !tree_contains_bytes(&output, secret.as_bytes()),
-            "configured output retained {secret}"
-        );
     }
+    assert!(
+        tree_contains_bytes(&output, SOURCE_SECRET.as_bytes()),
+        "configured output dropped bounded source evidence"
+    );
+    assert!(
+        !tree_contains_bytes(&output, RETIRED_SECRET.as_bytes()),
+        "configured output retained retired cache bytes"
+    );
 }
 
 #[test]

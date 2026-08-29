@@ -51,3 +51,4 @@ bzip2.workspace = true
 xz2.workspace = true
 zstd.workspace = true
 lz4_flex.workspace = true
+rusqlite.workspace = true
