@@ -20,9 +20,10 @@ test('requires workspace trust for graph artifact mutations', () => {
 });
 
 test('adds one validated workspace registry binding to graph mutations', () => {
+  const expectedRegistry = path.resolve('/work/example', '../graphoxide-catalog');
   assert.deepEqual(
     registryBindingArguments('/work/example', { tree: '../graphoxide-catalog', origin: 'internal-kbs' }),
-    ['--registry', '/work/graphoxide-catalog', '--registry-origin', 'internal-kbs'],
+    ['--registry', expectedRegistry, '--registry-origin', 'internal-kbs'],
   );
   assert.deepEqual(registryBindingArguments('/work/example', undefined), []);
   for (const binding of [
