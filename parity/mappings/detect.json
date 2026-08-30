@@ -1702,16 +1702,6 @@
       ]
     },
     {
-      "upstream": "tests/test_detect.py::test_detect_records_unclassified_extensionless_files",
-      "targets": [
-        {
-          "runner": "rust",
-          "package": "graphoxide-extract",
-          "id": "test_detect_records_unclassified_extensionless_files"
-        }
-      ]
-    },
-    {
       "upstream": "tests/test_detect.py::test_detect_unclassified_empty_when_all_supported",
       "targets": [
         {

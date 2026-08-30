@@ -41,7 +41,7 @@
     {"upstream":"tests/test_serve_http.py::test_api_key_bearer_scheme_case_insensitive","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_api_key_bearer_scheme_case_insensitive"}]},
     {"upstream":"tests/test_serve_http.py::test_custom_mount_path","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_custom_mount_path"}]},
     {"upstream":"tests/test_serve_http.py::test_tools_list_over_http","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_tools_list_over_http"}]},
-    {"upstream":"tests/test_serve_http.py::test_project_path_is_optional_on_every_tool","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_project_path_is_optional_on_every_tool"}]},
+    {"upstream":"tests/test_serve_http.py::test_project_path_is_optional_on_every_tool","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_tools_declare_their_required_graph_or_wiki_context"}]},
     {"upstream":"tests/test_serve_http.py::test_project_path_routes_to_that_projects_graph","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_project_path_routes_to_that_projects_graph"}]},
     {"upstream":"tests/test_serve_http.py::test_max_server_contexts_parsing[None-8]","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_max_server_contexts_parsing_none_8"}]},
     {"upstream":"tests/test_serve_http.py::test_max_server_contexts_parsing[-8]","targets":[{"runner":"rust","package":"graphoxide-mcp","id":"http::tests::test_max_server_contexts_parsing_blank_8"}]},

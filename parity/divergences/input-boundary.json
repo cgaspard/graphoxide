@@ -35,6 +35,17 @@
       "reason": "Graphoxide keeps one real-path incremental row per physical target when symlink following is enabled, while Graphify retains the alias row too."
     },
     {
+      "upstream": "tests/test_detect.py::test_detect_records_unclassified_extensionless_files",
+      "targets": [
+        {
+          "runner": "rust",
+          "package": "graphoxide-extract",
+          "id": "test_detect_admits_unknown_extensionless_files_as_t0_inventory_candidates"
+        }
+      ],
+      "reason": "Graphoxide admits unknown extensionless files (Dockerfile, Makefile, LICENSE, ...) as T0 document inventory candidates, while Graphify records them in the unclassified list."
+    },
+    {
       "upstream": "tests/test_extract.py::test_collect_files_follows_symlinked_directory",
       "targets": [
         {
