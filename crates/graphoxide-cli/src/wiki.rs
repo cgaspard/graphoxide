@@ -1013,8 +1013,14 @@ impl OutputDirectory {
                     stat.st_mode & libc::S_IFMT == libc::S_IFREG,
                     "refusing non-file wiki output"
                 );
-                // `mode_t` is u32 on Linux and u16 on macOS; widen uniformly.
-                Ok(Some(u32::from(stat.st_mode & 0o777)))
+                // `mode_t` is u32 on Linux and u16 on macOS; widen on the
+                // platforms that need it (a uniform conversion is a clippy
+                // useless_conversion on Linux).
+                #[cfg(target_os = "macos")]
+                let mode: u32 = u32::from(stat.st_mode) & 0o777;
+                #[cfg(not(target_os = "macos"))]
+                let mode: u32 = stat.st_mode & 0o777;
+                Ok(Some(mode))
             } else {
                 let error = std::io::Error::last_os_error();
                 if error.kind() == std::io::ErrorKind::NotFound {
