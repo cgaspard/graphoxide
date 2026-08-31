@@ -72,6 +72,18 @@ toml = "0.9"
 postgres = "0.19.14"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 
+# No debuginfo in the dev profile: it measurably slows compilation and
+# linking of this large workspace, and local iteration is the dominant use of
+# the dev profile. Release builds are unaffected. Use
+# `cargo build --profile dev-debug` (or set CARGO_PROFILE_DEV_DEBUG=2 ad hoc)
+# when you need local-variable inspection in a debugger.
+[profile.dev]
+debug = 0
+
+[profile.dev-debug]
+inherits = "dev"
+debug = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
