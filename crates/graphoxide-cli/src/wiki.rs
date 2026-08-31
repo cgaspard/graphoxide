@@ -894,23 +894,73 @@ impl OutputDirectory {
                     file: open_directory_nofollow(path)?,
                 });
             }
-            // Resolve stable ancestor symlinks before the no-follow walk
-            // (macOS maps /var to /private/var and /tmp to /private/tmp).
-            // The final component is still opened without following links,
-            // so a symlinked leaf is rejected on every supported platform.
-            let name = path
-                .file_name()
-                .filter(|name| !name.is_empty())
-                .context("output directory must have a final component")?;
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .context("output directory must have a parent")?;
-            let canonical_parent = fs::canonicalize(parent)
-                .with_context(|| format!("resolve output directory {}", path.display()))?;
-            Ok(Self {
-                file: open_directory_nofollow(&canonical_parent.join(name))?,
-            })
+            // Component-wise no-follow walk from the root. Symlinked
+            // components are rejected; on macOS the sole exception is a
+            // symlink directly under the filesystem root (a stable OS
+            // mapping such as /var -> /private/var - only the OS can
+            // create root-level symlinks), which is resolved and the walk
+            // continues against the real target.
+            let root = CString::new("/").expect("root path contains no NUL");
+            // SAFETY: the root C string remains valid for the call.
+            let fd = unsafe {
+                libc::open(
+                    root.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: open returned an owned descriptor above.
+            let mut directory = unsafe { fs::File::from_raw_fd(fd) };
+            let components = path.components().collect::<Vec<_>>();
+            let mut position = 0;
+            while position < components.len() {
+                let component = components[position];
+                match component {
+                    Component::RootDir => position += 1,
+                    Component::Normal(name) => {
+                        let name_c = c_name(name)?;
+                        match open_directory_at(directory.as_raw_fd(), &name_c) {
+                            Ok(next) => {
+                                directory = next;
+                                position += 1;
+                            }
+                            Err(error) => {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    // Probe the failing component without
+                                    // following it.
+                                    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+                                    let status = unsafe {
+                                        libc::fstatat(
+                                            directory.as_raw_fd(),
+                                            name_c.as_ptr(),
+                                            &mut stat,
+                                            libc::AT_SYMLINK_NOFOLLOW,
+                                        )
+                                    };
+                                    if status == 0
+                                        && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
+                                        && position == 1
+                                    {
+                                        let rebased = fs::canonicalize(Path::new("/").join(name))
+                                            .with_context(|| {
+                                            format!("resolve output directory {}", path.display())
+                                        })?;
+                                        directory = open_directory_nofollow(&rebased)?;
+                                        position += 1;
+                                        continue;
+                                    }
+                                }
+                                return Err(error);
+                            }
+                        }
+                    }
+                    _ => anyhow::bail!("unsafe output directory path"),
+                }
+            }
+            Ok(Self { file: directory })
         }
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
