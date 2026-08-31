@@ -112,6 +112,11 @@ Disable sccache (delete the config line) when running
 `npm run coverage:rust` so the llvm-cov instrumentation is never served from a
 stale cache.
 
+If `target/` ever balloons (profile or toolchain churn leaves thousands of
+stale `debug/incremental` sessions behind - this has grown to 300+ GiB in
+this repo), `cargo clean` is always safe: everything is regenerable, and the
+sccache cache keeps the rebuild warm across worktrees.
+
 ## Issues, branches, and worktrees
 
 Create the GitHub issue first. Name every issue worktree and its branch from the
