@@ -361,7 +361,10 @@ fn prune_stale_fact_run_staging(staging_root: &Path) -> anyhow::Result<()> {
                 let lock = OpenOptions::new().read(true).write(true).open(&lock_path)?;
                 match FileExt::try_lock_exclusive(&lock) {
                     Ok(()) => Some(lock),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                    // Another live owner (a sibling build, or an antivirus
+                    // scan) still holds this stale run's lock. Leave it in
+                    // place and reconsider it on the next build.
+                    Err(error) if crate::fs_lock::is_lock_contention(&error) => continue,
                     Err(error) => return Err(error.into()),
                 }
             }
@@ -839,6 +842,34 @@ mod tests {
             retained,
             MAX_RETAINED_STALE_FACT_RUN_DIRECTORIES + 1,
             "two stale crash directories plus the active build are retained"
+        );
+        active.cleanup().expect("clean active staging");
+    }
+
+    #[test]
+    fn contended_stale_run_lock_is_skipped_without_failing_the_build() {
+        let temp = tempfile::tempdir().expect("temporary output");
+        let staging_root = temp.path().join("staging");
+        fs::create_dir(&staging_root).expect("create staging root");
+        let stale = staging_root.join(format!("{FACT_RUN_STAGING_PREFIX}contended-000000"));
+        fs::create_dir(&stale).expect("create stale run directory");
+        let lock_path = stale.join(FACT_RUN_ACTIVE_LOCK);
+        File::create(&lock_path).expect("create lock marker");
+        // Simulate another live owner (a sibling build, or an antivirus
+        // scan on Windows) still holding the lock range.
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open the stale lock");
+        holder.lock_exclusive().expect("hold the stale lock");
+
+        let active = create_fact_run_staging(temp.path())
+            .expect("a contended stale lock must be skipped, not a build failure");
+
+        assert!(
+            stale.is_dir(),
+            "a contended stale run must be retained for its live owner"
         );
         active.cleanup().expect("clean active staging");
     }

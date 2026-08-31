@@ -229,7 +229,7 @@ impl RebuildLockGuard {
         let locked = if blocking {
             match file.try_lock_exclusive() {
                 Ok(()) => Ok(true),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if crate::fs_lock::is_lock_contention(&error) => {
                     on_contention();
                     file.lock_exclusive().map(|_| true)
                 }
@@ -238,7 +238,7 @@ impl RebuildLockGuard {
         } else {
             match file.try_lock_exclusive() {
                 Ok(()) => Ok(true),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+                Err(error) if crate::fs_lock::is_lock_contention(&error) => Ok(false),
                 Err(error) => Err(error),
             }
         }?;
@@ -1593,6 +1593,23 @@ mod tests {
             false
         ));
         assert!(!filter.accepts(&root.path().join(".git/config"), false));
+    }
+
+    #[test]
+    fn contended_rebuild_lock_reports_queued_instead_of_erroring() {
+        let out = tempfile::tempdir().expect("temporary output");
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(out.path().join(REBUILD_LOCK))
+            .expect("open the rebuild lock");
+        holder.lock_exclusive().expect("hold the rebuild lock");
+
+        let contended = RebuildLockGuard::acquire(out.path(), false)
+            .expect("a contended lock must be reported, not fail the rebuild");
+        assert!(contended.is_none(), "the live owner keeps the rebuild lock");
     }
 }
 
