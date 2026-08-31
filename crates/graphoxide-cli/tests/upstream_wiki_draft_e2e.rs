@@ -1,8 +1,8 @@
 //! End-to-end coverage for the catalog-index-to-local-draft workflow.
 //!
-//! Secure wiki publication (draft/render) is only supported on Linux AMD64,
-//! so the whole suite is gated to that platform.
-#![cfg(target_os = "linux")]
+//! Secure wiki publication (draft/render) is supported on Linux x86_64 and
+//! macOS, so the whole suite is gated to those platforms.
+#![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
@@ -733,8 +733,11 @@ fn catalog_aware_draft_publishes_pdf_docx_and_inventory_sources() {
 #[test]
 fn catalog_index_to_local_draft_emits_cited_wiki_pages() {
     let temporary = tempfile::tempdir().expect("tempdir");
-    let raw = temporary.path().join("raw");
-    let wiki = temporary.path().join("wiki");
+    // Catalog admission requires a symlink-free project root; macOS resolves
+    // /var to /private/var, so canonicalize the fixture root before use.
+    let root = fs::canonicalize(temporary.path()).expect("canonical tempdir");
+    let raw = root.join("raw");
+    let wiki = root.join("wiki");
     let source_path = "docs/source [draft].md";
     let source = raw.join(source_path);
     let source_text = b"Catalog-backed source text for the local wiki draft.\n";

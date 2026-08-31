@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 use serde_json::json;
 use std::{fs, path::Path, process::Command};

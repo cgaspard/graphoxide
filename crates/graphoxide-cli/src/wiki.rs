@@ -10,7 +10,7 @@ use std::{
     io::Write as _,
     path::{Component, Path, PathBuf},
 };
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 use std::{
     ffi::CString,
     io::Read as _,
@@ -31,7 +31,7 @@ const MAX_CANONICAL_PLAN_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DRAFT_SOURCES: usize = 12;
 pub(crate) const MAX_CANONICAL_DRAFT_SECTIONS: usize = 8;
 const MAX_CANONICAL_QUALITY_DIAGNOSTICS: usize = 256;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 static OUTPUT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,8 +528,12 @@ fn read_config(root: &OutputDirectory, relative: &Path, path: &Path) -> anyhow::
 }
 
 fn config_relative_path(root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    // `root` is canonicalized by every caller; resolve an absolute config
+    // path the same way so the prefix comparison is consistent on platforms
+    // with stable ancestor symlinks (macOS maps /var to /private/var).
     let path = if path.is_absolute() {
-        path.to_path_buf()
+        path.canonicalize()
+            .with_context(|| format!("resolve wiki config path {}", path.display()))?
     } else {
         root.join(path)
     };
@@ -860,43 +864,113 @@ fn read_output(
         .with_context(|| format!("generated wiki output {} is not UTF-8", path.display()))
 }
 
-/// A verified directory descriptor used for Linux-only wiki publication.
+/// A verified directory descriptor used for the certified secure wiki
+/// publication paths (Linux x86_64 and macOS).
 ///
 /// All creation and replacement below is relative to this descriptor, so a
 /// later rename of an ancestor cannot redirect output outside the directory
 /// that was opened without following links.
 pub(crate) struct OutputDirectory {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
     file: fs::File,
 }
 
 pub(crate) fn require_secure_publication_support() -> anyhow::Result<()> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
     {
         Ok(())
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
+    anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
 }
 
 impl OutputDirectory {
     pub(crate) fn open_existing(path: &Path) -> anyhow::Result<Self> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             anyhow::ensure!(path.is_absolute(), "output directory must be absolute");
-            Ok(Self {
-                file: open_directory_nofollow(path)?,
-            })
+            if path == Path::new("/") {
+                return Ok(Self {
+                    file: open_directory_nofollow(path)?,
+                });
+            }
+            // Component-wise no-follow walk from the root. Symlinked
+            // components are rejected; on macOS the sole exception is a
+            // symlink directly under the filesystem root (a stable OS
+            // mapping such as /var -> /private/var - only the OS can
+            // create root-level symlinks), which is resolved and the walk
+            // continues against the real target.
+            let root = CString::new("/").expect("root path contains no NUL");
+            // SAFETY: the root C string remains valid for the call.
+            let fd = unsafe {
+                libc::open(
+                    root.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: open returned an owned descriptor above.
+            let mut directory = unsafe { fs::File::from_raw_fd(fd) };
+            let components = path.components().collect::<Vec<_>>();
+            let mut position = 0;
+            while position < components.len() {
+                let component = components[position];
+                match component {
+                    Component::RootDir => position += 1,
+                    Component::Normal(name) => {
+                        let name_c = c_name(name)?;
+                        match open_directory_at(directory.as_raw_fd(), &name_c) {
+                            Ok(next) => {
+                                directory = next;
+                                position += 1;
+                            }
+                            Err(error) => {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    // Probe the failing component without
+                                    // following it.
+                                    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+                                    let status = unsafe {
+                                        libc::fstatat(
+                                            directory.as_raw_fd(),
+                                            name_c.as_ptr(),
+                                            &mut stat,
+                                            libc::AT_SYMLINK_NOFOLLOW,
+                                        )
+                                    };
+                                    if status == 0
+                                        && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
+                                        && position == 1
+                                    {
+                                        let rebased = fs::canonicalize(Path::new("/").join(name))
+                                            .with_context(|| {
+                                            format!("resolve output directory {}", path.display())
+                                        })?;
+                                        directory = open_directory_nofollow(&rebased)?;
+                                        position += 1;
+                                        continue;
+                                    }
+                                }
+                                return Err(error);
+                            }
+                        }
+                    }
+                    _ => anyhow::bail!("unsafe output directory path"),
+                }
+            }
+            Ok(Self { file: directory })
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = path;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
     pub(crate) fn open_or_create(&self, name: &OsStr) -> anyhow::Result<Self> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let name = c_name(name)?;
             // SAFETY: the descriptor and C string remain valid for the call.
@@ -911,15 +985,15 @@ impl OutputDirectory {
                 file: open_directory_at(self.file.as_raw_fd(), &name)?,
             })
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = name;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
     fn duplicate(&self) -> anyhow::Result<Self> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             // SAFETY: fcntl receives a valid descriptor and returns a new owned descriptor.
             let fd = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -931,12 +1005,12 @@ impl OutputDirectory {
                 file: unsafe { fs::File::from_raw_fd(fd) },
             })
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
+        anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
     }
 
     pub(crate) fn entry_exists(&self, name: &OsStr) -> anyhow::Result<bool> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let name = c_name(name)?;
             // SAFETY: zeroed stat is immediately written by fstatat on success.
@@ -961,16 +1035,16 @@ impl OutputDirectory {
                 }
             }
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = name;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
     fn regular_file_mode(&self, name: &OsStr) -> anyhow::Result<Option<u32>> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let name = c_name(name)?;
             // SAFETY: zeroed stat is immediately written by fstatat on success.
@@ -989,7 +1063,14 @@ impl OutputDirectory {
                     stat.st_mode & libc::S_IFMT == libc::S_IFREG,
                     "refusing non-file wiki output"
                 );
-                Ok(Some(stat.st_mode & 0o777))
+                // `mode_t` is u32 on Linux and u16 on macOS; widen on the
+                // platforms that need it (a uniform conversion is a clippy
+                // useless_conversion on Linux).
+                #[cfg(target_os = "macos")]
+                let mode: u32 = u32::from(stat.st_mode) & 0o777;
+                #[cfg(not(target_os = "macos"))]
+                let mode: u32 = stat.st_mode & 0o777;
+                Ok(Some(mode))
             } else {
                 let error = std::io::Error::last_os_error();
                 if error.kind() == std::io::ErrorKind::NotFound {
@@ -999,15 +1080,15 @@ impl OutputDirectory {
                 }
             }
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = name;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
     fn create_new_file(&self, name: &OsStr) -> anyhow::Result<fs::File> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let name = c_name(name)?;
             // SAFETY: the descriptor and C string remain valid for the call.
@@ -1030,15 +1111,15 @@ impl OutputDirectory {
                 Ok(unsafe { fs::File::from_raw_fd(fd) })
             }
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = name;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
     fn open_file_if_exists(&self, name: &OsStr) -> anyhow::Result<Option<fs::File>> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let name = c_name(name)?;
             // SAFETY: the descriptor and C string remain valid for the call.
@@ -1061,10 +1142,10 @@ impl OutputDirectory {
                 }
             }
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = name;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
@@ -1073,7 +1154,7 @@ impl OutputDirectory {
     /// The parent and leaf are resolved relative to the descriptor, so a
     /// later replacement of a path ancestor cannot redirect the read.
     pub(crate) fn read_bounded_regular(&self, path: &Path, cap: usize) -> anyhow::Result<Vec<u8>> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let (parent, name) = output_parent_if_existing(self, path)?
                 .context("required wiki input parent disappeared")?;
@@ -1097,10 +1178,10 @@ impl OutputDirectory {
             );
             Ok(bytes)
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = (path, cap);
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
@@ -1115,7 +1196,7 @@ impl OutputDirectory {
         cap: usize,
         prefix_cap: usize,
     ) -> anyhow::Result<(Vec<u8>, String)> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let (parent, name) = output_parent_if_existing(self, path)?
                 .context("required wiki input parent disappeared")?;
@@ -1153,10 +1234,10 @@ impl OutputDirectory {
             );
             Ok((prefix, hex::encode(digest.finalize())))
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = (path, cap, prefix_cap);
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
@@ -1172,7 +1253,7 @@ impl OutputDirectory {
     }
 
     fn open_or_create_new(&self, name: &OsStr) -> anyhow::Result<Self> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             let name = c_name(name)?;
             // SAFETY: the descriptor and C string remain valid for the call.
@@ -1184,13 +1265,23 @@ impl OutputDirectory {
                 file: open_directory_at(self.file.as_raw_fd(), &name)?,
             })
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = name;
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
+    /// Atomically publish `source` as `destination` without replacing an
+    /// existing entry.
+    ///
+    /// Linux x86_64 uses the certified `renameat2(RENAME_NOREPLACE)`
+    /// operation. macOS has no no-replace rename, so the publish reserves
+    /// the destination name with an exclusive regular file, renames the
+    /// source over that reservation (an atomic name replacement that works
+    /// for files and directories), then re-checks dev/ino to prove the
+    /// destination still names the published entry. A reservation or
+    /// identity failure restores the pre-publish state and fails closed.
     pub(crate) fn rename_noreplace(
         &self,
         source: &OsStr,
@@ -1217,15 +1308,140 @@ impl OutputDirectory {
                 Err(std::io::Error::last_os_error().into())
             }
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(target_os = "macos")]
+        {
+            let source = c_name(source)?;
+            let destination = c_name(destination)?;
+            // Record the source identity before publishing so the
+            // post-publish re-check can prove the destination still names
+            // the entry we moved.
+            // SAFETY: zeroed stat is immediately written by fstatat on success.
+            let mut source_stat = unsafe { std::mem::zeroed::<libc::stat>() };
+            // SAFETY: the descriptor, C string, and stat output remain valid
+            // for the call.
+            let status = unsafe {
+                libc::fstatat(
+                    self.file.as_raw_fd(),
+                    source.as_ptr(),
+                    &mut source_stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if status != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let source_type = source_stat.st_mode & libc::S_IFMT;
+            if source_type != libc::S_IFREG && source_type != libc::S_IFDIR {
+                anyhow::bail!("refusing non-regular wiki publication source");
+            }
+            // Reserve the destination name: this fails with EEXIST when any
+            // entry already occupies the name, preserving no-clobber. The
+            // reservation must match the source type because macOS refuses
+            // to rename a directory over a file (ENOTDIR).
+            let reservation_is_dir = source_type == libc::S_IFDIR;
+            let mut reservation_file = None;
+            if reservation_is_dir {
+                // SAFETY: the descriptor and C string remain valid for the call.
+                let status =
+                    unsafe { libc::mkdirat(self.file.as_raw_fd(), destination.as_ptr(), 0o777) };
+                if status != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            } else {
+                // SAFETY: the descriptor and C string remain valid for the call.
+                let reservation = unsafe {
+                    libc::openat(
+                        self.file.as_raw_fd(),
+                        destination.as_ptr(),
+                        libc::O_WRONLY
+                            | libc::O_CREAT
+                            | libc::O_EXCL
+                            | libc::O_NOFOLLOW
+                            | libc::O_CLOEXEC,
+                        0o666,
+                    )
+                };
+                if reservation < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                // SAFETY: openat returned an owned descriptor above.
+                reservation_file = Some(unsafe { fs::File::from_raw_fd(reservation) });
+            }
+            let result = (|| {
+                // SAFETY: the descriptor and C strings remain valid for the call.
+                let status = unsafe {
+                    libc::renameat(
+                        self.file.as_raw_fd(),
+                        source.as_ptr(),
+                        self.file.as_raw_fd(),
+                        destination.as_ptr(),
+                    )
+                };
+                if status != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                // TOCTOU re-check: between the rename and this point a local
+                // attacker could have replaced the destination name. It must
+                // still name the exact entry we published.
+                // SAFETY: zeroed stat is immediately written by fstatat on success.
+                let mut final_stat = unsafe { std::mem::zeroed::<libc::stat>() };
+                // SAFETY: the descriptor, C string, and stat output remain
+                // valid for the call.
+                let status = unsafe {
+                    libc::fstatat(
+                        self.file.as_raw_fd(),
+                        destination.as_ptr(),
+                        &mut final_stat,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
+                if status != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                if final_stat.st_dev != source_stat.st_dev
+                    || final_stat.st_ino != source_stat.st_ino
+                    || final_stat.st_mode & libc::S_IFMT != source_type
+                {
+                    // Remove the foreign entry so the destination is absent
+                    // again, then fail closed.
+                    let _ =
+                        unsafe { libc::unlinkat(self.file.as_raw_fd(), destination.as_ptr(), 0) };
+                    let _ = unsafe {
+                        libc::unlinkat(
+                            self.file.as_raw_fd(),
+                            destination.as_ptr(),
+                            libc::AT_REMOVEDIR,
+                        )
+                    };
+                    anyhow::bail!("wiki output destination changed during publication");
+                }
+                Ok(())
+            })();
+            drop(reservation_file);
+            if let Err(error) = result {
+                // Restore the pre-publish state (destination absent) when
+                // the rename could not complete.
+                let flags = if reservation_is_dir {
+                    libc::AT_REMOVEDIR
+                } else {
+                    0
+                };
+                let _ =
+                    unsafe { libc::unlinkat(self.file.as_raw_fd(), destination.as_ptr(), flags) };
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
         {
             let _ = (source, destination);
-            anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+            anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
         }
     }
 
     pub(crate) fn sync(&self) -> anyhow::Result<()> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
         {
             if let Err(error) = self.file.sync_all()
                 && !matches!(error.raw_os_error(), Some(code) if code == libc::ENOTSUP || code == libc::EINVAL)
@@ -1235,8 +1451,8 @@ impl OutputDirectory {
                 Ok(())
             }
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
+        anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
     }
 }
 
@@ -1262,7 +1478,7 @@ pub(crate) fn open_or_create_output_root(path: &Path) -> anyhow::Result<OutputDi
     OutputDirectory::open_existing(&parent)?.open_or_create(name)
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 fn ensure_regular_file(file: &fs::File, cap: usize) -> anyhow::Result<fs::Metadata> {
     let metadata = file.metadata()?;
     anyhow::ensure!(
@@ -1276,7 +1492,7 @@ fn ensure_regular_file(file: &fs::File, cap: usize) -> anyhow::Result<fs::Metada
     Ok(metadata)
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.dev() == right.dev()
         && left.ino() == right.ino()
@@ -1313,7 +1529,7 @@ fn output_parent_if_existing(
         .filter(|name| !name.is_empty())
         .context("wiki output must have a final path component")?
         .to_os_string();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
     {
         let mut parent = root.duplicate()?;
         for component in output.parent().into_iter().flat_map(Path::components) {
@@ -1334,10 +1550,10 @@ fn output_parent_if_existing(
         }
         Ok(Some((parent, name)))
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
     {
         let _ = (root, output, name);
-        anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+        anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
     }
 }
 
@@ -1347,7 +1563,7 @@ pub(crate) fn write_text_atomic_in(
     text: &str,
 ) -> anyhow::Result<()> {
     let name = name.as_ref();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
     {
         let existing_mode = parent.regular_file_mode(name)?;
         let mut temporary = None;
@@ -1395,10 +1611,10 @@ pub(crate) fn write_text_atomic_in(
         }
         result
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
     {
         let _ = (parent, name, text);
-        anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+        anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
     }
 }
 
@@ -1409,7 +1625,7 @@ pub(crate) fn write_new_text_atomic_in(
     text: &str,
 ) -> anyhow::Result<()> {
     let name = name.as_ref();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
     {
         anyhow::ensure!(!parent.entry_exists(name)?, "wiki output already exists");
         let mut temporary = None;
@@ -1450,10 +1666,10 @@ pub(crate) fn write_new_text_atomic_in(
         }
         result
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
     {
         let _ = (parent, name, text);
-        anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+        anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
     }
 }
 
@@ -1462,7 +1678,7 @@ pub(crate) fn remove_regular_file_in(root: &OutputDirectory, path: &Path) -> any
     let Some((parent, name)) = output_parent_if_existing(root, path)? else {
         anyhow::bail!("managed wiki output disappeared")
     };
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
     {
         anyhow::ensure!(
             parent.regular_file_mode(&name)?.is_some(),
@@ -1471,14 +1687,14 @@ pub(crate) fn remove_regular_file_in(root: &OutputDirectory, path: &Path) -> any
         unlink_at(&parent, &name)?;
         parent.sync()
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
     {
         let _ = (parent, name);
-        anyhow::bail!("secure wiki publication is only supported on Linux AMD64")
+        anyhow::bail!("secure wiki publication is only supported on Linux x86_64 and macOS")
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 fn c_name(name: &OsStr) -> anyhow::Result<CString> {
     let bytes = name.as_bytes();
     anyhow::ensure!(
@@ -1488,7 +1704,7 @@ fn c_name(name: &OsStr) -> anyhow::Result<CString> {
     CString::new(bytes).context("output entry name contains NUL")
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 fn open_directory_nofollow(path: &Path) -> anyhow::Result<fs::File> {
     anyhow::ensure!(path.is_absolute(), "output directory must be absolute");
     let root = CString::new("/").expect("root path contains no NUL");
@@ -1516,7 +1732,7 @@ fn open_directory_nofollow(path: &Path) -> anyhow::Result<fs::File> {
     Ok(directory)
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 fn open_directory_at(parent: std::os::fd::RawFd, name: &CString) -> anyhow::Result<fs::File> {
     // SAFETY: the descriptor and C string remain valid for the call.
     let fd = unsafe {
@@ -1533,7 +1749,7 @@ fn open_directory_at(parent: std::os::fd::RawFd, name: &CString) -> anyhow::Resu
     Ok(unsafe { fs::File::from_raw_fd(fd) })
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 fn replace_file_in(
     parent: &OutputDirectory,
     source: &OsStr,
@@ -1557,7 +1773,7 @@ fn replace_file_in(
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 fn unlink_at(parent: &OutputDirectory, name: &OsStr) -> anyhow::Result<()> {
     let name = c_name(name)?;
     // SAFETY: the descriptor and C string remain valid for the call.

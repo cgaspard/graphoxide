@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 use graphoxide_cli::wiki;
 use graphoxide_core::{KnowledgeGraph, Node};
@@ -810,7 +810,10 @@ fn index_rejects_crlf_frontmatter_that_exceeds_its_byte_limit() {
     assert!(wiki::index(temp.path(), &config_path).is_err());
 }
 
-#[cfg(unix)]
+// Non-UTF-8 file names can only exist on byte-oriented filesystems (Linux
+// ext4); APFS rejects them at creation, so the loader's UTF-8 rejection is
+// only observable there.
+#[cfg(target_os = "linux")]
 #[test]
 fn index_rejects_non_utf8_wiki_paths() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};

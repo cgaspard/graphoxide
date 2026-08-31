@@ -1,6 +1,6 @@
-//! Secure wiki publication (draft/render) is only supported on Linux AMD64,
-//! so the whole suite is gated to that platform.
-#![cfg(target_os = "linux")]
+//! Secure wiki publication (draft/render) is supported on Linux x86_64 and
+//! macOS, so the whole suite is gated to those platforms.
+#![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 use graphoxide_cli::{
     ollama_transport,
@@ -1163,7 +1163,9 @@ fn exact_consent_is_required_before_artifacts_or_network() {
     assert!(!args.output.exists());
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+// Only reachable on Linux non-x86_64 under the suite gate above: unsupported
+// platforms must reject before any network connection is attempted.
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")))]
 #[test]
 fn unsupported_targets_reject_drafts_before_connecting_to_ollama() {
     let (_temporary, mut args) = fixture(&[("a.md", b"alpha", 1)]);
@@ -1171,7 +1173,10 @@ fn unsupported_targets_reject_drafts_before_connecting_to_ollama() {
 
     let error = draft(args.clone()).unwrap_err().to_string();
 
-    assert!(error.contains("Linux AMD64"), "{error}");
+    assert!(
+        error.contains("only supported on Linux x86_64 and macOS"),
+        "{error}"
+    );
     assert!(!args.output.exists());
 }
 
