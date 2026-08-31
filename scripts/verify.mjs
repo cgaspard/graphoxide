@@ -25,6 +25,7 @@ run('node', [
   ...(testConcurrency === undefined ? [] : [`--test-concurrency=${testConcurrency}`]),
   'scripts/agent-artifacts.test.mjs',
   'scripts/benchmark-graph-build.test.mjs',
+  'scripts/cleanup-worktrees.test.mjs',
   'scripts/qualify-universal-indexing.test.mjs',
   'scripts/rust-coverage.test.mjs',
   'scripts/security-audit.test.mjs',

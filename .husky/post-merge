@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+
+# After a merge lands in this checkout (git merge / pull / rebase), prune
+# agent issue worktrees whose branches have been merged into main.
+#
+# The script is conservative: it only removes worktrees that are inside the
+# managed sibling directory, are clean (no uncommitted or untracked files),
+# and have no commits unique to their branch. Anything else is reported and
+# left in place.
+
+node scripts/cleanup-worktrees.mjs

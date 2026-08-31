@@ -78,6 +78,40 @@ The fast ratchet *logic* test (`scripts/rust-coverage.test.mjs`) runs in every
 gate via `verify.mjs`. Re-baseline only when a change intentionally lowers
 coverage; the baseline otherwise acts as a guard against unexplained regressions.
 
+### Fast local iteration
+
+The gates above are the source of truth for "is it shippable"; they are not the
+right tool for a tight edit loop. Recommended local setup (all optional,
+machine-local, nothing committed to the repo):
+
+1. `brew install sccache cargo-nextest`
+2. Add a user-level `~/.cargo/config.toml` (repo-level would break builds on
+   machines without sccache):
+
+   ```toml
+   [build]
+   rustc-wrapper = "sccache"
+   ```
+
+   sccache shares compile results across worktrees and branches. Every issue
+   worktree is a fresh checkout, so this is the biggest structural win:
+   a fresh worktree at the same commit compiles from cache instead of from
+   scratch, and clippy/release/coverage each cache in their own slot.
+3. Use `cargo nextest run` for the dev loop instead of `cargo test`:
+
+   ```bash
+   cargo nextest run -p graphoxide-cli          # whole crate, ~50s vs ~3m
+   cargo nextest run -p graphoxide-cli --lib    # units only
+   ```
+
+   nextest runs every test binary in parallel (the ~2m packaged-artifact smoke
+   test no longer serializes the rest) and supports rerunning only failed
+   tests. CI and the gates keep using plain `cargo test`.
+
+Disable sccache (delete the config line) when running
+`npm run coverage:rust` so the llvm-cov instrumentation is never served from a
+stale cache.
+
 ## Issues, branches, and worktrees
 
 Create the GitHub issue first. Name every issue worktree and its branch from the
@@ -93,6 +127,30 @@ For example, issue 42 is `42-universal-capability-indexing`, with branch
 (relative to this checkout: `../graphoxide-worktrees/42-universal-capability-indexing`).
 Use lowercase, hyphenated descriptions. One issue owns one branch and one
 worktree; do not use the main checkout for feature work.
+
+### Worktree cleanup after closing an issue
+
+When an issue's PR is merged into `main`, remove its worktree and branch. A
+`post-merge` git hook (installed by `npm install` like the other hooks) runs
+`sweep` automatically after `git pull`/`merge` on `main`:
+
+```bash
+node scripts/cleanup-worktrees.mjs            # sweep: remove what is safe
+node scripts/cleanup-worktrees.mjs --dry-run  # preview without removing
+node scripts/cleanup-worktrees.mjs agent/42-...   # remove one issue's worktree
+```
+
+An agent that closes an issue must not leave its worktree behind: after the PR
+is merged, run the script for that branch (or pull `main` in the main checkout
+so the hook sweeps it). The script only removes worktrees that are inside
+`../graphoxide-worktrees/`, have a clean working tree (no uncommitted or
+untracked files), and have no commits unique to their branch. A branch with no
+unique commits is treated as safe whether it was merged (including GitHub
+squash merges) or scaffolded with no work. Dirty or unmerged worktrees are
+reported and left in place; if a worktree has uncommitted work that should
+surive, commit or save it as a patch first (see
+`../graphoxide-worktrees/retained-from-deleted-worktrees/` for the patch
+convention used for retained state).
 
 ## Release process
 
