@@ -6,6 +6,7 @@ pub mod build_telemetry;
 pub mod coverage;
 pub mod enrich;
 pub mod extract_cli;
+pub(crate) mod fs_lock;
 pub mod google_workspace;
 pub mod hook_guard;
 pub mod hooks;
