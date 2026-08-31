@@ -2282,7 +2282,10 @@ fn sha256_text(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")
+))]
 fn assembled_extracted_text(source: &Source) -> Result<String> {
     assembled_source_text(source, "")
 }
@@ -2413,7 +2416,10 @@ fn is_binary_source(source: &str) -> bool {
         })
 }
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")
+))]
 fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest as _;
 
@@ -2492,7 +2498,10 @@ fn publish_directory(output: &DraftOutput, pages: &[(String, String)]) -> Result
     })()
 }
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos")
+))]
 mod tests {
     use super::{
         add_extracted_text, admit_sources, assembled_extracted_text, build_prompt,

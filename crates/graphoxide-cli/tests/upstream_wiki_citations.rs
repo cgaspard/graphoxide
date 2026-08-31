@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(all(target_os = "linux", target_arch = "x86_64"), target_os = "macos"))]
 
 use graphoxide_core::KnowledgeGraph;
 use graphoxide_export::{derive_topic_tree, render_structured_wiki_with_catalog};
