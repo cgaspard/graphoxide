@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
 
-import { inspectRepositoryWorkflows, inspectWorkflowActionPins } from './workflow-dependencies.mjs';
+import { inspectNextestProvisioning, inspectRepositoryWorkflows, inspectWorkflowActionPins } from './workflow-dependencies.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -20,6 +20,55 @@ test('all repository workflow actions use immutable reviewed revisions', () => {
   ]);
   assert.ok(result.actions > 0);
   assert.deepEqual(result.errors, []);
+});
+
+test('CI pins cargo-nextest and uses it for parallel Rust test lanes', () => {
+  const workflowText = readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const workflow = parse(workflowText, { maxAliasCount: 0, uniqueKeys: true });
+
+  for (const jobName of ['qualification', 'rust', 'knowledgebase-portability', 'vscode']) {
+    assert.ok(
+      workflow.jobs[jobName].steps.some(
+        (step) => step.uses?.startsWith('taiki-e/install-action@') &&
+          step.with?.tool === 'cargo-nextest@0.9.126',
+      ),
+      `${jobName} must install the pinned cargo-nextest release`,
+    );
+  }
+  assert.deepEqual(inspectNextestProvisioning(workflow, 'ci.yml'), []);
+  const portabilityRuns = workflow.jobs['knowledgebase-portability'].steps
+    .flatMap((step) => step.run ? [step.run] : []);
+  assert.ok(portabilityRuns.some((run) => run.includes('--test knowledgebase_cli')
+    && run.includes('direct_cli_') && run.includes('direct_source_regressions::')),
+  'every platform must run the public lifecycle and binary-source regressions');
+  assert.ok(portabilityRuns.some((run) => run.includes('--lib')
+    && run.includes('wiki_source::tests::')),
+  'every platform must run source admission and Git provenance checks');
+
+  assert.match(workflowText, /cargo nextest run --workspace --no-fail-fast --test-threads=num-cpus --locked/u);
+  assert.match(workflowText, /cargo nextest run -p graphoxide-cli --test knowledgebase_cli --test-threads=num-cpus --locked/u);
+  assert.doesNotMatch(workflowText, /cargo test -p graphoxide-cli/u);
+  assert.match(workflowText, /cargo test --workspace --doc --locked/u);
+  assert.match(workflowText, /--run-ignored only/u);
+});
+
+test('nextest must be provisioned before direct and script-based CI consumers', () => {
+  const install = {
+    uses: 'taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1',
+    with: { tool: 'cargo-nextest@0.9.126' },
+  };
+  for (const run of [
+    'cargo nextest run --workspace',
+    'node scripts/verify-wiki-test-lanes.mjs --list',
+    'npm run wiki:test-full',
+  ]) {
+    const inspect = (steps) => inspectNextestProvisioning({ jobs: { fixture: { steps } } });
+    assert.deepEqual(inspect([install, { run }]), []);
+    assert.equal(inspect([{ run }]).length, 1);
+    assert.equal(inspect([{ run }, install]).length, 1);
+    assert.equal(inspect([{ ...install, if: 'false' }, { run }]).length, 1);
+    assert.equal(inspect([{ ...install, with: { tool: 'cargo-nextest' } }, { run }]).length, 1);
+  }
 });
 
 test('mutable, abbreviated, uncommented, and quoted action references are rejected', () => {

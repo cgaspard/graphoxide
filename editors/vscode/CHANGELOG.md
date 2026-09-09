@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- The bundled CLI replaces the earlier wiki workflow with direct-source
+  knowledgebases: `wiki init`, `wiki source`, and `wiki live`. Sources are
+  referenced by pointers; derived Markdown starts provisional and supports
+  explicit AI review and human confirmation.
+- Knowledgebase MCP operations use a bound project root and require explicit
+  authorization for writes, HTTPS access, and model egress. Unsupported binary
+  evidence and remote Git fetching are rejected; local pinned Git sources and
+  bounded HTTPS sources remain supported.
+- Local preview requires a separately installed Hugo 0.165.0 binary selected
+  by `GRAPHOXIDE_HUGO_BINARY`. Earlier wiki commands have no automatic migration.
+
 ## 0.13.0 — 2026-08-29
 
 - The bundled CLI now builds an incremental, provenance-bound LLM wiki without

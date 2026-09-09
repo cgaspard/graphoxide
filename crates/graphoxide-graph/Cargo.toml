@@ -4,6 +4,11 @@ description = "Graph build/merge, dedup, community clustering, analysis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
+
+[[test]]
+name = "graph_integration"
+path = "tests/graph_integration.rs"
 
 [dependencies]
 graphoxide-core.workspace = true

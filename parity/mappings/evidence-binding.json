@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_fabricated_code_symbol_is_downgraded"
+          "id": "upstream_evidence_binding::test_fabricated_code_symbol_is_downgraded"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_qualified_and_prettified_labels_do_not_false_positive"
+          "id": "upstream_evidence_binding::test_qualified_and_prettified_labels_do_not_false_positive"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_document_and_sourceless_nodes_are_never_flagged"
+          "id": "upstream_evidence_binding::test_document_and_sourceless_nodes_are_never_flagged"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_node_attributed_to_undispatched_file_is_left_to_out_of_scope"
+          "id": "upstream_evidence_binding::test_node_attributed_to_undispatched_file_is_left_to_out_of_scope"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_uncheckable_short_label_is_not_flagged"
+          "id": "upstream_evidence_binding::test_uncheckable_short_label_is_not_flagged"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_existing_lower_confidence_is_not_overwritten"
+          "id": "upstream_evidence_binding::test_existing_lower_confidence_is_not_overwritten"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_label_identifiers_helper"
+          "id": "upstream_evidence_binding::test_label_identifiers_helper"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_bind_node_evidence_returns_downgrade_count"
+          "id": "upstream_evidence_binding::test_bind_node_evidence_returns_downgrade_count"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_evidence_binding_handles_file_slice"
+          "id": "upstream_evidence_binding::test_evidence_binding_handles_file_slice"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_evidence_binding_handles_absolute_source_file"
+          "id": "upstream_evidence_binding::test_evidence_binding_handles_absolute_source_file"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_downgrade_emits_stderr_summary"
+          "id": "upstream_evidence_binding::test_downgrade_emits_stderr_summary"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_unverified_flag_does_not_fail_validation"
+          "id": "upstream_evidence_binding::test_unverified_flag_does_not_fail_validation"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_diagnostics_reports_unverified_node_count"
+          "id": "upstream_evidence_binding::test_diagnostics_reports_unverified_node_count"
         }
       ]
     }

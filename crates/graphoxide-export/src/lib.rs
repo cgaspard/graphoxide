@@ -7,15 +7,22 @@
 //! Upstream's graph.svg came from matplotlib; the port either implements a
 //! small deterministic layout or defers SVG (see HANDOFF.md § "Exports").
 
+pub mod direct_taxonomy;
+pub mod graph_community_markdown;
+pub mod graph_community_topics;
 pub mod html;
 pub mod obsidian;
 pub mod report;
-pub mod taxonomy;
-pub mod wiki;
-pub mod wiki_canonical;
-pub mod wiki_evidence;
-pub mod wiki_plan;
 
+pub use graph_community_markdown::{
+    export_graph_community_markdown, export_graph_community_markdown_with_options,
+    render_graph_community_markdown, render_graph_community_markdown_with_catalog,
+    GraphCommunityGodNodeArticle, GraphCommunityMarkdownOptions, GraphCommunityMarkdownPage,
+    GraphCommunityMarkdownPlan, GraphCommunityMarkdownReport,
+};
+pub use graph_community_topics::{
+    derive_graph_community_topic_tree, GraphCommunityTopic, GraphCommunityTopicTree,
+};
 pub use html::{
     derive_sections_from_communities, render_callflow_html, render_callflow_html_with_options,
     render_html, render_html_with_options, write_callflow_html, ArchitectureSection, HtmlOptions,
@@ -27,22 +34,6 @@ pub use obsidian::{
 };
 pub use report::{
     render_report, render_report_with_options, DetectionSummary, ReportOptions, TokenCost,
-};
-pub use taxonomy::{derive_topic_tree, Topic, TopicTree};
-pub use wiki::{
-    export_wiki, export_wiki_with_options, render_structured_wiki,
-    render_structured_wiki_with_catalog, GodNodeArticle, StructuredWikiPage, StructuredWikiPlan,
-    WikiOptions, WikiReport,
-};
-pub use wiki_canonical::{canonical_source_coverage, render_canonical_wiki};
-pub use wiki_evidence::{
-    project_wiki_evidence, WikiEvidenceBlock, WikiEvidenceDiagnostic, WikiEvidenceProjection,
-    WikiEvidenceSource,
-};
-pub use wiki_plan::{
-    load_wiki_plan, parse_wiki_plan, WikiArticleType, WikiPlan, WikiPlanArticle, WikiPlanCoverage,
-    WikiPlanDomain, WikiPlanPathKind, WikiPlanSource, MAX_WIKI_PLAN_ARTICLES,
-    MAX_WIKI_PLAN_DOMAINS, MAX_WIKI_PLAN_SOURCES,
 };
 
 use graphoxide_core::KnowledgeGraph;

@@ -25,6 +25,7 @@ const MAX_FIELDS: usize = 32_768;
 const MAX_EDGES: usize = 65_536;
 const MAX_NESTING: usize = 64;
 const MAX_LINE_BYTES: usize = 16 * 1024;
+const MAX_PROTOBUF_DOC_BYTES: usize = 4 * 1024;
 const MAX_DESCRIPTOR_FILES: usize = 1_024;
 const MAX_DESCRIPTOR_MESSAGES: usize = 4_096;
 const MAX_DESCRIPTOR_FIELDS: usize = 32_768;
@@ -220,6 +221,7 @@ pub(crate) enum ProtocolFormat {
     GraphQl,
     OpenApi,
     AsyncApi,
+    JsonSchema,
     Wit,
     Smithy,
     Cddl,
@@ -239,6 +241,7 @@ impl ProtocolFormat {
             Self::GraphQl => "graphql",
             Self::OpenApi => "openapi",
             Self::AsyncApi => "asyncapi",
+            Self::JsonSchema => "json_schema",
             Self::Wit => "wit",
             Self::Smithy => "smithy",
             Self::Cddl => "cddl",
@@ -266,9 +269,9 @@ pub(crate) fn supports_extension(extension: &str) -> bool {
         .is_some_and(|spec| spec.adapter() == crate::format_registry::ByteAdapterKind::Protocol)
 }
 
-/// Return whether a generic JSON or YAML buffer is an OpenAPI or AsyncAPI
-/// document. The check reads only bounded leading structure and is deliberately
-/// stricter than filename guessing.
+/// Return whether a generic JSON or YAML buffer is a natively supported API or
+/// JSON Schema document. The check reads only bounded leading structure and is
+/// deliberately stricter than filename guessing.
 pub(crate) fn looks_like_api_description(path: &Path, bytes: &[u8]) -> bool {
     let extension = extension(path);
     if !matches!(extension.as_str(), "json" | "yaml" | "yml") || bytes.len() > MAX_PROTOCOL_BYTES {
@@ -280,20 +283,27 @@ pub(crate) fn looks_like_api_description(path: &Path, bytes: &[u8]) -> bool {
     if let Ok(value) = graphoxide_core::parse_jsonc(text)
         && let Some(object) = value.as_object()
     {
-        return object.contains_key("openapi") || object.contains_key("asyncapi");
+        return object.contains_key("openapi")
+            || object.contains_key("asyncapi")
+            || object.contains_key("$schema");
     }
     text.lines().take(128).any(|line| {
-        let line = line.trim_start();
-        line.starts_with("openapi:") || line.starts_with("asyncapi:")
+        let indent = line.len() - line.trim_start().len();
+        let line = line.trim();
+        indent == 0
+            && (line.starts_with("openapi:")
+                || line.starts_with("asyncapi:")
+                || line.starts_with("$schema:")
+                || line.starts_with("\"$schema\":"))
     })
 }
 
 /// Extract protocol and IDL facts from a borrowed input buffer.
 ///
 /// Text input is parsed only for an explicitly recognized source family. For
-/// generic JSON/YAML, a document must contain the OpenAPI or AsyncAPI root
-/// marker. Binary protocol values always produce inventory-only facts without
-/// a verified descriptor. Arrow IPC and Parquet are the narrow exception:
+/// generic JSON/YAML, a document must contain an OpenAPI, AsyncAPI, or JSON
+/// Schema root marker. Binary protocol values always produce inventory-only
+/// facts without a verified descriptor. Arrow IPC and Parquet are the narrow exception:
 /// their embedded, self-describing schema metadata is parsed without decoding
 /// any data values, under independent metadata and record limits.
 pub(crate) fn extract_protocol_bytes(
@@ -350,6 +360,13 @@ pub(crate) fn extract_protocol_bytes(
                 parse_api_json(&mut state, &value);
             } else {
                 parse_api_yaml(&mut state, text);
+            }
+        }
+        ProtocolFormat::JsonSchema => {
+            if let Ok(value) = graphoxide_core::parse_jsonc(text) {
+                parse_json_schema_json(&mut state, &value);
+            } else {
+                parse_json_schema_yaml(&mut state, text);
             }
         }
         ProtocolFormat::AvroSchema => parse_avro_schema(&mut state, text),
@@ -658,8 +675,17 @@ fn format_for_text(path: &Path, bytes: &[u8]) -> Option<ProtocolFormat> {
                     .is_some_and(|value| value.get("asyncapi").is_some())
             {
                 ProtocolFormat::AsyncApi
-            } else {
+            } else if text
+                .lines()
+                .take(128)
+                .any(|line| line.trim_start().starts_with("openapi:"))
+                || graphoxide_core::parse_jsonc(text)
+                    .ok()
+                    .is_some_and(|value| value.get("openapi").is_some())
+            {
                 ProtocolFormat::OpenApi
+            } else {
+                ProtocolFormat::JsonSchema
             }
         }
         _ => return None,
@@ -2743,17 +2769,37 @@ impl<'a> ProtocolState<'a> {
         Some(id)
     }
 
-    fn field(&mut self, parent: &str, name: &str, declared_type: Option<&str>, line: usize) {
+    fn declaration_at_pointer(
+        &mut self,
+        parent: Option<&str>,
+        kind: &str,
+        name: &str,
+        pointer: &str,
+    ) -> Option<String> {
+        let id = self.declaration(parent, kind, name, 1)?;
+        self.set_node_location(&id, pointer);
+        let relation_parent = parent.unwrap_or(&self.file_id).to_owned();
+        self.set_relation_location(&relation_parent, &id, "contains", pointer);
+        Some(id)
+    }
+
+    fn field(
+        &mut self,
+        parent: &str,
+        name: &str,
+        declared_type: Option<&str>,
+        line: usize,
+    ) -> Option<String> {
         if self.fields >= MAX_FIELDS || !valid_name(name) {
-            return;
+            return None;
         }
         let id = make_id(&[&self.stem, self.format.id(), "field", parent, name]);
         if id.is_empty() {
-            return;
+            return None;
         }
         if !self.seen_nodes.contains(&id) {
             if !crate::parser_budget::try_reserve_facts(1) {
-                return;
+                return None;
             }
             self.seen_nodes.insert(id.clone());
             self.fields += 1;
@@ -2776,16 +2822,78 @@ impl<'a> ProtocolState<'a> {
         if let Some(declared_type) = declared_type.filter(|value| !is_builtin_type(value)) {
             self.reference(&id, declared_type, line);
         }
+        Some(id)
+    }
+
+    fn field_at_pointer(
+        &mut self,
+        parent: &str,
+        name: &str,
+        declared_type: Option<&str>,
+        pointer: &str,
+    ) -> Option<String> {
+        let id = self.field(parent, name, declared_type, 1)?;
+        self.set_node_location(&id, pointer);
+        self.set_relation_location(parent, &id, "contains", pointer);
+        Some(id)
     }
 
     fn operation(&mut self, parent: Option<&str>, name: &str, line: usize) {
         let _ = self.declaration(parent, "operation", name, line);
     }
 
+    fn operation_at_pointer(
+        &mut self,
+        parent: Option<&str>,
+        name: &str,
+        pointer: &str,
+    ) -> Option<String> {
+        self.declaration_at_pointer(parent, "operation", name, pointer)
+    }
+
     fn import(&mut self, target: &str, line: usize) {
         self.reference(&self.file_id.clone(), target, line);
         let target_id = make_id(&["protocol_reference", target]);
         self.relation(&self.file_id.clone(), &target_id, "imports", line);
+    }
+
+    fn option(&mut self, parent: Option<&str>, name: &str, value: &str, line: usize) {
+        if self.declarations >= MAX_DECLARATIONS
+            || !valid_protobuf_option_name(name)
+            || !valid_option_value(value)
+        {
+            return;
+        }
+        let scope = parent.unwrap_or(&self.file_id).to_owned();
+        let id = make_id(&[&self.stem, self.format.id(), "option", &scope, name, value]);
+        if id.is_empty() {
+            return;
+        }
+        if !self.seen_nodes.contains(&id) {
+            if !crate::parser_budget::try_reserve_facts(1) {
+                return;
+            }
+            self.seen_nodes.insert(id.clone());
+            self.declarations += 1;
+            let mut option = protocol_node(
+                id.clone(),
+                name,
+                self.source_file,
+                line,
+                "option",
+                self.format.id(),
+            );
+            option.extra.insert("option_name".into(), name.into());
+            option.extra.insert("option_value".into(), value.into());
+            self.nodes.push(option);
+        }
+        self.relation(&scope, &id, "contains", line);
+    }
+
+    fn documentation(&mut self, id: &str, text: String) {
+        if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+            node.extra.insert("documentation".into(), text.into());
+        }
     }
 
     fn reference(&mut self, source: &str, target: &str, line: usize) {
@@ -2811,6 +2919,19 @@ impl<'a> ProtocolState<'a> {
         self.relation(source, &id, "references", line);
     }
 
+    fn reference_at_pointer(&mut self, source: &str, target: &str, pointer: &str) {
+        self.reference(source, target, 1);
+        let target = target.trim_matches(|value| matches!(value, '"' | '\'' | '`' | ';' | ','));
+        if valid_reference(target) {
+            self.set_relation_location(
+                source,
+                &make_id(&["protocol_reference", target]),
+                "references",
+                pointer,
+            );
+        }
+    }
+
     fn relation(&mut self, source: &str, target: &str, relation: &str, line: usize) {
         if self.edges.len() >= MAX_EDGES
             || source.is_empty()
@@ -2834,6 +2955,26 @@ impl<'a> ProtocolState<'a> {
             self.source_file,
             line,
         ));
+    }
+
+    fn set_node_location(&mut self, id: &str, location: &str) {
+        if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+            node.source_location = Some(location.into());
+        }
+    }
+
+    fn set_relation_location(
+        &mut self,
+        source: &str,
+        target: &str,
+        relation: &str,
+        location: &str,
+    ) {
+        if let Some(edge) = self.edges.iter_mut().find(|edge| {
+            edge.source == source && edge.target == target && edge.relation == relation
+        }) {
+            edge.extra.insert("source_location".into(), location.into());
+        }
     }
 
     fn finish(self) -> Extraction {
@@ -2906,8 +3047,15 @@ struct Scope {
 fn parse_text_idl(state: &mut ProtocolState<'_>, text: &str) {
     let mut scopes = Vec::<Scope>::new();
     let mut in_block_comment = false;
+    let mut protobuf_docs = String::new();
     for (index, raw_line) in text.lines().enumerate().take(MAX_DECLARATIONS + MAX_FIELDS) {
         if raw_line.len() > MAX_LINE_BYTES {
+            continue;
+        }
+        if matches!(state.format, ProtocolFormat::Protobuf)
+            && let Some(doc) = protobuf_doc_line(raw_line)
+        {
+            append_protobuf_doc(&mut protobuf_docs, doc);
             continue;
         }
         let Some(line) = source_line(raw_line, &mut in_block_comment) else {
@@ -2936,10 +3084,49 @@ fn parse_text_idl(state: &mut ProtocolState<'_>, text: &str) {
                     kind: kind.into(),
                 })
         });
-        if declaration.is_none() {
-            parse_context_member(state, &scopes, line, line_no);
+        let member = declaration
+            .is_none()
+            .then(|| parse_context_member(state, &scopes, line, line_no))
+            .flatten();
+        if matches!(state.format, ProtocolFormat::Protobuf)
+            && let Some((name, value)) = protobuf_option(line)
+        {
+            state.option(parent, name, value, line_no);
+        }
+        if matches!(state.format, ProtocolFormat::Protobuf) && !protobuf_docs.is_empty() {
+            if let Some(id) = declaration
+                .as_ref()
+                .map(|scope| scope.id.as_str())
+                .or(member.as_deref())
+            {
+                state.documentation(id, std::mem::take(&mut protobuf_docs));
+            } else {
+                protobuf_docs.clear();
+            }
         }
         update_scopes(&mut scopes, line, declaration);
+    }
+}
+
+fn protobuf_doc_line(line: &str) -> Option<&str> {
+    line.trim_start()
+        .strip_prefix("///")
+        .or_else(|| line.trim_start().strip_prefix("//"))
+        .map(str::trim)
+}
+
+fn append_protobuf_doc(docs: &mut String, line: &str) {
+    if docs.len() >= MAX_PROTOBUF_DOC_BYTES {
+        return;
+    }
+    if !docs.is_empty() {
+        docs.push('\n');
+    }
+    for character in line.chars() {
+        if docs.len() + character.len_utf8() > MAX_PROTOBUF_DOC_BYTES {
+            break;
+        }
+        docs.push(character);
     }
 }
 
@@ -2952,6 +3139,17 @@ fn source_line<'a>(line: &'a str, in_block_comment: &mut bool) -> Option<&'a str
     }
     let mut cut = line.len();
     if let Some(index) = line.find("//") {
+        cut = cut.min(index);
+    }
+    if let Some(index) = line.char_indices().find_map(|(index, character)| {
+        (character == '#'
+            && (index == 0
+                || line[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace)))
+        .then_some(index)
+    }) {
         cut = cut.min(index);
     }
     if let Some(index) = line.find("/*") {
@@ -3043,6 +3241,7 @@ fn declaration_for_line(format: ProtocolFormat, line: &str) -> Option<(&'static 
         ],
         ProtocolFormat::OpenApi
         | ProtocolFormat::AsyncApi
+        | ProtocolFormat::JsonSchema
         | ProtocolFormat::AvroSchema
         | ProtocolFormat::Cddl
         | ProtocolFormat::Asn1 => &[],
@@ -3097,43 +3296,41 @@ fn parse_context_member(
     scopes: &[Scope],
     line: &str,
     line_no: usize,
-) {
-    let Some(parent) = scopes.last() else {
-        return;
-    };
+) -> Option<String> {
+    let parent = scopes.last()?;
     if matches!(state.format, ProtocolFormat::Protobuf) {
         if let Some(name) = keyword_name(line, "rpc") {
             state.operation(Some(&parent.id), name, line_no);
-            return;
+            return None;
         }
         if is_field_scope(&parent.kind)
             && let Some((name, ty)) = equals_field(line)
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
-        return;
+        return None;
     }
     if matches!(state.format, ProtocolFormat::Flatbuffers) {
         if keyword_name(line, "rpc").is_some() {
             if let Some(name) = keyword_name(line, "rpc") {
                 state.operation(Some(&parent.id), name, line_no);
             }
-            return;
+            return None;
         }
         if is_field_scope(&parent.kind)
             && let Some((name, ty)) = colon_field(line, state.format)
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
-        return;
+        return None;
     }
     if matches!(state.format, ProtocolFormat::GraphQl) {
         if is_field_scope(&parent.kind)
             && let Some((name, ty)) = graphql_field(line)
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
-        return;
+        return None;
     }
     if matches!(state.format, ProtocolFormat::Wit) {
         if let Some(name) = keyword_name(line, "func") {
@@ -3141,9 +3338,9 @@ fn parse_context_member(
         } else if is_field_scope(&parent.kind)
             && let Some((name, ty)) = colon_field(line, state.format)
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
-        return;
+        return None;
     }
     if matches!(state.format, ProtocolFormat::Capnp) {
         if line.contains("->") && line.contains('@') {
@@ -3153,9 +3350,9 @@ fn parse_context_member(
         } else if is_field_scope(&parent.kind)
             && let Some((name, ty)) = capnp_field(line)
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
-        return;
+        return None;
     }
     if matches!(state.format, ProtocolFormat::AvroIdl) {
         if parent.kind == "service" && line.contains('(') {
@@ -3165,17 +3362,17 @@ fn parse_context_member(
         } else if parent.kind == "record"
             && let Some((name, ty)) = avro_field(line)
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
-        return;
+        return None;
     }
     if matches!(state.format, ProtocolFormat::Yang) {
         if matches!(parent.kind.as_str(), "container" | "list")
             && let Some((name, ty)) = keyword_value(line, "type")
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
-        return;
+        return None;
     }
     if matches!(
         state.format,
@@ -3188,9 +3385,10 @@ fn parse_context_member(
         } else if is_field_scope(&parent.kind)
             && let Some((name, ty)) = colon_field(line, state.format)
         {
-            state.field(&parent.id, name, Some(ty), line_no);
+            return state.field(&parent.id, name, Some(ty), line_no);
         }
     }
+    None
 }
 
 fn is_field_scope(kind: &str) -> bool {
@@ -3215,6 +3413,17 @@ fn equals_field(line: &str) -> Option<(&str, &str)> {
         .unwrap_or(ty)
         .trim_matches(|value: char| !value.is_ascii_alphanumeric() && value != '_');
     (valid_name(name) && valid_name(ty)).then_some((name, ty))
+}
+
+fn protobuf_option(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("option")?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let (name, value) = rest.trim_start().split_once('=')?;
+    let name = name.trim();
+    let value = value.trim().trim_end_matches(';').trim();
+    (valid_protobuf_option_name(name) && valid_option_value(value)).then_some((name, value))
 }
 
 fn colon_field(line: &str, format: ProtocolFormat) -> Option<(&str, &str)> {
@@ -3455,45 +3664,149 @@ fn parse_api_json(state: &mut ProtocolState<'_>, value: &Value) {
         .and_then(Value::as_object)
         .and_then(|info| info.get("title"))
         .and_then(Value::as_str)
+        .filter(|title| valid_name(title))
         .unwrap_or(state.format.id());
-    let api = state.declaration(None, "api", title, 1);
+    let title_pointer = root
+        .get("info")
+        .and_then(Value::as_object)
+        .and_then(|info| info.get("title"))
+        .and_then(Value::as_str)
+        .filter(|title| valid_name(title))
+        .map_or_else(
+            || format!("/{}", state.format.id()),
+            |_| "/info/title".into(),
+        );
+    let api = state.declaration_at_pointer(None, "api", title, &title_pointer);
     let parent = api.as_deref();
     if matches!(state.format, ProtocolFormat::OpenApi) {
         if let Some(paths) = root.get("paths").and_then(Value::as_object) {
-            parse_openapi_paths(state, paths, parent);
+            parse_openapi_paths(state, paths, parent, "/paths");
         }
     } else if let Some(channels) = root.get("channels").and_then(Value::as_object) {
-        parse_asyncapi_channels(state, channels, parent);
+        parse_asyncapi_channels(state, channels, parent, "/channels");
     }
     if let Some(components) = root.get("components").and_then(Value::as_object) {
-        parse_api_components(state, components, parent);
+        parse_api_components(state, components, parent, "/components");
     }
     let reference_source = parent.unwrap_or(&state.file_id).to_owned();
-    parse_json_references(state, &reference_source, value, 0);
+    for (key, value) in root {
+        if !matches!(key.as_str(), "paths" | "channels" | "components") {
+            parse_json_references(state, &reference_source, value, &json_pointer("", key), 0);
+        }
+    }
+}
+
+fn parse_json_schema_json(state: &mut ProtocolState<'_>, value: &Value) {
+    let Some(root) = value.as_object() else {
+        return;
+    };
+    let name = root
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|name| valid_name(name))
+        .unwrap_or("json_schema");
+    let pointer = root
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| valid_name(title))
+        .map_or("/$schema", |_| "/title");
+    let Some(schema) = state.declaration_at_pointer(None, "schema", name, pointer) else {
+        return;
+    };
+    parse_json_schema_object(state, root, &schema, "", 0);
+}
+
+fn parse_json_schema_object(
+    state: &mut ProtocolState<'_>,
+    schema: &serde_json::Map<String, Value>,
+    parent: &str,
+    pointer: &str,
+    depth: usize,
+) {
+    if depth > MAX_NESTING {
+        return;
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        state.reference_at_pointer(parent, reference, &json_pointer(pointer, "$ref"));
+    }
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (name, property) in properties.iter().take(MAX_FIELDS) {
+            let property_pointer = json_pointer(&json_pointer(pointer, "properties"), name);
+            let declared_type = property
+                .as_object()
+                .and_then(|property| property.get("type"))
+                .and_then(Value::as_str);
+            let Some(field) =
+                state.field_at_pointer(parent, name, declared_type, &property_pointer)
+            else {
+                continue;
+            };
+            if let Some(property) = property.as_object() {
+                parse_json_schema_object(state, property, &field, &property_pointer, depth + 1);
+            }
+        }
+    }
+    for definition_key in ["$defs", "definitions"] {
+        let Some(definitions) = schema.get(definition_key).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, definition) in definitions.iter().take(MAX_DECLARATIONS) {
+            let Some(definition) = definition.as_object() else {
+                continue;
+            };
+            let definition_pointer = json_pointer(&json_pointer(pointer, definition_key), name);
+            let Some(id) =
+                state.declaration_at_pointer(Some(parent), "schema", name, &definition_pointer)
+            else {
+                continue;
+            };
+            parse_json_schema_object(state, definition, &id, &definition_pointer, depth + 1);
+        }
+    }
+    for (key, value) in schema.iter().take(MAX_FIELDS) {
+        if matches!(
+            key.as_str(),
+            "$ref" | "properties" | "$defs" | "definitions"
+        ) {
+            continue;
+        }
+        parse_json_references(state, parent, value, &json_pointer(pointer, key), depth + 1);
+    }
 }
 
 fn parse_openapi_paths(
     state: &mut ProtocolState<'_>,
     paths: &serde_json::Map<String, Value>,
     parent: Option<&str>,
+    pointer: &str,
 ) {
     for (path, item) in paths.iter().take(MAX_DECLARATIONS) {
-        let Some(endpoint) = state.declaration(parent, "endpoint", path, 1) else {
+        let endpoint_pointer = json_pointer(pointer, path);
+        let Some(endpoint) =
+            state.declaration_at_pointer(parent, "endpoint", path, &endpoint_pointer)
+        else {
             continue;
         };
         let Some(item) = item.as_object() else {
             continue;
         };
-        for (method, operation) in item {
-            if !is_http_method(method) || !operation.is_object() {
+        for (key, value) in item.iter().take(MAX_FIELDS) {
+            let value_pointer = json_pointer(&endpoint_pointer, key);
+            if !is_http_method(key) || !value.is_object() {
+                parse_json_references(state, &endpoint, value, &value_pointer, 0);
                 continue;
             }
-            let label = operation
+            let label = value
                 .get("operationId")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("{} {}", method.to_ascii_uppercase(), path));
-            state.operation(Some(&endpoint), &label, 1);
+                .unwrap_or_else(|| format!("{} {}", key.to_ascii_uppercase(), path));
+            let Some(operation) =
+                state.operation_at_pointer(Some(&endpoint), &label, &value_pointer)
+            else {
+                continue;
+            };
+            parse_json_references(state, &operation, value, &value_pointer, 0);
         }
     }
 }
@@ -3502,18 +3815,30 @@ fn parse_asyncapi_channels(
     state: &mut ProtocolState<'_>,
     channels: &serde_json::Map<String, Value>,
     parent: Option<&str>,
+    pointer: &str,
 ) {
     for (channel, item) in channels.iter().take(MAX_DECLARATIONS) {
-        let Some(channel_id) = state.declaration(parent, "channel", channel, 1) else {
+        let channel_pointer = json_pointer(pointer, channel);
+        let Some(channel_id) =
+            state.declaration_at_pointer(parent, "channel", channel, &channel_pointer)
+        else {
             continue;
         };
         let Some(item) = item.as_object() else {
             continue;
         };
-        for operation in ["publish", "subscribe"] {
-            if item.contains_key(operation) {
-                state.operation(Some(&channel_id), operation, 1);
+        for (key, value) in item.iter().take(MAX_FIELDS) {
+            let value_pointer = json_pointer(&channel_pointer, key);
+            if !matches!(key.as_str(), "publish" | "subscribe") || !value.is_object() {
+                parse_json_references(state, &channel_id, value, &value_pointer, 0);
+                continue;
             }
+            let Some(operation) =
+                state.operation_at_pointer(Some(&channel_id), key, &value_pointer)
+            else {
+                continue;
+            };
+            parse_json_references(state, &operation, value, &value_pointer, 0);
         }
     }
 }
@@ -3522,6 +3847,7 @@ fn parse_api_components(
     state: &mut ProtocolState<'_>,
     components: &serde_json::Map<String, Value>,
     parent: Option<&str>,
+    pointer: &str,
 ) {
     for section in [
         "schemas",
@@ -3534,44 +3860,71 @@ fn parse_api_components(
             continue;
         };
         for (name, item) in items.iter().take(MAX_DECLARATIONS) {
+            let item_pointer = json_pointer(&json_pointer(pointer, section), name);
             let kind = if section == "schemas" {
                 "schema"
             } else {
                 "component"
             };
-            let id = state.declaration(parent, kind, name, 1);
-            if let (Some(id), Some(object)) = (id.as_deref(), item.as_object())
-                && let Some(properties) = object.get("properties").and_then(Value::as_object)
-            {
-                for (name, property) in properties.iter().take(MAX_FIELDS) {
-                    let ty = property.get("type").and_then(Value::as_str);
-                    state.field(id, name, ty, 1);
-                }
+            let Some(id) = state.declaration_at_pointer(parent, kind, name, &item_pointer) else {
+                continue;
+            };
+            let Some(object) = item.as_object() else {
+                continue;
+            };
+            if section == "schemas" {
+                parse_json_schema_object(state, object, &id, &item_pointer, 0);
+            } else {
+                parse_json_references(state, &id, item, &item_pointer, 0);
             }
         }
     }
 }
 
-fn parse_json_references(state: &mut ProtocolState<'_>, source: &str, value: &Value, depth: usize) {
+fn parse_json_references(
+    state: &mut ProtocolState<'_>,
+    source: &str,
+    value: &Value,
+    pointer: &str,
+    depth: usize,
+) {
     if depth > MAX_NESTING {
         return;
     }
     match value {
         Value::Object(object) => {
             if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-                state.reference(source, reference, 1);
+                state.reference_at_pointer(source, reference, &json_pointer(pointer, "$ref"));
             }
-            for value in object.values() {
-                parse_json_references(state, source, value, depth + 1);
+            for (key, value) in object.iter().take(MAX_FIELDS) {
+                if key != "$ref" {
+                    parse_json_references(
+                        state,
+                        source,
+                        value,
+                        &json_pointer(pointer, key),
+                        depth + 1,
+                    );
+                }
             }
         }
         Value::Array(values) => {
-            for value in values.iter().take(MAX_FIELDS) {
-                parse_json_references(state, source, value, depth + 1);
+            for (index, value) in values.iter().take(MAX_FIELDS).enumerate() {
+                parse_json_references(
+                    state,
+                    source,
+                    value,
+                    &json_pointer(pointer, &index.to_string()),
+                    depth + 1,
+                );
             }
         }
         _ => {}
     }
+}
+
+fn json_pointer(parent: &str, segment: &str) -> String {
+    format!("{parent}/{}", segment.replace('~', "~0").replace('/', "~1"))
 }
 
 fn parse_api_yaml(state: &mut ProtocolState<'_>, text: &str) {
@@ -3662,6 +4015,127 @@ fn parse_api_yaml(state: &mut ProtocolState<'_>, text: &str) {
     }
 }
 
+fn parse_json_schema_yaml(state: &mut ProtocolState<'_>, text: &str) {
+    let root_name = json_schema_yaml_title(text).unwrap_or_else(|| "json_schema".into());
+    let mut in_block_comment = false;
+    let mut root = None::<String>;
+    let mut definitions_indent = None::<usize>;
+    let mut definition = None::<(usize, String)>;
+    let mut properties = None::<(usize, String)>;
+    for (index, raw_line) in text.lines().enumerate().take(MAX_DECLARATIONS + MAX_FIELDS) {
+        if raw_line.len() > MAX_LINE_BYTES {
+            continue;
+        }
+        let indent = raw_line.len() - raw_line.trim_start().len();
+        let Some(line) = source_line(raw_line, &mut in_block_comment) else {
+            continue;
+        };
+        let Some((key, value)) = yaml_mapping_entry(line) else {
+            continue;
+        };
+        let line_no = index + 1;
+        if key == "$schema" {
+            root = state.declaration(None, "schema", &root_name, line_no);
+            continue;
+        }
+        let Some(root_id) = root.as_deref() else {
+            continue;
+        };
+        if key == "$ref" {
+            let source = definition.as_ref().map_or(root_id, |(_, id)| id.as_str());
+            state.reference(source, value, line_no);
+            continue;
+        }
+        if matches!(key, "$defs" | "definitions") && value.is_empty() {
+            definitions_indent = Some(indent);
+            definition = None;
+            properties = None;
+            continue;
+        }
+        if let Some(defs_indent) = definitions_indent {
+            if indent <= defs_indent {
+                definitions_indent = None;
+                definition = None;
+                properties = None;
+            } else if definition
+                .as_ref()
+                .is_none_or(|(definition_indent, _)| indent <= *definition_indent)
+                && value.is_empty()
+            {
+                definition = state
+                    .declaration(Some(root_id), "schema", key, line_no)
+                    .map(|id| (indent, id));
+                properties = None;
+                continue;
+            }
+        }
+        if key == "properties" && value.is_empty() {
+            let parent = definition
+                .as_ref()
+                .filter(|(definition_indent, _)| indent > *definition_indent)
+                .map_or_else(|| root_id.to_owned(), |(_, id)| id.clone());
+            properties = Some((indent, parent));
+            continue;
+        }
+        if let Some((properties_indent, parent)) = properties.as_ref() {
+            if indent <= *properties_indent {
+                properties = None;
+            } else if value.is_empty() && key != "$ref" {
+                state.field(
+                    parent,
+                    key,
+                    yaml_schema_property_type(text, index, indent).as_deref(),
+                    line_no,
+                );
+            }
+        }
+    }
+}
+
+fn json_schema_yaml_title(text: &str) -> Option<String> {
+    let mut in_block_comment = false;
+    for raw_line in text.lines().take(128) {
+        let Some(line) = source_line(raw_line, &mut in_block_comment) else {
+            continue;
+        };
+        let Some((key, value)) = yaml_mapping_entry(line) else {
+            continue;
+        };
+        if key == "title" {
+            let value = value.trim_matches(|value| matches!(value, '\'' | '\"'));
+            return valid_name(value).then(|| value.to_owned());
+        }
+    }
+    None
+}
+
+fn yaml_schema_property_type(text: &str, start: usize, property_indent: usize) -> Option<String> {
+    let mut in_block_comment = false;
+    for raw_line in text.lines().skip(start + 1).take(MAX_FIELDS) {
+        let indent = raw_line.len() - raw_line.trim_start().len();
+        let Some(line) = source_line(raw_line, &mut in_block_comment) else {
+            continue;
+        };
+        if indent <= property_indent {
+            break;
+        }
+        let Some((key, value)) = yaml_mapping_entry(line) else {
+            continue;
+        };
+        if key == "type" {
+            let value = value.trim_matches(|value| matches!(value, '\'' | '\"'));
+            return valid_name(value).then(|| value.to_owned());
+        }
+    }
+    None
+}
+
+fn yaml_mapping_entry(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once(':')?;
+    let key = key.trim_matches(|value| matches!(value, '\'' | '\"'));
+    (!key.is_empty()).then_some((key, value.trim()))
+}
+
 fn is_http_method(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
@@ -3681,6 +4155,20 @@ fn valid_protobuf_identifier(value: &str) -> bool {
     let mut bytes = value.bytes();
     matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn valid_protobuf_option_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'(' | b')'))
+}
+
+fn valid_option_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LINE_BYTES
+        && !value.bytes().any(|byte| byte.is_ascii_control())
 }
 
 fn valid_reference(value: &str) -> bool {
@@ -3780,6 +4268,97 @@ mod tests {
     }
 
     #[test]
+    fn protobuf_retains_leading_docs_scoped_options_and_import_locators() {
+        let result = extract(
+            "annotated.proto",
+            "syntax = \"proto3\";\nimport \"common.proto\";\n// Request documentation\nmessage Request {\n  // Request name\n  string name = 1;\n  option (acme.message_mode) = \"strict\";\n}\noption java_package = \"example.v1\";\n",
+        );
+        let request = node(&result, "Request", "message");
+        let name = node(&result, "name", "field");
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .find(|node| node.id == request)
+                .and_then(|node| node.extra.get("documentation"))
+                .and_then(serde_json::Value::as_str),
+            Some("Request documentation")
+        );
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .find(|node| node.id == name)
+                .and_then(|node| node.extra.get("documentation"))
+                .and_then(serde_json::Value::as_str),
+            Some("Request name")
+        );
+        let message_option = result
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("option")
+                    && node
+                        .extra
+                        .get("option_name")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("(acme.message_mode)")
+                    && node
+                        .extra
+                        .get("option_value")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("\"strict\"")
+            })
+            .map(|node| node.id.clone())
+            .expect("message option");
+        let file_option = result
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("option")
+                    && node
+                        .extra
+                        .get("option_name")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("java_package")
+                    && node
+                        .extra
+                        .get("option_value")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("\"example.v1\"")
+            })
+            .map(|node| node.id.clone())
+            .expect("file option");
+        let file = result
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("protocol_file")
+            })
+            .map(|node| node.id.clone())
+            .expect("protocol file");
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == request && edge.target == message_option));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == file && edge.target == file_option));
+        assert!(result.nodes.iter().any(|node| {
+            node.label == "common.proto" && node.source_location.as_deref() == Some("L2")
+        }));
+        assert!(result.edges.iter().any(|edge| {
+            edge.relation == "references"
+                && edge
+                    .extra
+                    .get("source_location")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("L2")
+        }));
+    }
+
+    #[test]
     fn representative_text_idls_emit_declarations() {
         for (name, source, label) in [
             (
@@ -3865,6 +4444,162 @@ mod tests {
             .get("type")
             .and_then(serde_json::Value::as_str)
             == Some("operation")));
+    }
+
+    #[test]
+    fn json_protocol_declarations_and_references_use_owned_rfc_6901_locators() {
+        let openapi = extract(
+            "openapi.json",
+            r##"{"openapi":"3.1.0","info":{"title":"Pets"},"paths":{"/pets/id":{"get":{"operationId":"getPet","responses":{"200":{"$ref":"#/components/responses/Ok"}}}}},"components":{"schemas":{"Pet":{"type":"object","properties":{"parent":{"$ref":"#/components/schemas/Pet"}}}}}}"##,
+        );
+        let api = node(&openapi, "Pets", "api");
+        let endpoint = node(&openapi, "/pets/id", "endpoint");
+        let operation = node(&openapi, "getPet", "operation");
+        let schema = node(&openapi, "Pet", "schema");
+        let field = node(&openapi, "parent", "field");
+        let endpoint_pointer = "/paths/~1pets~1id";
+        assert_eq!(
+            openapi
+                .nodes
+                .iter()
+                .find(|node| node.id == api)
+                .and_then(|node| node.source_location.as_deref()),
+            Some("/info/title")
+        );
+        assert_eq!(
+            openapi
+                .nodes
+                .iter()
+                .find(|node| node.id == endpoint)
+                .and_then(|node| node.source_location.as_deref()),
+            Some(endpoint_pointer)
+        );
+        assert_eq!(
+            openapi
+                .nodes
+                .iter()
+                .find(|node| node.id == operation)
+                .and_then(|node| node.source_location.as_deref()),
+            Some("/paths/~1pets~1id/get")
+        );
+        assert_eq!(
+            openapi
+                .nodes
+                .iter()
+                .find(|node| node.id == schema)
+                .and_then(|node| node.source_location.as_deref()),
+            Some("/components/schemas/Pet")
+        );
+        assert_eq!(
+            openapi
+                .nodes
+                .iter()
+                .find(|node| node.id == field)
+                .and_then(|node| node.source_location.as_deref()),
+            Some("/components/schemas/Pet/properties/parent")
+        );
+        let operation_reference = openapi
+            .edges
+            .iter()
+            .find(|edge| edge.source == operation && edge.relation == "references")
+            .expect("operation reference");
+        assert_eq!(
+            operation_reference.extra["source_location"],
+            "/paths/~1pets~1id/get/responses/200/$ref"
+        );
+        let field_reference = openapi
+            .edges
+            .iter()
+            .find(|edge| edge.source == field && edge.relation == "references")
+            .expect("field reference");
+        assert_eq!(
+            field_reference.extra["source_location"],
+            "/components/schemas/Pet/properties/parent/$ref"
+        );
+
+        let asyncapi = extract(
+            "asyncapi.json",
+            r##"{"asyncapi":"3.0.0","info":{"title":"Events"},"channels":{"user/id":{"subscribe":{"message":{"$ref":"#/components/messages/User"}}}}}"##,
+        );
+        let channel = node(&asyncapi, "user/id", "channel");
+        let subscribe = node(&asyncapi, "subscribe", "operation");
+        assert_eq!(
+            asyncapi
+                .nodes
+                .iter()
+                .find(|node| node.id == channel)
+                .and_then(|node| node.source_location.as_deref()),
+            Some("/channels/user~1id")
+        );
+        assert_eq!(
+            asyncapi
+                .edges
+                .iter()
+                .find(|edge| edge.source == subscribe && edge.relation == "references")
+                .and_then(|edge| edge.extra.get("source_location"))
+                .and_then(serde_json::Value::as_str),
+            Some("/channels/user~1id/subscribe/message/$ref")
+        );
+
+        let schema = extract(
+            "person.schema.json",
+            r##"{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Person","properties":{"address":{"$ref":"#/$defs/Address"}},"$defs":{"Address":{"properties":{"street":{"type":"string"}}}}}"##,
+        );
+        let person = node(&schema, "Person", "schema");
+        let address = node(&schema, "address", "field");
+        let address_definition = node(&schema, "Address", "schema");
+        assert_eq!(
+            schema
+                .nodes
+                .iter()
+                .find(|node| node.id == person)
+                .and_then(|node| node.source_location.as_deref()),
+            Some("/title")
+        );
+        assert_eq!(
+            schema
+                .nodes
+                .iter()
+                .find(|node| node.id == address_definition)
+                .and_then(|node| node.source_location.as_deref()),
+            Some("/$defs/Address")
+        );
+        assert_eq!(
+            schema
+                .edges
+                .iter()
+                .find(|edge| edge.source == address && edge.relation == "references")
+                .and_then(|edge| edge.extra.get("source_location"))
+                .and_then(serde_json::Value::as_str),
+            Some("/properties/address/$ref")
+        );
+    }
+
+    #[test]
+    fn json_schema_json_and_yaml_capture_root_definitions_properties_and_references() {
+        let json = r##"{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Person","type":"object","properties":{"name":{"type":"string"},"address":{"$ref":"#/$defs/Address"}},"$defs":{"Address":{"type":"object","properties":{"street":{"type":"string"}}}}}"##;
+        assert!(looks_like_api_description(
+            Path::new("person.schema.json"),
+            json.as_bytes()
+        ));
+        let json = extract("person.schema.json", json);
+        node(&json, "Person", "schema");
+        node(&json, "name", "field");
+        node(&json, "Address", "schema");
+        node(&json, "street", "field");
+        assert!(json.edges.iter().any(|edge| edge.relation == "references"));
+
+        let yaml = "$schema: https://json-schema.org/draft/2020-12/schema\ntitle: Pet\ntype: object\nproperties:\n  name:\n    type: string\n  owner:\n    $ref: '#/$defs/Owner'\n$defs:\n  Owner:\n    type: object\n    properties:\n      email:\n        type: string\n";
+        assert!(looks_like_api_description(
+            Path::new("pet.schema.yaml"),
+            yaml.as_bytes()
+        ));
+        let yaml = extract("pet.schema.yaml", yaml);
+        node(&yaml, "Pet", "schema");
+        node(&yaml, "name", "field");
+        node(&yaml, "Owner", "schema");
+        node(&yaml, "email", "field");
+        assert!(yaml.edges.iter().any(|edge| edge.relation == "references"));
     }
 
     #[test]

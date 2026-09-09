@@ -377,7 +377,8 @@ fn extract_registered_format_at_depth(
             source_file,
             source,
             semantic_parser_allowance,
-            dispatch_budget.cancellation(),
+            recursion_depth,
+            dispatch_budget,
         )),
         // Extension-owned package formats are consumed before generic ZIP
         // inspection above. Keep a fail-closed branch for future magic-only
@@ -494,12 +495,30 @@ fn extract_with_parser_plan(
 /// the same exact allowance and derives the fact ceiling installed here.
 fn extract_pdf_with_plan(
     plan: Option<crate::parser_budget::ParserPlan>,
-    operation: impl FnOnce() -> anyhow::Result<Extraction>,
-) -> anyhow::Result<Extraction> {
-    match plan {
-        Some(plan) => run_parser_with_plan(plan, operation),
-        None => operation(),
+    operation: impl FnOnce() -> anyhow::Result<crate::pdf::PdfExtraction>,
+) -> anyhow::Result<crate::pdf::PdfExtraction> {
+    let (mut result, max_facts, exhausted) = match plan {
+        Some(plan) => {
+            let max_facts = plan.max_facts();
+            let (result, exhausted) = crate::parser_budget::with_plan(plan, operation);
+            (result?, Some(max_facts), exhausted)
+        }
+        None => (operation()?, None, false),
+    };
+    if let Some(max_facts) = max_facts {
+        let fact_count = extraction_fact_count(&result.extraction)
+            .ok_or_else(|| anyhow::anyhow!("parser output fact count overflow"))?;
+        anyhow::ensure!(
+            fact_count <= max_facts,
+            "parser output exceeded its dynamic fact allowance"
+        );
     }
+    if exhausted && let Some(root) = result.extraction.nodes.first_mut() {
+        root.extra.insert("parse_status".into(), "partial".into());
+        root.extra
+            .insert("parser_diagnostic".into(), "parser_arena_fact_limit".into());
+    }
+    Ok(result)
 }
 
 fn run_parser_with_plan(
@@ -565,7 +584,8 @@ fn extract_pdf_for_spec(
     source_file: &str,
     source: &[u8],
     parser_allowance_bytes: Option<usize>,
-    cancellation: Option<&graphoxide_index_runtime::RuntimeCancellation>,
+    recursion_depth: u16,
+    dispatch_budget: &mut RecursiveDispatchBudget,
 ) -> Extraction {
     // The PDF adapter owns its scratch proof (see `extract_pdf_with_plan`):
     // derive the limits first, then install the fact plan derived from them.
@@ -588,22 +608,375 @@ fn extract_pdf_for_spec(
     };
     let result = extract_pdf_with_plan(plan, || {
         let is_cancelled = || {
-            cancellation.is_some_and(graphoxide_index_runtime::RuntimeCancellation::is_cancelled)
+            dispatch_budget
+                .cancellation()
+                .is_some_and(graphoxide_index_runtime::RuntimeCancellation::is_cancelled)
         };
-        match crate::pdf::extract_pdf_bytes(path, source_file, source, limits, Some(&is_cancelled))
-        {
-            Ok(extraction) if !extraction.nodes.is_empty() => Ok(extraction),
+        match crate::pdf::extract_pdf(path, source_file, source, limits, Some(&is_cancelled)) {
+            Ok(result) if !result.extraction.nodes.is_empty() => Ok(result),
             Ok(_) => anyhow::bail!("PDF parser returned an empty extraction"),
             Err(error) => {
                 anyhow::ensure!(
                     crate::parser_budget::try_reserve_facts(1),
                     "PDF rejection root exceeded its dynamic fact allowance"
                 );
-                Ok(rejected_pdf_extraction(path, source_file, error.code()))
+                Ok(crate::pdf::PdfExtraction {
+                    extraction: rejected_pdf_extraction(path, source_file, error.code()),
+                    attachments: Vec::new(),
+                })
             }
         }
     });
-    result.unwrap_or_else(|_| rejected_pdf_extraction(path, source_file, "parser_arena_budget"))
+    let Ok(mut result) = result else {
+        return rejected_pdf_extraction(path, source_file, "parser_arena_budget");
+    };
+    attach_pdf_attachments(
+        &mut result.extraction,
+        result.attachments,
+        path,
+        source_file,
+        recursion_depth,
+        dispatch_budget,
+    );
+    result.extraction
+}
+
+fn attach_pdf_attachments(
+    extraction: &mut Extraction,
+    attachments: Vec<crate::pdf::PdfAttachment>,
+    path: &Path,
+    source_file: &str,
+    recursion_depth: u16,
+    dispatch_budget: &mut RecursiveDispatchBudget,
+) {
+    if attachments.is_empty() {
+        return;
+    }
+    let requested = attachments.len();
+    let Some(base_facts) = extraction_fact_count(extraction) else {
+        mark_all_pdf_attachments_omitted(extraction, requested, "aggregate_fact_limit");
+        return;
+    };
+    if !dispatch_budget.reserve_output_facts(base_facts) {
+        mark_all_pdf_attachments_omitted(extraction, requested, "aggregate_fact_limit");
+        return;
+    }
+    if dispatch_budget.is_cancelled() {
+        mark_all_pdf_attachments_omitted(extraction, requested, "cancelled");
+        return;
+    }
+    let Some(decoded_attachment_bytes) =
+        attachments.iter().try_fold(0usize, |total, attachment| {
+            total.checked_add(attachment.bytes.as_ref().map_or(0, Vec::len))
+        })
+    else {
+        mark_all_pdf_attachments_omitted(extraction, requested, "aggregate_scratch_limit");
+        return;
+    };
+    // Attachment vectors outlive the PDF parser plan. Hold one tree-wide
+    // reservation for every decoded sibling so child parser allowances account
+    // for all still-live attachment bytes, not only the member being visited.
+    let Some(_attachments_scratch_permit) =
+        dispatch_budget.try_reserve_scratch(decoded_attachment_bytes)
+    else {
+        mark_all_pdf_attachments_omitted(extraction, requested, "aggregate_scratch_limit");
+        return;
+    };
+    let root_id = extraction
+        .nodes
+        .first()
+        .map(|root| root.id.clone())
+        .unwrap_or_else(|| make_id(&[&source_stem(source_file)]));
+    let stem = source_stem(source_file);
+    let mut used_node_ids = extraction
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut used_hyperedge_ids = extraction
+        .hyperedges
+        .iter()
+        .filter_map(|hyperedge| hyperedge.get("id"))
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut blocker_count = 0usize;
+    let mut represented = 0usize;
+    let mut stop_status = None;
+
+    for attachment in attachments {
+        if dispatch_budget.is_cancelled() {
+            stop_status = Some("cancelled");
+            break;
+        }
+        if !dispatch_budget.admit_encounter() {
+            stop_status = Some("aggregate_member_or_byte_limit");
+            break;
+        }
+        if !dispatch_budget.reserve_output_facts(2) {
+            stop_status = Some("aggregate_fact_limit");
+            break;
+        }
+        represented += 1;
+        let member_id = unique_container_member_id(&stem, &attachment.path, &mut used_node_ids);
+        let declared_bytes = attachment
+            .bytes
+            .as_ref()
+            .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let mut extra = BTreeMap::from([
+            ("type".into(), "container_member".into()),
+            ("member_kind".into(), "pdf_attachment".into()),
+            ("compressed_bytes".into(), attachment.encoded_bytes.into()),
+            ("declared_uncompressed_bytes".into(), declared_bytes.into()),
+        ]);
+
+        let mut extracted = None;
+        if let Some(blocker) = attachment.blocker {
+            blocker_count += 1;
+            extra.insert("dispatch_status".into(), blocker.code().into());
+            extra.insert("blocker".into(), blocker.code().into());
+            extra.insert("retry_route".into(), blocker.retry_route().into());
+        } else if let Some(bytes) = attachment.bytes.as_deref() {
+            let kind =
+                if crate::containers::recursive_archive_kind(&attachment.path, bytes).is_some() {
+                    crate::containers::ContainerMemberKind::NestedContainer
+                } else {
+                    crate::containers::ContainerMemberKind::File
+                };
+            let member = crate::containers::ContainerMember {
+                path: attachment.path.clone(),
+                kind,
+                compressed_bytes: declared_bytes,
+                declared_uncompressed_bytes: declared_bytes,
+                zip: None,
+            };
+            let mut statuses = BTreeMap::new();
+            match dispatch_container_member(
+                path,
+                source_file,
+                &member,
+                bytes,
+                recursion_depth + 1,
+                dispatch_budget,
+                &mut statuses,
+            ) {
+                Ok(Some(child)) => {
+                    extra.insert("dispatch_status".into(), "processed".into());
+                    extracted = Some(child);
+                }
+                Ok(None) => {
+                    blocker_count += 1;
+                    let status = statuses
+                        .get(&attachment.path)
+                        .copied()
+                        .unwrap_or("attachment_unrecognized");
+                    extra.insert("dispatch_status".into(), status.into());
+                    if status == "sensitive_path_skipped" {
+                        extra.insert("blocker".into(), "pdf-attachment-sensitive-path".into());
+                        extra.insert(
+                            "retry_route".into(),
+                            "authorize-sensitive-member-processing".into(),
+                        );
+                    } else {
+                        extra.insert("blocker".into(), "pdf-attachment-unreadable".into());
+                        extra.insert("retry_route".into(), "repair-pdf-attachment".into());
+                    }
+                }
+                Err(status) => {
+                    blocker_count += 1;
+                    extra.insert("dispatch_status".into(), status.into());
+                    // Preserve the safe bounded admission reason for callers
+                    // that need to choose a reprocessing route.
+                    extra.insert("diagnostic".into(), status.into());
+                    if status == "cancelled" {
+                        extra.insert("blocker".into(), "cancelled".into());
+                        extra.insert("retry_route".into(), "retry-extraction".into());
+                        stop_status = Some("cancelled");
+                    } else {
+                        extra.insert("blocker".into(), "pdf-attachment-dispatch-limit".into());
+                        extra.insert(
+                            "retry_route".into(),
+                            "raise-container-dispatch-budget".into(),
+                        );
+                    }
+                }
+            }
+        }
+
+        extraction.nodes.push(Node {
+            id: member_id.clone(),
+            label: attachment.path,
+            file_type: "document".into(),
+            source_file: source_file.into(),
+            source_location: None,
+            community: None,
+            extra,
+        });
+        extraction
+            .edges
+            .push(contains_edge(&root_id, &member_id, source_file));
+
+        if let Some(mut child) = extracted {
+            remap_pdf_attachment_child(
+                &mut child.extraction,
+                &mut used_node_ids,
+                &mut used_hyperedge_ids,
+                &virtual_member_source_file(source_file, &child.path),
+            );
+            let child_ids = child
+                .extraction
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>();
+            extraction.nodes.extend(child.extraction.nodes);
+            extraction.edges.extend(child.extraction.edges);
+            extraction.hyperedges.extend(child.extraction.hyperedges);
+            for child_id in child_ids {
+                extraction
+                    .edges
+                    .push(contains_edge(&member_id, &child_id, source_file));
+            }
+        }
+        if stop_status == Some("cancelled") {
+            break;
+        }
+    }
+
+    let omitted = requested.saturating_sub(represented);
+    blocker_count = blocker_count.saturating_add(omitted);
+    let root = &mut extraction.nodes[0];
+    if omitted == 0 {
+        remove_ignored_pdf_feature(root, "embedded_files");
+    }
+    if represented == 0 || blocker_count > 0 {
+        root.extra.insert("parse_status".into(), "partial".into());
+        root.extra.insert(
+            "attachment_blocker_count".into(),
+            blocker_count.max(1).into(),
+        );
+    } else if !root.extra.contains_key("ignored_pdf_features")
+        && !root.extra.contains_key("parser_diagnostic")
+    {
+        root.extra.insert("parse_status".into(), "complete".into());
+    }
+    if omitted > 0 {
+        root.extra
+            .insert("omitted_attachment_count".into(), omitted.into());
+        if let Some(status) = stop_status {
+            root.extra
+                .insert("attachment_dispatch_status".into(), status.into());
+        }
+    }
+}
+
+fn mark_all_pdf_attachments_omitted(
+    extraction: &mut Extraction,
+    requested: usize,
+    status: &'static str,
+) {
+    let Some(root) = extraction.nodes.first_mut() else {
+        return;
+    };
+    root.extra.insert("parse_status".into(), "partial".into());
+    root.extra
+        .insert("attachment_blocker_count".into(), requested.max(1).into());
+    root.extra
+        .insert("omitted_attachment_count".into(), requested.into());
+    root.extra
+        .insert("attachment_dispatch_status".into(), status.into());
+}
+
+fn unique_container_member_id(
+    stem: &str,
+    member_path: &str,
+    used: &mut BTreeSet<String>,
+) -> String {
+    let legacy = make_id(&[stem, "member", member_path]);
+    if used.insert(legacy.clone()) {
+        return legacy;
+    }
+    let mut attempt = 0_u64;
+    loop {
+        let candidate = generated_container_member_id(stem, member_path, attempt);
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        attempt = attempt
+            .checked_add(1)
+            .expect("PDF attachment member ID attempts must not overflow");
+    }
+}
+
+fn remap_pdf_attachment_child(
+    extraction: &mut Extraction,
+    used_node_ids: &mut BTreeSet<String>,
+    used_hyperedge_ids: &mut BTreeSet<String>,
+    owner_name: &str,
+) {
+    let node_owners = extraction
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), BTreeSet::from([0usize])))
+        .collect::<BTreeMap<_, _>>();
+    let hyperedge_owners = extraction
+        .hyperedges
+        .iter()
+        .filter_map(|hyperedge| hyperedge.get("id"))
+        .filter_map(serde_json::Value::as_str)
+        .map(|id| (id.to_owned(), BTreeSet::from([0usize])))
+        .collect::<BTreeMap<_, _>>();
+    let node_plan = collision_safe_owned_id_plan(
+        b"node",
+        &node_owners,
+        &[owner_name.to_owned()],
+        used_node_ids,
+    );
+    let hyperedge_plan = collision_safe_owned_id_plan(
+        b"hyperedge",
+        &hyperedge_owners,
+        &[owner_name.to_owned()],
+        used_hyperedge_ids,
+    );
+    let empty_remap = BTreeMap::new();
+    remap_container_extraction_ids(
+        extraction,
+        node_plan.first().unwrap_or(&empty_remap),
+        hyperedge_plan.first().unwrap_or(&empty_remap),
+    );
+    used_node_ids.extend(extraction.nodes.iter().map(|node| node.id.clone()));
+    used_hyperedge_ids.extend(
+        extraction
+            .hyperedges
+            .iter()
+            .filter_map(|hyperedge| hyperedge.get("id"))
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned),
+    );
+}
+
+fn remove_ignored_pdf_feature(root: &mut Node, feature: &str) {
+    let remaining = root
+        .extra
+        .get("ignored_pdf_features")
+        .and_then(serde_json::Value::as_str)
+        .map(|features| {
+            features
+                .split(',')
+                .filter(|candidate| *candidate != feature)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+    match remaining.as_deref() {
+        Some("") => {
+            root.extra.remove("ignored_pdf_features");
+        }
+        Some(remaining) => {
+            root.extra
+                .insert("ignored_pdf_features".into(), remaining.into());
+        }
+        None => {}
+    }
 }
 
 fn extract_rtf_for_spec(
@@ -952,6 +1325,7 @@ impl RecursiveDispatchBudget {
             allowance
                 .checked_shr(u32::from(recursion_depth).min(usize::BITS - 1))
                 .unwrap_or(0)
+                .saturating_sub(self.scratch.state.used.get())
         })
     }
 
@@ -1217,96 +1591,7 @@ fn remap_container_extraction_ids(
 /// lexical fast path because the compatibility detector may inspect a shebang
 /// when classifying an ordinary extensionless source file.
 pub(crate) fn is_sensitive_container_member_path(member_path: &str) -> bool {
-    let path = Path::new(member_path);
-    let components = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => {
-                Some(value.to_string_lossy().to_ascii_lowercase())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if components.iter().any(|component| {
-        matches!(
-            component.as_str(),
-            ".ssh" | ".gnupg" | ".aws" | ".gcloud" | "secrets" | ".secrets" | "credentials"
-        )
-    }) {
-        return true;
-    }
-
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let env_template = [".example", ".sample", ".template", ".dist"]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
-        && (name.starts_with(".env.") || name.starts_with(".envrc."));
-    if (name.starts_with(".env") || name.starts_with(".envrc")) && !env_template {
-        return true;
-    }
-    let private_key_name = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
-        .iter()
-        .any(|key| {
-            name.strip_suffix(key).is_some_and(|prefix| {
-                prefix
-                    .chars()
-                    .next_back()
-                    .is_none_or(|character| !character.is_ascii_alphanumeric())
-            })
-        });
-    if [
-        ".netrc",
-        ".pgpass",
-        ".htpasswd",
-        ".npmrc",
-        ".pypirc",
-        ".git-credentials",
-        ".boto",
-        "secring",
-        "secring.gpg",
-        "secring.pgp",
-    ]
-    .contains(&name.as_str())
-        || private_key_name
-        || [
-            ".pem", ".key", ".p12", ".pfx", ".cert", ".crt", ".der", ".p8",
-        ]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
-    {
-        return true;
-    }
-
-    if path.extension().is_some() {
-        return crate::detect::is_sensitive_path_only(path);
-    }
-    let stem = name.trim_start_matches('.');
-    if ["service_account", "service-account", "service.account"]
-        .iter()
-        .any(|marker| stem.contains(marker))
-    {
-        return true;
-    }
-    stem.split(['-', '_', '.', ' ', '\t']).any(|part| {
-        matches!(
-            part,
-            "credential"
-                | "credentials"
-                | "secret"
-                | "secrets"
-                | "passwd"
-                | "passwds"
-                | "password"
-                | "passwords"
-                | "token"
-                | "tokens"
-                | "serviceaccount"
-        )
-    })
+    crate::containers::is_sensitive_archive_member_path(member_path)
 }
 
 fn extract_container_member(
@@ -1749,6 +2034,7 @@ fn container_inventory_extraction(
                     .into(),
                 );
             }
+            insert_registered_reprocessing_route(&mut root.extra, path);
             if let Some(reason) = dispatch_stop_reason {
                 root.extra
                     .insert("recursive_dispatch_status".into(), reason.into());
@@ -1947,6 +2233,7 @@ fn container_inventory_extraction(
                     .into(),
                 );
             }
+            insert_registered_reprocessing_route(&mut root.extra, path);
             if let Some(metadata) = media.metadata {
                 root.extra.insert("width".into(), metadata.width.into());
                 root.extra.insert("height".into(), metadata.height.into());
@@ -2361,10 +2648,24 @@ fn rejected_inventory_extraction(
     node.extra.insert("diagnostic".into(), diagnostic.into());
     node.extra
         .insert("format_capability".into(), "inventory_only".into());
+    insert_registered_reprocessing_route(&mut node.extra, path);
     Extraction {
         nodes: vec![node],
         edges: Vec::new(),
         hyperedges: Vec::new(),
+    }
+}
+
+fn insert_registered_reprocessing_route(
+    extra: &mut BTreeMap<String, serde_json::Value>,
+    path: &Path,
+) {
+    let Some(spec) = crate::format_registry::format_registry().find_by_path(path) else {
+        return;
+    };
+    if let Some((blocker, retry_route)) = spec.wiki_processing_contract().blocker() {
+        extra.insert("blocker".into(), blocker.into());
+        extra.insert("retry_route".into(), retry_route.into());
     }
 }
 
@@ -2426,6 +2727,10 @@ fn registered_inventory_extraction(
     node.extra.insert("byte_length".into(), byte_length.into());
     node.extra
         .insert("parse_status".into(), "inventory_only".into());
+    if let Some((blocker, retry_route)) = spec.wiki_processing_contract().blocker() {
+        node.extra.insert("blocker".into(), blocker.into());
+        node.extra.insert("retry_route".into(), retry_route.into());
+    }
     Extraction {
         nodes: vec![node],
         edges: Vec::new(),
@@ -2449,6 +2754,69 @@ mod tests {
             writer.write_all(value).expect("write ZIP member");
         }
         writer.finish().expect("finish ZIP").into_inner()
+    }
+
+    #[test]
+    fn pdf_attachments_share_one_fact_budget_with_the_pdf_root() {
+        let mut extraction = Extraction {
+            nodes: vec![Node {
+                id: "pdf-root".into(),
+                label: "fixture.pdf".into(),
+                file_type: "paper".into(),
+                source_file: "fixture.pdf".into(),
+                source_location: None,
+                community: None,
+                extra: BTreeMap::from([
+                    ("type".into(), "pdf_document".into()),
+                    ("ignored_pdf_features".into(), "embedded_files".into()),
+                ]),
+            }],
+            ..Extraction::default()
+        };
+        let attachments = vec![crate::pdf::PdfAttachment {
+            path: "attachment.json".into(),
+            bytes: Some(br#"{"fixture":true}"#.to_vec()),
+            encoded_bytes: 16,
+            blocker: None,
+        }];
+        let limits = crate::containers::ContainerLimits::default();
+        let mut budget = RecursiveDispatchBudget::with_output_fact_limit(limits, 2);
+
+        attach_pdf_attachments(
+            &mut extraction,
+            attachments,
+            Path::new("fixture.pdf"),
+            "fixture.pdf",
+            0,
+            &mut budget,
+        );
+
+        assert_eq!(extraction.nodes.len(), 1);
+        assert_eq!(budget.remaining_output_facts(), 1);
+        assert_eq!(
+            extraction.nodes[0].extra.get("omitted_attachment_count"),
+            Some(&1.into())
+        );
+        assert_eq!(
+            extraction.nodes[0].extra.get("attachment_dispatch_status"),
+            Some(&"aggregate_fact_limit".into())
+        );
+        assert_eq!(
+            extraction.nodes[0].extra.get("ignored_pdf_features"),
+            Some(&"embedded_files".into())
+        );
+    }
+
+    #[test]
+    fn live_recursive_scratch_reduces_child_parser_allowance() {
+        let limits = crate::containers::ContainerLimits::default();
+        let budget = RecursiveDispatchBudget::new_with_parser_allowance(limits, Some(1_024));
+        assert_eq!(budget.parser_allowance_at_depth(0), Some(1_024));
+        let permit = budget.try_reserve_scratch(256).expect("scratch permit");
+        assert_eq!(budget.parser_allowance_at_depth(0), Some(768));
+        assert_eq!(budget.parser_allowance_at_depth(1), Some(256));
+        drop(permit);
+        assert_eq!(budget.parser_allowance_at_depth(0), Some(1_024));
     }
 
     fn zip_directory_bytes(directories: &[&str]) -> Vec<u8> {
@@ -2534,6 +2902,44 @@ mod tests {
             format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
                 .to_owned(),
+        ];
+        let mut pdf = b"%PDF-1.4\n%\x80\x80\x80\x80\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    fn one_page_pdf_with_form_text(text: &str) -> Vec<u8> {
+        assert!(text.is_ascii());
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('(', "\\(")
+            .replace(')', "\\)");
+        let page_content = "q /X1 Do Q\n";
+        let form_content = format!("BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET\n");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> /XObject << /X1 5 0 R >> >> /Contents 4 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{page_content}endstream", page_content.len()),
+            format!("<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Length {} >>\nstream\n{form_content}endstream", form_content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_owned(),
         ];
         let mut pdf = b"%PDF-1.4\n%\x80\x80\x80\x80\n".to_vec();
         let mut offsets = Vec::with_capacity(objects.len());
@@ -3246,6 +3652,33 @@ mod tests {
     }
 
     #[test]
+    fn isolated_pdf_retains_text_from_a_form_xobject() {
+        let source = one_page_pdf_with_form_text("Form table value 13.5");
+        let extraction = extract_with_allowance("document.pdf", &source, 16 * 1024 * 1024);
+        let page = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(serde_json::Value::as_str) == Some("pdf_page")
+            })
+            .expect("PDF page fact");
+        assert!(page.extra["text"]
+            .as_str()
+            .expect("page text")
+            .contains("Form table value 13.5"));
+    }
+
+    #[test]
+    fn explicitly_budgeted_large_pdf_uses_its_own_parser_admission() {
+        let mut source = one_page_pdf("Large bounded adapter text");
+        source.resize(20 * 1024 * 1024, b' ');
+        let extraction = extract_with_allowance("document.pdf", &source, 64 * 1024 * 1024);
+        assert!(extraction.nodes.iter().any(|node| {
+            node.extra.get("type").and_then(serde_json::Value::as_str) == Some("pdf_page")
+        }));
+    }
+
+    #[test]
     fn isolated_semantic_builders_consume_fact_credits_before_retention() {
         let fixtures = [
             (
@@ -3475,7 +3908,7 @@ mod tests {
 
     #[test]
     fn default_archive_budget_uses_the_published_aggregate_fact_ceiling() {
-        let directory_names = (0..2_050)
+        let directory_names = (0..4_096)
             .map(|index| format!("d{index:04}/"))
             .collect::<Vec<_>>();
         let directory_refs = directory_names
@@ -3486,7 +3919,7 @@ mod tests {
 
         let fact_count = extraction_fact_count(&extraction).expect("bounded archive fact count");
         assert!(fact_count <= crate::format_registry::CONTAINER_LIMITS.max_records);
-        assert_eq!(crate::format_registry::CONTAINER_LIMITS.max_records, 4_096);
+        assert_eq!(crate::format_registry::CONTAINER_LIMITS.max_records, 8_192);
         let root = extraction.nodes.first().expect("container root");
         assert_eq!(
             root.extra
@@ -3497,6 +3930,32 @@ mod tests {
         assert!(root.extra["omitted_member_count"]
             .as_u64()
             .is_some_and(|count| count > 0));
+    }
+
+    #[test]
+    fn default_archive_budget_retains_a_nested_source_family_over_four_thousand_facts() {
+        let directory_names = (0..2_455)
+            .map(|index| format!("d{index:04}/"))
+            .collect::<Vec<_>>();
+        let directory_refs = directory_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let extraction = extract("complete-family.zip", &zip_directory_bytes(&directory_refs));
+
+        assert_eq!(
+            extraction_fact_count(&extraction),
+            Some(4_911),
+            "one archive root plus one node and containment edge per member"
+        );
+        let root = extraction.nodes.first().expect("container root");
+        assert_eq!(
+            root.extra
+                .get("recursive_dispatch_status")
+                .and_then(serde_json::Value::as_str),
+            None
+        );
+        assert!(!root.extra.contains_key("omitted_member_count"));
     }
 
     #[test]
@@ -4077,5 +4536,43 @@ mod tests {
             checked_rules > 0,
             "the registry has no magic rules to validate"
         );
+    }
+
+    #[test]
+    fn blocked_container_and_media_routes_preserve_the_registry_retry_contract() {
+        for (path, bytes, blocker, retry_route) in [
+            (
+                "recording.flac",
+                b"not a flac stream".as_slice(),
+                "media-transcription-or-video-analysis-unavailable",
+                "media-enrichment-route-available",
+            ),
+            (
+                "archive.7z",
+                b"7z\xbc\xaf\x27\x1c".as_slice(),
+                "archive-decoder-unavailable",
+                "bounded-decoder-available",
+            ),
+        ] {
+            let root = extract(path, bytes)
+                .nodes
+                .into_iter()
+                .next()
+                .expect("blocked route retains an inventory root");
+            assert_eq!(
+                root.extra
+                    .get("blocker")
+                    .and_then(serde_json::Value::as_str),
+                Some(blocker),
+                "{path}"
+            );
+            assert_eq!(
+                root.extra
+                    .get("retry_route")
+                    .and_then(serde_json::Value::as_str),
+                Some(retry_route),
+                "{path}"
+            );
+        }
     }
 }

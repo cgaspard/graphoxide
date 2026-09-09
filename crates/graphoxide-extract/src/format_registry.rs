@@ -114,6 +114,85 @@ impl ByteAdapterKind {
     }
 }
 
+/// The named processing route that owns a registered source in the wiki
+/// pipeline. This is intentionally narrower than an extractor implementation:
+/// it describes the material contract available to controller metadata without
+/// claiming that every source instance has been completely extracted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WikiProcessingRoute {
+    TextCode,
+    StructuredData,
+    ProtocolSchema,
+    Diagram,
+    Engineering,
+    Simulation,
+    DocumentLayout,
+    Container,
+}
+
+/// The page contract that a registered representation requires when it is
+/// admitted to the wiki. This deliberately remains distinct from the
+/// processing route: an XLSX workbook and a DOCX document both use layout
+/// processing, but only the workbook requires dataset navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WikiPageSemantics {
+    Generic,
+    Dataset,
+}
+
+impl WikiProcessingRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TextCode => "text-code",
+            Self::StructuredData => "structured-data",
+            Self::ProtocolSchema => "protocol-schema",
+            Self::Diagram => "diagram",
+            Self::Engineering => "engineering",
+            Self::Simulation => "simulation",
+            Self::DocumentLayout => "document-layout",
+            Self::Container => "container",
+        }
+    }
+}
+
+/// A format's complete wiki-processing declaration. A family either has a
+/// named route or is held behind a stable reprocessing blocker; no caller may
+/// silently treat inventory-only output as successful content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WikiProcessingContract {
+    Route(WikiProcessingRoute),
+    Blocked {
+        blocker: &'static str,
+        retry_route: &'static str,
+    },
+    Invalid,
+}
+
+impl WikiProcessingContract {
+    pub fn is_valid(self) -> bool {
+        !matches!(self, Self::Invalid)
+    }
+
+    pub fn route(self) -> Option<&'static str> {
+        match self {
+            Self::Route(route) => Some(route.as_str()),
+            Self::Blocked { .. } | Self::Invalid => None,
+        }
+    }
+
+    pub fn blocker(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Blocked {
+                blocker,
+                retry_route,
+            } => Some((blocker, retry_route)),
+            Self::Route(_) | Self::Invalid => None,
+        }
+    }
+}
+
 impl FormatCapability {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -204,14 +283,16 @@ pub const BINARY_LIMITS: FormatLimits = FormatLimits {
 /// Effective ceilings enforced by the bounded PDF text/page adapter.
 ///
 /// A successful extraction retains one document node plus one node and one
-/// containment edge per page. The expansion ratio bounds decoded stream and
-/// retained text growth relative to the admitted source bytes.
+/// containment edge per page. Authenticated empty-password encrypted PDFs may
+/// additionally route bounded embedded files through the shared recursive
+/// container budget. The expansion ratio bounds decoded stream and retained
+/// text growth relative to the admitted source bytes.
 pub const PDF_LIMITS: FormatLimits = FormatLimits {
     max_input_bytes: 16 * 1024 * 1024,
     max_nesting: 32,
-    max_records: 1_025,
-    max_container_members: 0,
-    max_recursion_depth: 0,
+    max_records: 4_096,
+    max_container_members: 4_096,
+    max_recursion_depth: 4,
     max_expansion_ratio: 64,
 };
 
@@ -244,9 +325,9 @@ pub const CONTAINER_LIMITS: FormatLimits = FormatLimits {
     max_input_bytes: 512 * 1024 * 1024,
     max_nesting: 64,
     // Recursive archives may repeat long virtual member paths in every fact.
-    // Keep one complete archive tree at the graph batch fact ceiling so it
-    // cannot retain a million-fact extraction before downstream byte admission.
-    max_records: 4_096,
+    // Keep one complete archive tree bounded while retaining a moderately
+    // sized nested source family before downstream byte admission.
+    max_records: 8_192,
     max_container_members: 4_096,
     max_recursion_depth: 4,
     max_expansion_ratio: 128,
@@ -342,6 +423,11 @@ pub struct FormatSpec {
     pub limits: FormatLimits,
     pub legacy_file_type: Option<FileType>,
     pub watched: bool,
+    /// Stable reason a registered family cannot currently produce semantic
+    /// material. `None` means the selected adapter is the declared route.
+    pub blocker: Option<&'static str>,
+    /// Stable condition that permits retrying a blocked family.
+    pub retry_route: Option<&'static str>,
     document_heuristic: bool,
     office: bool,
     google_workspace: bool,
@@ -356,9 +442,15 @@ pub struct FormatCapabilityReport {
     pub capability: FormatCapability,
     pub schema_requirement: SchemaRequirement,
     pub adapter: ByteAdapterKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wiki_processing_route: Option<&'static str>,
     pub extensions: &'static [&'static str],
     pub file_names: &'static [&'static str],
     pub limits: FormatLimits,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_route: Option<&'static str>,
 }
 
 impl FormatSpec {
@@ -376,6 +468,25 @@ impl FormatSpec {
 
     pub fn matches_magic(self, input: &[u8]) -> bool {
         self.magic.iter().copied().any(|rule| rule.matches(input))
+    }
+
+    /// Resolve the page contract from this registry entry and its admitted
+    /// extension. Some container families intentionally share an extraction
+    /// route, so the extension remains part of the immutable representation.
+    pub fn wiki_page_semantics_for_extension(self, extension: &str) -> WikiPageSemantics {
+        match (self.id.as_str(), extension.to_ascii_lowercase().as_str()) {
+            ("delimited-data" | "json-lines", _)
+            | ("office-open-xml", "xlsx")
+            | ("office-container-documents", "ods") => WikiPageSemantics::Dataset,
+            _ => WikiPageSemantics::Generic,
+        }
+    }
+
+    pub fn wiki_page_semantics_for_path(self, path: &Path) -> WikiPageSemantics {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| self.wiki_page_semantics_for_extension(extension))
+            .unwrap_or(WikiPageSemantics::Generic)
     }
 
     pub fn adapter(self) -> ByteAdapterKind {
@@ -438,10 +549,12 @@ impl FormatSpec {
             | "zip-archive"
             | "gzip-archive"
             | "tar-archive"
-            | "archive"
+            | "stream-archive"
+            | "unsupported-archive"
             | "openusd-container"
             | "simulation-container" => ByteAdapterKind::ContainerMedia,
             "google-workspace-shortcut"
+            | "formal-spec"
             | "configuration-languages"
             | "relax-ng-compact"
             | "dia"
@@ -451,15 +564,63 @@ impl FormatSpec {
         }
     }
 
+    /// Return the complete wiki-processing contract for this format family.
+    /// Explicit registry blockers win over an adapter route. Inventory-only
+    /// families without a dedicated decoder remain reprocessable blockers,
+    /// rather than looking like metadata-only processing succeeded.
+    pub fn wiki_processing_contract(self) -> WikiProcessingContract {
+        match (self.blocker, self.retry_route) {
+            (Some(blocker), Some(retry_route)) => WikiProcessingContract::Blocked {
+                blocker,
+                retry_route,
+            },
+            (Some(_), None) | (None, Some(_)) => WikiProcessingContract::Invalid,
+            (None, None) if matches!(self.adapter(), ByteAdapterKind::Engine) => {
+                WikiProcessingContract::Route(WikiProcessingRoute::TextCode)
+            }
+            (None, None) => match self.capability {
+                FormatCapability::InventoryOnly => WikiProcessingContract::Blocked {
+                    blocker: "format-processor-unavailable",
+                    retry_route: "add-format-adapter-or-enrichment",
+                },
+                _ => WikiProcessingContract::Route(match self.adapter() {
+                    ByteAdapterKind::Engine => unreachable!("engine route is selected above"),
+                    ByteAdapterKind::Structured => WikiProcessingRoute::StructuredData,
+                    ByteAdapterKind::Protocol => WikiProcessingRoute::ProtocolSchema,
+                    ByteAdapterKind::Diagram => WikiProcessingRoute::Diagram,
+                    ByteAdapterKind::Engineering => WikiProcessingRoute::Engineering,
+                    ByteAdapterKind::Simulation => WikiProcessingRoute::Simulation,
+                    ByteAdapterKind::Pdf | ByteAdapterKind::Office | ByteAdapterKind::Rtf => {
+                        WikiProcessingRoute::DocumentLayout
+                    }
+                    ByteAdapterKind::ContainerMedia => WikiProcessingRoute::Container,
+                    // Inventory-only capability is handled above. A future
+                    // non-inventory use of this adapter must make its route
+                    // explicit instead of inheriting a false success state.
+                    ByteAdapterKind::Inventory => return WikiProcessingContract::Invalid,
+                }),
+            },
+        }
+    }
+
     pub fn capability_report(self) -> FormatCapabilityReport {
+        let contract = self.wiki_processing_contract();
+        let (blocker, retry_route) = contract
+            .blocker()
+            .map_or((None, None), |(blocker, retry_route)| {
+                (Some(blocker), Some(retry_route))
+            });
         FormatCapabilityReport {
             id: self.id,
             capability: self.capability,
             schema_requirement: self.schema_requirement,
             adapter: self.adapter(),
+            wiki_processing_route: contract.route(),
             extensions: self.extensions,
             file_names: self.file_names,
             limits: self.limits,
+            blocker,
+            retry_route,
         }
     }
 }
@@ -477,7 +638,9 @@ macro_rules! format_spec {
         $watched:expr,
         $document_heuristic:expr,
         $office:expr,
-        $google_workspace:expr $(,)?
+        $google_workspace:expr,
+        $blocker:expr,
+        $retry_route:expr $(,)?
     ) => {
         FormatSpec {
             id: FormatId::new($id),
@@ -489,10 +652,43 @@ macro_rules! format_spec {
             limits: $limits,
             legacy_file_type: $legacy_file_type,
             watched: $watched,
+            blocker: $blocker,
+            retry_route: $retry_route,
             document_heuristic: $document_heuristic,
             office: $office,
             google_workspace: $google_workspace,
         }
+    };
+    (
+        $id:expr,
+        $extensions:expr,
+        $file_names:expr,
+        $magic:expr,
+        $capability:expr,
+        $schema_requirement:expr,
+        $limits:expr,
+        $legacy_file_type:expr,
+        $watched:expr,
+        $document_heuristic:expr,
+        $office:expr,
+        $google_workspace:expr $(,)?
+    ) => {
+        format_spec!(
+            $id,
+            $extensions,
+            $file_names,
+            $magic,
+            $capability,
+            $schema_requirement,
+            $limits,
+            $legacy_file_type,
+            $watched,
+            $document_heuristic,
+            $office,
+            $google_workspace,
+            None,
+            None,
+        )
     };
 }
 
@@ -505,11 +701,13 @@ const MAGIC_RASTER: &[MagicRule] = &[
 ];
 const MAGIC_ZIP: &[MagicRule] = &[MagicRule::new(0, b"PK\x03\x04")];
 const MAGIC_GZIP: &[MagicRule] = &[MagicRule::new(0, b"\x1f\x8b")];
-const MAGIC_ARCHIVE: &[MagicRule] = &[
+const MAGIC_STREAM_ARCHIVE: &[MagicRule] = &[
     MagicRule::new(0, b"BZh"),
     MagicRule::new(0, b"\xfd7zXZ\x00"),
     MagicRule::new(0, b"\x28\xb5\x2f\xfd"),
     MagicRule::new(0, b"\x04\x22\x4d\x18"),
+];
+const MAGIC_UNSUPPORTED_ARCHIVE: &[MagicRule] = &[
     MagicRule::new(0, b"7z\xbc\xaf\x27\x1c"),
     MagicRule::new(0, b"Rar!\x1a\x07\x00"),
     MagicRule::new(0, b"Rar!\x1a\x07\x01\x00"),
@@ -529,6 +727,7 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
     "dfm", "lfm", "lpk", "sh", "bash", "dm", "dme", "dmi", "dmm", "dmf", "sln", "slnx", "csproj",
     "fsproj", "vbproj", "xaml", "razor", "cshtml", "cls", "trigger",
 ];
+const FORMAL_SPEC_EXTENSIONS: &[&str] = &["qnt"];
 const JSON_EXTENSIONS: &[&str] = &["json"];
 const JSON_VARIANT_EXTENSIONS: &[&str] = &[
     "jsonc",
@@ -653,7 +852,8 @@ const SCENARIO_INVENTORY_EXTENSIONS: &[&str] = &["osc"];
 const ZIP_ARCHIVE_EXTENSIONS: &[&str] = &["zip"];
 const TAR_ARCHIVE_EXTENSIONS: &[&str] = &["tar"];
 const GZIP_ARCHIVE_EXTENSIONS: &[&str] = &["tgz", "gz"];
-const ARCHIVE_EXTENSIONS: &[&str] = &["bz2", "xz", "zst", "7z", "rar", "cpio", "cab", "lz4", "lz"];
+const STREAM_ARCHIVE_EXTENSIONS: &[&str] = &["bz2", "xz", "zst", "lz4"];
+const UNSUPPORTED_ARCHIVE_EXTENSIONS: &[&str] = &["7z", "rar", "cpio", "cab", "lz"];
 
 const PACKAGE_MANIFEST_NAMES: &[&str] = &[
     "package.json",
@@ -710,6 +910,20 @@ const CONFIG_JSON_FILE_NAMES: &[&str] = &[".prettierrc", ".eslintrc", ".babelrc"
 const FMI_FILE_NAMES: &[&str] = &["modeldescription.xml"];
 
 const FORMAT_SPECS: &[FormatSpec] = &[
+    format_spec!(
+        "formal-spec",
+        FORMAL_SPEC_EXTENSIONS,
+        &[],
+        &[],
+        FormatCapability::InventoryOnly,
+        SchemaRequirement::NotRequired,
+        TEXT_LIMITS,
+        None,
+        false,
+        false,
+        false,
+        false,
+    ),
     format_spec!(
         "source-code",
         SOURCE_CODE_EXTENSIONS,
@@ -1009,7 +1223,7 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         SVG_EXTENSIONS,
         &[],
         &[],
-        FormatCapability::InventoryOnly,
+        FormatCapability::StructuralPartial,
         SchemaRequirement::NotRequired,
         TEXT_LIMITS,
         None,
@@ -1031,6 +1245,8 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
         false,
         false,
+        Some("media-transcription-or-video-analysis-unavailable"),
+        Some("media-enrichment-route-available"),
     ),
     format_spec!(
         "additional-media",
@@ -1045,6 +1261,8 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
         false,
         false,
+        Some("media-transcription-or-video-analysis-unavailable"),
+        Some("media-enrichment-route-available"),
     ),
     format_spec!(
         "google-workspace-shortcut",
@@ -1185,6 +1403,8 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
         false,
         false,
+        Some("verified-schema-binding-required"),
+        Some("verified-schema-binding-available"),
     ),
     format_spec!(
         "flatbuffers-idl",
@@ -1213,6 +1433,8 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
         false,
         false,
+        Some("verified-schema-binding-required"),
+        Some("verified-schema-binding-available"),
     ),
     format_spec!(
         "capnproto",
@@ -1395,6 +1617,8 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
         false,
         false,
+        Some("bounded-asn1-decoder-unavailable"),
+        Some("bounded-asn1-decoder-available"),
     ),
     format_spec!(
         "api-idl",
@@ -1803,11 +2027,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
     ),
     format_spec!(
-        "archive",
-        ARCHIVE_EXTENSIONS,
+        "stream-archive",
+        STREAM_ARCHIVE_EXTENSIONS,
         &[],
-        MAGIC_ARCHIVE,
-        FormatCapability::InventoryOnly,
+        MAGIC_STREAM_ARCHIVE,
+        FormatCapability::StructuralPartial,
         SchemaRequirement::NotRequired,
         CONTAINER_LIMITS,
         None,
@@ -1816,6 +2040,22 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
         false,
     ),
+    FormatSpec {
+        id: FormatId::new("unsupported-archive"),
+        extensions: UNSUPPORTED_ARCHIVE_EXTENSIONS,
+        file_names: &[],
+        magic: MAGIC_UNSUPPORTED_ARCHIVE,
+        capability: FormatCapability::InventoryOnly,
+        schema_requirement: SchemaRequirement::NotRequired,
+        limits: CONTAINER_LIMITS,
+        legacy_file_type: None,
+        watched: false,
+        blocker: Some("archive-decoder-unavailable"),
+        retry_route: Some("bounded-decoder-available"),
+        document_heuristic: false,
+        office: false,
+        google_workspace: false,
+    },
     format_spec!(
         "mcp-configuration",
         &[],
@@ -1829,6 +2069,8 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         false,
         false,
         false,
+        Some("mcp-redacted-projection-required"),
+        Some("add-redacted-mcp-material-projection"),
     ),
 ];
 
@@ -2258,9 +2500,10 @@ pub fn default_runtime_admission_profile() -> RuntimeAdmissionProfile {
 mod tests {
     use super::{
         default_runtime_admission_profile, format_registry, ByteAdapterKind, FormatCapability,
-        MagicRule, SchemaRequirement, COLUMNAR_PROTOCOL_LIMITS, CONTAINER_LIMITS,
-        DEFAULT_PROFILE_PARSER_ALLOWANCE_BYTES, DIAGRAM_LIMITS, ENGINEERING_LIMITS, OFFICE_LIMITS,
-        PDF_LIMITS, PROTOCOL_LIMITS, SIMULATION_LIMITS, STRUCTURED_TEXT_LIMITS, WATCHED_EXTENSIONS,
+        MagicRule, SchemaRequirement, WikiPageSemantics, COLUMNAR_PROTOCOL_LIMITS,
+        CONTAINER_LIMITS, DEFAULT_PROFILE_PARSER_ALLOWANCE_BYTES, DIAGRAM_LIMITS,
+        ENGINEERING_LIMITS, OFFICE_LIMITS, PDF_LIMITS, PROTOCOL_LIMITS, SIMULATION_LIMITS,
+        STRUCTURED_TEXT_LIMITS, WATCHED_EXTENSIONS,
     };
     use std::path::Path;
 
@@ -2385,6 +2628,16 @@ mod tests {
         assert_eq!(projected, WATCHED_EXTENSIONS);
         assert!(registry.is_watched_extension(".RS"));
         assert!(!registry.is_watched_extension("csv"));
+    }
+
+    #[test]
+    fn quint_files_are_admitted_as_inventory_only_formal_specs() {
+        let formal = format_registry()
+            .find_by_extension("qnt")
+            .expect("Quint format registration");
+        assert_eq!(formal.id.as_str(), "formal-spec");
+        assert_eq!(formal.capability, FormatCapability::InventoryOnly);
+        assert_eq!(formal.adapter(), ByteAdapterKind::Inventory);
     }
 
     #[test]
@@ -2541,6 +2794,22 @@ mod tests {
             assert_eq!(report.capability, spec.capability);
             assert_eq!(report.schema_requirement, spec.schema_requirement);
             assert_eq!(report.adapter, spec.adapter());
+            assert_eq!(
+                report.wiki_processing_route,
+                spec.wiki_processing_contract().route(),
+                "{} must expose its wiki route in the capability report",
+                spec.id.as_str()
+            );
+            assert_eq!(
+                (report.blocker, report.retry_route),
+                spec.wiki_processing_contract()
+                    .blocker()
+                    .map_or((None, None), |(blocker, retry_route)| {
+                        (Some(blocker), Some(retry_route))
+                    }),
+                "{} must expose its reprocessing blocker in the capability report",
+                spec.id.as_str()
+            );
             assert!(report.limits.max_input_bytes > 0);
             assert!(report.limits.max_nesting > 0);
             assert!(report.limits.max_records > 0);
@@ -2548,6 +2817,91 @@ mod tests {
                 !report.extensions.is_empty() || !report.file_names.is_empty(),
                 "{} must have a deterministic discriminator",
                 report.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn wiki_processing_contracts_are_declared_for_every_registered_format() {
+        let registry = format_registry();
+        for spec in registry.specs() {
+            let contract = spec.wiki_processing_contract();
+            assert!(
+                contract.is_valid(),
+                "{} has no declared wiki processing route or blocker",
+                spec.id.as_str()
+            );
+        }
+
+        let openapi = registry
+            .find_by_path(Path::new("openapi.yaml"))
+            .expect("OpenAPI registry entry");
+        assert_eq!(
+            openapi.wiki_processing_contract().route(),
+            Some("protocol-schema")
+        );
+
+        let media = registry
+            .find_by_extension("mp4")
+            .expect("media registry entry");
+        assert_eq!(
+            media.wiki_processing_contract().blocker(),
+            Some((
+                "media-transcription-or-video-analysis-unavailable",
+                "media-enrichment-route-available"
+            ))
+        );
+
+        let inventory = registry
+            .find_by_extension("qnt")
+            .expect("inventory-only registry entry");
+        assert_eq!(
+            inventory.wiki_processing_contract().blocker(),
+            Some((
+                "format-processor-unavailable",
+                "add-format-adapter-or-enrichment"
+            ))
+        );
+    }
+
+    #[test]
+    fn registry_declares_dataset_page_semantics_by_format_and_extension() {
+        let registry = format_registry();
+        for path in [
+            "records.csv",
+            "records.ccsv",
+            "records.tsv",
+            "records.tab",
+            "records.psv",
+            "events.jsonl",
+            "events.ndjson",
+            "ledger.xlsx",
+            "ledger.ods",
+        ] {
+            let spec = registry
+                .find_by_path(Path::new(path))
+                .expect("registered dataset format");
+            assert_eq!(
+                spec.wiki_page_semantics_for_path(Path::new(path)),
+                WikiPageSemantics::Dataset,
+                "{path} must retain the dataset page contract"
+            );
+        }
+        for path in [
+            "document.json",
+            "document.yaml",
+            "document.docx",
+            "slides.pptx",
+            "legacy.xls",
+            "macro.xlsm",
+        ] {
+            let spec = registry
+                .find_by_path(Path::new(path))
+                .expect("registered non-dataset format");
+            assert_eq!(
+                spec.wiki_page_semantics_for_path(Path::new(path)),
+                WikiPageSemantics::Generic,
+                "{path} must not acquire a dataset contract without a dedicated route"
             );
         }
     }
@@ -2633,7 +2987,7 @@ mod tests {
 
     #[test]
     fn recursive_container_reports_publish_the_aggregate_tree_fact_ceiling() {
-        assert_eq!(CONTAINER_LIMITS.max_records, 4_096);
+        assert_eq!(CONTAINER_LIMITS.max_records, 8_192);
         let tar = format_registry()
             .find_by_extension("tar")
             .expect("tar registry entry");
@@ -2799,7 +3153,43 @@ mod tests {
             );
         }
         assert_eq!(registry.classify_extension("usdz"), None);
-        for extension in ["bz2", "xz", "zst", "7z", "rar", "glb", "fmi"] {
+        for extension in ["bz2", "xz", "zst", "lz4"] {
+            assert_eq!(
+                registry.capability_for_extension(extension),
+                Some(FormatCapability::StructuralPartial),
+                "{extension}"
+            );
+            assert_eq!(
+                registry
+                    .find_by_extension(extension)
+                    .map(|spec| spec.id.as_str()),
+                Some("stream-archive"),
+                "{extension}"
+            );
+        }
+        for extension in ["7z", "rar", "cpio", "cab", "lz"] {
+            let spec = registry
+                .find_by_extension(extension)
+                .unwrap_or_else(|| panic!("missing unsupported archive {extension}"));
+            assert_eq!(spec.id.as_str(), "unsupported-archive", "{extension}");
+            assert_eq!(
+                spec.capability,
+                FormatCapability::InventoryOnly,
+                "{extension}"
+            );
+            let report = spec.capability_report();
+            assert_eq!(
+                report.blocker,
+                Some("archive-decoder-unavailable"),
+                "{extension}"
+            );
+            assert_eq!(
+                report.retry_route,
+                Some("bounded-decoder-available"),
+                "{extension}"
+            );
+        }
+        for extension in ["glb", "fmi"] {
             assert_eq!(
                 registry.capability_for_extension(extension),
                 Some(FormatCapability::InventoryOnly),

@@ -18,13 +18,16 @@ use std::{
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
 // Bump whenever a built-in extractor's persisted fact schema changes. Version
-// 32 retains bounded source scalars in the knowledge-plane structured facts.
+// 34 emits bounded embedded-file and recursively dispatched archive-member facts
+// for successfully authenticated PDFs. Version 33 retries readable
+// empty-password encrypted PDFs through bounded decryption.
+// Version 32 retains bounded source scalars in the knowledge-plane structured facts.
 // Version 31 distinguishes MPEG transport-stream `.ts` media from TypeScript
 // before producing facts. Version 30 redacts secret-bearing scalar values in
 // generic structured facts and must not replay version 29 rows that may retain
 // raw credentials. Version 29 replaced OOXML, ODF, and EPUB inventory entries
 // with bounded package-part, document-structure, and internal-relationship facts.
-pub const AST_CACHE_VERSION: u32 = 32;
+pub const AST_CACHE_VERSION: u32 = 34;
 
 const LAST_PRE_REDACTION_AST_CACHE_VERSION: u32 = 29;
 const MAX_AST_CACHE_ROOT_ENTRIES_FOR_PURGE: usize = 1_000_000;

@@ -87,7 +87,7 @@ mod claude_md {
         install(Platform::Claude, &context).unwrap();
         let content = fs::read_to_string(claude_md(&context)).unwrap();
         assert!(content.contains("GRAPH_REPORT.md"));
-        assert!(content.contains("wiki/index.md"));
+        assert!(content.contains("community-markdown/index.md"));
         assert!(content.contains("graphoxide update"));
     }
 

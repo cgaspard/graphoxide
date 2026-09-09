@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Reusable CLI services.
 
 pub mod build_guard;
@@ -14,8 +16,11 @@ pub mod install;
 pub mod ollama_transport;
 pub mod transcribe;
 pub mod watch;
-pub mod wiki;
-pub mod wiki_draft;
-pub mod wiki_materialize;
+pub mod wiki_direct;
+pub mod wiki_hugo;
+mod wiki_lock;
 pub mod wiki_openapi;
 pub mod wiki_provider;
+pub mod wiki_source;
+
+pub mod wiki_materialize;

@@ -178,7 +178,10 @@ impl Default for OfficeLimits {
             max_expansion_ratio: 64,
             max_relationships: 2_048,
             max_nesting: 128,
-            max_xml_events: 262_144,
+            // Relevant OOXML parts are structurally validated before semantic
+            // parsing, so dense but otherwise bounded workbooks consume this
+            // budget twice. Keep the limit finite while admitting them.
+            max_xml_events: 524_288,
             max_xml_event_bytes: 256 * 1024,
             max_attributes_per_element: 256,
             max_units: 1_024,
@@ -351,6 +354,28 @@ struct UnitDraft {
     label: String,
     part: String,
     text: String,
+    word_paragraphs: Vec<WordParagraphDraft>,
+    spreadsheet_formulas: Vec<SpreadsheetFormulaDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpreadsheetFormulaDraft {
+    cell_reference: String,
+    expression: String,
+    cached_value: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorksheetDraft {
+    text: String,
+    formulas: Vec<SpreadsheetFormulaDraft>,
+}
+
+#[derive(Debug, Clone)]
+struct WordParagraphDraft {
+    heading_path: String,
+    paragraph: u32,
+    text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -411,7 +436,7 @@ struct PackageScratch {
     docx_sections: Option<Vec<UnitDraft>>,
     xlsx_sheets: Option<Vec<PendingUnit>>,
     shared_strings: Vec<String>,
-    worksheets: BTreeMap<String, String>,
+    worksheets: BTreeMap<String, WorksheetDraft>,
     pptx_slides: Option<Vec<PendingSlide>>,
     slide_text: BTreeMap<String, String>,
     odf_units: Option<Vec<UnitDraft>>,
@@ -527,7 +552,14 @@ impl<'a> ParseBudget<'a> {
     }
 
     fn cell(&mut self) -> Result<(), OfficeError> {
-        self.cells = self.cells.checked_add(1).ok_or(OfficeError::CellLimit)?;
+        self.charge_cells(1)
+    }
+
+    fn charge_cells(&mut self, count: usize) -> Result<(), OfficeError> {
+        self.cells = self
+            .cells
+            .checked_add(count)
+            .ok_or(OfficeError::CellLimit)?;
         if self.cells > self.limits.max_table_cells {
             return Err(OfficeError::CellLimit);
         }
@@ -1087,6 +1119,36 @@ fn estimate_materialization_model(
                 .and_then(|bytes| bytes.checked_add(MATERIALIZATION_ENTRY_OVERHEAD))
                 .ok_or(OfficeError::ModelLimit)?,
         )?;
+        for paragraph in &unit.word_paragraphs {
+            let strings = paragraph
+                .heading_path
+                .capacity()
+                .checked_add(paragraph.text.capacity())
+                .ok_or(OfficeError::ModelLimit)?;
+            size.add(
+                strings
+                    .checked_mul(MATERIALIZATION_STRING_COPIES)
+                    .and_then(|bytes| bytes.checked_add(MATERIALIZATION_ENTRY_OVERHEAD))
+                    .ok_or(OfficeError::ModelLimit)?,
+            )?;
+        }
+        for formula in &unit.spreadsheet_formulas {
+            let strings = source_file
+                .len()
+                .checked_add(unit.part.capacity())
+                .and_then(|bytes| bytes.checked_add(formula.cell_reference.capacity()))
+                .and_then(|bytes| bytes.checked_add(formula.expression.capacity()))
+                .and_then(|bytes| {
+                    bytes.checked_add(formula.cached_value.as_ref().map_or(0, String::capacity))
+                })
+                .ok_or(OfficeError::ModelLimit)?;
+            size.add(
+                strings
+                    .checked_mul(MATERIALIZATION_STRING_COPIES)
+                    .and_then(|bytes| bytes.checked_add(MATERIALIZATION_ENTRY_OVERHEAD))
+                    .ok_or(OfficeError::ModelLimit)?,
+            )?;
+        }
     }
     for relationship in &package.relationships {
         let strings = source_file
@@ -1169,6 +1231,12 @@ fn unsafe_member_error(kind: OfficeKind, member: &ContainerMember) -> Option<Off
     {
         return Some(OfficeError::FormatMismatch);
     }
+    // OOXML printer settings are inert display metadata. They are binary, but
+    // unlike macros, ActiveX, and embedded objects they are never decoded or
+    // interpreted by this extractor.
+    let inert_xlsx_printer_settings = kind == OfficeKind::Xlsx
+        && lower.starts_with("xl/printersettings/")
+        && lower.ends_with(".bin");
     if kind.is_ooxml()
         && (lower.ends_with("vbaproject.bin")
             || lower.ends_with("vbadata.xml")
@@ -1178,7 +1246,8 @@ fn unsafe_member_error(kind: OfficeKind, member: &ContainerMember) -> Option<Off
             || ((lower.starts_with("word/")
                 || lower.starts_with("xl/")
                 || lower.starts_with("ppt/"))
-                && lower.ends_with(".bin")))
+                && lower.ends_with(".bin")
+                && !inert_xlsx_printer_settings))
     {
         return Some(OfficeError::ActiveContent);
     }
@@ -1293,7 +1362,7 @@ fn parse_member(
                 scratch.shared_strings = strings;
             }
             OfficeKind::Xlsx if path.starts_with("xl/worksheets/") && path.ends_with(".xml") => {
-                let text = parse_xlsx_worksheet(bytes, &scratch.shared_strings, budget)?;
+                let worksheet = parse_xlsx_worksheet(bytes, &scratch.shared_strings, budget)?;
                 if scratch.worksheets.contains_key(path) {
                     return Err(OfficeError::MalformedXml);
                 }
@@ -1302,7 +1371,7 @@ fn parse_member(
                 size.add(96)?;
                 size.string(&retained_path)?;
                 budget.retain_model(size.bytes)?;
-                scratch.worksheets.insert(retained_path, text);
+                scratch.worksheets.insert(retained_path, worksheet);
             }
             OfficeKind::Pptx if path == "ppt/presentation.xml" => {
                 if scratch.pptx_slides.is_some() {
@@ -1565,7 +1634,21 @@ fn estimate_unit_model(unit: &UnitDraft, size: &mut ModelSizer) -> Result<(), Of
     // Text heap bytes are independently charged by `max_total_text_bytes`.
     size.add(std::mem::size_of::<UnitDraft>().saturating_add(64))?;
     size.string(&unit.label)?;
-    size.string(&unit.part)
+    size.string(&unit.part)?;
+    for paragraph in &unit.word_paragraphs {
+        size.add(std::mem::size_of::<WordParagraphDraft>().saturating_add(32))?;
+        size.string(&paragraph.heading_path)?;
+        size.string(&paragraph.text)?;
+    }
+    for formula in &unit.spreadsheet_formulas {
+        size.add(std::mem::size_of::<SpreadsheetFormulaDraft>().saturating_add(48))?;
+        size.string(&formula.cell_reference)?;
+        size.string(&formula.expression)?;
+        if let Some(cached_value) = &formula.cached_value {
+            size.string(cached_value)?;
+        }
+    }
+    Ok(())
 }
 
 fn retain_generated_unit_model(
@@ -2315,6 +2398,12 @@ fn parse_docx(
     let mut cell_depth = 0_usize;
     let mut paragraph_depth = 0_usize;
     let mut paragraph_properties_depth = 0_usize;
+    let mut paragraph_style_seen = false;
+    let mut paragraph_style = None;
+    let mut paragraph_start = 0_usize;
+    let mut paragraph_ordinal = 0_u32;
+    let mut heading_stack = Vec::<(u8, String)>::new();
+    let mut word_paragraphs = Vec::<WordParagraphDraft>::new();
     let mut hyperlink_depth = 0_usize;
     let mut run_depth = 0_usize;
     let mut text_depth = 0_usize;
@@ -2391,6 +2480,9 @@ fn parse_docx(
                             }
                             paragraph_depth = depth;
                             paragraph_section_break = false;
+                            paragraph_style_seen = false;
+                            paragraph_style = None;
+                            paragraph_start = current.len();
                         }
                         b"pPr" => {
                             if paragraph_depth == 0
@@ -2401,6 +2493,7 @@ fn parse_docx(
                             }
                             paragraph_properties_depth = depth;
                         }
+                        b"pStyle" => return Err(OfficeError::MalformedXml),
                         b"hyperlink" => {
                             if paragraph_depth == 0
                                 || depth != paragraph_depth + 1
@@ -2470,6 +2563,22 @@ fn parse_docx(
                                 return Err(OfficeError::MalformedXml);
                             }
                         }
+                        b"pStyle" => {
+                            if paragraph_properties_depth == 0
+                                || depth != paragraph_properties_depth
+                                || paragraph_style_seen
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            paragraph_style_seen = true;
+                            paragraph_style = decoded_attribute(
+                                &reader,
+                                &element,
+                                NamespaceTag::Word,
+                                b"val",
+                                budget.limits.max_string_bytes,
+                            )?;
+                        }
                         b"tr" => {
                             if table_depth == 0 || depth != table_depth || row_depth != 0 {
                                 return Err(OfficeError::MalformedXml);
@@ -2486,6 +2595,9 @@ fn parse_docx(
                             if (!direct_body && !direct_cell) || paragraph_depth != 0 {
                                 return Err(OfficeError::MalformedXml);
                             }
+                            paragraph_ordinal = paragraph_ordinal
+                                .checked_add(1)
+                                .ok_or(OfficeError::TextLimit)?;
                         }
                         b"pPr" => {
                             if paragraph_depth == 0
@@ -2538,7 +2650,13 @@ fn parse_docx(
                             if direct_properties {
                                 paragraph_section_break = true;
                             } else {
-                                finish_unit(&mut units, &mut current, part, None, budget)?;
+                                finish_docx_unit(
+                                    &mut units,
+                                    &mut current,
+                                    &mut word_paragraphs,
+                                    part,
+                                    budget,
+                                )?;
                             }
                         }
                         _ => {}
@@ -2590,7 +2708,13 @@ fn parse_docx(
                                 return Err(OfficeError::MalformedXml);
                             }
                             if !section_owned_by_paragraph {
-                                finish_unit(&mut units, &mut current, part, None, budget)?;
+                                finish_docx_unit(
+                                    &mut units,
+                                    &mut current,
+                                    &mut word_paragraphs,
+                                    part,
+                                    budget,
+                                )?;
                             }
                             section_depth = 0;
                             section_owned_by_paragraph = false;
@@ -2604,9 +2728,26 @@ fn parse_docx(
                             {
                                 return Err(OfficeError::MalformedXml);
                             }
+                            paragraph_ordinal = paragraph_ordinal
+                                .checked_add(1)
+                                .ok_or(OfficeError::TextLimit)?;
+                            record_docx_paragraph(
+                                &current[paragraph_start..],
+                                paragraph_style.as_deref(),
+                                paragraph_ordinal,
+                                &mut heading_stack,
+                                &mut word_paragraphs,
+                                budget,
+                            )?;
                             append_separator(&mut current, "\n", budget)?;
                             if paragraph_section_break {
-                                finish_unit(&mut units, &mut current, part, None, budget)?;
+                                finish_docx_unit(
+                                    &mut units,
+                                    &mut current,
+                                    &mut word_paragraphs,
+                                    part,
+                                    budget,
+                                )?;
                             }
                             paragraph_section_break = false;
                             paragraph_depth = 0;
@@ -2682,9 +2823,81 @@ fn parse_docx(
         return Err(OfficeError::MalformedXml);
     }
     if !current.is_empty() || units.is_empty() {
-        finish_unit(&mut units, &mut current, part, None, budget)?;
+        finish_docx_unit(&mut units, &mut current, &mut word_paragraphs, part, budget)?;
     }
     Ok(units)
+}
+
+const MAX_DOCX_LOCATOR_PARAGRAPHS: usize = 256;
+
+fn record_docx_paragraph(
+    raw: &str,
+    style: Option<&str>,
+    paragraph: u32,
+    heading_stack: &mut Vec<(u8, String)>,
+    locators: &mut Vec<WordParagraphDraft>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), OfficeError> {
+    let text = normalize_text(raw.to_owned());
+    if text.is_empty() {
+        return Ok(());
+    }
+    if let Some(level) = style.and_then(word_heading_level) {
+        heading_stack.retain(|(existing, _)| *existing < level);
+        heading_stack.push((level, text.clone()));
+    }
+    if heading_stack.is_empty() || locators.len() >= MAX_DOCX_LOCATOR_PARAGRAPHS {
+        return Ok(());
+    }
+    let heading_path = heading_stack
+        .iter()
+        .map(|(_, heading)| heading.as_str())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let mut size = ModelSizer::default();
+    size.add(std::mem::size_of::<WordParagraphDraft>().saturating_add(32))?;
+    size.string(&heading_path)?;
+    size.string(&text)?;
+    budget.retain_model(size.bytes)?;
+    locators
+        .try_reserve(1)
+        .map_err(|_| OfficeError::ModelLimit)?;
+    locators.push(WordParagraphDraft {
+        heading_path,
+        paragraph,
+        text,
+    });
+    Ok(())
+}
+
+fn word_heading_level(style: &str) -> Option<u8> {
+    match style.strip_prefix("Heading")? {
+        "1" => Some(1),
+        "2" => Some(2),
+        "3" => Some(3),
+        "4" => Some(4),
+        "5" => Some(5),
+        "6" => Some(6),
+        "7" => Some(7),
+        "8" => Some(8),
+        "9" => Some(9),
+        _ => None,
+    }
+}
+
+fn finish_docx_unit(
+    units: &mut Vec<UnitDraft>,
+    current: &mut String,
+    word_paragraphs: &mut Vec<WordParagraphDraft>,
+    part: &str,
+    budget: &ParseBudget<'_>,
+) -> Result<(), OfficeError> {
+    finish_unit(units, current, part, None, budget)?;
+    units
+        .last_mut()
+        .ok_or(OfficeError::MalformedXml)?
+        .word_paragraphs = std::mem::take(word_paragraphs);
+    Ok(())
 }
 
 fn finish_unit(
@@ -2710,6 +2923,8 @@ fn finish_unit(
         label,
         part: part.to_owned(),
         text,
+        word_paragraphs: Vec::new(),
+        spreadsheet_formulas: Vec::new(),
     });
     Ok(())
 }
@@ -3037,7 +3252,7 @@ fn parse_xlsx_worksheet(
     bytes: &[u8],
     shared_strings: &[String],
     budget: &mut ParseBudget<'_>,
-) -> Result<String, OfficeError> {
+) -> Result<WorksheetDraft, OfficeError> {
     let mut reader = bounded_xml_reader(bytes, budget.limits);
     let mut depth = 0_usize;
     let mut root_seen = false;
@@ -3048,10 +3263,13 @@ fn parse_xlsx_worksheet(
     let mut inline_depth = 0_usize;
     let mut run_depth = 0_usize;
     let mut value_depth = 0_usize;
+    let mut formula_depth = 0_usize;
     let mut foreign_depth = 0_usize;
     let mut cell_type = String::new();
     let mut cell_reference = String::new();
     let mut value = String::new();
+    let mut formula = String::new();
+    let mut formulas = Vec::new();
     let mut output = String::new();
     loop {
         let (resolved, event) = reader
@@ -3129,6 +3347,7 @@ fn parse_xlsx_worksheet(
                                 return Err(OfficeError::MalformedXml);
                             }
                             value.clear();
+                            formula.clear();
                         }
                         b"is" => {
                             if cell_depth == 0
@@ -3159,6 +3378,17 @@ fn parse_xlsx_worksheet(
                                 return Err(OfficeError::MalformedXml);
                             }
                             value_depth = depth;
+                        }
+                        b"f" => {
+                            if cell_depth == 0
+                                || depth != cell_depth + 1
+                                || inline_depth != 0
+                                || value_depth != 0
+                                || formula_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            formula_depth = depth;
                         }
                         b"t" => {
                             let direct_inline = inline_depth > 0 && depth == inline_depth + 1;
@@ -3215,6 +3445,15 @@ fn parse_xlsx_worksheet(
                                 return Err(OfficeError::MalformedXml);
                             }
                         }
+                        b"f" => {
+                            if cell_depth == 0
+                                || depth != cell_depth
+                                || inline_depth != 0
+                                || formula_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                        }
                         b"t" => {
                             let direct_inline = inline_depth > 0 && depth == inline_depth;
                             let direct_run = run_depth > 0 && depth == run_depth;
@@ -3225,6 +3464,15 @@ fn parse_xlsx_worksheet(
                         _ => {}
                     }
                 }
+            }
+            Event::Text(text) if formula_depth > 0 && foreign_depth == 0 => {
+                append_text(&mut formula, &decoded_text(&text)?, budget)?;
+            }
+            Event::CData(text) if formula_depth > 0 && foreign_depth == 0 => {
+                append_text(&mut formula, &decoded_cdata(&text)?, budget)?;
+            }
+            Event::GeneralRef(reference) if formula_depth > 0 && foreign_depth == 0 => {
+                append_reference(&mut formula, &reference, budget)?;
             }
             Event::Text(text) if value_depth > 0 && foreign_depth == 0 => {
                 append_text(&mut value, &decoded_text(&text)?, budget)?;
@@ -3243,20 +3491,56 @@ fn parse_xlsx_worksheet(
                 if namespace == NamespaceTag::Sheet && foreign_depth == 0 {
                     match element.local_name().as_ref() {
                         b"v" | b"t" if value_depth == depth => value_depth = 0,
+                        b"f" if formula_depth == depth => formula_depth = 0,
                         b"r" if run_depth == depth => run_depth = 0,
                         b"is" if inline_depth == depth => inline_depth = 0,
                         b"c" if cell_depth == depth => {
-                            if inline_depth != 0 || run_depth != 0 || value_depth != 0 {
+                            if inline_depth != 0
+                                || run_depth != 0
+                                || value_depth != 0
+                                || formula_depth != 0
+                            {
                                 return Err(OfficeError::MalformedXml);
                             }
                             let rendered = render_cell_value(&cell_type, &value, shared_strings)?;
-                            if !rendered.is_empty() {
+                            if !formula.is_empty() || !rendered.is_empty() {
                                 if !cell_reference.is_empty() {
                                     append_text(&mut output, &cell_reference, budget)?;
                                     append_text(&mut output, ": ", budget)?;
                                 }
-                                append_text(&mut output, &rendered, budget)?;
+                                if !formula.is_empty() {
+                                    append_text(&mut output, "=", budget)?;
+                                    append_text(&mut output, &formula, budget)?;
+                                    if !rendered.is_empty() {
+                                        append_text(&mut output, " [cached: ", budget)?;
+                                        append_text(&mut output, &rendered, budget)?;
+                                        append_text(&mut output, "]", budget)?;
+                                    }
+                                } else {
+                                    append_text(&mut output, &rendered, budget)?;
+                                }
                                 append_separator(&mut output, "\n", budget)?;
+                            }
+                            if !formula.is_empty() {
+                                let mut size = ModelSizer::default();
+                                size.add(
+                                    std::mem::size_of::<SpreadsheetFormulaDraft>()
+                                        .saturating_add(48),
+                                )?;
+                                size.string(&cell_reference)?;
+                                size.string(&formula)?;
+                                if !rendered.is_empty() {
+                                    size.string(&rendered)?;
+                                }
+                                budget.retain_model(size.bytes)?;
+                                formulas
+                                    .try_reserve(1)
+                                    .map_err(|_| OfficeError::CellLimit)?;
+                                formulas.push(SpreadsheetFormulaDraft {
+                                    cell_reference: cell_reference.clone(),
+                                    expression: formula.clone(),
+                                    cached_value: (!rendered.is_empty()).then_some(rendered),
+                                });
                             }
                             cell_depth = 0;
                             value_depth = 0;
@@ -3286,11 +3570,15 @@ fn parse_xlsx_worksheet(
         || inline_depth != 0
         || run_depth != 0
         || value_depth != 0
+        || formula_depth != 0
         || foreign_depth != 0
     {
         return Err(OfficeError::MalformedXml);
     }
-    Ok(normalize_text(output))
+    Ok(WorksheetDraft {
+        text: normalize_text(output),
+        formulas,
+    })
 }
 
 fn valid_cell_reference(value: &str) -> bool {
@@ -3470,6 +3758,12 @@ fn parse_pptx_slide(bytes: &[u8], budget: &mut ParseBudget<'_>) -> Result<String
     let mut shape_tree_seen = false;
     let mut shape_tree_depth = 0_usize;
     let mut shape_depth = 0_usize;
+    let mut graphic_frame_depth = 0_usize;
+    let mut graphic_depth = 0_usize;
+    let mut graphic_data_depth = 0_usize;
+    let mut table_depth = 0_usize;
+    let mut table_row_depth = 0_usize;
+    let mut table_cell_depth = 0_usize;
     let mut text_body_depth = 0_usize;
     let mut paragraph_depth = 0_usize;
     let mut run_depth = 0_usize;
@@ -3540,6 +3834,15 @@ fn parse_pptx_slide(bytes: &[u8], budget: &mut ParseBudget<'_>) -> Result<String
                             }
                             shape_depth = depth;
                         }
+                        b"graphicFrame" => {
+                            if shape_tree_depth == 0
+                                || depth != shape_tree_depth + 1
+                                || graphic_frame_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            graphic_frame_depth = depth;
+                        }
                         b"txBody" => {
                             if shape_depth == 0 || depth != shape_depth + 1 || text_body_depth != 0
                             {
@@ -3552,6 +3855,58 @@ fn parse_pptx_slide(bytes: &[u8], budget: &mut ParseBudget<'_>) -> Result<String
                 }
                 if namespace == NamespaceTag::Drawing && foreign_depth == 0 {
                     match local_name(&element) {
+                        b"graphic" => {
+                            if graphic_frame_depth == 0
+                                || depth != graphic_frame_depth + 1
+                                || graphic_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            graphic_depth = depth;
+                        }
+                        b"graphicData" => {
+                            if graphic_depth == 0
+                                || depth != graphic_depth + 1
+                                || graphic_data_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            graphic_data_depth = depth;
+                        }
+                        b"tbl" => {
+                            if graphic_data_depth == 0
+                                || depth != graphic_data_depth + 1
+                                || table_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            table_depth = depth;
+                        }
+                        b"tr" => {
+                            if table_depth == 0 || depth != table_depth + 1 || table_row_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            table_row_depth = depth;
+                        }
+                        b"tc" => {
+                            if table_row_depth == 0
+                                || depth != table_row_depth + 1
+                                || table_cell_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            table_cell_depth = depth;
+                        }
+                        b"txBody" => {
+                            if table_cell_depth == 0
+                                || depth != table_cell_depth + 1
+                                || text_body_depth != 0
+                            {
+                                return Err(OfficeError::MalformedXml);
+                            }
+                            text_body_depth = depth;
+                        }
                         b"p" => {
                             if text_body_depth == 0
                                 || depth != text_body_depth + 1
@@ -3655,6 +4010,12 @@ fn parse_pptx_slide(bytes: &[u8], budget: &mut ParseBudget<'_>) -> Result<String
                             append_separator(&mut output, "\n", budget)?;
                             paragraph_depth = 0;
                         }
+                        b"txBody" if text_body_depth == depth => text_body_depth = 0,
+                        b"tc" if table_cell_depth == depth => table_cell_depth = 0,
+                        b"tr" if table_row_depth == depth => table_row_depth = 0,
+                        b"tbl" if table_depth == depth => table_depth = 0,
+                        b"graphicData" if graphic_data_depth == depth => graphic_data_depth = 0,
+                        b"graphic" if graphic_depth == depth => graphic_depth = 0,
                         _ => {}
                     }
                 }
@@ -3662,6 +4023,7 @@ fn parse_pptx_slide(bytes: &[u8], budget: &mut ParseBudget<'_>) -> Result<String
                     match element.local_name().as_ref() {
                         b"txBody" if text_body_depth == depth => text_body_depth = 0,
                         b"sp" if shape_depth == depth => shape_depth = 0,
+                        b"graphicFrame" if graphic_frame_depth == depth => graphic_frame_depth = 0,
                         b"spTree" if shape_tree_depth == depth => shape_tree_depth = 0,
                         b"cSld" if content_depth == depth => content_depth = 0,
                         _ => {}
@@ -3685,6 +4047,12 @@ fn parse_pptx_slide(bytes: &[u8], budget: &mut ParseBudget<'_>) -> Result<String
         || content_depth != 0
         || shape_tree_depth != 0
         || shape_depth != 0
+        || graphic_frame_depth != 0
+        || graphic_depth != 0
+        || graphic_data_depth != 0
+        || table_depth != 0
+        || table_row_depth != 0
+        || table_cell_depth != 0
         || text_body_depth != 0
         || paragraph_depth != 0
         || run_depth != 0
@@ -3892,6 +4260,145 @@ fn push_odf_manifest_entry(
     Ok(())
 }
 
+fn ods_repetition(
+    reader: &NsReader<&[u8]>,
+    element: &BytesStart<'_>,
+    attribute: &[u8],
+    budget: &ParseBudget<'_>,
+) -> Result<u32, OfficeError> {
+    decoded_attribute(
+        reader,
+        element,
+        NamespaceTag::OdfTable,
+        attribute,
+        budget.limits.max_string_bytes,
+    )?
+    .map(|value| {
+        value
+            .parse::<u32>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or(OfficeError::MalformedXml)
+    })
+    .transpose()
+    .map(|value| value.unwrap_or(1))
+}
+
+fn ods_cached_value(
+    reader: &NsReader<&[u8]>,
+    element: &BytesStart<'_>,
+    budget: &ParseBudget<'_>,
+) -> Result<Option<String>, OfficeError> {
+    let mut cached = None;
+    for attribute in [
+        b"value".as_slice(),
+        b"string-value".as_slice(),
+        b"boolean-value".as_slice(),
+        b"date-value".as_slice(),
+        b"time-value".as_slice(),
+    ] {
+        if let Some(value) = decoded_attribute(
+            reader,
+            element,
+            NamespaceTag::OdfOffice,
+            attribute,
+            budget.limits.max_string_bytes,
+        )? && cached.replace(value).is_some()
+        {
+            return Err(OfficeError::MalformedXml);
+        }
+    }
+    Ok(cached)
+}
+
+fn ods_cell_reference(column: u32, row: u32) -> Result<String, OfficeError> {
+    if column == 0 || row == 0 {
+        return Err(OfficeError::CellLimit);
+    }
+    let mut column = column;
+    let mut letters = Vec::new();
+    while column > 0 {
+        let remainder = u8::try_from((column - 1) % 26).map_err(|_| OfficeError::CellLimit)?;
+        letters.push(char::from(b'A' + remainder));
+        column = (column - 1) / 26;
+    }
+    let mut reference = letters.into_iter().rev().collect::<String>();
+    use std::fmt::Write as _;
+    write!(&mut reference, "{row}").map_err(|_| OfficeError::CellLimit)?;
+    Ok(reference)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_ods_cell(
+    output: &mut String,
+    cell_text: &mut String,
+    formulas: &mut Vec<SpreadsheetFormulaDraft>,
+    row_start: u32,
+    row_repeat: u32,
+    column_start: u32,
+    column_repeat: u32,
+    formula: Option<String>,
+    cached_value: Option<String>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), OfficeError> {
+    let rendered = normalize_text(std::mem::take(cell_text));
+    let cached_value = cached_value.or_else(|| (!rendered.is_empty()).then_some(rendered.clone()));
+    if formula.is_none() && rendered.is_empty() && cached_value.is_none() {
+        return Ok(());
+    }
+    let cells = usize::try_from(u64::from(row_repeat) * u64::from(column_repeat))
+        .map_err(|_| OfficeError::CellLimit)?;
+    budget.charge_cells(cells)?;
+    for row_offset in 0..row_repeat {
+        let row = row_start
+            .checked_add(row_offset)
+            .ok_or(OfficeError::CellLimit)?;
+        for column_offset in 0..column_repeat {
+            let column = column_start
+                .checked_add(column_offset)
+                .ok_or(OfficeError::CellLimit)?;
+            let reference = ods_cell_reference(column, row)?;
+            append_text(output, &reference, budget)?;
+            append_text(output, ": ", budget)?;
+            if let Some(formula) = &formula {
+                append_text(output, "=", budget)?;
+                append_text(output, formula, budget)?;
+                if let Some(cached_value) = &cached_value {
+                    append_text(output, " [cached: ", budget)?;
+                    append_text(output, cached_value, budget)?;
+                    append_text(output, "]", budget)?;
+                }
+                let mut size = ModelSizer::default();
+                size.add(std::mem::size_of::<SpreadsheetFormulaDraft>().saturating_add(48))?;
+                size.string(&reference)?;
+                size.string(formula)?;
+                if let Some(cached_value) = &cached_value {
+                    size.string(cached_value)?;
+                }
+                budget.retain_model(size.bytes)?;
+                formulas
+                    .try_reserve(1)
+                    .map_err(|_| OfficeError::CellLimit)?;
+                formulas.push(SpreadsheetFormulaDraft {
+                    cell_reference: reference.clone(),
+                    expression: formula.clone(),
+                    cached_value: cached_value.clone(),
+                });
+            } else if rendered.is_empty() {
+                append_text(
+                    output,
+                    cached_value.as_deref().ok_or(OfficeError::MalformedXml)?,
+                    budget,
+                )?;
+            } else {
+                append_text(output, &rendered, budget)?;
+            }
+            append_separator(output, "\n", budget)?;
+        }
+    }
+    Ok(())
+}
+
 fn parse_odf_content(
     kind: OfficeKind,
     bytes: &[u8],
@@ -3916,6 +4423,15 @@ fn parse_odf_content(
     let mut current = String::new();
     let mut current_label = None;
     let mut units = Vec::new();
+    let mut ods_row = 0_u32;
+    let mut ods_row_repeat = 1_u32;
+    let mut ods_column = 0_u32;
+    let mut ods_cell_column = 0_u32;
+    let mut ods_cell_repeat = 1_u32;
+    let mut ods_cell_formula: Option<String> = None;
+    let mut ods_cell_cached_value: Option<String> = None;
+    let mut ods_cell_text = String::new();
+    let mut ods_formulas: Vec<SpreadsheetFormulaDraft> = Vec::new();
     loop {
         let (resolved, event) = reader
             .read_resolved_event()
@@ -4054,6 +4570,10 @@ fn parse_odf_content(
                                     }
                                     active_depth = depth;
                                     current.clear();
+                                    ods_row = 0;
+                                    ods_row_repeat = 1;
+                                    ods_column = 0;
+                                    ods_formulas.clear();
                                     current_label = decoded_attribute(
                                         &reader,
                                         &element,
@@ -4067,13 +4587,43 @@ fn parse_odf_content(
                                         return Err(OfficeError::MalformedXml);
                                     }
                                     row_depth = depth;
+                                    ods_row_repeat = ods_repetition(
+                                        &reader,
+                                        &element,
+                                        b"number-rows-repeated",
+                                        budget,
+                                    )?;
+                                    ods_column = 0;
                                 }
                                 b"table-cell" | b"covered-table-cell" => {
                                     if row_depth == 0 || depth != row_depth + 1 || cell_depth != 0 {
                                         return Err(OfficeError::MalformedXml);
                                     }
-                                    budget.cell()?;
                                     cell_depth = depth;
+                                    ods_cell_column =
+                                        ods_column.checked_add(1).ok_or(OfficeError::CellLimit)?;
+                                    ods_cell_repeat = ods_repetition(
+                                        &reader,
+                                        &element,
+                                        b"number-columns-repeated",
+                                        budget,
+                                    )?;
+                                    ods_cell_formula = decoded_attribute(
+                                        &reader,
+                                        &element,
+                                        NamespaceTag::OdfTable,
+                                        b"formula",
+                                        budget.limits.max_string_bytes,
+                                    )?;
+                                    if ods_cell_formula
+                                        .as_deref()
+                                        .is_some_and(|formula| formula.trim().is_empty())
+                                    {
+                                        return Err(OfficeError::MalformedXml);
+                                    }
+                                    ods_cell_cached_value =
+                                        ods_cached_value(&reader, &element, budget)?;
+                                    ods_cell_text.clear();
                                 }
                                 _ => {}
                             }
@@ -4175,6 +4725,12 @@ fn parse_odf_content(
                             return Err(OfficeError::MalformedXml);
                         }
                         match local_name(&element) {
+                            b"tab" if kind == OfficeKind::Ods => {
+                                append_text(&mut ods_cell_text, "\t", budget)?
+                            }
+                            b"line-break" if kind == OfficeKind::Ods => {
+                                append_separator(&mut ods_cell_text, "\n", budget)?
+                            }
                             b"tab" => append_text(&mut current, "\t", budget)?,
                             b"line-break" => append_separator(&mut current, "\n", budget)?,
                             _ => unreachable!(),
@@ -4250,12 +4806,57 @@ fn parse_odf_content(
                                         if active_depth == 0 || row_depth != 0 || cell_depth != 0 {
                                             return Err(OfficeError::MalformedXml);
                                         }
+                                        ods_row = ods_row
+                                            .checked_add(ods_repetition(
+                                                &reader,
+                                                &element,
+                                                b"number-rows-repeated",
+                                                budget,
+                                            )?)
+                                            .ok_or(OfficeError::CellLimit)?;
+                                        ods_column = 0;
                                     }
                                     b"table-cell" | b"covered-table-cell" => {
                                         if row_depth == 0 || depth != row_depth || cell_depth != 0 {
                                             return Err(OfficeError::MalformedXml);
                                         }
-                                        budget.cell()?;
+                                        let column = ods_column
+                                            .checked_add(1)
+                                            .ok_or(OfficeError::CellLimit)?;
+                                        let repeat = ods_repetition(
+                                            &reader,
+                                            &element,
+                                            b"number-columns-repeated",
+                                            budget,
+                                        )?;
+                                        let formula = decoded_attribute(
+                                            &reader,
+                                            &element,
+                                            NamespaceTag::OdfTable,
+                                            b"formula",
+                                            budget.limits.max_string_bytes,
+                                        )?;
+                                        if formula
+                                            .as_deref()
+                                            .is_some_and(|formula| formula.trim().is_empty())
+                                        {
+                                            return Err(OfficeError::MalformedXml);
+                                        }
+                                        finish_ods_cell(
+                                            &mut current,
+                                            &mut ods_cell_text,
+                                            &mut ods_formulas,
+                                            ods_row.checked_add(1).ok_or(OfficeError::CellLimit)?,
+                                            ods_row_repeat,
+                                            column,
+                                            repeat,
+                                            formula,
+                                            ods_cached_value(&reader, &element, budget)?,
+                                            budget,
+                                        )?;
+                                        ods_column = ods_column
+                                            .checked_add(repeat)
+                                            .ok_or(OfficeError::CellLimit)?;
                                     }
                                     _ => {}
                                 }
@@ -4313,21 +4914,27 @@ fn parse_odf_content(
             Event::Text(text)
                 if typed_body_depth > 0 && paragraph_depth > 0 && foreign_depth == 0 =>
             {
-                if kind == OfficeKind::Odt || active_depth > 0 {
+                if kind == OfficeKind::Ods {
+                    append_text(&mut ods_cell_text, &decoded_text(&text)?, budget)?;
+                } else if kind == OfficeKind::Odt || active_depth > 0 {
                     append_text(&mut current, &decoded_text(&text)?, budget)?;
                 }
             }
             Event::CData(text)
                 if typed_body_depth > 0 && paragraph_depth > 0 && foreign_depth == 0 =>
             {
-                if kind == OfficeKind::Odt || active_depth > 0 {
+                if kind == OfficeKind::Ods {
+                    append_text(&mut ods_cell_text, &decoded_cdata(&text)?, budget)?;
+                } else if kind == OfficeKind::Odt || active_depth > 0 {
                     append_text(&mut current, &decoded_cdata(&text)?, budget)?;
                 }
             }
             Event::GeneralRef(reference)
                 if typed_body_depth > 0 && paragraph_depth > 0 && foreign_depth == 0 =>
             {
-                if kind == OfficeKind::Odt || active_depth > 0 {
+                if kind == OfficeKind::Ods {
+                    append_reference(&mut ods_cell_text, &reference, budget)?;
+                } else if kind == OfficeKind::Odt || active_depth > 0 {
                     append_reference(&mut current, &reference, budget)?;
                 } else {
                     validate_ignored_reference(&reference)?;
@@ -4344,7 +4951,11 @@ fn parse_odf_content(
                             if paragraph_depth != depth {
                                 return Err(OfficeError::MalformedXml);
                             }
-                            append_separator(&mut current, "\n", budget)?;
+                            if kind == OfficeKind::Ods {
+                                append_separator(&mut ods_cell_text, "\n", budget)?;
+                            } else {
+                                append_separator(&mut current, "\n", budget)?;
+                            }
                             paragraph_depth = 0;
                         }
                         b"section" if kind == OfficeKind::Odt => {
@@ -4373,12 +4984,31 @@ fn parse_odf_content(
                                     if cell_depth != depth || paragraph_depth != 0 {
                                         return Err(OfficeError::MalformedXml);
                                     }
+                                    finish_ods_cell(
+                                        &mut current,
+                                        &mut ods_cell_text,
+                                        &mut ods_formulas,
+                                        ods_row.checked_add(1).ok_or(OfficeError::CellLimit)?,
+                                        ods_row_repeat,
+                                        ods_cell_column,
+                                        ods_cell_repeat,
+                                        ods_cell_formula.take(),
+                                        ods_cell_cached_value.take(),
+                                        budget,
+                                    )?;
+                                    ods_column = ods_column
+                                        .checked_add(ods_cell_repeat)
+                                        .ok_or(OfficeError::CellLimit)?;
                                     cell_depth = 0;
                                 }
                                 b"table-row" => {
                                     if row_depth != depth || cell_depth != 0 {
                                         return Err(OfficeError::MalformedXml);
                                     }
+                                    ods_row = ods_row
+                                        .checked_add(ods_row_repeat)
+                                        .ok_or(OfficeError::CellLimit)?;
+                                    ods_column = 0;
                                     row_depth = 0;
                                 }
                                 b"table" => {
@@ -4397,6 +5027,10 @@ fn parse_odf_content(
                                         kind,
                                         budget,
                                     )?;
+                                    units
+                                        .last_mut()
+                                        .ok_or(OfficeError::MalformedXml)?
+                                        .spreadsheet_formulas = std::mem::take(&mut ods_formulas);
                                     active_depth = 0;
                                 }
                                 _ => {}
@@ -4517,6 +5151,8 @@ fn finish_odf_unit(
         label,
         part: part.to_owned(),
         text,
+        word_paragraphs: Vec::new(),
+        spreadsheet_formulas: Vec::new(),
     });
     Ok(())
 }
@@ -5363,7 +5999,7 @@ fn finalize_package(
                     if !seen_parts.insert(part.clone()) {
                         return Err(OfficeError::InvalidRelationship);
                     }
-                    let text = scratch
+                    let worksheet = scratch
                         .worksheets
                         .remove(part)
                         .ok_or(OfficeError::MissingPart)?;
@@ -5371,7 +6007,9 @@ fn finalize_package(
                     units.push(UnitDraft {
                         label: sheet.label,
                         part: part.clone(),
-                        text,
+                        text: worksheet.text,
+                        word_paragraphs: Vec::new(),
+                        spreadsheet_formulas: worksheet.formulas,
                     });
                 }
             }
@@ -5400,6 +6038,8 @@ fn finalize_package(
                         label,
                         part: part.clone(),
                         text,
+                        word_paragraphs: Vec::new(),
+                        spreadsheet_formulas: Vec::new(),
                     });
                 }
             }
@@ -5472,6 +6112,8 @@ fn finalize_package(
                 label,
                 part: item.path.clone(),
                 text: xhtml.text.clone(),
+                word_paragraphs: Vec::new(),
+                spreadsheet_formulas: Vec::new(),
             });
         }
         for (id, item) in &opf.manifest {
@@ -5672,13 +6314,27 @@ fn materialize_extraction(request: MaterializeRequest<'_>) -> Result<Extraction,
         request.limits,
     )?;
 
+    macro_rules! retain_or_partial {
+        ($result:expr) => {
+            if $result.is_err() {
+                return Ok(partial_materialization(nodes, edges));
+            }
+        };
+    }
+
     let mut unit_nodes_by_part = BTreeMap::new();
     let mut unit_part_counts = BTreeMap::<String, usize>::new();
     for unit in &request.units {
         *unit_part_counts.entry(unit.part.clone()).or_default() += 1;
     }
     for (index, unit) in request.units.into_iter().enumerate() {
-        let UnitDraft { label, part, text } = unit;
+        let UnitDraft {
+            label,
+            part,
+            text,
+            word_paragraphs,
+            spreadsheet_formulas,
+        } = unit;
         let ordinal = index + 1;
         let ordinal_id = format!("{ordinal:06}");
         let unique_part = unit_part_counts.get(&part) == Some(&1);
@@ -5687,10 +6343,11 @@ fn materialize_extraction(request: MaterializeRequest<'_>) -> Result<Extraction,
         } else {
             make_id(&[&root_id, request.kind.unit_type(), &ordinal_id])
         };
-        if unique_part {
-            unit_nodes_by_part.insert(part.clone(), unit_id.clone());
+        if nodes.len().saturating_add(edges.len()).saturating_add(2) > request.limits.max_facts {
+            return Ok(partial_materialization(nodes, edges));
         }
-        push_node(
+        let unit_source_location = None;
+        retain_or_partial!(push_node(
             &mut nodes,
             &edges,
             Node {
@@ -5698,21 +6355,37 @@ fn materialize_extraction(request: MaterializeRequest<'_>) -> Result<Extraction,
                 label,
                 file_type: "document".into(),
                 source_file: request.source_file.into(),
-                source_location: None,
+                source_location: unit_source_location,
                 community: None,
-                extra: BTreeMap::from([
-                    ("_origin".into(), "document_package".into()),
-                    ("format".into(), request.kind.format().into()),
-                    ("type".into(), request.kind.unit_type().into()),
-                    ("unit_ordinal".into(), ordinal.into()),
-                    ("internal_part".into(), part.into()),
-                    ("text_bytes".into(), text.len().into()),
-                    ("text".into(), text.into()),
-                ]),
+                extra: {
+                    let mut extra = BTreeMap::from([
+                        ("_origin".into(), "document_package".into()),
+                        ("format".into(), request.kind.format().into()),
+                        ("type".into(), request.kind.unit_type().into()),
+                        ("unit_ordinal".into(), ordinal.into()),
+                        ("internal_part".into(), part.clone().into()),
+                        ("text_bytes".into(), text.len().into()),
+                        ("text".into(), text.into()),
+                    ]);
+                    if !spreadsheet_formulas.is_empty() {
+                        extra.insert(
+                            "spreadsheet_formulas".into(),
+                            serde_json::json!(spreadsheet_formulas
+                                .iter()
+                                .map(|formula| serde_json::json!({
+                                    "cell": formula.cell_reference,
+                                    "expression": formula.expression,
+                                    "cached_value": formula.cached_value,
+                                }))
+                                .collect::<Vec<_>>()),
+                        );
+                    }
+                    extra
+                },
             },
             request.limits,
-        )?;
-        push_edge(
+        ));
+        retain_or_partial!(push_edge(
             &nodes,
             &mut edges,
             relationship_edge(
@@ -5724,7 +6397,111 @@ fn materialize_extraction(request: MaterializeRequest<'_>) -> Result<Extraction,
                 None,
             ),
             request.limits,
-        )?;
+        ));
+        if unique_part {
+            unit_nodes_by_part.insert(part.clone(), unit_id.clone());
+        }
+        for paragraph in word_paragraphs {
+            if nodes.len().saturating_add(edges.len()).saturating_add(2) > request.limits.max_facts
+            {
+                return Ok(partial_materialization(nodes, edges));
+            }
+            let paragraph_ordinal = format!("{:010}", paragraph.paragraph);
+            let paragraph_id = make_id(&[&unit_id, "word-paragraph", &paragraph_ordinal]);
+            let text_bytes = paragraph.text.len();
+            let heading_path = paragraph.heading_path;
+            let paragraph_number = paragraph.paragraph;
+            retain_or_partial!(push_node(
+                &mut nodes,
+                &edges,
+                Node {
+                    id: paragraph_id.clone(),
+                    label: format!("Paragraph {paragraph_number}"),
+                    file_type: "document".into(),
+                    source_file: request.source_file.into(),
+                    source_location: Some(format!("{part}#paragraph-{paragraph_number}")),
+                    community: None,
+                    extra: BTreeMap::from([
+                        ("_origin".into(), "document_package".into()),
+                        ("format".into(), request.kind.format().into()),
+                        ("type".into(), request.kind.unit_type().into()),
+                        ("unit_ordinal".into(), ordinal.into()),
+                        ("internal_part".into(), part.clone().into()),
+                        ("paragraph_ordinal".into(), paragraph_number.into()),
+                        ("text_bytes".into(), text_bytes.into()),
+                        ("text".into(), paragraph.text.into()),
+                        (
+                            "word_paragraphs".into(),
+                            serde_json::json!([{
+                                "heading_path": heading_path,
+                                "paragraph": paragraph_number,
+                            }]),
+                        ),
+                    ]),
+                },
+                request.limits,
+            ));
+            retain_or_partial!(push_edge(
+                &nodes,
+                &mut edges,
+                relationship_edge(
+                    &unit_id,
+                    &paragraph_id,
+                    "contains",
+                    request.source_file,
+                    None,
+                    None,
+                ),
+                request.limits,
+            ));
+        }
+        for formula in spreadsheet_formulas {
+            if nodes.len().saturating_add(edges.len()).saturating_add(2) > request.limits.max_facts
+            {
+                return Ok(partial_materialization(nodes, edges));
+            }
+            let formula_id = make_id(&[
+                &unit_id,
+                "formula",
+                &formula.cell_reference,
+                &formula.expression,
+            ]);
+            let mut extra = BTreeMap::from([
+                ("_origin".into(), "document_package".into()),
+                ("cell".into(), formula.cell_reference.clone().into()),
+                ("formula".into(), formula.expression.into()),
+            ]);
+            if let Some(cached_value) = formula.cached_value {
+                extra.insert("cached_value".into(), cached_value.into());
+            }
+            retain_or_partial!(push_node(
+                &mut nodes,
+                &edges,
+                Node {
+                    id: formula_id.clone(),
+                    label: format!("Formula {}", formula.cell_reference),
+                    file_type: "spreadsheet_formula".into(),
+                    source_file: request.source_file.into(),
+                    source_location: Some(format!("{part}#{}", formula.cell_reference)),
+                    community: None,
+                    extra,
+                },
+                request.limits,
+            ));
+            retain_or_partial!(push_edge(
+                &nodes,
+                &mut edges,
+                relationship_edge(
+                    &unit_id,
+                    &formula_id,
+                    "contains",
+                    request.source_file,
+                    None,
+                    None,
+                ),
+                request.limits,
+            ));
+        }
     }
 
     let mut part_paths = BTreeSet::new();
@@ -5741,12 +6518,11 @@ fn materialize_extraction(request: MaterializeRequest<'_>) -> Result<Extraction,
     let mut part_nodes = BTreeMap::new();
     for part in part_paths {
         let part_id = path_owned_id(&root_id, "part", &part);
-        part_nodes.insert(part.clone(), part_id.clone());
-        push_node(
+        retain_or_partial!(push_node(
             &mut nodes,
             &edges,
             Node {
-                id: part_id,
+                id: part_id.clone(),
                 label: part.rsplit('/').next().unwrap_or(&part).to_owned(),
                 file_type: "document".into(),
                 source_file: request.source_file.into(),
@@ -5756,11 +6532,12 @@ fn materialize_extraction(request: MaterializeRequest<'_>) -> Result<Extraction,
                     ("_origin".into(), "document_package".into()),
                     ("format".into(), request.kind.format().into()),
                     ("type".into(), "document_package_part".into()),
-                    ("internal_part".into(), part.into()),
+                    ("internal_part".into(), part.clone().into()),
                 ]),
             },
             request.limits,
-        )?;
+        ));
+        part_nodes.insert(part.clone(), part_id);
     }
 
     let mut relationship_evidence =
@@ -5778,25 +6555,41 @@ fn materialize_extraction(request: MaterializeRequest<'_>) -> Result<Extraction,
         let target_id = unit_nodes_by_part
             .get(&relationship.target_part)
             .or_else(|| part_nodes.get(&relationship.target_part))
-            .ok_or(OfficeError::FactLimit)?;
+            .ok_or(OfficeError::FactLimit);
+        let Ok(target_id) = target_id else {
+            return Ok(partial_materialization(nodes, edges));
+        };
         relationship_evidence
             .entry((source_id.clone(), target_id.clone()))
             .or_default()
             .insert((relationship.id.clone(), relationship.kind));
     }
     for ((source_id, target_id), evidence) in relationship_evidence {
-        push_edge(
+        retain_or_partial!(push_edge(
             &nodes,
             &mut edges,
             relationship_evidence_edge(&source_id, &target_id, request.source_file, evidence),
             request.limits,
-        )?;
+        ));
     }
     Ok(Extraction {
         nodes,
         edges,
         hyperedges: Vec::new(),
     })
+}
+
+fn partial_materialization(mut nodes: Vec<Node>, edges: Vec<Edge>) -> Extraction {
+    if let Some(root) = nodes.first_mut() {
+        root.extra.insert("parse_status".into(), "partial".into());
+        root.extra
+            .insert("coverage_blocker".into(), "office_fact_limit".into());
+    }
+    Extraction {
+        nodes,
+        edges,
+        hyperedges: Vec::new(),
+    }
 }
 
 fn relationship_evidence_edge(
@@ -5964,6 +6757,37 @@ mod tests {
         ])
     }
 
+    fn ods(content: &str) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        writer
+            .start_file(
+                "mimetype",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .expect("start stored ODF mimetype");
+        writer
+            .write_all(b"application/vnd.oasis.opendocument.spreadsheet")
+            .expect("write ODF mimetype");
+        for (name, bytes) in [
+            ("content.xml", content.as_bytes()),
+            (
+                "META-INF/manifest.xml",
+                br#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>"#
+                    .as_slice(),
+            ),
+        ] {
+            writer
+                .start_file(
+                    name,
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+                )
+                .expect("start ODF member");
+            writer.write_all(bytes).expect("write ODF member");
+        }
+        writer.finish().expect("finish ODF ZIP").into_inner()
+    }
+
     fn parse_budget(limits: OfficeLimits) -> ParseBudget<'static> {
         ParseBudget::new(limits, None, ModelLedger::new(limits.max_model_bytes))
     }
@@ -5987,6 +6811,50 @@ mod tests {
             )
         })
         .0
+    }
+
+    fn extract_ods(source: &[u8], limits: OfficeLimits) -> Result<Extraction, OfficeError> {
+        let plan = ParserPlan::for_fact_limit(limits.max_facts).expect("positive fact limit");
+        with_plan(plan, || {
+            extract_office_bytes_with_admission(
+                Path::new("fixture.ods"),
+                "fixture.ods",
+                source,
+                OfficeKind::Ods,
+                limits,
+                None,
+                |_| true,
+                |_| Some(()),
+            )
+        })
+        .0
+    }
+
+    #[test]
+    fn xlsx_printer_settings_are_inert_but_other_binary_parts_remain_blocked() {
+        let member = |path: &str| ContainerMember {
+            path: path.into(),
+            kind: ContainerMemberKind::OfficePart,
+            compressed_bytes: 0,
+            declared_uncompressed_bytes: 0,
+            zip: None,
+        };
+
+        assert_eq!(
+            unsafe_member_error(
+                OfficeKind::Xlsx,
+                &member("xl/printerSettings/printerSettings1.bin"),
+            ),
+            None
+        );
+        assert_eq!(
+            unsafe_member_error(OfficeKind::Xlsx, &member("xl/vbaProject.bin")),
+            Some(OfficeError::ActiveContent)
+        );
+        assert_eq!(
+            unsafe_member_error(OfficeKind::Xlsx, &member("xl/unknown-part.bin")),
+            Some(OfficeError::ActiveContent)
+        );
     }
 
     #[test]
@@ -6173,7 +7041,7 @@ mod tests {
         .expect("declared extension subtree is inert");
         assert_eq!(ods_units.len(), 1);
         assert_eq!(ods_units[0].label, "Visible");
-        assert_eq!(ods_units[0].text, "visible");
+        assert_eq!(ods_units[0].text, "A1: visible");
 
         let presentation = br#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:evil="urn:evil"><office:body><office:presentation><evil:payload><draw:page draw:name="Hidden"><draw:frame><draw:text-box><text:p>ODP_SENTINEL</text:p></draw:text-box></draw:frame></draw:page></evil:payload><draw:page draw:name="Visible"><draw:frame><draw:text-box><text:p>visible</text:p></draw:text-box></draw:frame></draw:page></office:presentation></office:body></office:document-content>"#;
         let odp_units = parse_odf_content(
@@ -6302,7 +7170,7 @@ mod tests {
             &mut parse_budget(OfficeLimits::default()),
         )
         .expect("ODS list paragraph remains owned by its cell");
-        assert_eq!(listed_ods_units[0].text, "ODS list");
+        assert_eq!(listed_ods_units[0].text, "A1: ODS list");
         let listed_odp = br#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:presentation><draw:page draw:name="List"><draw:g><draw:frame><draw:text-box><text:list><text:list-item><text:p>ODP list</text:p></text:list-item></text:list></draw:text-box></draw:frame></draw:g></draw:page></office:presentation></office:body></office:document-content>"#;
         let listed_odp_units = parse_odf_content(
             OfficeKind::Odp,
@@ -6312,6 +7180,94 @@ mod tests {
         )
         .expect("ODP list paragraph remains owned by its text box");
         assert_eq!(listed_odp_units[0].text, "ODP list");
+    }
+
+    #[test]
+    fn docx_heading_styles_produce_bounded_paragraph_locator_facts() {
+        let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Architecture</w:t></w:r></w:p><w:p><w:r><w:t>Overview</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Interface</w:t></w:r></w:p><w:p><w:r><w:t>Request payload</w:t></w:r></w:p></w:body></w:document>"#;
+        let units = parse_docx(
+            document.as_bytes(),
+            "word/document.xml",
+            &mut parse_budget(OfficeLimits::default()),
+        )
+        .expect("DOCX heading locators");
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            units[0]
+                .word_paragraphs
+                .iter()
+                .map(|locator| (locator.heading_path.as_str(), locator.paragraph))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Architecture", 1),
+                ("Architecture", 2),
+                ("Architecture / Interface", 3),
+                ("Architecture / Interface", 4),
+            ]
+        );
+
+        let extraction = extract_docx(&docx(document), OfficeLimits::default(), None)
+            .expect("materialize DOCX heading locators");
+        let paragraph_locators = extraction
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                node.extra
+                    .get("word_paragraphs")
+                    .and_then(|value| value.as_array())
+                    .and_then(|paragraphs| paragraphs.first())
+            })
+            .map(|paragraph| {
+                (
+                    paragraph["heading_path"]
+                        .as_str()
+                        .expect("paragraph heading path"),
+                    paragraph["paragraph"].as_u64().expect("paragraph ordinal"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paragraph_locators,
+            vec![
+                ("Architecture", 1),
+                ("Architecture", 2),
+                ("Architecture / Interface", 3),
+                ("Architecture / Interface", 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn docx_paragraph_locator_nodes_retain_only_exact_paragraph_text() {
+        let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Architecture</w:t></w:r></w:p><w:p><w:r><w:t>First paragraph.</w:t></w:r></w:p><w:p><w:r><w:t>Second paragraph.</w:t></w:r></w:p></w:body></w:document>"#;
+        let extraction = extract_docx(&docx(document), OfficeLimits::default(), None)
+            .expect("materialize exact DOCX paragraph locators");
+        let paragraph_material = |paragraph| {
+            extraction
+                .nodes
+                .iter()
+                .find(|node| {
+                    node.extra.get("type").and_then(|value| value.as_str())
+                        == Some("document_section")
+                        && node
+                            .extra
+                            .get("word_paragraphs")
+                            .and_then(|value| value.as_array())
+                            .is_some_and(|entries| {
+                                entries.iter().any(|entry| {
+                                    entry["heading_path"] == "Architecture"
+                                        && entry["paragraph"] == paragraph
+                                })
+                            })
+                })
+                .and_then(|node| node.extra.get("text"))
+                .and_then(|value| value.as_str())
+                .expect("paragraph locator has exact material")
+        };
+
+        assert_eq!(paragraph_material(2), "First paragraph.");
+        assert_eq!(paragraph_material(3), "Second paragraph.");
     }
 
     #[test]
@@ -6367,7 +7323,7 @@ mod tests {
         let worksheet_text =
             parse_xlsx_worksheet(worksheet, &[], &mut parse_budget(OfficeLimits::default()))
                 .expect("foreign cell content is inert");
-        assert_eq!(worksheet_text, "A1: 7\nA2: safe");
+        assert_eq!(worksheet_text.text, "A1: 7\nA2: safe");
         let malformed_worksheet = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1"><f><v>CELL_SENTINEL</v></f></c></row></sheetData></worksheet>"#;
         assert_office_error!(
             parse_xlsx_worksheet(
@@ -6391,6 +7347,138 @@ mod tests {
         assert_office_error!(
             parse_pptx_slide(active_slide, &mut parse_budget(OfficeLimits::default())),
             OfficeError::ActiveContent
+        );
+    }
+
+    #[test]
+    fn pptx_graphic_frame_tables_retain_owned_cell_text() {
+        let slide = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:graphicFrame><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Header</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Value</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
+
+        assert_eq!(
+            parse_pptx_slide(slide, &mut parse_budget(OfficeLimits::default()))
+                .expect("PowerPoint table text is owned by its slide"),
+            "Header\nValue"
+        );
+    }
+
+    #[test]
+    fn xlsx_formula_cells_preserve_expression_and_cached_value() {
+        let worksheet = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><f>SUM(A1:A3)</f><v>42</v></c><c r="C2"><f>NOW()</f></c></row></sheetData></worksheet>"#;
+        let worksheet_text =
+            parse_xlsx_worksheet(worksheet, &[], &mut parse_budget(OfficeLimits::default()))
+                .expect("formula cells are extracted");
+
+        assert_eq!(
+            worksheet_text.text,
+            "B2: =SUM(A1:A3) [cached: 42]\nC2: =NOW()"
+        );
+    }
+
+    #[test]
+    fn xlsx_formula_cells_are_retained_as_typed_worksheet_facts() {
+        let worksheet = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><f>SUM(A1:A3)</f><v>42</v></c><c r="C2"><f>NOW()</f></c></row></sheetData></worksheet>"#;
+        let parsed =
+            parse_xlsx_worksheet(worksheet, &[], &mut parse_budget(OfficeLimits::default()))
+                .expect("formula cells are extracted");
+
+        assert_eq!(
+            parsed.formulas,
+            vec![
+                SpreadsheetFormulaDraft {
+                    cell_reference: "B2".into(),
+                    expression: "SUM(A1:A3)".into(),
+                    cached_value: Some("42".into()),
+                },
+                SpreadsheetFormulaDraft {
+                    cell_reference: "C2".into(),
+                    expression: "NOW()".into(),
+                    cached_value: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ods_cells_materialize_a1_text_and_formula_facts() {
+        let content = r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="Calculations"><table:table-row><table:table-cell office:value-type="float" office:value="2"><text:p>2.0</text:p></table:table-cell><table:table-cell table:formula="of:=SUM([.A1:.A1])" office:value-type="float" office:value="2"><text:p>2.0</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#;
+
+        let source = ods(content);
+        let extraction = extract_ods(&source, OfficeLimits::default())
+            .expect("ODS cells are materialized as spreadsheet facts");
+        let sheet = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(|value| value.as_str()) == Some("workbook_sheet")
+            })
+            .expect("worksheet node");
+
+        assert_eq!(
+            sheet.extra["text"],
+            "A1: 2.0\nB1: =of:=SUM([.A1:.A1]) [cached: 2]"
+        );
+        assert_eq!(
+            sheet.extra["spreadsheet_formulas"],
+            serde_json::json!([{
+                "cell": "B1",
+                "expression": "of:=SUM([.A1:.A1])",
+                "cached_value": "2",
+            }])
+        );
+        assert!(extraction.nodes.iter().any(|node| {
+            node.file_type == "spreadsheet_formula"
+                && node.source_location.as_deref() == Some("content.xml#B1")
+        }));
+        assert_eq!(
+            crate::evidence::extract_locator_candidates(Path::new("fixture.ods"), &source)
+                .expect("ODS A1 cells are admitted by the evidence adapter")
+                .locators,
+            vec![crate::evidence::EvidenceLocatorCandidate::Spreadsheet {
+                sheet: "Calculations".into(),
+                cell_range: "A1:B1".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn ods_repeated_cells_keep_their_native_a1_coordinates() {
+        let content = r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="Repeats"><table:table-row table:number-rows-repeated="2"><table:table-cell table:number-columns-repeated="2"><text:p>replicated</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#;
+
+        let extraction = extract_ods(&ods(content), OfficeLimits::default())
+            .expect("repeated ODS cells are materialized");
+        let sheet = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(|value| value.as_str()) == Some("workbook_sheet")
+            })
+            .expect("worksheet node");
+
+        assert_eq!(
+            sheet.extra["text"],
+            "A1: replicated\nB1: replicated\nA2: replicated\nB2: replicated"
+        );
+    }
+
+    #[test]
+    fn ods_empty_formula_cells_keep_cached_value_facts() {
+        let content = r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"><office:body><office:spreadsheet><table:table table:name="Cached"><table:table-row><table:table-cell table:formula="of:=NOW()" office:date-value="2026-09-05"/></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#;
+
+        let extraction = extract_ods(&ods(content), OfficeLimits::default())
+            .expect("empty ODS formula cells are materialized");
+        let sheet = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.extra.get("type").and_then(|value| value.as_str()) == Some("workbook_sheet")
+            })
+            .expect("worksheet node");
+
+        assert_eq!(sheet.extra["text"], "A1: =of:=NOW() [cached: 2026-09-05]");
+        assert_eq!(sheet.extra["spreadsheet_formulas"][0]["cell"], "A1");
+        assert_eq!(
+            sheet.extra["spreadsheet_formulas"][0]["cached_value"],
+            "2026-09-05"
         );
     }
 
@@ -6520,7 +7608,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_model_pending_and_fact_limits_fail_before_publication() {
+    fn retained_model_limits_fail_and_fact_limits_publish_a_bounded_prefix() {
         let ledger = ModelLedger::new(1_024);
         let reservation = ledger.reserve(768).expect("pending reservation");
         assert_eq!(ledger.retain(257), Err(OfficeError::ModelLimit));
@@ -6567,6 +7655,8 @@ mod tests {
                 label: "unit".into(),
                 part: long.clone(),
                 text: String::new(),
+                word_paragraphs: Vec::new(),
+                spreadsheet_formulas: Vec::new(),
             }],
             relationships: (0..8)
                 .map(|index| RelationshipDraft {
@@ -6603,6 +7693,8 @@ mod tests {
                 label: "Section 1".into(),
                 part: "word/document.xml".into(),
                 text: "safe".into(),
+                word_paragraphs: Vec::new(),
+                spreadsheet_formulas: Vec::new(),
             }],
             relationships: Vec::new(),
             external_relationships: 0,
@@ -6612,7 +7704,67 @@ mod tests {
             text_bytes: 4,
             limits,
         });
-        assert_office_error!(result, OfficeError::FactLimit);
+        let extraction = result.expect("fact ceiling retains the root fact");
+        assert_eq!(extraction.nodes.len(), 1);
+        assert!(extraction.edges.is_empty());
+        assert_eq!(extraction.nodes[0].extra["parse_status"], "partial");
+        assert_eq!(
+            extraction.nodes[0].extra["coverage_blocker"],
+            "office_fact_limit"
+        );
+    }
+
+    #[test]
+    fn materialization_keeps_bounded_document_facts_when_fact_limit_is_reached() {
+        let limits = OfficeLimits {
+            max_facts: 3,
+            ..OfficeLimits::default()
+        };
+        let extraction = materialize_extraction(MaterializeRequest {
+            path: Path::new("fixture.docx"),
+            source_file: "fixture.docx",
+            kind: OfficeKind::Docx,
+            title: None,
+            units: vec![
+                UnitDraft {
+                    label: "Section 1".into(),
+                    part: "word/document.xml".into(),
+                    text: "one".into(),
+                    word_paragraphs: Vec::new(),
+                    spreadsheet_formulas: Vec::new(),
+                },
+                UnitDraft {
+                    label: "Section 2".into(),
+                    part: "word/document-2.xml".into(),
+                    text: "two".into(),
+                    word_paragraphs: Vec::new(),
+                    spreadsheet_formulas: Vec::new(),
+                },
+            ],
+            relationships: Vec::new(),
+            external_relationships: 0,
+            member_count: 4,
+            decompressed_bytes: 1,
+            xml_events: 1,
+            text_bytes: 6,
+            limits,
+        })
+        .expect("fact ceiling retains a truthful prefix");
+
+        assert_eq!(
+            extraction.nodes.len() + extraction.edges.len(),
+            limits.max_facts
+        );
+        assert_eq!(extraction.nodes[0].extra["parse_status"], "partial");
+        assert_eq!(
+            extraction.nodes[0].extra["coverage_blocker"],
+            "office_fact_limit"
+        );
+        assert!(extraction.edges.iter().all(|edge| extraction
+            .nodes
+            .iter()
+            .any(|node| node.id == edge.source)
+            && extraction.nodes.iter().any(|node| node.id == edge.target)));
     }
 
     #[test]

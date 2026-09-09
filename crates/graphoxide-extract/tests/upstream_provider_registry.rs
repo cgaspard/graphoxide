@@ -16,12 +16,12 @@ fn test_custom_provider_add_list_show_remove() {
     let global = temp.path().join("providers.json");
     write(
         &global,
-        json!({"nvidia": {"base_url": "https://integrate.api.nvidia.com/v1", "default_model": "minimaxai/minimax-m2.7", "env_key": "NVIDIA_API_KEY", "pricing": {"input": 0.0, "output": 0.0}, "temperature": 0}}),
+        json!({"custom": {"base_url": "https://api.example.com/v1", "default_model": "example/model", "env_key": "CUSTOM_API_KEY", "pricing": {"input": 0.0, "output": 0.0}, "temperature": 0}}),
     );
     let loaded = load_custom_providers(&global, &temp.path().join("local.json"), false);
     assert_eq!(
-        loaded.providers["nvidia"].base_url,
-        "https://integrate.api.nvidia.com/v1"
+        loaded.providers["custom"].base_url,
+        "https://api.example.com/v1"
     );
 }
 

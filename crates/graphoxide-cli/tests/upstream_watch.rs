@@ -73,6 +73,12 @@ fn retired_ast_artifact(output: &Path, hash_byte: char, contents: &str) -> PathB
     artifact
 }
 
+fn current_ast_cache_directory(output: &Path) -> PathBuf {
+    output
+        .join("cache/ast")
+        .join(format!("v{}", graphoxide_extract::cache::AST_CACHE_VERSION))
+}
+
 fn rewrite_with_new_mtime(path: impl AsRef<Path>, text: &str) {
     let path = path.as_ref();
     let previous = FileTime::from_last_modification_time(&fs::metadata(path).unwrap());
@@ -1612,16 +1618,18 @@ fn test_legacy_update_keeps_cache_manifest_and_migration_in_custom_output() {
     assert!(output.join("graph.json").is_file());
     let manifest: Value =
         serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["settings.json"]["ast_version"], 32);
-    assert!(output
-        .join("cache/ast/v32")
+    assert_eq!(
+        manifest["settings.json"]["ast_version"],
+        graphoxide_extract::cache::AST_CACHE_VERSION
+    );
+    assert!(current_ast_cache_directory(&output)
         .read_dir()
         .unwrap()
         .next()
         .is_some());
     assert!(!default_output.join("graph.json").exists());
     assert!(!default_output.join("manifest.json").exists());
-    assert!(!default_output.join("cache/ast/v32").exists());
+    assert!(!current_ast_cache_directory(&default_output).exists());
 
     let graph_bytes = fs::read(output.join("graph.json")).unwrap();
     let graph: Value = serde_json::from_slice(&graph_bytes).unwrap();
@@ -1704,8 +1712,7 @@ fn test_caller_owned_no_lock_rebuilds_prepare_cache_schema_in_both_entrypoints()
         canonical_observer_output.join("graph.json")
     );
     assert!(observer_output.join("manifest.json").is_file());
-    assert!(observer_output
-        .join("cache/ast/v32")
+    assert!(current_ast_cache_directory(&observer_output)
         .read_dir()
         .unwrap()
         .next()

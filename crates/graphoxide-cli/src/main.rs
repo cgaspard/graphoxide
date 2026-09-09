@@ -5,7 +5,7 @@
 
 mod site;
 
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use graphoxide_cli::build_progress::{
     BuildProgressFactory, BuildProgressMode, BuildProgressPhase, BuildProgressReporter,
@@ -16,6 +16,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -31,6 +32,250 @@ const MAX_REGISTRY_RECORD_INPUT_BYTES: u64 = 256 * 1024;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone)]
+struct BoundDirectSourceService {
+    root: PathBuf,
+    allow_remote: bool,
+}
+
+impl graphoxide_mcp::direct_source::DirectSourceService for BoundDirectSourceService {
+    fn add_sources(
+        &self,
+        request: graphoxide_mcp::direct_source::DirectSourceAddRequest,
+        model_egress: Option<graphoxide_mcp::direct_source::ModelEgressConsent>,
+    ) -> anyhow::Result<graphoxide_mcp::direct_source::DirectSourceAddResult> {
+        ensure!(
+            model_egress.is_some(),
+            "direct source add requires explicit model egress consent"
+        );
+        let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(&self.root)?;
+        let inputs = request
+            .inputs
+            .into_iter()
+            .map(|input| match input {
+                graphoxide_mcp::direct_source::DirectSourceInput::BoundPath {
+                    binding,
+                    relative_path,
+                } => graphoxide_cli::wiki_source::SourceAdmissionInput::BoundPath {
+                    binding,
+                    path: relative_path,
+                },
+                graphoxide_mcp::direct_source::DirectSourceInput::Https { url } => {
+                    graphoxide_cli::wiki_source::SourceAdmissionInput::Https {
+                        url,
+                        consent: graphoxide_cli::wiki_source::allow_https_fetch(),
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let receipt =
+            graphoxide_cli::wiki_source::admit_source_inputs(&self.root, &inputs, |_| {})?;
+        let (sources, _) = author_admitted_sources(&self.root, &receipt, self.allow_remote, true)?;
+        let sources = sources.into_iter().map(direct_source_status).collect();
+        Ok(graphoxide_mcp::direct_source::DirectSourceAddResult { sources })
+    }
+
+    fn source_status(
+        &self,
+    ) -> anyhow::Result<graphoxide_mcp::direct_source::DirectSourceStatusResult> {
+        let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(&self.root)?;
+        Ok(graphoxide_mcp::direct_source::DirectSourceStatusResult {
+            sources: graphoxide_cli::wiki_source::source_status(&self.root)?
+                .into_iter()
+                .map(direct_source_status)
+                .collect(),
+        })
+    }
+
+    fn refresh_source(
+        &self,
+        request: graphoxide_mcp::direct_source::DirectSourceRefreshRequest,
+        remote_fetch: Option<graphoxide_mcp::direct_source::HttpsFetchConsent>,
+        model_egress: Option<graphoxide_mcp::direct_source::ModelEgressConsent>,
+    ) -> anyhow::Result<graphoxide_mcp::direct_source::DirectSourceLifecycleResult> {
+        ensure!(
+            model_egress.is_some(),
+            "direct source refresh requires explicit model egress consent"
+        );
+        let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(&self.root)?;
+        let source = direct_source_entry(&self.root, &request.source_id)?;
+        require_remote_fetch_consent(&source, remote_fetch)?;
+        let (refreshed, _) = graphoxide_cli::wiki_direct::refresh_source(
+            &self.root,
+            &request.source_id,
+            remote_fetch.map(|_| graphoxide_cli::wiki_source::allow_https_fetch()),
+        )?;
+        Ok(direct_source_lifecycle_result(refreshed))
+    }
+
+    fn review_source(
+        &self,
+        request: graphoxide_mcp::direct_source::DirectSourceReviewRequest,
+        remote_fetch: Option<graphoxide_mcp::direct_source::HttpsFetchConsent>,
+        model_egress: Option<graphoxide_mcp::direct_source::ModelEgressConsent>,
+    ) -> anyhow::Result<graphoxide_mcp::direct_source::DirectSourceReviewResult> {
+        let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(&self.root)?;
+        let source_id = match request {
+            graphoxide_mcp::direct_source::DirectSourceReviewRequest::Ai { source_id, .. } => {
+                let source = direct_source_entry(&self.root, &source_id)?;
+                require_remote_fetch_consent(&source, remote_fetch)?;
+                ensure!(
+                    model_egress.is_some(),
+                    "AI direct source review requires explicit model egress consent"
+                );
+                graphoxide_cli::wiki_direct::review_source(&self.root, &source, self.allow_remote)?;
+                source_id
+            }
+            graphoxide_mcp::direct_source::DirectSourceReviewRequest::HumanConfirm {
+                source_id,
+            } => {
+                ensure!(
+                    remote_fetch.is_none() && model_egress.is_none(),
+                    "human direct source confirmation may not request source fetch or model egress"
+                );
+                let source = direct_source_entry(&self.root, &source_id)?;
+                graphoxide_cli::wiki_direct::human_confirm(&self.root, &source)?;
+                source_id
+            }
+        };
+        Ok(graphoxide_mcp::direct_source::DirectSourceReviewResult {
+            source: direct_source_lifecycle_result(direct_source_entry(&self.root, &source_id)?),
+            decision: graphoxide_mcp::direct_source::DirectSourceReviewDecision::Approve,
+        })
+    }
+
+    fn retire_source(
+        &self,
+        request: graphoxide_mcp::direct_source::DirectSourceRetireRequest,
+    ) -> anyhow::Result<graphoxide_mcp::direct_source::DirectSourceRetireResult> {
+        let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(&self.root)?;
+        graphoxide_cli::wiki_direct::retire_source(&self.root, &request.source_id)?;
+        Ok(graphoxide_mcp::direct_source::DirectSourceRetireResult {
+            source_id: request.source_id,
+            retired: true,
+        })
+    }
+}
+
+fn direct_source_entry(
+    root: &Path,
+    source_id: &str,
+) -> anyhow::Result<graphoxide_cli::wiki_source::SourceEntry> {
+    graphoxide_cli::wiki_source::source_status(root)?
+        .into_iter()
+        .find(|source| source.source_id == source_id)
+        .with_context(|| format!("source {source_id:?} is not indexed"))
+}
+
+fn require_remote_fetch_consent(
+    source: &graphoxide_cli::wiki_source::SourceEntry,
+    remote_fetch: Option<graphoxide_mcp::direct_source::HttpsFetchConsent>,
+) -> anyhow::Result<()> {
+    if matches!(
+        &source.location,
+        graphoxide_cli::wiki_source::SourceLocation::Https { .. }
+    ) {
+        ensure!(
+            remote_fetch.is_some(),
+            "remote source refresh requires explicit consent"
+        );
+    }
+    Ok(())
+}
+
+/// Every source pointer is sealed by the source layer before it reaches the
+/// authoring layer. If authoring fails, it rolls back exactly this receipt.
+fn author_admitted_sources(
+    root: &Path,
+    receipt: &graphoxide_cli::wiki_source::SourceAdmissionReceipt,
+    allow_remote: bool,
+    allow_model_egress: bool,
+) -> anyhow::Result<(
+    Vec<graphoxide_cli::wiki_source::SourceEntry>,
+    Vec<graphoxide_cli::wiki_direct::DirectAuthoringResult>,
+)> {
+    ensure!(
+        allow_model_egress,
+        "source authoring requires --allow-model-egress"
+    );
+    let sources = receipt.sources().to_vec();
+    let authored = graphoxide_cli::wiki_direct::author_new_sources(root, receipt, allow_remote)?;
+    Ok((sources, authored))
+}
+
+fn direct_source_status(
+    source: graphoxide_cli::wiki_source::SourceEntry,
+) -> graphoxide_mcp::direct_source::DirectSourceStatus {
+    let location = match source.location {
+        graphoxide_cli::wiki_source::SourceLocation::Git {
+            remote,
+            commit,
+            path,
+        } => graphoxide_mcp::direct_source::DirectSourceLocation::Git {
+            remote,
+            commit,
+            path,
+        },
+        graphoxide_cli::wiki_source::SourceLocation::BoundPath { binding, path } => {
+            graphoxide_mcp::direct_source::DirectSourceLocation::BoundPath {
+                binding,
+                relative_path: path,
+            }
+        }
+        graphoxide_cli::wiki_source::SourceLocation::Https { url } => {
+            graphoxide_mcp::direct_source::DirectSourceLocation::Https { url }
+        }
+    };
+    let status = direct_source_status_name(&source.status);
+    graphoxide_mcp::direct_source::DirectSourceStatus {
+        source_id: source.source_id,
+        location,
+        content_sha256: source.content_sha256,
+        bytes: source.bytes,
+        status: status.into(),
+    }
+}
+
+fn direct_source_lifecycle_result(
+    source: graphoxide_cli::wiki_source::SourceEntry,
+) -> graphoxide_mcp::direct_source::DirectSourceLifecycleResult {
+    graphoxide_mcp::direct_source::DirectSourceLifecycleResult {
+        source_id: source.source_id,
+        content_sha256: source.content_sha256,
+        bytes: source.bytes,
+        status: direct_source_status_name(&source.status).into(),
+    }
+}
+
+fn direct_source_status_name(source: &graphoxide_cli::wiki_source::SourceStatus) -> &'static str {
+    match source {
+        graphoxide_cli::wiki_source::SourceStatus::Provisional => "provisional",
+        graphoxide_cli::wiki_source::SourceStatus::AiReviewed => "ai-reviewed",
+        graphoxide_cli::wiki_source::SourceStatus::HumanConfirmed => "human-confirmed",
+        graphoxide_cli::wiki_source::SourceStatus::StaleError => "stale-error",
+    }
+}
+
+fn direct_mcp_root(
+    wiki_root: Option<PathBuf>,
+    allow_wiki_write: bool,
+) -> anyhow::Result<Option<PathBuf>> {
+    match (wiki_root, allow_wiki_write) {
+        (Some(root), true) => Ok(Some(root)),
+        (Some(_), false) => anyhow::bail!("--wiki-root requires --allow-wiki-write"),
+        (None, true) => anyhow::bail!("--allow-wiki-write requires --wiki-root"),
+        (None, false) => Ok(None),
+    }
+}
+
+fn direct_http_root(wiki_root: Option<PathBuf>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        wiki_root.is_none(),
+        "--wiki-root is supported only with --transport stdio"
+    );
+    Ok(())
 }
 
 /// Explicit controls for the isolated I/O/CPU indexing runtime.
@@ -167,7 +412,7 @@ enum Command {
         #[command(flatten)]
         build: ProjectBuildOptions,
     },
-    /// Build, validate, or draft a checked-in Markdown wiki.
+    /// Build and validate a schema-enforced knowledgebase.
     Wiki {
         #[command(subcommand)]
         command: WikiCommand,
@@ -376,9 +621,9 @@ enum Command {
         #[arg(long, default_value = "graphoxide-out/GRAPH_REPORT.md")]
         output: PathBuf,
     },
-    /// Export an existing graph as HTML, callflow HTML, GraphML, Cypher, wiki, Obsidian, or JSON
+    /// Export an existing graph as HTML, callflow HTML, GraphML, Cypher, community Markdown, Obsidian, or JSON
     Export {
-        #[arg(value_parser = ["html", "callflow-html", "graphml", "cypher", "neo4j", "falkordb", "wiki", "obsidian", "json"])]
+        #[arg(value_parser = ["html", "callflow-html", "graphml", "cypher", "neo4j", "falkordb", "community-markdown", "obsidian", "json"])]
         format: String,
         /// Output path, or the graph path for `callflow-html --output ...`.
         positional: Option<PathBuf>,
@@ -577,6 +822,17 @@ enum Command {
     Serve {
         #[arg(default_value = "graphoxide-out/graph.json")]
         graph: PathBuf,
+        #[arg(long, value_name = "WIKI_ROOT")]
+        wiki_root: Option<PathBuf>,
+        /// Permit stdio MCP direct-source tools to mutate the explicitly bound knowledgebase.
+        #[arg(long)]
+        allow_wiki_write: bool,
+        /// Permit write-authorized stdio MCP direct-source HTTPS fetches.
+        #[arg(long)]
+        allow_wiki_network: bool,
+        /// Permit write-authorized stdio MCP direct-source model egress after each AI review acknowledgement.
+        #[arg(long)]
+        allow_wiki_model_egress: bool,
         #[arg(long, value_parser = ["stdio", "http"], default_value = "stdio")]
         transport: String,
         #[arg(long, default_value = "127.0.0.1")]
@@ -663,166 +919,77 @@ struct ProjectBuildOptions {
 
 #[derive(Subcommand)]
 enum WikiCommand {
-    /// Validate a manifest-driven, read-only private OpenAPI contract.
-    Openapi {
+    /// Initialize the current Git worktree as a direct-source knowledgebase.
+    Init {
+        /// Secret-free profile that selects the configured author and reviewer models.
+        #[arg(long, value_name = "PROFILE")]
+        authoring_profile: PathBuf,
+    },
+    /// Add, refresh, review, inspect, or retire direct knowledgebase sources.
+    Source {
         #[command(subcommand)]
-        command: WikiOpenapiCommand,
+        command: WikiSourceCommand,
     },
-    /// Generate the deterministic llms.txt file defined by the wiki config.
-    Index {
+    /// Serve the direct knowledgebase locally.
+    Live {
         #[arg(value_name = "WIKI_ROOT")]
         root: PathBuf,
-        #[arg(long, value_name = "FILE")]
-        config: PathBuf,
-    },
-    /// Validate wiki pages and require the generated llms.txt file to be current.
-    Check {
-        #[arg(value_name = "WIKI_ROOT")]
-        root: PathBuf,
-        #[arg(long, value_name = "FILE")]
-        config: PathBuf,
-        /// Validate page citations against a catalog directory.
-        #[arg(long, value_name = "DIRECTORY")]
-        catalog: Option<PathBuf>,
-        /// Project root that owns --catalog; defaults to WIKI_ROOT.
-        #[arg(long, value_name = "DIRECTORY", requires = "catalog")]
-        catalog_root: Option<PathBuf>,
-        /// Validate graph catalog annotations against --catalog.
-        #[arg(long, value_name = "FILE", requires = "catalog")]
-        graph: Option<PathBuf>,
-        /// Require the wiki to match an exact reviewed canonical plan render.
-        #[arg(long, value_name = "FILE", requires_all = ["catalog", "graph"])]
-        plan: Option<PathBuf>,
-        /// Write the machine-readable validation report to stdout.
+        #[arg(long, default_value_t = 1313)]
+        port: u16,
         #[arg(long)]
-        json: bool,
-    },
-    /// Propose a reviewer-owned canonical wiki plan from graph metadata.
-    Plan {
-        #[arg(long, value_name = "FILE")]
-        graph: PathBuf,
-        #[arg(long, value_name = "DIRECTORY")]
-        catalog: PathBuf,
-        /// New .proposed.json file; Graphoxide never overwrites a reviewed plan.
-        #[arg(long, value_name = "FILE")]
-        output: PathBuf,
-        #[arg(long)]
-        model: String,
-        #[arg(long)]
-        consent: String,
-        #[arg(long, default_value = graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL)]
-        ollama_url: String,
-        /// Use Ollama's native /api/chat endpoint instead of its OpenAI-compatible API.
-        #[arg(long)]
-        ollama_native: bool,
-        /// Versioned JSON profile for an OpenAI-compatible, Anthropic, native Ollama, or MCP agent provider.
-        #[arg(long, value_name = "FILE")]
-        provider_profile: Option<PathBuf>,
-        /// Optional Registry v1 tree that receives append-only secret-free model-run records.
-        #[arg(long, value_name = "DIRECTORY")]
-        registry_tree: Option<PathBuf>,
-    },
-    /// Render deterministic graph-derived Markdown into a new directory.
-    Render {
-        /// Raw snapshot root for legacy rendering. Omit with --plan: canonical
-        /// rendering reads only graph, catalog metadata, and the reviewed plan.
-        #[arg(value_name = "SOURCE_ROOT")]
-        source_root: Option<PathBuf>,
-        #[arg(long, value_name = "FILE")]
-        graph: PathBuf,
-        /// Bind rendered output to active captures in this catalog directory.
-        #[arg(long, value_name = "DIRECTORY")]
-        catalog: Option<PathBuf>,
-        /// Render the reviewed canonical plan without reading raw source files.
-        #[arg(long, value_name = "FILE", requires = "catalog")]
-        plan: Option<PathBuf>,
-        #[arg(long, value_name = "DIRECTORY")]
-        output: PathBuf,
-    },
-    /// Publish graph-only source pages immediately, then reconcile canonical navigation.
-    Materialize {
-        /// Clean Git checkout containing the Registry v1 tree.
-        #[arg(long, value_name = "DIRECTORY")]
-        registry_repo: PathBuf,
-        /// Exact commit object ID currently checked out by --registry-repo.
-        #[arg(long, value_name = "COMMIT")]
-        registry_rev: String,
-        #[arg(long, value_name = "ID")]
-        origin: String,
-        #[arg(long, value_name = "FILE")]
-        graph: PathBuf,
-        #[arg(long, value_name = "FILE")]
-        plan: PathBuf,
-        #[arg(long, value_name = "DIRECTORY")]
-        output: PathBuf,
-        /// Optional validated canonical draft tree; only evidence-bound article prose is adopted.
-        #[arg(long, value_name = "DIRECTORY")]
-        drafts: Option<PathBuf>,
-        /// Optional pinned freshness policy from policies/freshness.json.
-        #[arg(long, value_name = "FILE")]
-        policy: Option<PathBuf>,
-        /// Reserved model-work budget; this deterministic release requires one.
-        #[arg(long, default_value_t = 1)]
-        agent_jobs: usize,
-        #[arg(long, value_enum, default_value_t = graphoxide_cli::wiki_materialize::MaterializeProgress::Jsonl)]
-        progress: graphoxide_cli::wiki_materialize::MaterializeProgress,
-    },
-    /// Create catalog-cited, local-Ollama Markdown drafts in a new directory.
-    Draft {
-        #[arg(value_name = "SOURCE_ROOT")]
-        source_root: PathBuf,
-        #[arg(long, value_name = "FILE")]
-        graph: PathBuf,
-        /// Bind draft output to active captures in this catalog directory.
-        #[arg(long, value_name = "DIRECTORY")]
-        catalog: Option<PathBuf>,
-        /// Synthesize reviewed canonical articles from graph evidence.
-        #[arg(long, value_name = "FILE", requires = "catalog")]
-        plan: Option<PathBuf>,
-        #[arg(long, value_name = "DIRECTORY")]
-        output: PathBuf,
-        #[arg(long)]
-        model: String,
-        /// Draft one or more graph-derived page scopes (source, community, or topic).
-        #[arg(
-            long = "scope",
-            value_name = "SCOPE",
-            value_parser = ["source", "community", "topic"]
-        )]
-        scopes: Vec<String>,
-        #[arg(long)]
-        consent: String,
-        #[arg(long, default_value = graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL)]
-        ollama_url: String,
-        /// Use Ollama's native /api/chat endpoint instead of its OpenAI-compatible API.
-        #[arg(long)]
-        ollama_native: bool,
-        /// Versioned JSON profile for an OpenAI-compatible, Anthropic, native Ollama, or MCP agent provider.
-        #[arg(long, value_name = "FILE")]
-        provider_profile: Option<PathBuf>,
-        /// Optional Registry v1 tree that receives append-only secret-free model-run records.
-        #[arg(long, value_name = "DIRECTORY")]
-        registry_tree: Option<PathBuf>,
+        open: bool,
     },
 }
 
 #[derive(Subcommand)]
-enum WikiOpenapiCommand {
-    /// Verify the manifest, pinned specification digest, and every allowlisted operation.
-    Validate {
-        #[arg(long, value_name = "FILE")]
-        manifest: PathBuf,
-        #[arg(long, value_name = "FILE")]
-        spec: PathBuf,
+enum WikiSourceCommand {
+    /// Add one or more direct sources from the current knowledgebase root.
+    Add {
+        #[arg(value_name = "INPUT", required = true, num_args = 1..)]
+        inputs: Vec<PathBuf>,
+        /// Permit the explicit HTTPS transfers in this invocation.
+        #[arg(long)]
+        allow_network: bool,
+        /// Acknowledge transient source-text egress to the configured author model.
+        #[arg(long)]
+        allow_model_egress: bool,
     },
-    /// Make one allowlisted read and emit response metadata without saving content.
-    Fetch {
-        #[arg(long, value_name = "FILE")]
-        manifest: PathBuf,
-        #[arg(long, value_name = "FILE")]
-        spec: PathBuf,
-        #[arg(long, value_name = "OPERATION_ID")]
-        operation: String,
+    /// Refresh one source pointer and regenerate its derived page when it changed.
+    Refresh {
+        #[arg(value_name = "SOURCE_ID")]
+        source_id: String,
+        /// Permit an explicit HTTPS refresh for this invocation.
+        #[arg(long)]
+        allow_network: bool,
+        /// Acknowledge transient source-text egress when a changed source is re-authored.
+        #[arg(long)]
+        allow_model_egress: bool,
+    },
+    /// Run an AI review for one current derived source page.
+    Review {
+        #[arg(value_name = "SOURCE_ID")]
+        source_id: String,
+        /// Permit an explicit HTTPS read for this invocation.
+        #[arg(long)]
+        allow_network: bool,
+        /// Acknowledge transient source-text egress to the configured reviewer model.
+        #[arg(long)]
+        allow_model_egress: bool,
+    },
+    /// Explicitly record a local human confirmation after AI review.
+    Confirm {
+        #[arg(value_name = "SOURCE_ID")]
+        source_id: String,
+    },
+    /// Show secret-free direct-source lifecycle state.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retire one source pointer and its derived artifacts.
+    Retire {
+        #[arg(value_name = "SOURCE_ID")]
+        source_id: String,
     },
 }
 
@@ -2650,7 +2817,16 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
+    // Clap builds the complete command tree while parsing, which exceeds the
+    // default Windows main-thread stack in debug builds. Bound the parser's
+    // stack explicitly without changing the thread that executes the command.
+    let cli = thread::Builder::new()
+        .name("cli-parser".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(Cli::parse)
+        .context("start CLI parser")?
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     match cli.command {
         Command::Enrich { args } => write_output(&graphoxide_cli::enrich::run(args)?),
         Command::Formats { json } => write_output(&format_capability_output(json)?),
@@ -3128,6 +3304,10 @@ fn main() -> anyhow::Result<()> {
         } => rebuild_hook(mode.parse()?, &root, legacy_executor, runtime),
         Command::Serve {
             graph,
+            wiki_root,
+            allow_wiki_write,
+            allow_wiki_network,
+            allow_wiki_model_egress,
             transport,
             host,
             port,
@@ -3138,8 +3318,33 @@ fn main() -> anyhow::Result<()> {
             session_timeout,
         } => {
             if transport == "stdio" {
-                graphoxide_mcp::serve_graph(graph)
+                anyhow::ensure!(
+                    !allow_wiki_network || allow_wiki_write,
+                    "--allow-wiki-network requires --allow-wiki-write"
+                );
+                anyhow::ensure!(
+                    !allow_wiki_model_egress || allow_wiki_write,
+                    "--allow-wiki-model-egress requires --allow-wiki-write"
+                );
+                if let Some(root) = direct_mcp_root(wiki_root, allow_wiki_write)? {
+                    graphoxide_mcp::serve_graph_with_direct_source_service(
+                        graph,
+                        Arc::new(BoundDirectSourceService {
+                            root,
+                            allow_remote: allow_wiki_network,
+                        }),
+                        allow_wiki_network,
+                        allow_wiki_model_egress,
+                    )
+                } else {
+                    graphoxide_mcp::serve_graph(graph)
+                }
             } else {
+                anyhow::ensure!(
+                    !allow_wiki_write && !allow_wiki_network && !allow_wiki_model_egress,
+                    "knowledgebase workflow write, network, and model-egress flags are supported only with --transport stdio"
+                );
+                direct_http_root(wiki_root)?;
                 let api_key = api_key.or_else(|| {
                     std::env::var("GRAPHOXIDE_API_KEY")
                         .ok()
@@ -3945,264 +4150,365 @@ fn registry_freshness(
     }
 }
 
-fn wiki(command: WikiCommand) -> anyhow::Result<()> {
-    match command {
-        WikiCommand::Openapi { command } => match command {
-            WikiOpenapiCommand::Validate { manifest, spec } => {
-                let manifest =
-                    graphoxide_cli::wiki_openapi::OpenApiServiceManifest::from_path(&manifest)?;
-                let metadata = fs::symlink_metadata(&spec)?;
+fn direct_wiki_root() -> anyhow::Result<PathBuf> {
+    let root = std::env::current_dir()
+        .context("resolve current knowledgebase directory")?
+        .canonicalize()
+        .context("canonicalize current knowledgebase directory")?;
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(&root)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("find knowledgebase Git worktree root")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "knowledgebase commands must run from an initialized Git worktree root; run `git init` here first"
+    );
+    let git_root = PathBuf::from(
+        std::str::from_utf8(&output.stdout)
+            .context("read knowledgebase Git worktree root")?
+            .trim(),
+    )
+    .canonicalize()
+    .context("canonicalize knowledgebase Git worktree root")?;
+    anyhow::ensure!(
+        git_root == root,
+        "knowledgebase commands must run from the Git worktree root"
+    );
+    Ok(root)
+}
+
+struct DirectRuntimeGitignore {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+    updated: Vec<u8>,
+}
+
+impl DirectRuntimeGitignore {
+    fn prepare(root: &Path) -> anyhow::Result<Self> {
+        const RUNTIME_RULE: &[u8] = b".graphoxide/\n";
+        let path = root.join(".gitignore");
+        let original = match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
                 anyhow::ensure!(
-                    metadata.file_type().is_file()
-                        && !metadata.file_type().is_symlink()
-                        && metadata.len() <= 8 * 1024 * 1024,
-                    "OpenAPI specification must be a bounded regular file"
+                    !metadata.file_type().is_symlink() && metadata.is_file(),
+                    ".gitignore must be a regular file"
                 );
-                manifest.validate_spec(&fs::read(&spec)?)?;
-                write_output("Validated read-only OpenAPI service contract")
+                Some(fs::read(&path).context("read .gitignore")?)
             }
-            WikiOpenapiCommand::Fetch {
-                manifest,
-                spec,
-                operation,
-            } => {
-                let manifest =
-                    graphoxide_cli::wiki_openapi::OpenApiServiceManifest::from_path(&manifest)?;
-                let metadata = fs::symlink_metadata(&spec)?;
-                anyhow::ensure!(
-                    metadata.file_type().is_file()
-                        && !metadata.file_type().is_symlink()
-                        && metadata.len() <= 8 * 1024 * 1024,
-                    "OpenAPI specification must be a bounded regular file"
-                );
-                let request = manifest.resolve_read(&fs::read(&spec)?, &operation)?;
-                write_output(&serde_json::to_string(&request.fetch_metadata()?)?)
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("inspect .gitignore"),
+        };
+        let mut updated = original.clone().unwrap_or_default();
+        if !updated
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == b".graphoxide/")
+        {
+            if !updated.is_empty() && !updated.ends_with(b"\n") {
+                updated.push(b'\n');
             }
-        },
-        WikiCommand::Index { root, config } => {
-            let report = graphoxide_cli::wiki::index(&root, &config)?;
-            write_output(&format!(
-                "Indexed {} wiki pages into {}",
-                report.page_count,
-                report.output.display()
-            ))
+            updated.extend_from_slice(RUNTIME_RULE);
         }
-        WikiCommand::Check {
-            root,
-            config,
-            catalog,
-            catalog_root,
-            graph,
-            plan,
-            json,
-        } => {
-            let catalog = catalog
-                .as_deref()
-                .map(|directory| {
-                    if let Some(catalog_root) = catalog_root.as_deref() {
-                        let catalog =
-                            graphoxide_extract::catalog::Catalog::load(catalog_root, directory)?;
-                        catalog.verify_sources()?;
-                        return Ok::<_, anyhow::Error>(catalog);
-                    }
-                    let catalog =
-                        graphoxide_extract::catalog::Catalog::load_metadata(&root, directory)?;
-                    if catalog.version() == 1 {
-                        let catalog = graphoxide_extract::catalog::Catalog::load(&root, directory)?;
-                        catalog.verify_sources()?;
-                        Ok::<_, anyhow::Error>(catalog)
-                    } else {
-                        Ok::<_, anyhow::Error>(catalog)
-                    }
-                })
-                .transpose()?;
-            let graph = graph
-                .as_deref()
-                .map(graphoxide_core::read_graph)
-                .transpose()?;
-            if let (Some(catalog), Some(graph)) = (&catalog, &graph) {
-                catalog.validate_graph_annotations(graph)?;
-            }
-            let citations = catalog.as_ref().map(|catalog| catalog.citation_keys());
-            let active_annotations = catalog
-                .as_ref()
-                .zip(graph.as_ref())
-                .map(|(catalog, _)| catalog.active_annotations());
-            let (report, quality) = if let Some(plan_path) = plan {
-                let catalog = catalog.as_ref().context("--plan requires --catalog")?;
-                let graph = graph.as_ref().context("--plan requires --graph")?;
-                let plan = graphoxide_cli::wiki::load_canonical_plan(
-                    &root,
-                    &plan_path,
-                    &catalog.citation_keys(),
-                )?;
-                let expected = graphoxide_export::render_canonical_wiki(
-                    graph,
-                    &plan,
-                    &catalog.active_annotations(),
-                )?;
-                graphoxide_cli::wiki::check_with_canonical_plan_quality(
-                    &root,
-                    &config,
-                    &catalog.citation_keys(),
-                    graph,
-                    &catalog.active_annotations(),
-                    &expected,
-                )?
-            } else {
-                let report = graphoxide_cli::wiki::check_with_graph(
-                    &root,
-                    &config,
-                    citations.as_ref(),
-                    graph.as_ref(),
-                    active_annotations.as_ref(),
-                )?;
-                let quality = serde_json::json!({
-                    "status": "ok",
-                    "page_count": report.page_count,
-                    "output": report.output,
-                    "diagnostics": [],
-                });
-                (report, quality)
-            };
-            if json {
-                write_output(&serde_json::to_string(&quality)?)
-            } else {
-                write_output(&format!("Checked {} wiki pages", report.page_count))
-            }
+        Ok(Self {
+            path,
+            original,
+            updated,
+        })
+    }
+
+    fn apply(&self) -> anyhow::Result<()> {
+        if self.original.as_deref() == Some(&self.updated) {
+            return Ok(());
         }
-        WikiCommand::Render {
-            source_root,
-            graph,
-            catalog,
-            plan,
-            output,
-        } => {
-            if let Some(plan) = plan {
-                anyhow::ensure!(
-                    source_root.is_none(),
-                    "canonical wiki render does not accept SOURCE_ROOT"
-                );
-                let catalog = catalog.context("--plan requires --catalog")?;
-                graphoxide_cli::wiki_draft::render_canonical(
-                    graphoxide_cli::wiki_draft::CanonicalRenderArgs {
-                        graph,
-                        catalog,
-                        plan,
-                        output: output.clone(),
-                    },
-                )?;
-            } else {
-                let source_root = source_root
-                    .context("wiki render requires SOURCE_ROOT unless --plan is supplied")?;
-                graphoxide_cli::wiki_draft::render(graphoxide_cli::wiki_draft::RenderArgs {
-                    source_root,
-                    graph,
-                    catalog,
-                    output: output.clone(),
-                })?;
-            }
-            write_output(&format!("Rendered wiki to {}", output.display()))
+        graphoxide_core::write_bytes_atomic_strict(&self.path, &self.updated)
+            .map_err(|_| anyhow::anyhow!("write .gitignore runtime rule failed"))
+    }
+
+    fn restore(&self) -> anyhow::Result<()> {
+        if self.original.as_deref() == Some(&self.updated) {
+            return Ok(());
         }
-        WikiCommand::Materialize {
-            registry_repo,
-            registry_rev,
-            origin,
-            graph,
-            plan,
-            output,
-            drafts,
-            policy,
-            agent_jobs,
-            progress,
-        } => {
-            graphoxide_cli::wiki_materialize::materialize(
-                graphoxide_cli::wiki_materialize::MaterializeArgs {
-                    registry_repo,
-                    registry_rev,
-                    origin_id: origin,
-                    graph,
-                    plan,
-                    output: output.clone(),
-                    drafts,
-                    policy,
-                    agent_jobs,
-                    progress,
-                },
-            )?;
-            write_output(&format!("Materialized live wiki to {}", output.display()))
-        }
-        WikiCommand::Plan {
-            graph,
-            catalog,
-            output,
-            model,
-            consent,
-            ollama_url,
-            ollama_native,
-            provider_profile,
-            registry_tree,
-        } => {
-            graphoxide_cli::wiki_draft::propose_plan(graphoxide_cli::wiki_draft::PlanArgs {
-                graph,
-                catalog,
-                output: output.clone(),
-                model,
-                consent,
-                ollama_url,
-                ollama_native,
-                provider_profile,
-                registry_tree,
-            })?;
-            write_output(&format!("Wrote wiki plan proposal to {}", output.display()))
-        }
-        WikiCommand::Draft {
-            source_root,
-            graph,
-            catalog,
-            plan,
-            output,
-            model,
-            scopes,
-            consent,
-            ollama_url,
-            ollama_native,
-            provider_profile,
-            registry_tree,
-        } => {
-            graphoxide_cli::wiki_draft::draft(graphoxide_cli::wiki_draft::DraftArgs {
-                source_root,
-                graph,
-                catalog,
-                plan,
-                output: output.clone(),
-                model,
-                scopes: parse_draft_scopes(scopes)?,
-                consent,
-                ollama_url,
-                ollama_native,
-                provider_profile,
-                registry_tree,
-            })?;
-            write_output(&format!("Wrote wiki drafts to {}", output.display()))
+        let metadata = fs::symlink_metadata(&self.path)
+            .map_err(|_| anyhow::anyhow!("verify .gitignore before rollback failed"))?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink() && metadata.is_file(),
+            ".gitignore changed concurrently; rollback was not applied"
+        );
+        let current = fs::read(&self.path)
+            .map_err(|_| anyhow::anyhow!("read .gitignore before rollback failed"))?;
+        anyhow::ensure!(
+            current == self.updated,
+            ".gitignore changed concurrently; rollback was not applied"
+        );
+        match &self.original {
+            Some(original) => graphoxide_core::write_bytes_atomic_strict(&self.path, original)
+                .map_err(|_| anyhow::anyhow!("restore .gitignore failed")),
+            None => fs::remove_file(&self.path)
+                .map_err(|_| anyhow::anyhow!("remove .gitignore runtime rule failed")),
         }
     }
 }
 
-fn parse_draft_scopes(
-    scopes: Vec<String>,
-) -> anyhow::Result<std::collections::BTreeSet<graphoxide_cli::wiki_draft::DraftScope>> {
-    scopes
-        .into_iter()
-        .map(|scope| match scope.as_str() {
-            "source" => Ok(graphoxide_cli::wiki_draft::DraftScope::Source),
-            "community" => Ok(graphoxide_cli::wiki_draft::DraftScope::Community),
-            "topic" => Ok(graphoxide_cli::wiki_draft::DraftScope::Topic),
-            _ => Err(anyhow::anyhow!(
-                "--scope must be source, community, or topic"
-            )),
-        })
-        .collect()
+fn rollback_direct_initialization(
+    root: &Path,
+    created_taxonomy: bool,
+    created_sources: bool,
+    created_files: &[(PathBuf, Vec<u8>)],
+) -> anyhow::Result<()> {
+    for (path, expected) in created_files.iter().rev() {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => anyhow::ensure!(
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && fs::read(path).context("read initialization artifact before rollback")?
+                        == *expected,
+                "initialization artifact changed concurrently; rollback was not applied"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).context("inspect initialization artifact before rollback")
+            }
+        }
+        if let Err(error) = fs::remove_file(path) {
+            anyhow::ensure!(
+                error.kind() == std::io::ErrorKind::NotFound,
+                "remove owned artifact during initialization rollback failed"
+            );
+        }
+    }
+    if created_sources {
+        let _ = fs::remove_dir(root.join("sources"));
+    }
+    if created_taxonomy {
+        let _ = fs::remove_dir(root.join("taxonomy"));
+    }
+    Ok(())
+}
+
+fn write_new_initialization_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let mut staging = tempfile::NamedTempFile::new_in(
+        path.parent()
+            .context("initialization artifact has no parent")?,
+    )?;
+    staging
+        .write_all(bytes)
+        .context("write initialization artifact")?;
+    staging
+        .as_file()
+        .sync_all()
+        .context("sync initialization artifact")?;
+    staging.persist_noclobber(path).map_err(|_| {
+        anyhow::anyhow!("initialization artifact already exists or cannot be published")
+    })?;
+    Ok(())
+}
+
+fn initialize_direct_wiki(root: &Path, authoring_profile: &Path) -> anyhow::Result<()> {
+    let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(root)?;
+    for path in [
+        root.join("sources/index.json"),
+        root.join("taxonomy/policy.json"),
+    ] {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error).context("inspect existing knowledgebase initialization"),
+            Ok(_) => anyhow::bail!("knowledgebase is already initialized; direct source index or taxonomy policy exists"),
+        }
+    }
+    let gitignore = DirectRuntimeGitignore::prepare(root)?;
+    gitignore.apply()?;
+    let taxonomy = root.join("taxonomy");
+    let sources = root.join("sources");
+    let created_taxonomy = !taxonomy.exists();
+    let created_sources = !sources.exists();
+    let mut created_files = Vec::new();
+    let initialized = (|| {
+        let index = root.join("sources/index.json");
+        let policy_path = root.join("taxonomy/policy.json");
+        let policy = graphoxide_export::direct_taxonomy::canonical_taxonomy_policy(
+            &graphoxide_export::direct_taxonomy::default_taxonomy_policy(),
+        )?;
+        for directory in [&taxonomy, &sources] {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) => anyhow::ensure!(
+                    metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+                    "knowledgebase metadata directory must be a real directory"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(directory).context("create knowledgebase metadata directory")?;
+                }
+                Err(error) => return Err(error).context("read knowledgebase metadata directory"),
+            }
+        }
+        let index_bytes = serde_json::to_vec_pretty(&graphoxide_cli::wiki_source::SourceIndex {
+            schema: "graphoxide.source-index".into(),
+            sources: Vec::new(),
+        })?;
+        write_new_initialization_file(&index, &index_bytes)?;
+        created_files.push((index, index_bytes));
+        write_new_initialization_file(&policy_path, &policy)?;
+        created_files.push((policy_path, policy));
+        graphoxide_cli::wiki_direct::init_authoring(root, authoring_profile)
+    })();
+    if let Err(error) = initialized {
+        rollback_direct_initialization(root, created_taxonomy, created_sources, &created_files)?;
+        gitignore.restore()?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn wiki(command: WikiCommand) -> anyhow::Result<()> {
+    match command {
+        WikiCommand::Init { authoring_profile } => {
+            let root = direct_wiki_root()?;
+            initialize_direct_wiki(&root, &authoring_profile)?;
+            write_output("Initialized knowledgebase")
+        }
+        WikiCommand::Source { command } => {
+            let root = direct_wiki_root()?;
+            let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(&root)?;
+            match command {
+                WikiSourceCommand::Add {
+                    inputs,
+                    allow_network,
+                    allow_model_egress,
+                } => {
+                    let root = direct_wiki_root()?;
+                    let has_https = inputs.iter().any(|input| {
+                        input
+                            .to_str()
+                            .is_some_and(|value| value.starts_with("https://"))
+                    });
+                    anyhow::ensure!(
+                        !has_https || allow_network,
+                        "HTTPS source add requires --allow-network"
+                    );
+                    anyhow::ensure!(
+                        allow_model_egress,
+                        "source add requires --allow-model-egress"
+                    );
+                    let mut admission_inputs = Vec::with_capacity(inputs.len());
+                    for input in inputs {
+                        if input
+                            .to_str()
+                            .is_some_and(|value| value.starts_with("https://"))
+                        {
+                            admission_inputs.push(
+                                graphoxide_cli::wiki_source::SourceAdmissionInput::Https {
+                                    url: input
+                                        .to_str()
+                                        .expect("validated HTTPS input is UTF-8")
+                                        .to_owned(),
+                                    consent: graphoxide_cli::wiki_source::allow_https_fetch(),
+                                },
+                            );
+                        } else if fs::symlink_metadata(&input)
+                            .context("read source input")?
+                            .file_type()
+                            .is_dir()
+                        {
+                            admission_inputs.push(
+                                graphoxide_cli::wiki_source::SourceAdmissionInput::Directory(input),
+                            );
+                        } else {
+                            admission_inputs.push(
+                                graphoxide_cli::wiki_source::SourceAdmissionInput::LocalPath(input),
+                            );
+                        }
+                    }
+                    let mut outcomes = Vec::new();
+                    let receipt = graphoxide_cli::wiki_source::admit_source_inputs(
+                        &root,
+                        &admission_inputs,
+                        |outcome| outcomes.push(outcome),
+                    )?;
+                    let (sources, authored) = author_admitted_sources(
+                        &root,
+                        &receipt,
+                        allow_network,
+                        allow_model_egress,
+                    )?;
+                    write_output(&serde_json::to_string_pretty(&serde_json::json!({
+                        "sources": sources,
+                        "authored": authored,
+                        "outcomes": outcomes,
+                    }))?)
+                }
+                WikiSourceCommand::Refresh {
+                    source_id,
+                    allow_network,
+                    allow_model_egress,
+                } => {
+                    let root = direct_wiki_root()?;
+                    anyhow::ensure!(
+                        allow_model_egress,
+                        "source refresh requires --allow-model-egress"
+                    );
+                    let (source, page_id) = graphoxide_cli::wiki_direct::refresh_source(
+                        &root,
+                        &source_id,
+                        allow_network.then(graphoxide_cli::wiki_source::allow_https_fetch),
+                    )?;
+                    write_output(&serde_json::to_string_pretty(&serde_json::json!({
+                        "source": source,
+                        "page_id": page_id,
+                    }))?)
+                }
+                WikiSourceCommand::Review {
+                    source_id,
+                    allow_network,
+                    allow_model_egress,
+                } => {
+                    anyhow::ensure!(
+                        allow_model_egress,
+                        "source review requires --allow-model-egress"
+                    );
+                    let root = direct_wiki_root()?;
+                    let source = graphoxide_cli::wiki_source::source_status(&root)?
+                        .into_iter()
+                        .find(|source| source.source_id == source_id)
+                        .context("direct source is unavailable")?;
+                    graphoxide_cli::wiki_direct::review_source(&root, &source, allow_network)?;
+                    let source = graphoxide_cli::wiki_source::source_status(&root)?
+                        .into_iter()
+                        .find(|source| source.source_id == source_id)
+                        .context("reviewed direct source is unavailable")?;
+                    write_output(&serde_json::to_string_pretty(&source)?)
+                }
+                WikiSourceCommand::Confirm { source_id } => {
+                    let root = direct_wiki_root()?;
+                    let source = graphoxide_cli::wiki_source::source_status(&root)?
+                        .into_iter()
+                        .find(|source| source.source_id == source_id)
+                        .context("direct source is unavailable")?;
+                    graphoxide_cli::wiki_direct::human_confirm(&root, &source)?;
+                    let source = graphoxide_cli::wiki_source::source_status(&root)?
+                        .into_iter()
+                        .find(|source| source.source_id == source_id)
+                        .context("confirmed direct source is unavailable")?;
+                    write_output(&serde_json::to_string_pretty(&source)?)
+                }
+                WikiSourceCommand::Status { json } => {
+                    let sources = graphoxide_cli::wiki_source::source_status(&direct_wiki_root()?)?;
+                    if json {
+                        write_output(&serde_json::to_string_pretty(&sources)?)
+                    } else {
+                        write_output(&format!("{} direct sources", sources.len()))
+                    }
+                }
+                WikiSourceCommand::Retire { source_id } => {
+                    graphoxide_cli::wiki_direct::retire_source(&direct_wiki_root()?, &source_id)?;
+                    write_output(&source_id)
+                }
+            }
+        }
+        WikiCommand::Live { root, port, open } => {
+            graphoxide_cli::wiki_hugo::live(&root, port, open)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7465,7 +7771,7 @@ fn run_export(
         "callflow-html" => managed.join("callflow.html"),
         "graphml" => managed.join("graph.graphml"),
         "cypher" | "neo4j" | "falkordb" => managed.join("cypher.txt"),
-        "wiki" => managed.join("wiki"),
+        "community-markdown" => managed.join("community-markdown"),
         "obsidian" => managed.join("obsidian"),
         "json" => managed.join("graph-copy.json"),
         _ => unreachable!("clap validates export formats"),
@@ -7522,7 +7828,9 @@ fn run_export(
         "cypher" | "neo4j" | "falkordb" => {
             write_text(&output, &graphoxide_export::render_cypher(&graph))?
         }
-        "wiki" => graphoxide_export::export_wiki(&graph, &output)?,
+        "community-markdown" => {
+            graphoxide_export::export_graph_community_markdown(&graph, &output)?
+        }
         "obsidian" => {
             let mut communities = graphoxide_export::communities_from_graph(&graph);
             if communities.is_empty() && !graph.nodes.is_empty() {
@@ -7676,22 +7984,350 @@ fn load_learning_overlay(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_query_context, audit_report, format_capability_output, format_god_nodes,
-        incremental_graph_budget_after_retained_scan, load_learning_overlay,
+        annotate_query_context, audit_report, direct_http_root, direct_mcp_root,
+        format_capability_output, format_god_nodes, incremental_graph_budget_after_retained_scan,
+        initialize_direct_wiki, load_learning_overlay,
         optional_baseline_leaves_full_graph_headroom, read_incremental_baseline,
         relevant_watch_paths, resolve_label_transport_inputs, run_project_build_with_cancellation,
         stale_local_sources, verify_catalog_before_publication,
-        watch_change_requires_structural_rebuild, Cli, Command, IncrementalGraphBudget,
-        ProgressModeArg, ProjectBuildOptions, ProjectBuildWorkflow, RuntimeIoBackendArg,
-        RuntimeOptions, WikiCommand,
+        watch_change_requires_structural_rebuild, BoundDirectSourceService, Cli, Command,
+        DirectRuntimeGitignore, IncrementalGraphBudget, ProgressModeArg, ProjectBuildOptions,
+        ProjectBuildWorkflow, RuntimeIoBackendArg, RuntimeOptions, WikiCommand, WikiSourceCommand,
     };
     use clap::Parser;
     use graphoxide_cli::build_progress::{BuildProgressMode, BuildProgressReporter};
     use sha2::{Digest as _, Sha256};
     use std::{
+        ffi::OsString,
         fs,
         path::{Path, PathBuf},
+        thread,
     };
+
+    // Clap constructs the complete command tree while parsing. Keep parser
+    // coverage on a predictable stack across the supported test platforms.
+    fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || Cli::try_parse_from(args))
+            .expect("start large-stack CLI parser test")
+            .join()
+            .expect("finish large-stack CLI parser test")
+    }
+
+    #[test]
+    fn direct_init_gitignore_creates_the_runtime_rule_for_a_new_file() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+
+        DirectRuntimeGitignore::prepare(root.path())
+            .expect("prepare runtime ignore rule")
+            .apply()
+            .expect("write runtime ignore rule");
+
+        assert_eq!(
+            fs::read(root.path().join(".gitignore")).expect("read gitignore"),
+            b".graphoxide/\n"
+        );
+    }
+
+    #[test]
+    fn direct_init_gitignore_preserves_user_entries_before_the_runtime_rule() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        fs::write(root.path().join(".gitignore"), b"notes/\n*.tmp\n")
+            .expect("write user gitignore");
+
+        DirectRuntimeGitignore::prepare(root.path())
+            .expect("prepare runtime ignore rule")
+            .apply()
+            .expect("append runtime ignore rule");
+
+        assert_eq!(
+            fs::read(root.path().join(".gitignore")).expect("read gitignore"),
+            b"notes/\n*.tmp\n.graphoxide/\n"
+        );
+    }
+
+    #[test]
+    fn direct_init_gitignore_keeps_an_existing_exact_runtime_rule_once() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        fs::write(
+            root.path().join(".gitignore"),
+            b"notes/\n.graphoxide/\n*.tmp\n",
+        )
+        .expect("write user gitignore");
+
+        DirectRuntimeGitignore::prepare(root.path())
+            .expect("prepare runtime ignore rule")
+            .apply()
+            .expect("keep runtime ignore rule");
+
+        assert_eq!(
+            fs::read(root.path().join(".gitignore")).expect("read gitignore"),
+            b"notes/\n.graphoxide/\n*.tmp\n"
+        );
+    }
+
+    #[test]
+    fn direct_init_gitignore_keeps_an_existing_crlf_runtime_rule_once() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        fs::write(
+            root.path().join(".gitignore"),
+            b"notes/\r\n.graphoxide/\r\n*.tmp\r\n",
+        )
+        .expect("write user gitignore");
+
+        DirectRuntimeGitignore::prepare(root.path())
+            .expect("prepare runtime ignore rule")
+            .apply()
+            .expect("keep runtime ignore rule");
+
+        assert_eq!(
+            fs::read(root.path().join(".gitignore")).expect("read gitignore"),
+            b"notes/\r\n.graphoxide/\r\n*.tmp\r\n"
+        );
+    }
+
+    #[test]
+    fn direct_init_gitignore_write_failure_leaves_existing_entry_untouched() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        fs::create_dir(root.path().join(".gitignore")).expect("create blocking directory");
+
+        let error = match DirectRuntimeGitignore::prepare(root.path()) {
+            Ok(_) => panic!("a directory cannot be replaced as gitignore"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains(".gitignore"));
+        assert!(root.path().join(".gitignore").is_dir());
+    }
+
+    #[test]
+    fn direct_init_failure_does_not_add_a_runtime_gitignore_rule() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        let authoring_profile = root.path().join("missing-authoring-profile.json");
+
+        initialize_direct_wiki(root.path(), &authoring_profile)
+            .expect_err("missing authoring profile must fail initialization");
+
+        assert!(
+            !root.path().join(".gitignore").exists(),
+            "failed initialization must not modify a user gitignore"
+        );
+        assert!(!root.path().join("sources/index.json").exists());
+        assert!(!root.path().join("taxonomy/policy.json").exists());
+        assert!(!root.path().join("taxonomy").exists());
+        assert!(!root.path().join("config/authoring-profile.json").exists());
+    }
+
+    #[test]
+    fn direct_init_rejects_existing_index_or_policy_without_modifying_files() {
+        for paths in [
+            vec!["sources/index.json"],
+            vec!["taxonomy/policy.json"],
+            vec!["sources/index.json", "taxonomy/policy.json"],
+        ] {
+            let root = tempfile::tempdir().expect("knowledgebase");
+            for relative in &paths {
+                let path = root.path().join(relative);
+                fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+                fs::write(path, b"existing user state\n").expect("existing artifact");
+            }
+            fs::write(root.path().join(".gitignore"), b"user-rule\n").expect("gitignore");
+            let error =
+                initialize_direct_wiki(root.path(), &root.path().join("unused-profile.json"))
+                    .expect_err("already initialized");
+            assert!(format!("{error:#}").contains("already initialized"));
+            for relative in &paths {
+                assert_eq!(
+                    fs::read(root.path().join(relative)).expect("preserved artifact"),
+                    b"existing user state\n"
+                );
+            }
+            assert_eq!(
+                fs::read(root.path().join(".gitignore")).expect("gitignore"),
+                b"user-rule\n"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_init_publication_cannot_replace_a_concurrent_creation() {
+        let root = tempfile::tempdir().expect("knowledgebase");
+        let path = root.path().join("index.json");
+        fs::write(&path, b"concurrent user state").expect("existing file");
+        super::write_new_initialization_file(&path, b"new initialization")
+            .expect_err("initialization may only create absent files");
+        assert_eq!(
+            fs::read(path).expect("preserved artifact"),
+            b"concurrent user state"
+        );
+    }
+
+    #[test]
+    fn direct_init_rollback_preserves_changed_owned_artifacts() {
+        let root = tempfile::tempdir().expect("knowledgebase");
+        let path = root.path().join("index.json");
+        fs::write(&path, b"concurrent user edit").expect("changed artifact");
+        super::rollback_direct_initialization(
+            root.path(),
+            false,
+            false,
+            &[(path.clone(), b"original initialization".to_vec())],
+        )
+        .expect_err("changed artifact must not be deleted");
+        assert_eq!(
+            fs::read(path).expect("preserved edit"),
+            b"concurrent user edit"
+        );
+    }
+
+    #[test]
+    fn direct_init_gitignore_rollback_preserves_a_concurrent_user_edit() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        let gitignore = DirectRuntimeGitignore::prepare(root.path()).expect("prepare gitignore");
+        gitignore.apply().expect("apply runtime rule");
+        fs::write(root.path().join(".gitignore"), b"human-edit\n").expect("concurrent edit");
+
+        let error = gitignore
+            .restore()
+            .expect_err("rollback must not clobber a concurrent edit");
+
+        assert!(format!("{error:#}").contains("changed concurrently"));
+        assert_eq!(
+            fs::read(root.path().join(".gitignore")).expect("read user edit"),
+            b"human-edit\n"
+        );
+    }
+
+    #[test]
+    fn direct_init_gitignore_destination_swap_error_hides_the_knowledgebase_root() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        let gitignore = DirectRuntimeGitignore::prepare(root.path()).expect("prepare gitignore");
+        fs::create_dir(root.path().join(".gitignore")).expect("swap destination for directory");
+
+        let error = gitignore
+            .apply()
+            .expect_err("directory destination must fail");
+
+        assert!(!format!("{error:#}").contains(&root.path().display().to_string()));
+    }
+
+    #[test]
+    fn direct_init_failure_restores_existing_gitignore_bytes() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        let gitignore = root.path().join(".gitignore");
+        let original = b"notes/\r\n*.tmp\r\n";
+        fs::write(&gitignore, original).expect("write user gitignore");
+
+        initialize_direct_wiki(
+            root.path(),
+            &root.path().join("missing-authoring-profile.json"),
+        )
+        .expect_err("missing authoring profile must fail initialization");
+
+        assert_eq!(fs::read(gitignore).expect("read gitignore"), original);
+    }
+
+    #[test]
+    fn direct_init_failure_preserves_an_existing_authoring_config() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        let config = root.path().join("config/authoring-profile.json");
+        fs::create_dir_all(config.parent().expect("config parent")).expect("create config");
+        fs::write(&config, b"user-config\n").expect("write user config");
+
+        initialize_direct_wiki(
+            root.path(),
+            &root.path().join("missing-authoring-profile.json"),
+        )
+        .expect_err("missing authoring profile must fail initialization");
+
+        assert_eq!(
+            fs::read(config).expect("read user config"),
+            b"user-config\n"
+        );
+    }
+
+    #[test]
+    fn direct_init_gitignore_preflight_failure_creates_no_schema_files() {
+        let root = tempfile::tempdir().expect("knowledgebase root");
+        fs::create_dir(root.path().join(".gitignore")).expect("create blocking directory");
+        let profile = root.path().join("providers/authoring.json");
+        fs::create_dir_all(profile.parent().expect("profile parent")).expect("create providers");
+        fs::write(root.path().join("providers/transport.json"), r#"{"version":1,"id":"local","protocol":"ollama-native","endpoint":"http://127.0.0.1:11434","source_egress_consent":"fixture-consent","models":[{"id":"author","api_model":"a","label":"A","capabilities":["structured-output","text-generation"]},{"id":"reviewer","api_model":"r","label":"R","capabilities":["structured-output","text-generation"]}]}"#).expect("write provider");
+        fs::write(&profile, r#"{"provider_profile":"providers/transport.json","author_model":"author","reviewer_model":"reviewer","source_egress_consent":"fixture-consent"}"#).expect("write authoring profile");
+
+        initialize_direct_wiki(root.path(), &profile)
+            .expect_err("a blocking gitignore must fail initialization");
+
+        assert!(!root.path().join("sources/index.json").exists());
+        assert!(!root.path().join("taxonomy/policy.json").exists());
+        assert!(!root.path().join("config/authoring-profile.json").exists());
+    }
+
+    #[test]
+    fn wiki_parser_exposes_only_direct_source_lifecycle_commands() {
+        for arguments in [
+            vec![
+                "graphoxide",
+                "wiki",
+                "init",
+                "--authoring-profile",
+                "config/authoring-profile.json",
+            ],
+            vec!["graphoxide", "wiki", "source", "add", "reference.md"],
+            vec!["graphoxide", "wiki", "source", "refresh", "src:reference"],
+            vec!["graphoxide", "wiki", "source", "review", "src:reference"],
+            vec!["graphoxide", "wiki", "source", "confirm", "src:reference"],
+            vec!["graphoxide", "wiki", "source", "status"],
+            vec!["graphoxide", "wiki", "source", "retire", "src:reference"],
+            vec!["graphoxide", "wiki", "live", "knowledgebase"],
+        ] {
+            assert!(
+                parse_cli(arguments).is_ok(),
+                "canonical direct command must parse"
+            );
+        }
+
+        for arguments in [
+            vec!["graphoxide", "wiki", "new"],
+            vec!["graphoxide", "wiki", "gaps", "knowledgebase"],
+            vec!["graphoxide", "wiki", "sync", "knowledgebase"],
+            vec!["graphoxide", "wiki", "source", "validate", "knowledgebase"],
+            vec!["graphoxide", "wiki", "source", "sample", "knowledgebase"],
+            vec!["graphoxide", "wiki", "source", "admit", "knowledgebase"],
+            vec!["graphoxide", "wiki", "source", "reprocess", "knowledgebase"],
+            vec!["graphoxide", "wiki", "source", "replace", "knowledgebase"],
+            vec![
+                "graphoxide",
+                "wiki",
+                "source",
+                "snapshot",
+                "create",
+                "knowledgebase",
+            ],
+        ] {
+            assert!(
+                parse_cli(arguments).is_err(),
+                "removed knowledgebase command must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_community_markdown_export_is_the_only_community_markdown_format() {
+        assert!(matches!(
+            parse_cli(["graphoxide", "export", "community-markdown"])
+                .expect("parse graph community Markdown export")
+                .command,
+            Command::Export { format, .. } if format == "community-markdown"
+        ));
+        assert!(parse_cli(["graphoxide", "export", "wiki"]).is_err());
+    }
 
     fn god_test_graph() -> graphoxide_core::KnowledgeGraph {
         let node = |id: &str, label: &str, source: &str| graphoxide_core::Node {
@@ -7972,14 +8608,14 @@ mod tests {
 
     #[test]
     fn update_accepts_force_for_managed_graph_reductions() {
-        let cli = Cli::try_parse_from(["graphoxide", "update", ".", "--force"])
-            .expect("parse update --force");
+        let cli =
+            parse_cli(["graphoxide", "update", ".", "--force"]).expect("parse update --force");
         assert!(matches!(cli.command, Command::Update { force: true, .. }));
     }
 
     #[test]
     fn build_commands_accept_explicit_progress_modes_and_default_to_auto() {
-        let extract = Cli::try_parse_from(["graphoxide", "extract", ".", "--progress=json"])
+        let extract = parse_cli(["graphoxide", "extract", ".", "--progress=json"])
             .expect("parse extract progress");
         assert!(matches!(
             extract.command,
@@ -7991,7 +8627,7 @@ mod tests {
                 ..
             }
         ));
-        let index = Cli::try_parse_from(["graphoxide", "index", ".", "--progress", "never"])
+        let index = parse_cli(["graphoxide", "index", ".", "--progress", "never"])
             .expect("parse index progress");
         assert!(matches!(
             index.command,
@@ -8002,8 +8638,8 @@ mod tests {
                 }
             }
         ));
-        let update = Cli::try_parse_from(["graphoxide", "update", "."])
-            .expect("parse default update progress");
+        let update =
+            parse_cli(["graphoxide", "update", "."]).expect("parse default update progress");
         assert!(matches!(
             update.command,
             Command::Update {
@@ -8011,7 +8647,7 @@ mod tests {
                 ..
             }
         ));
-        let watch = Cli::try_parse_from(["graphoxide", "watch", ".", "--progress=json"])
+        let watch = parse_cli(["graphoxide", "watch", ".", "--progress=json"])
             .expect("parse watch progress");
         assert!(matches!(
             watch.command,
@@ -8024,7 +8660,7 @@ mod tests {
 
     #[test]
     fn extract_and_update_accept_opt_in_runtime_reports() {
-        let extract = Cli::try_parse_from([
+        let extract = parse_cli([
             "graphoxide",
             "extract",
             ".",
@@ -8043,7 +8679,7 @@ mod tests {
             } if path.as_path() == Path::new("runtime/extract.json")
         ));
 
-        let update = Cli::try_parse_from([
+        let update = parse_cli([
             "graphoxide",
             "update",
             ".",
@@ -8058,7 +8694,7 @@ mod tests {
             } if path.as_path() == Path::new("runtime/update.json")
         ));
 
-        let watch = Cli::try_parse_from([
+        let watch = parse_cli([
             "graphoxide",
             "watch",
             ".",
@@ -8077,7 +8713,7 @@ mod tests {
 
     #[test]
     fn isolated_runtime_controls_are_available_for_extract_update_and_watch() {
-        let extract = Cli::try_parse_from([
+        let extract = parse_cli([
             "graphoxide",
             "extract",
             ".",
@@ -8113,7 +8749,7 @@ mod tests {
         );
         assert_eq!(resolved.read_batch_bytes, 4096);
 
-        let update = Cli::try_parse_from([
+        let update = parse_cli([
             "graphoxide",
             "update",
             ".",
@@ -8139,7 +8775,7 @@ mod tests {
             }
         ));
 
-        let watch = Cli::try_parse_from([
+        let watch = parse_cli([
             "graphoxide",
             "watch",
             ".",
@@ -8168,7 +8804,7 @@ mod tests {
 
     #[test]
     fn configured_input_cap_resolves_exactly_and_rejects_the_legacy_executor() {
-        let extract = Cli::try_parse_from([
+        let extract = parse_cli([
             "graphoxide",
             "extract",
             ".",
@@ -8197,7 +8833,7 @@ mod tests {
 
     #[test]
     fn index_accepts_the_shared_build_controls_but_not_the_legacy_executor() {
-        let index = Cli::try_parse_from([
+        let index = parse_cli([
             "graphoxide",
             "index",
             "workspace",
@@ -8252,272 +8888,12 @@ mod tests {
         assert_eq!(runtime.io_workers, Some(2));
         assert_eq!(runtime.compute_workers, Some(3));
 
-        let error = match Cli::try_parse_from(["graphoxide", "index", ".", "--legacy-executor"]) {
+        let error = match parse_cli(["graphoxide", "index", ".", "--legacy-executor"]) {
             Ok(_) => panic!("index must not expose the unbounded legacy executor"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("--legacy-executor"));
     }
-
-    #[test]
-    fn catalog_and_wiki_commands_parse_with_the_expected_contract() {
-        let index =
-            Cli::try_parse_from(["graphoxide", "index", "sources", "--catalog", "metadata"])
-                .expect("parse catalog-aware index");
-        assert!(matches!(
-            index.command,
-            Command::Index {
-                build: ProjectBuildOptions {
-                    path,
-                    catalog: Some(catalog),
-                    ..
-                },
-            } if path == Path::new("sources") && catalog == Path::new("metadata")
-        ));
-
-        let wiki_index = Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "index",
-            "wiki",
-            "--config",
-            "wiki.json",
-        ])
-        .expect("parse wiki index");
-        assert!(matches!(
-            wiki_index.command,
-            Command::Wiki {
-                command: WikiCommand::Index { root, config },
-            } if root == Path::new("wiki") && config == Path::new("wiki.json")
-        ));
-
-        let wiki_check = Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "check",
-            "wiki",
-            "--config",
-            "wiki.json",
-            "--catalog",
-            "catalog",
-            "--catalog-root",
-            "raw",
-            "--graph",
-            "graph.json",
-        ])
-        .expect("parse catalog-backed wiki check");
-        assert!(matches!(
-            wiki_check.command,
-            Command::Wiki {
-                command: WikiCommand::Check {
-                    root,
-                    config,
-                    catalog: Some(catalog),
-                    catalog_root: Some(catalog_root),
-                    graph: Some(graph),
-                    plan: None,
-                    json: false,
-                },
-            } if root == Path::new("wiki")
-                && config == Path::new("wiki.json")
-                && catalog == Path::new("catalog")
-                && catalog_root == Path::new("raw")
-                && graph == Path::new("graph.json")
-        ));
-
-        let render = Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "render",
-            "raw",
-            "--graph",
-            "graph.json",
-            "--catalog",
-            "catalog",
-            "--output",
-            "wiki",
-        ])
-        .expect("parse wiki render");
-        assert!(matches!(
-            render.command,
-            Command::Wiki {
-                command: WikiCommand::Render {
-                    source_root,
-                    graph,
-                    catalog: Some(catalog),
-                    plan: None,
-                    output,
-                },
-            } if source_root == Some(PathBuf::from("raw"))
-                && graph == Path::new("graph.json")
-                && catalog == Path::new("catalog")
-                && output == Path::new("wiki")
-        ));
-
-        let canonical_render = Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "render",
-            "--graph",
-            "graph.json",
-            "--catalog",
-            "catalog",
-            "--plan",
-            "wiki-plan.json",
-            "--output",
-            "wiki",
-        ])
-        .expect("parse canonical wiki render");
-        assert!(matches!(
-            canonical_render.command,
-            Command::Wiki {
-                command: WikiCommand::Render {
-                    source_root: None,
-                    graph,
-                    catalog: Some(catalog),
-                    plan: Some(plan),
-                    output,
-                },
-            } if graph == Path::new("graph.json")
-                && catalog == Path::new("catalog")
-                && plan == Path::new("wiki-plan.json")
-                && output == Path::new("wiki")
-        ));
-
-        let plan = Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "plan",
-            "--graph",
-            "graph.json",
-            "--catalog",
-            "catalog",
-            "--output",
-            "wiki-plan.proposed.json",
-            "--model",
-            "llama3",
-            "--consent",
-            "send-source-text-to-local-ollama",
-            "--ollama-native",
-        ])
-        .expect("parse wiki plan proposal");
-        assert!(matches!(
-            plan.command,
-            Command::Wiki {
-                command: WikiCommand::Plan {
-                    graph,
-                    catalog,
-                    output,
-                    model,
-                    consent,
-                    ollama_url,
-                    ollama_native,
-                    provider_profile,
-                    registry_tree,
-                },
-            } if graph == Path::new("graph.json")
-                && catalog == Path::new("catalog")
-                && output == Path::new("wiki-plan.proposed.json")
-                && model == "llama3"
-                && consent == "send-source-text-to-local-ollama"
-                && ollama_url == graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL
-                && ollama_native
-                && provider_profile.is_none()
-                && registry_tree.is_none()
-        ));
-
-        let draft = Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "draft",
-            "raw",
-            "--graph",
-            "graph.json",
-            "--catalog",
-            "catalog",
-            "--output",
-            "drafts",
-            "--model",
-            "llama3",
-            "--scope",
-            "source",
-            "--scope",
-            "topic",
-            "--consent",
-            "send-source-text-to-local-ollama",
-        ])
-        .expect("parse wiki draft");
-        assert!(matches!(
-            draft.command,
-            Command::Wiki {
-                command: WikiCommand::Draft {
-                    source_root,
-                    graph,
-                    catalog: Some(catalog),
-                    plan: None,
-                    output,
-                    model,
-                    scopes,
-                    consent,
-                    ollama_url,
-                    ollama_native,
-                    provider_profile,
-                    registry_tree,
-                },
-            } if source_root == Path::new("raw")
-                && graph == Path::new("graph.json")
-                && catalog == Path::new("catalog")
-                && output == Path::new("drafts")
-                && model == "llama3"
-                && scopes == vec!["source", "topic"]
-                && consent == "send-source-text-to-local-ollama"
-                && ollama_url == graphoxide_cli::ollama_transport::DEFAULT_OLLAMA_URL
-                && !ollama_native
-                && provider_profile.is_none()
-                && registry_tree.is_none()
-        ));
-
-        let no_scope = Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "draft",
-            "raw",
-            "--graph",
-            "graph.json",
-            "--output",
-            "drafts",
-            "--model",
-            "llama3",
-            "--consent",
-            "send-source-text-to-local-ollama",
-        ])
-        .expect("parse wiki draft without a scope");
-        assert!(matches!(
-            no_scope.command,
-            Command::Wiki {
-                command: WikiCommand::Draft { scopes, .. },
-            } if scopes.is_empty()
-        ));
-
-        assert!(Cli::try_parse_from([
-            "graphoxide",
-            "wiki",
-            "draft",
-            "raw",
-            "--graph",
-            "graph.json",
-            "--output",
-            "drafts",
-            "--model",
-            "llama3",
-            "--consent",
-            "send-source-text-to-local-ollama",
-            "--scope",
-            "unsupported",
-        ])
-        .is_err());
-    }
-
     #[test]
     fn cancelled_index_cli_path_preserves_seeded_artifacts() {
         use std::fs;
@@ -8585,8 +8961,7 @@ mod tests {
 
     #[test]
     fn isolated_executor_is_the_default_and_legacy_requires_an_explicit_flag() {
-        let extract =
-            Cli::try_parse_from(["graphoxide", "extract", "."]).expect("parse default extract");
+        let extract = parse_cli(["graphoxide", "extract", "."]).expect("parse default extract");
         assert!(matches!(
             extract.command,
             Command::Extract {
@@ -8594,8 +8969,7 @@ mod tests {
                 ..
             }
         ));
-        let update =
-            Cli::try_parse_from(["graphoxide", "update", "."]).expect("parse default update");
+        let update = parse_cli(["graphoxide", "update", "."]).expect("parse default update");
         assert!(matches!(
             update.command,
             Command::Update {
@@ -8603,7 +8977,7 @@ mod tests {
                 ..
             }
         ));
-        let watch = Cli::try_parse_from(["graphoxide", "watch", "."]).expect("parse default watch");
+        let watch = parse_cli(["graphoxide", "watch", "."]).expect("parse default watch");
         assert!(matches!(
             watch.command,
             Command::Watch {
@@ -8611,7 +8985,7 @@ mod tests {
                 ..
             }
         ));
-        let legacy = Cli::try_parse_from(["graphoxide", "extract", ".", "--legacy-executor"])
+        let legacy = parse_cli(["graphoxide", "extract", ".", "--legacy-executor"])
             .expect("parse legacy escape hatch");
         assert!(matches!(
             legacy.command,
@@ -8620,7 +8994,7 @@ mod tests {
                 ..
             }
         ));
-        let legacy = Cli::try_parse_from(["graphoxide", "update", ".", "--legacy-executor"])
+        let legacy = parse_cli(["graphoxide", "update", ".", "--legacy-executor"])
             .expect("parse legacy update escape hatch");
         assert!(matches!(
             legacy.command,
@@ -8629,7 +9003,7 @@ mod tests {
                 ..
             }
         ));
-        let legacy = Cli::try_parse_from(["graphoxide", "watch", ".", "--legacy-executor"])
+        let legacy = parse_cli(["graphoxide", "watch", ".", "--legacy-executor"])
             .expect("parse legacy watch escape hatch");
         assert!(matches!(
             legacy.command,
@@ -8638,7 +9012,7 @@ mod tests {
                 ..
             }
         ));
-        let hook = Cli::try_parse_from(["graphoxide", "hook-rebuild", "post-checkout", "."])
+        let hook = parse_cli(["graphoxide", "hook-rebuild", "post-checkout", "."])
             .expect("parse default hook rebuild");
         assert!(matches!(
             hook.command,
@@ -8647,7 +9021,7 @@ mod tests {
                 ..
             }
         ));
-        let legacy = Cli::try_parse_from([
+        let legacy = parse_cli([
             "graphoxide",
             "hook-rebuild",
             "post-checkout",
@@ -9339,7 +9713,7 @@ mod tests {
     #[test]
     fn formats_command_reports_the_registry_contract_without_path_probing() {
         for spelling in ["formats", "capabilities"] {
-            let cli = Cli::try_parse_from(["graphoxide", spelling, "--json"])
+            let cli = parse_cli(["graphoxide", spelling, "--json"])
                 .unwrap_or_else(|error| panic!("parse {spelling} command: {error}"));
             assert!(matches!(cli.command, Command::Formats { json: true }));
         }
@@ -9419,9 +9793,8 @@ mod tests {
 
     #[test]
     fn audit_accepts_json_strict_and_cache_bypass() {
-        let cli =
-            Cli::try_parse_from(["graphoxide", "audit", ".", "--json", "--strict", "--force"])
-                .expect("parse audit flags");
+        let cli = parse_cli(["graphoxide", "audit", ".", "--json", "--strict", "--force"])
+            .expect("parse audit flags");
         assert!(matches!(
             cli.command,
             Command::Audit {
@@ -9461,7 +9834,7 @@ mod tests {
                 "--strict",
             ],
         ] {
-            let cli = Cli::try_parse_from(arguments).expect("parse coverage audit flags");
+            let cli = parse_cli(arguments).expect("parse coverage audit flags");
             assert!(matches!(
                 cli.command,
                 Command::Audit {
@@ -9474,7 +9847,7 @@ mod tests {
             ));
         }
 
-        let cli = Cli::try_parse_from(["graphoxide", "audit", "coverage", "--json"])
+        let cli = parse_cli(["graphoxide", "audit", "coverage", "--json"])
             .expect("parse coverage audit with default path");
         assert!(matches!(
             cli.command,
@@ -9489,7 +9862,7 @@ mod tests {
 
     #[test]
     fn audit_dot_coverage_remains_a_legacy_graph_audit_path() {
-        let cli = Cli::try_parse_from(["graphoxide", "audit", "./coverage", "--json"])
+        let cli = parse_cli(["graphoxide", "audit", "./coverage", "--json"])
             .expect("parse literal coverage directory");
         assert!(matches!(
             cli.command,
@@ -9503,7 +9876,7 @@ mod tests {
     }
 
     fn assert_pathless_postgres(arguments: &[&str], expected_no_cluster: bool) {
-        let cli = Cli::try_parse_from(arguments).expect("parse pathless PostgreSQL extract");
+        let cli = parse_cli(arguments).expect("parse pathless PostgreSQL extract");
         match cli.command {
             Command::Extract {
                 build:
@@ -9601,7 +9974,7 @@ mod tests {
 
     #[test]
     fn query_cli_accepts_repeated_explicit_contexts() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "graphoxide",
             "query",
             "extract",
@@ -9637,8 +10010,7 @@ mod tests {
 
     #[test]
     fn test_god_nodes_cli_underscore_alias() {
-        let cli =
-            Cli::try_parse_from(["graphoxide", "god_nodes"]).expect("underscore god-nodes alias");
+        let cli = parse_cli(["graphoxide", "god_nodes"]).expect("underscore god-nodes alias");
         assert!(matches!(cli.command, Command::GodNodes { .. }));
     }
 
@@ -9699,7 +10071,7 @@ mod tests {
 
     #[test]
     fn serve_cli_defaults_to_stdio_and_the_managed_graph() {
-        let cli = Cli::try_parse_from(["graphoxide", "serve"]).expect("parse serve defaults");
+        let cli = parse_cli(["graphoxide", "serve"]).expect("parse serve defaults");
         assert!(matches!(
             cli.command,
             Command::Serve {
@@ -9715,8 +10087,49 @@ mod tests {
     }
 
     #[test]
+    fn serve_cli_parses_explicit_stdio_knowledgebase_workflow_authorization() {
+        std::thread::Builder::new()
+            .name("serve-cli-parse".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = parse_cli([
+                    "graphoxide",
+                    "serve",
+                    "--wiki-root",
+                    "knowledgebase",
+                    "--allow-wiki-write",
+                    "--allow-wiki-network",
+                    "--allow-wiki-model-egress",
+                ])
+                .expect("parse authorized stdio workflow flags");
+                assert!(matches!(
+                    cli.command,
+                    Command::Serve {
+                        wiki_root: Some(root),
+                        allow_wiki_write: true,
+                        allow_wiki_network: true,
+                        allow_wiki_model_egress: true,
+                        transport,
+                        ..
+                    } if root == Path::new("knowledgebase") && transport == "stdio"
+                ));
+            })
+            .expect("start parser thread")
+            .join()
+            .expect("serve parser thread succeeds");
+    }
+
+    #[test]
+    fn serve_cli_rejects_the_retired_artifact_read_authorization() {
+        assert!(
+            parse_cli(["graphoxide", "serve", "--allow-wiki-artifact-read"]).is_err(),
+            "direct-source MCP must not retain the retired artifact-read flag"
+        );
+    }
+
+    #[test]
     fn serve_cli_exposes_streamable_http_controls() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli([
             "graphoxide",
             "serve",
             "g.json",
@@ -9750,5 +10163,346 @@ mod tests {
                 && key == "secret"
                 && mount_path == "/graph"
         ));
+    }
+
+    #[test]
+    fn serve_binds_a_knowledgebase_root_to_the_direct_source_surface() {
+        let error = direct_mcp_root(Some(PathBuf::from("knowledgebase")), false)
+            .expect_err("knowledgebase root without direct write authorization must fail");
+        assert!(
+            format!("{error:#}").contains("--wiki-root requires --allow-wiki-write"),
+            "{error:#}"
+        );
+        assert_eq!(
+            direct_mcp_root(Some(PathBuf::from("knowledgebase")), true)
+                .expect("bind direct knowledgebase root"),
+            Some(PathBuf::from("knowledgebase"))
+        );
+        assert_eq!(
+            direct_mcp_root(None, false).expect("graph-only server needs no direct root"),
+            None,
+            "a graph-only server must not bind any knowledgebase service"
+        );
+        let error = direct_mcp_root(None, true)
+            .expect_err("write authorization without a knowledgebase root must fail");
+        assert!(
+            format!("{error:#}").contains("--allow-wiki-write requires --wiki-root"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn wiki_source_review_is_ai_only_and_confirm_is_a_separate_command() {
+        let review = parse_cli([
+            "graphoxide",
+            "wiki",
+            "source",
+            "review",
+            "src:docs",
+            "--allow-model-egress",
+        ])
+        .expect("parse AI review");
+        assert!(matches!(
+            review.command,
+            Command::Wiki {
+                command: WikiCommand::Source {
+                    command: WikiSourceCommand::Review { .. }
+                }
+            }
+        ));
+
+        let confirm = parse_cli(["graphoxide", "wiki", "source", "confirm", "src:docs"])
+            .expect("parse local confirmation");
+        assert!(matches!(
+            confirm.command,
+            Command::Wiki {
+                command: WikiCommand::Source {
+                    command: WikiSourceCommand::Confirm { .. }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn serve_rejects_an_http_knowledgebase_root() {
+        let error = direct_http_root(Some(PathBuf::from("knowledgebase")))
+            .expect_err("HTTP knowledgebase root must not select legacy readers");
+        assert!(
+            format!("{error:#}").contains("--wiki-root is supported only with --transport stdio"),
+            "{error:#}"
+        );
+        direct_http_root(None).expect("graph-only HTTP server is allowed");
+    }
+
+    #[test]
+    fn bound_direct_source_service_rolls_back_a_new_logical_pointer_when_authoring_is_unavailable()
+    {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("knowledgebase");
+        let external = fixture.path().join("external");
+        fs::create_dir_all(&root).expect("create knowledgebase root");
+        fs::create_dir_all(&external).expect("create external root");
+        let git = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .expect("initialize knowledgebase Git repository");
+        assert!(git.status.success(), "git init failed: {git:?}");
+        let document = external.join("reference.md");
+        let body = "private server-bound source body";
+        fs::write(&document, body).expect("write external source");
+        let initial = graphoxide_cli::wiki_source::admit_sources(&root, [&document])
+            .expect("create ignored binding")
+            .sources()
+            .first()
+            .expect("one admitted pointer")
+            .clone();
+        let binding = match &initial.location {
+            graphoxide_cli::wiki_source::SourceLocation::BoundPath { binding, .. } => {
+                binding.clone()
+            }
+            location => panic!("expected bound pointer, got {location:?}"),
+        };
+        let new_document = external.join("new-reference.md");
+        let new_body = "private transient body that must not become a pointer-only source";
+        fs::write(&new_document, new_body).expect("write new external source");
+
+        let service = BoundDirectSourceService {
+            root: root.clone(),
+            allow_remote: false,
+        };
+        let result = graphoxide_mcp::direct_source::DirectSourceService::add_sources(
+            &service,
+            graphoxide_mcp::direct_source::DirectSourceAddRequest::new(
+                vec![
+                    graphoxide_mcp::direct_source::DirectSourceInput::BoundPath {
+                        binding: binding.clone(),
+                        relative_path: "new-reference.md".into(),
+                    },
+                ],
+                true,
+            ),
+            Some(graphoxide_mcp::direct_source::allow_model_egress()),
+        )
+        .expect_err("a pointer must not remain when authoring is unavailable");
+
+        let result_text = format!("{result:#}");
+        assert!(result_text.contains("authoring"), "{result_text}");
+        assert!(
+            !result_text.contains(&external.display().to_string()),
+            "ignored local binding root leaked through an authoring error: {result_text}"
+        );
+        let index = graphoxide_cli::wiki_source::source_status(&root).expect("source status");
+        assert_eq!(index, vec![initial]);
+        let index_text = fs::read_to_string(root.join("sources/index.json")).expect("source index");
+        assert!(!index_text.contains(body));
+        assert!(!index_text.contains(new_body));
+        assert!(!index_text.contains(&external.display().to_string()));
+    }
+
+    #[test]
+    fn bound_direct_source_service_keeps_multiple_logical_inputs_atomic() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("knowledgebase");
+        let external = fixture.path().join("external");
+        fs::create_dir_all(&root).expect("create knowledgebase root");
+        fs::create_dir_all(&external).expect("create external root");
+        let git = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .expect("initialize knowledgebase Git repository");
+        assert!(git.status.success(), "git init failed: {git:?}");
+        let anchor = external.join("anchor.md");
+        fs::write(&anchor, "anchor").expect("write bound anchor");
+        let anchor = graphoxide_cli::wiki_source::admit_sources(&root, [&anchor])
+            .expect("create ignored binding")
+            .sources()
+            .first()
+            .expect("one admitted pointer")
+            .clone();
+        let binding = match anchor.location {
+            graphoxide_cli::wiki_source::SourceLocation::BoundPath { binding, .. } => binding,
+            location => panic!("expected bound pointer, got {location:?}"),
+        };
+        fs::write(external.join("new.md"), "new source").expect("write new bound source");
+        let before = fs::read(root.join("sources/index.json")).expect("read pointer index");
+        let service = BoundDirectSourceService {
+            root: root.clone(),
+            allow_remote: false,
+        };
+
+        let error = graphoxide_mcp::direct_source::DirectSourceService::add_sources(
+            &service,
+            graphoxide_mcp::direct_source::DirectSourceAddRequest::new(
+                vec![
+                    graphoxide_mcp::direct_source::DirectSourceInput::BoundPath {
+                        binding: binding.clone(),
+                        relative_path: "new.md".into(),
+                    },
+                    graphoxide_mcp::direct_source::DirectSourceInput::BoundPath {
+                        binding,
+                        relative_path: "missing.md".into(),
+                    },
+                ],
+                true,
+            ),
+            Some(graphoxide_mcp::direct_source::allow_model_egress()),
+        )
+        .expect_err("a failed logical member must abort the whole batch");
+
+        assert!(format!("{error:#}").contains("unavailable or unsafe"));
+        assert_eq!(
+            fs::read(root.join("sources/index.json")).expect("read unchanged pointer index"),
+            before
+        );
+    }
+
+    #[test]
+    fn bound_direct_source_service_requires_model_consent_before_refresh() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let location = graphoxide_cli::wiki_source::SourceLocation::Https {
+            url: "https://docs.example.com/reference.md".into(),
+        };
+        let source = graphoxide_cli::wiki_source::SourceEntry {
+            source_id: location.source_id(),
+            location,
+            content_sha256: "a".repeat(64),
+            bytes: 1,
+            status: graphoxide_cli::wiki_source::SourceStatus::AiReviewed,
+        };
+        graphoxide_cli::wiki_source::write_source_index(
+            fixture.path(),
+            &graphoxide_cli::wiki_source::SourceIndex {
+                schema: "graphoxide.source-index".into(),
+                sources: vec![source.clone()],
+            },
+        )
+        .expect("write pointer index");
+        let service = BoundDirectSourceService {
+            root: fixture.path().to_path_buf(),
+            allow_remote: true,
+        };
+
+        let error = graphoxide_mcp::direct_source::DirectSourceService::refresh_source(
+            &service,
+            graphoxide_mcp::direct_source::DirectSourceRefreshRequest {
+                source_id: source.source_id.clone(),
+                allow_remote_fetch: false,
+                allow_model_egress: false,
+            },
+            None,
+            None,
+        )
+        .expect_err("refresh without boundary-issued model consent must fail before reading");
+
+        assert!(format!("{error:#}").contains("model egress"), "{error:#}");
+        assert_eq!(
+            graphoxide_cli::wiki_source::source_status(fixture.path()).expect("read status"),
+            vec![source]
+        );
+    }
+
+    #[test]
+    fn bound_direct_source_service_confirms_remote_pointer_from_persisted_state_without_fetch() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let location = graphoxide_cli::wiki_source::SourceLocation::Https {
+            url: "https://docs.example.com/reference.md".into(),
+        };
+        let source = graphoxide_cli::wiki_source::SourceEntry {
+            source_id: location.source_id(),
+            location,
+            content_sha256: "a".repeat(64),
+            bytes: 1,
+            status: graphoxide_cli::wiki_source::SourceStatus::AiReviewed,
+        };
+        graphoxide_cli::wiki_source::write_source_index(
+            fixture.path(),
+            &graphoxide_cli::wiki_source::SourceIndex {
+                schema: "graphoxide.source-index".into(),
+                sources: vec![source.clone()],
+            },
+        )
+        .expect("write pointer index");
+        let service = BoundDirectSourceService {
+            root: fixture.path().to_path_buf(),
+            allow_remote: false,
+        };
+
+        let error = graphoxide_mcp::direct_source::DirectSourceService::review_source(
+            &service,
+            graphoxide_mcp::direct_source::DirectSourceReviewRequest::HumanConfirm {
+                source_id: source.source_id,
+            },
+            None,
+            None,
+        )
+        .expect_err("missing persisted authoring artifacts must fail closed");
+
+        assert!(
+            !format!("{error:#}").contains("remote source refresh requires explicit consent"),
+            "human confirmation must not fetch the pointer: {error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("taxonomy"),
+            "human confirmation must validate persisted state: {error:#}"
+        );
+    }
+
+    #[test]
+    fn bound_direct_source_service_retires_only_the_pointer() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let location = graphoxide_cli::wiki_source::SourceLocation::Https {
+            url: "https://docs.example.com/reference.md".into(),
+        };
+        let source = graphoxide_cli::wiki_source::SourceEntry {
+            source_id: location.source_id(),
+            location,
+            content_sha256: "a".repeat(64),
+            bytes: 1,
+            status: graphoxide_cli::wiki_source::SourceStatus::HumanConfirmed,
+        };
+        graphoxide_cli::wiki_source::write_source_index(
+            fixture.path(),
+            &graphoxide_cli::wiki_source::SourceIndex {
+                schema: "graphoxide.source-index".into(),
+                sources: vec![source.clone()],
+            },
+        )
+        .expect("write pointer index");
+        let service = BoundDirectSourceService {
+            root: fixture.path().to_path_buf(),
+            allow_remote: false,
+        };
+
+        let result = graphoxide_mcp::direct_source::DirectSourceService::retire_source(
+            &service,
+            graphoxide_mcp::direct_source::DirectSourceRetireRequest {
+                source_id: source.source_id,
+            },
+        )
+        .expect("retire pointer");
+
+        assert!(result.retired);
+        assert!(graphoxide_cli::wiki_source::source_status(fixture.path())
+            .expect("read status")
+            .is_empty());
+        assert_eq!(
+            fs::read_dir(fixture.path())
+                .expect("read root")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                std::ffi::OsString::from("sources"),
+                std::ffi::OsString::from(".graphoxide")
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(
+            fs::read(fixture.path().join(".graphoxide/direct-source.lock"))
+                .expect("stable operation lock"),
+            b""
+        );
     }
 }

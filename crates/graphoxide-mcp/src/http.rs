@@ -19,7 +19,7 @@ use std::{net::IpAddr, path::PathBuf, sync::Arc, time::Duration};
 
 pub const DEFAULT_MAX_CONTEXTS: usize = 8;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpOptions {
     pub mount_path: String,
     pub api_key: Option<String>,
@@ -27,6 +27,20 @@ pub struct HttpOptions {
     pub json_response: bool,
     pub session_timeout: Option<Duration>,
     pub max_project_contexts: usize,
+}
+
+impl std::fmt::Debug for HttpOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpOptions")
+            .field("mount_path", &self.mount_path)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("stateless", &self.stateless)
+            .field("json_response", &self.json_response)
+            .field("session_timeout", &self.session_timeout)
+            .field("max_project_contexts", &self.max_project_contexts)
+            .finish()
+    }
 }
 
 impl Default for HttpOptions {
@@ -614,7 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tools_declare_their_required_graph_or_wiki_context() {
+    async fn test_project_path_is_optional_on_every_http_tool() {
         let directory = tempfile::tempdir().expect("temp directory");
         let app = build_http_app(
             sample_graph(directory.path()),
@@ -634,32 +648,24 @@ mod tests {
             .await
             .expect("tools response");
         let body = json_body(response).await;
-        for tool in body["result"]["tools"].as_array().expect("tools") {
+        let tools = body["result"]["tools"].as_array().expect("tools array");
+        assert!(!tools.is_empty());
+        for tool in tools {
             let properties = tool["inputSchema"]["properties"]
                 .as_object()
                 .unwrap_or_else(|| panic!("{} missing properties", tool["name"]));
-            let required = tool["inputSchema"]["required"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            if tool["name"]
-                .as_str()
-                .is_some_and(|name| name.starts_with("wiki_"))
-            {
-                assert!(
-                    properties.contains_key("wiki_root"),
-                    "{} missing wiki_root",
-                    tool["name"]
-                );
-                assert!(required.iter().any(|field| field == "wiki_root"));
-            } else {
-                assert!(
-                    properties.contains_key("project_path"),
-                    "{} missing project_path",
-                    tool["name"]
-                );
-                assert!(!required.iter().any(|field| field == "project_path"));
-            }
+            assert!(
+                properties.contains_key("project_path"),
+                "{} missing project_path",
+                tool["name"]
+            );
+            assert!(
+                !tool["inputSchema"]["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|field| field == "project_path")),
+                "{} must accept the server's default project",
+                tool["name"]
+            );
         }
     }
 

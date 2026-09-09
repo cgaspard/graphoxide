@@ -33,6 +33,7 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_norway = "0.9.42"
 petgraph = "0.8"
 rayon = "1.10"
 ignore = "0.4"          # gitignore-aware parallel walker (ripgrep's)
@@ -64,21 +65,26 @@ rmcp = { version = "3.1", features = ["server", "transport-io", "transport-strea
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net", "time", "sync"] }
 notify = "8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+robotxt = "0.6.1"
 # The opt-in vision path uses base64's runtime-dispatched AVX2/NEON engine and
 # falls back to scalar on CPUs without either feature.
 base64 = "0.23"
 simdutf8 = "0.1.5"
 toml = "0.9"
+schemars = "1.2.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 postgres = "0.19.14"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 
-# No debuginfo in the dev profile: it measurably slows compilation and
-# linking of this large workspace, and local iteration is the dominant use of
-# the dev profile. Release builds are unaffected. Use
+# Keep line-level debuginfo for useful backtraces during local iteration,
+# with parallel code generation and unpacked debug information. Release
+# profile settings are independent. Use
 # `cargo build --profile dev-debug` (or set CARGO_PROFILE_DEV_DEBUG=2 ad hoc)
 # when you need local-variable inspection in a debugger.
 [profile.dev]
-debug = 0
+debug = 1
+codegen-units = 256
+split-debuginfo = "unpacked"
 
 [profile.dev-debug]
 inherits = "dev"

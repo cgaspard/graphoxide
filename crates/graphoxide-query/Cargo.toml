@@ -4,6 +4,11 @@ description = "Graph traversal: query, path, explain, affected, god-nodes, bench
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
+
+[[test]]
+name = "query_integration"
+path = "tests/query_integration.rs"
 
 [dependencies]
 graphoxide-core.workspace = true

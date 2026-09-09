@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_ready"
+          "id": "upstream_prs::test_ready"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_ci_fail"
+          "id": "upstream_prs::test_ci_fail"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_changes_req"
+          "id": "upstream_prs::test_changes_req"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_draft"
+          "id": "upstream_prs::test_draft"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_stale"
+          "id": "upstream_prs::test_stale"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_draft_not_marked_stale"
+          "id": "upstream_prs::test_draft_not_marked_stale"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_pending"
+          "id": "upstream_prs::test_pending"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_wrong_base"
+          "id": "upstream_prs::test_wrong_base"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_empty_rollup_returns_none"
+          "id": "upstream_prs::test_empty_rollup_returns_none"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_failure_conclusion"
+          "id": "upstream_prs::test_failure_conclusion"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_cancelled_is_failure"
+          "id": "upstream_prs::test_cancelled_is_failure"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_timed_out_is_failure"
+          "id": "upstream_prs::test_timed_out_is_failure"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_in_progress_is_pending"
+          "id": "upstream_prs::test_in_progress_is_pending"
         }
       ]
     },
@@ -137,7 +137,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_success"
+          "id": "upstream_prs::test_success"
         }
       ]
     },
@@ -147,7 +147,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_mixed_success_and_failure_is_failure"
+          "id": "upstream_prs::test_mixed_success_and_failure_is_failure"
         }
       ]
     },
@@ -157,7 +157,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_exact_match"
+          "id": "upstream_prs::test_exact_match"
         }
       ]
     },
@@ -167,7 +167,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_graph_path_longer_with_boundary"
+          "id": "upstream_prs::test_graph_path_longer_with_boundary"
         }
       ]
     },
@@ -177,7 +177,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_no_false_positive_on_partial_filename"
+          "id": "upstream_prs::test_no_false_positive_on_partial_filename"
         }
       ]
     },
@@ -187,7 +187,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_both_directions_work"
+          "id": "upstream_prs::test_both_directions_work"
         }
       ]
     },
@@ -197,7 +197,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_matching_files_returns_correct_communities_and_count"
+          "id": "upstream_prs::test_matching_files_returns_correct_communities_and_count"
         }
       ]
     },
@@ -207,7 +207,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_matching_both_files"
+          "id": "upstream_prs::test_matching_both_files"
         }
       ]
     },
@@ -217,7 +217,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_empty_files_returns_empty"
+          "id": "upstream_prs::test_empty_files_returns_empty"
         }
       ]
     },
@@ -227,7 +227,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_no_matching_files_returns_empty"
+          "id": "upstream_prs::test_no_matching_files_returns_empty"
         }
       ]
     },
@@ -237,7 +237,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_no_double_counting_when_basename_matches_multiple_paths"
+          "id": "upstream_prs::test_no_double_counting_when_basename_matches_multiple_paths"
         }
       ]
     },
@@ -247,7 +247,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_no_double_counting_same_graph_file_matched_by_two_pr_files"
+          "id": "upstream_prs::test_no_double_counting_same_graph_file_matched_by_two_pr_files"
         }
       ]
     },
@@ -257,7 +257,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_normal_case_maps_branch_to_path"
+          "id": "upstream_prs::test_normal_case_maps_branch_to_path"
         }
       ]
     },
@@ -267,7 +267,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_detached_head_does_not_leak_into_next_record"
+          "id": "upstream_prs::test_detached_head_does_not_leak_into_next_record"
         }
       ]
     },
@@ -277,7 +277,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_empty_output_returns_empty_dict"
+          "id": "upstream_prs::test_empty_output_returns_empty_dict"
         }
       ]
     },
@@ -287,7 +287,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_nonzero_returncode_returns_empty_dict"
+          "id": "upstream_prs::test_nonzero_returncode_returns_empty_dict"
         }
       ]
     },
@@ -297,7 +297,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_subprocess_failure_returns_empty_dict"
+          "id": "upstream_prs::test_subprocess_failure_returns_empty_dict"
         }
       ]
     },
@@ -307,7 +307,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_contains_pr_metadata_and_count_header"
+          "id": "upstream_prs::test_contains_pr_metadata_and_count_header"
         }
       ]
     },
@@ -317,7 +317,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_empty_pr_list"
+          "id": "upstream_prs::test_empty_pr_list"
         }
       ]
     },
@@ -327,7 +327,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_gh_returns_main"
+          "id": "upstream_prs::test_gh_returns_main"
         }
       ]
     },
@@ -337,7 +337,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_falls_back_to_git_symbolic_ref"
+          "id": "upstream_prs::test_falls_back_to_git_symbolic_ref"
         }
       ]
     },
@@ -347,7 +347,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_both_fail_returns_main"
+          "id": "upstream_prs::test_both_fail_returns_main"
         }
       ]
     },
@@ -357,7 +357,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_gh_returns_empty_dict_falls_back"
+          "id": "upstream_prs::test_gh_returns_empty_dict_falls_back"
         }
       ]
     },
@@ -367,7 +367,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_git_timeout_returns_main"
+          "id": "upstream_prs::test_git_timeout_returns_main"
         }
       ]
     },
@@ -377,7 +377,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_basic_grouping"
+          "id": "upstream_prs::test_basic_grouping"
         }
       ]
     },
@@ -387,7 +387,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_top_n_capped"
+          "id": "upstream_prs::test_top_n_capped"
         }
       ]
     },
@@ -397,7 +397,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_no_community_field_skipped"
+          "id": "upstream_prs::test_no_community_field_skipped"
         }
       ]
     },
@@ -407,7 +407,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_empty_nodes"
+          "id": "upstream_prs::test_empty_nodes"
         }
       ]
     },
@@ -417,7 +417,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_fixture_is_cp1252_undecodable"
+          "id": "upstream_prs::test_fixture_is_cp1252_undecodable"
         }
       ]
     },
@@ -427,7 +427,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_gh_decodes_output_as_utf8"
+          "id": "upstream_prs::test_gh_decodes_output_as_utf8"
         }
       ]
     },
@@ -437,7 +437,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_fetch_pr_files_decodes_output_as_utf8"
+          "id": "upstream_prs::test_fetch_pr_files_decodes_output_as_utf8"
         }
       ]
     },
@@ -447,7 +447,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_fetch_worktrees_decodes_output_as_utf8"
+          "id": "upstream_prs::test_fetch_worktrees_decodes_output_as_utf8"
         }
       ]
     },
@@ -457,7 +457,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-query",
-          "id": "test_detect_default_branch_decodes_output_as_utf8"
+          "id": "upstream_prs::test_detect_default_branch_decodes_output_as_utf8"
         }
       ]
     }

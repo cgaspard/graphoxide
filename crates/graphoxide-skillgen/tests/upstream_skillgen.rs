@@ -112,7 +112,7 @@ fn test_lean_core_has_no_reference_only_content() {
         ENUM_VALUES,
         "graphoxide cluster-only INPUT_PATH",
         "## Constrained query expansion",
-        "graphoxide export wiki",
+        "graphoxide export community-markdown",
         "graphoxide export neo4j",
         "graphoxide hook install INPUT_PATH",
         "graphoxide watch INPUT_PATH",

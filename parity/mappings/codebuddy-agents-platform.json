@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_user_creates_skill_file"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_user_creates_skill_file"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_skill_file_contains_frontmatter"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_skill_file_contains_frontmatter"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_skill_file_references_graphify_query"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_skill_file_references_graphify_query"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_project_writes_codebuddy_md"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_project_writes_codebuddy_md"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_project_writes_hook"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_project_writes_hook"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_hook_has_bash_matcher"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_hook_has_bash_matcher"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_hook_has_read_glob_matcher"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_hook_has_read_glob_matcher"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_idempotent"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_idempotent"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_upgrades_stale_section"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_upgrades_stale_section"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_merges_existing_codebuddy_md"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_merges_existing_codebuddy_md"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_prints_no_change_on_second_run"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_prints_no_change_on_second_run"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_install_hint_git_add"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_install_hint_git_add"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_uninstall_removes_section"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_uninstall_removes_section"
         }
       ]
     },
@@ -137,7 +137,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_uninstall_removes_hook"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_uninstall_removes_hook"
         }
       ]
     },
@@ -147,7 +147,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_uninstall_noop_if_not_installed"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_uninstall_noop_if_not_installed"
         }
       ]
     },
@@ -157,7 +157,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_uninstall_noop_if_no_section"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_uninstall_noop_if_no_section"
         }
       ]
     },
@@ -167,7 +167,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_uninstall_preserves_other_content"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_uninstall_preserves_other_content"
         }
       ]
     },
@@ -177,7 +177,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_uninstall_all_removes_codebuddy_md"
+          "id": "upstream_codebuddy_agents::codebuddy::test_uninstall_all_removes_codebuddy_md"
         }
       ]
     },
@@ -187,7 +187,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_uninstall_all_removes_codebuddy_hook"
+          "id": "upstream_codebuddy_agents::codebuddy::test_uninstall_all_removes_codebuddy_hook"
         }
       ]
     },
@@ -197,7 +197,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_in_platform_config"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_in_platform_config"
         }
       ]
     },
@@ -207,7 +207,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_platform_skill_destination_user_scope"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_platform_skill_destination_user_scope"
         }
       ]
     },
@@ -217,7 +217,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_platform_skill_destination_project_scope"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_platform_skill_destination_project_scope"
         }
       ]
     },
@@ -227,7 +227,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_in_main_help_text"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_in_main_help_text"
         }
       ]
     },
@@ -237,7 +237,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_skill_file_exists_in_package"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_skill_file_exists_in_package"
         }
       ]
     },
@@ -247,7 +247,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "codebuddy::test_codebuddy_installation_roundtrip"
+          "id": "upstream_codebuddy_agents::codebuddy::test_codebuddy_installation_roundtrip"
         }
       ]
     },
@@ -257,7 +257,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_agents_user_destination_is_user_global_dot_agents"
+          "id": "upstream_codebuddy_agents::agents_platform::test_agents_user_destination_is_user_global_dot_agents"
         }
       ]
     },
@@ -267,7 +267,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_agents_project_destination_is_dot_agents"
+          "id": "upstream_codebuddy_agents::agents_platform::test_agents_project_destination_is_dot_agents"
         }
       ]
     },
@@ -277,7 +277,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_skills_alias_resolves_to_agents"
+          "id": "upstream_codebuddy_agents::agents_platform::test_skills_alias_resolves_to_agents"
         }
       ]
     },
@@ -287,7 +287,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_install_platform_agents_writes_user_global_skill_only_agents"
+          "id": "upstream_codebuddy_agents::agents_platform::test_install_platform_agents_writes_user_global_skill_only_agents"
         }
       ]
     },
@@ -297,7 +297,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_install_platform_agents_writes_user_global_skill_only_skills"
+          "id": "upstream_codebuddy_agents::agents_platform::test_install_platform_agents_writes_user_global_skill_only_skills"
         }
       ]
     },
@@ -307,7 +307,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_uninstall_platform_agents_removes_user_global_skill"
+          "id": "upstream_codebuddy_agents::agents_platform::test_uninstall_platform_agents_removes_user_global_skill"
         }
       ]
     },
@@ -317,7 +317,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_uninstall_platform_flag_global_removes_skill_agents"
+          "id": "upstream_codebuddy_agents::agents_platform::test_uninstall_platform_flag_global_removes_skill_agents"
         }
       ]
     },
@@ -327,7 +327,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_uninstall_platform_flag_global_removes_skill_skills"
+          "id": "upstream_codebuddy_agents::agents_platform::test_uninstall_platform_flag_global_removes_skill_skills"
         }
       ]
     },
@@ -337,7 +337,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_project_uninstall_all_removes_agents_skill"
+          "id": "upstream_codebuddy_agents::agents_platform::test_project_uninstall_all_removes_agents_skill"
         }
       ]
     },
@@ -347,7 +347,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_install_platform_agents_project_writes_dot_agents"
+          "id": "upstream_codebuddy_agents::agents_platform::test_install_platform_agents_project_writes_dot_agents"
         }
       ]
     },
@@ -357,7 +357,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_agents_subcommand_install_also_wires_agents_md"
+          "id": "upstream_codebuddy_agents::agents_platform::test_agents_subcommand_install_also_wires_agents_md"
         }
       ]
     },
@@ -367,7 +367,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_agents_subcommand_install_is_idempotent"
+          "id": "upstream_codebuddy_agents::agents_platform::test_agents_subcommand_install_is_idempotent"
         }
       ]
     },
@@ -377,7 +377,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_skills_subcommand_is_the_agents_subcommand"
+          "id": "upstream_codebuddy_agents::agents_platform::test_skills_subcommand_is_the_agents_subcommand"
         }
       ]
     },
@@ -387,7 +387,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "agents_platform::test_bare_install_does_not_touch_dot_agents"
+          "id": "upstream_codebuddy_agents::agents_platform::test_bare_install_does_not_touch_dot_agents"
         }
       ]
     }

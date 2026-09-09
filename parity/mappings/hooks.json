@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_creates_hook"
+          "id": "upstream_hooks::test_install_creates_hook"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_is_executable"
+          "id": "upstream_hooks::test_install_is_executable"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_idempotent"
+          "id": "upstream_hooks::test_install_idempotent"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_appends_to_existing_hook"
+          "id": "upstream_hooks::test_install_appends_to_existing_hook"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_uninstall_removes_hook"
+          "id": "upstream_hooks::test_uninstall_removes_hook"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_uninstall_no_hook"
+          "id": "upstream_hooks::test_uninstall_no_hook"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_status_installed"
+          "id": "upstream_hooks::test_status_installed"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_status_not_installed"
+          "id": "upstream_hooks::test_status_not_installed"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_no_git_repo_raises"
+          "id": "upstream_hooks::test_no_git_repo_raises"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_creates_post_checkout_hook"
+          "id": "upstream_hooks::test_install_creates_post_checkout_hook"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_post_checkout_is_executable"
+          "id": "upstream_hooks::test_install_post_checkout_is_executable"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_uninstall_removes_post_checkout_hook"
+          "id": "upstream_hooks::test_uninstall_removes_post_checkout_hook"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_status_shows_both_hooks"
+          "id": "upstream_hooks::test_status_shows_both_hooks"
         }
       ]
     },
@@ -137,7 +137,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_dir_resolves_relative_git_hooks_path"
+          "id": "upstream_hooks::test_hooks_dir_resolves_relative_git_hooks_path"
         }
       ]
     },
@@ -147,7 +147,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_dir_rejects_multiline_git_output"
+          "id": "upstream_hooks::test_hooks_dir_rejects_multiline_git_output"
         }
       ]
     },
@@ -157,7 +157,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_dir_accepts_absolute_git_hooks_path"
+          "id": "upstream_hooks::test_hooks_dir_accepts_absolute_git_hooks_path"
         }
       ]
     },
@@ -167,7 +167,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hook_skips_head_on_exe"
+          "id": "upstream_hooks::test_hook_skips_head_on_exe"
         }
       ]
     },
@@ -177,7 +177,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_embeds_pinned_interpreter"
+          "id": "upstream_hooks::test_install_embeds_pinned_interpreter"
         }
       ]
     },
@@ -187,7 +187,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_fallback_is_loud_not_silent"
+          "id": "upstream_hooks::test_install_fallback_is_loud_not_silent"
         }
       ]
     },
@@ -197,7 +197,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hook_check_no_additional_context"
+          "id": "upstream_hooks::test_hook_check_no_additional_context"
         }
       ]
     },
@@ -207,7 +207,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_do_not_use_nohup"
+          "id": "upstream_hooks::test_hooks_do_not_use_nohup"
         }
       ]
     },
@@ -217,7 +217,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_do_not_use_nohup"
+          "id": "upstream_hooks::test_hooks_do_not_use_nohup"
         }
       ]
     },
@@ -227,7 +227,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_use_cross_platform_detach"
+          "id": "upstream_hooks::test_hooks_use_cross_platform_detach"
         }
       ]
     },
@@ -237,7 +237,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_use_cross_platform_detach"
+          "id": "upstream_hooks::test_hooks_use_cross_platform_detach"
         }
       ]
     },
@@ -247,7 +247,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_limit_windows_workers_by_default"
+          "id": "upstream_hooks::test_hooks_limit_windows_workers_by_default"
         }
       ]
     },
@@ -257,7 +257,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_limit_windows_workers_by_default"
+          "id": "upstream_hooks::test_hooks_limit_windows_workers_by_default"
         }
       ]
     },
@@ -267,7 +267,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_launcher_payload_is_shell_quote_safe"
+          "id": "upstream_hooks::test_launcher_payload_is_shell_quote_safe"
         }
       ]
     },
@@ -277,7 +277,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_launcher_payload_is_shell_quote_safe"
+          "id": "upstream_hooks::test_launcher_payload_is_shell_quote_safe"
         }
       ]
     },
@@ -287,7 +287,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_launcher_and_rebuild_body_are_valid_python"
+          "id": "upstream_hooks::test_launcher_and_rebuild_body_are_valid_python"
         }
       ]
     },
@@ -297,7 +297,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_launcher_and_rebuild_body_are_valid_python"
+          "id": "upstream_hooks::test_launcher_and_rebuild_body_are_valid_python"
         }
       ]
     },
@@ -307,7 +307,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_rebuild_bodies_are_shell_quote_safe"
+          "id": "upstream_hooks::test_rebuild_bodies_are_shell_quote_safe"
         }
       ]
     },
@@ -317,7 +317,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_rebuild_bodies_read_graphify_root"
+          "id": "upstream_hooks::test_rebuild_bodies_read_graphify_root"
         }
       ]
     },
@@ -327,7 +327,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_rebuild_bodies_read_graphify_root"
+          "id": "upstream_hooks::test_rebuild_bodies_read_graphify_root"
         }
       ]
     },
@@ -337,7 +337,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_rebuild_bodies_with_graphify_root_are_valid_python"
+          "id": "upstream_hooks::test_rebuild_bodies_with_graphify_root_are_valid_python"
         }
       ]
     },
@@ -347,7 +347,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_rebuild_bodies_arm_a_timeout_without_sigalrm"
+          "id": "upstream_hooks::test_rebuild_bodies_arm_a_timeout_without_sigalrm"
         }
       ]
     },
@@ -357,7 +357,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_rebuild_bodies_arm_a_timeout_without_sigalrm"
+          "id": "upstream_hooks::test_rebuild_bodies_arm_a_timeout_without_sigalrm"
         }
       ]
     },
@@ -367,7 +367,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_detached_launch_targets_graphify_python"
+          "id": "upstream_hooks::test_detached_launch_targets_graphify_python"
         }
       ]
     },
@@ -377,7 +377,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_installed_hooks_contain_no_nohup"
+          "id": "upstream_hooks::test_installed_hooks_contain_no_nohup"
         }
       ]
     },
@@ -387,7 +387,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_windows_hookspath_rejected_no_junk_dir_on_posix"
+          "id": "upstream_hooks::test_windows_hookspath_rejected_no_junk_dir_on_posix"
         }
       ]
     },
@@ -397,7 +397,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_windows_hookspath_rejected_no_junk_dir_on_posix"
+          "id": "upstream_hooks::test_windows_hookspath_rejected_no_junk_dir_on_posix"
         }
       ]
     },
@@ -407,7 +407,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_windows_hookspath_rejected_no_junk_dir_on_posix"
+          "id": "upstream_hooks::test_windows_hookspath_rejected_no_junk_dir_on_posix"
         }
       ]
     },
@@ -417,7 +417,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_windows_hookspath_rejected_no_junk_dir_on_posix"
+          "id": "upstream_hooks::test_windows_hookspath_rejected_no_junk_dir_on_posix"
         }
       ]
     },
@@ -427,7 +427,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_posix_custom_hookspath_still_works"
+          "id": "upstream_hooks::test_posix_custom_hookspath_still_works"
         }
       ]
     },
@@ -437,7 +437,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_default_hooks_dir_unaffected"
+          "id": "upstream_hooks::test_default_hooks_dir_unaffected"
         }
       ]
     },
@@ -447,7 +447,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_probes_use_find_spec_not_full_import"
+          "id": "upstream_hooks::test_probes_use_find_spec_not_full_import"
         }
       ]
     },
@@ -457,7 +457,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_shebang_read_is_null_byte_safe"
+          "id": "upstream_hooks::test_shebang_read_is_null_byte_safe"
         }
       ]
     },
@@ -467,7 +467,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_probe_prefers_sibling_python_exe_on_windows_layouts"
+          "id": "upstream_hooks::test_probe_prefers_sibling_python_exe_on_windows_layouts"
         }
       ]
     },
@@ -477,7 +477,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_file_path_allowlist_accepts_windows_backslash_path"
+          "id": "upstream_hooks::test_file_path_allowlist_accepts_windows_backslash_path"
         }
       ]
     },
@@ -487,7 +487,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_file_path_allowlist_accepts_windows_backslash_path"
+          "id": "upstream_hooks::test_file_path_allowlist_accepts_windows_backslash_path"
         }
       ]
     },
@@ -497,7 +497,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_shebang_allowlist_accepts_windows_backslash_path"
+          "id": "upstream_hooks::test_shebang_allowlist_accepts_windows_backslash_path"
         }
       ]
     },
@@ -507,7 +507,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_python_detect_allowlists_still_reject_shell_metacharacters"
+          "id": "upstream_hooks::test_python_detect_allowlists_still_reject_shell_metacharacters"
         }
       ]
     },
@@ -517,7 +517,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_python_detect_allowlists_still_reject_shell_metacharacters"
+          "id": "upstream_hooks::test_python_detect_allowlists_still_reject_shell_metacharacters"
         }
       ]
     },
@@ -527,7 +527,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_python_detect_allowlists_still_reject_shell_metacharacters"
+          "id": "upstream_hooks::test_python_detect_allowlists_still_reject_shell_metacharacters"
         }
       ]
     },
@@ -537,7 +537,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_python_detect_allowlists_still_reject_shell_metacharacters"
+          "id": "upstream_hooks::test_python_detect_allowlists_still_reject_shell_metacharacters"
         }
       ]
     },
@@ -547,7 +547,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_reuse_git_dir_from_env"
+          "id": "upstream_hooks::test_hooks_reuse_git_dir_from_env"
         }
       ]
     },
@@ -557,7 +557,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_reuse_git_dir_from_env"
+          "id": "upstream_hooks::test_hooks_reuse_git_dir_from_env"
         }
       ]
     },
@@ -567,7 +567,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_honor_skip_env"
+          "id": "upstream_hooks::test_hooks_honor_skip_env"
         }
       ]
     },
@@ -577,7 +577,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_honor_skip_env"
+          "id": "upstream_hooks::test_hooks_honor_skip_env"
         }
       ]
     },
@@ -587,7 +587,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_skip_linked_worktrees"
+          "id": "upstream_hooks::test_hooks_skip_linked_worktrees"
         }
       ]
     },
@@ -597,7 +597,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_skip_linked_worktrees"
+          "id": "upstream_hooks::test_hooks_skip_linked_worktrees"
         }
       ]
     },
@@ -607,7 +607,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_worktree_guard_runs_on_primary_skips_linked"
+          "id": "upstream_hooks::test_worktree_guard_runs_on_primary_skips_linked"
         }
       ]
     },
@@ -617,7 +617,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_dir_no_warning_on_duplicate_config_keys"
+          "id": "upstream_hooks::test_hooks_dir_no_warning_on_duplicate_config_keys"
         }
       ]
     },
@@ -627,7 +627,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_hooks_dir_duplicate_config_keys_honor_custom_hookspath"
+          "id": "upstream_hooks::test_hooks_dir_duplicate_config_keys_honor_custom_hookspath"
         }
       ]
     },
@@ -637,7 +637,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_registers_merge_driver"
+          "id": "upstream_hooks::test_install_registers_merge_driver"
         }
       ]
     },
@@ -647,7 +647,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_merge_driver_idempotent"
+          "id": "upstream_hooks::test_install_merge_driver_idempotent"
         }
       ]
     },
@@ -657,7 +657,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_preserves_existing_gitattributes"
+          "id": "upstream_hooks::test_install_preserves_existing_gitattributes"
         }
       ]
     },
@@ -667,7 +667,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_uninstall_removes_merge_driver_keeps_other_attrs"
+          "id": "upstream_hooks::test_uninstall_removes_merge_driver_keeps_other_attrs"
         }
       ]
     },
@@ -677,7 +677,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_accepts_paths_containing_spaces"
+          "id": "upstream_hooks::test_pinned_python_accepts_paths_containing_spaces"
         }
       ]
     },
@@ -687,7 +687,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_accepts_paths_containing_spaces"
+          "id": "upstream_hooks::test_pinned_python_accepts_paths_containing_spaces"
         }
       ]
     },
@@ -697,7 +697,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_accepts_paths_containing_spaces"
+          "id": "upstream_hooks::test_pinned_python_accepts_paths_containing_spaces"
         }
       ]
     },
@@ -707,7 +707,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_still_rejects_shell_metacharacters"
+          "id": "upstream_hooks::test_pinned_python_still_rejects_shell_metacharacters"
         }
       ]
     },
@@ -717,7 +717,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_still_rejects_shell_metacharacters"
+          "id": "upstream_hooks::test_pinned_python_still_rejects_shell_metacharacters"
         }
       ]
     },
@@ -727,7 +727,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_still_rejects_shell_metacharacters"
+          "id": "upstream_hooks::test_pinned_python_still_rejects_shell_metacharacters"
         }
       ]
     },
@@ -737,7 +737,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_still_rejects_shell_metacharacters"
+          "id": "upstream_hooks::test_pinned_python_still_rejects_shell_metacharacters"
         }
       ]
     },
@@ -747,7 +747,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_still_rejects_shell_metacharacters"
+          "id": "upstream_hooks::test_pinned_python_still_rejects_shell_metacharacters"
         }
       ]
     },
@@ -757,7 +757,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_pinned_python_still_rejects_shell_metacharacters"
+          "id": "upstream_hooks::test_pinned_python_still_rejects_shell_metacharacters"
         }
       ]
     },
@@ -767,7 +767,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_merge_driver_quotes_interpreter_with_spaces"
+          "id": "upstream_hooks::test_merge_driver_quotes_interpreter_with_spaces"
         }
       ]
     },
@@ -777,7 +777,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_pins_interpreter_path_with_spaces"
+          "id": "upstream_hooks::test_install_pins_interpreter_path_with_spaces"
         }
       ]
     }

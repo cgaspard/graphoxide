@@ -1,9 +1,10 @@
+use flate2::{write::GzEncoder, Compression};
 use graphoxide_core::Extraction;
 use graphoxide_extract::format_registry::{
     format_registry, ByteAdapterKind, FormatCapability, OFFICE_LIMITS, PDF_LIMITS,
 };
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::{fs, io::Write, path::Path};
 
 fn extract_fixture(name: &str, bytes: &[u8]) -> Extraction {
     let project = tempfile::tempdir().expect("create fixture directory");
@@ -249,6 +250,65 @@ fn inventory_only_output_cannot_pass_the_semantic_evidence_check() {
 }
 
 #[test]
+fn inventory_routes_declare_reprocessing_contracts_and_svgz_uses_the_bounded_svg_parser() {
+    let registry = format_registry();
+    for (id, blocker, retry_route) in [
+        (
+            "media",
+            "media-transcription-or-video-analysis-unavailable",
+            "media-enrichment-route-available",
+        ),
+        (
+            "additional-media",
+            "media-transcription-or-video-analysis-unavailable",
+            "media-enrichment-route-available",
+        ),
+        (
+            "protobuf-binary",
+            "verified-schema-binding-required",
+            "verified-schema-binding-available",
+        ),
+        (
+            "flatbuffers-binary",
+            "verified-schema-binding-required",
+            "verified-schema-binding-available",
+        ),
+        (
+            "asn-1-binary",
+            "bounded-asn1-decoder-unavailable",
+            "bounded-asn1-decoder-available",
+        ),
+        (
+            "mcp-configuration",
+            "mcp-redacted-projection-required",
+            "add-redacted-mcp-material-projection",
+        ),
+    ] {
+        let report = registry
+            .find_by_id(id)
+            .unwrap_or_else(|| panic!("missing registered route {id}"))
+            .capability_report();
+        assert_eq!(report.capability, FormatCapability::InventoryOnly, "{id}");
+        assert_eq!(report.blocker, Some(blocker), "{id}");
+        assert_eq!(report.retry_route, Some(retry_route), "{id}");
+    }
+
+    let svgz = registry
+        .find_by_extension("svgz")
+        .expect("SVGZ format registration");
+    assert_eq!(svgz.capability, FormatCapability::StructuralPartial);
+    assert_eq!(svgz.blocker, None);
+    assert_eq!(svgz.retry_route, None);
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(br##"<svg><rect id="rack"/><use href="#rack"/></svg>"##)
+        .expect("write SVGZ fixture");
+    let extraction = assert_partial_root("rack.svgz", &encoder.finish().expect("finish SVGZ"));
+    assert!(extraction.nodes.iter().any(|node| node.label == "rack"));
+}
+
+#[test]
 fn dot_is_semantic_full_while_other_diagram_scanners_remain_partial() {
     let diagram_specs = format_registry()
         .specs()
@@ -290,7 +350,9 @@ fn pdf_registry_promises_only_bounded_structural_page_extraction() {
     assert_eq!(spec.capability, FormatCapability::StructuralPartial);
     assert_eq!(spec.limits, PDF_LIMITS);
     assert_eq!(spec.limits.max_input_bytes, 16 * 1024 * 1024);
-    assert_eq!(spec.limits.max_records, 1_025);
+    assert_eq!(spec.limits.max_records, 4_096);
+    assert_eq!(spec.limits.max_container_members, 4_096);
+    assert_eq!(spec.limits.max_recursion_depth, 4);
     assert_eq!(spec.limits.max_expansion_ratio, 64);
 }
 

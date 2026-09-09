@@ -41,6 +41,7 @@ mod dot;
 mod dotnet;
 pub mod engine;
 mod engineering;
+pub mod evidence;
 pub mod extractor_registry;
 mod fallback;
 mod format_adapter;
@@ -81,6 +82,10 @@ pub mod vision;
 pub use detect::collect_files;
 pub use engine::extract;
 pub use js_resolution::resolve_js_module_path;
+pub use pdf::{
+    pdf_embedded_attachment, pdf_page_visual_artifact, PdfEmbeddedAttachmentBlocker,
+    PdfPageVisualArtifact, PdfPageVisualArtifactBlocker,
+};
 pub use protocols::{
     extract_binary_protocol_with_binding_or_inventory, extract_bound_binary_protocol_bytes,
     BinaryProtocolKind, SchemaBindingError, VerifiedBinarySchemaBinding,

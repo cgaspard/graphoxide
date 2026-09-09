@@ -235,7 +235,7 @@ fn assert_contains_edges(extraction: &Extraction, root: &Node, units: &[&Node]) 
     let contains = extraction
         .edges
         .iter()
-        .filter(|edge| edge.relation == "contains")
+        .filter(|edge| edge.relation == "contains" && edge.true_source() == root.id)
         .collect::<Vec<_>>();
     assert_eq!(contains.len(), units.len());
     for unit in units {
@@ -414,7 +414,7 @@ fn xlsx_fixture_with_options(
         r#"<sst xmlns="{NS_SHEET}" count="2" uniqueCount="2"><si><t>Shared one</t></si><si><t>Shared two</t></si></sst>"#
     );
     let sheet1 = format!(
-        r#"<worksheet xmlns="{NS_SHEET}"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#
+        r#"<worksheet xmlns="{NS_SHEET}"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><f>SUM(A1:A3)</f><v>42</v></c><c r="C1"><f>NOW()</f></c></row></sheetData></worksheet>"#
     );
     let sheet2 = format!(
         r#"<worksheet xmlns="{NS_SHEET}"><sheetData><row r="1"><c r="B2" t="s"><v>1</v></c></row></sheetData></worksheet>"#
@@ -684,6 +684,35 @@ fn all_seven_packages_publish_stable_ordered_units_and_provenance() {
         assert!(first.hyperedges.is_empty());
         assert_fact_sizes(&first);
     }
+}
+
+#[test]
+fn xlsx_formula_cells_publish_typed_source_located_facts() {
+    let project = tempfile::tempdir().expect("package fixture project");
+    let path = project.path().join("formulas.xlsx");
+    let extraction = extract_at(&path, &xlsx_fixture());
+    let formulas = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.file_type == "spreadsheet_formula")
+        .collect::<Vec<_>>();
+
+    assert_eq!(formulas.len(), 2);
+    let sum = formulas
+        .iter()
+        .find(|node| node.extra.get("cell") == Some(&Value::from("B1")))
+        .expect("SUM formula fact");
+    assert_eq!(
+        sum.source_location.as_deref(),
+        Some("xl/worksheets/sheet1.xml#B1")
+    );
+    assert_eq!(sum.extra.get("formula"), Some(&Value::from("SUM(A1:A3)")));
+    assert_eq!(sum.extra.get("cached_value"), Some(&Value::from("42")));
+    assert!(formulas.iter().any(|node| {
+        node.extra.get("cell") == Some(&Value::from("C1"))
+            && node.extra.get("formula") == Some(&Value::from("NOW()"))
+            && !node.extra.contains_key("cached_value")
+    }));
 }
 
 #[test]
@@ -1528,13 +1557,13 @@ fn package_xml_requires_declared_schema_ancestors_and_section_order() {
 }
 
 #[test]
-fn worst_case_json_escaped_text_hits_the_fact_cap_before_publication() {
+fn worst_case_json_escaped_text_reports_fact_cap_without_rejecting_the_document() {
     let escaped_text = "\\\"".repeat(128 * 1024 - 1);
     assert_eq!(escaped_text.len(), 256 * 1024 - 2);
     let document = format!(
         r#"<w:document xmlns:w="{NS_WORD}"><w:body><w:p><w:r><w:t>{escaped_text}</w:t></w:r></w:p></w:body></w:document>"#
     );
-    let extraction = assert_rejected(
+    let extraction = extract_source(
         "escaped-fact.docx",
         &zip_bytes_with_method(
             vec![
@@ -1554,8 +1583,17 @@ fn worst_case_json_escaped_text_hits_the_fact_cap_before_publication() {
             ],
             CompressionMethod::Stored,
         ),
-        "office_fact_limit",
     );
+    let root = package_root(&extraction);
+    assert_eq!(
+        root.extra.get("parse_status"),
+        Some(&Value::from("partial"))
+    );
+    assert_eq!(
+        root.extra.get("coverage_blocker"),
+        Some(&Value::from("office_fact_limit"))
+    );
+    assert_fact_sizes(&extraction);
     assert_no_payload(&extraction, "\\\"\\\"\\\"\\\"");
 }
 
