@@ -1,6 +1,7 @@
 //! Pinned, proxy-free Ollama HTTP transport shared by local-source features.
 
 use anyhow::{bail, Context as _, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use std::{
     io::Read,
@@ -12,7 +13,8 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/v1";
 pub const DEFAULT_OLLAMA_NATIVE_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "qwen2.5-coder:7b";
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
-pub(crate) const MARKDOWN_CONTEXT_TOKENS: usize = 73_728;
+const MAX_MODEL_PLAIN_TEXT_BYTES: usize = 64 * 1024;
+pub(crate) const MARKDOWN_CONTEXT_TOKENS: usize = 131_072;
 pub(crate) const MARKDOWN_COMPLETION_TOKENS: usize = 512;
 pub(crate) const MARKDOWN_CHAT_TEMPLATE_RESERVE: usize = 1_024;
 pub(crate) const MARKDOWN_SYSTEM_PROMPT: &str = "Write only a dense explanatory Markdown body of at most roughly 400 words for the requested wiki page. Do not add frontmatter, a title, a draft marker, or a Sources section.";
@@ -37,6 +39,10 @@ pub struct OllamaTransport {
 }
 
 impl OllamaTransport {
+    pub(crate) fn endpoint_key(&self) -> &str {
+        self.endpoint.as_str()
+    }
+
     pub fn local(base_url: &str, model: &str) -> Result<Self> {
         Self::local_with_resolver(base_url, model, |host, port| {
             (host, port)
@@ -246,6 +252,42 @@ impl OllamaTransport {
         Ok(value)
     }
 
+    pub fn complete_json_object_with_image(
+        &self,
+        system: &str,
+        prompt: &str,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> Result<Value> {
+        anyhow::ensure!(
+            matches!(media_type, "image/jpeg" | "image/png"),
+            "Ollama enrichment image format is unsupported"
+        );
+        anyhow::ensure!(
+            !system.is_empty()
+                && system
+                    .len()
+                    .saturating_add(prompt.len())
+                    .saturating_add(bytes.len())
+                    <= MARKDOWN_USER_PROMPT_BYTES,
+            "Ollama enrichment image exceeds its prompt byte cap"
+        );
+        let body = self.complete(
+            json!([
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt, "images": [BASE64_STANDARD.encode(bytes)]},
+            ]),
+            JSON_COMPLETION_TOKENS,
+            true,
+        )?;
+        let value: Value = serde_json::from_str(&body).context("Ollama returned invalid JSON")?;
+        anyhow::ensure!(
+            value.is_object(),
+            "Ollama returned a JSON value instead of an object"
+        );
+        Ok(value)
+    }
+
     pub fn call_label(
         &self,
         request: &graphoxide_graph::LabelRequest,
@@ -335,7 +377,7 @@ impl OllamaTransport {
 }
 
 pub(crate) fn normalize_wiki_markdown_body(body: String) -> String {
-    let body = crate::wiki_draft::project_plain_text(&body);
+    let body = project_model_source_text(&body);
     project_model_markdown(&body)
 }
 
@@ -349,10 +391,221 @@ pub(crate) fn validate_wiki_markdown_body(body: &str) -> Result<()> {
     {
         bail!("body is empty or contains reserved markup");
     }
-    if let Err(error) = crate::wiki::validate_model_markdown_body(body) {
+    if let Err(error) = validate_untrusted_model_markdown_body(body) {
         bail!("body violates the wiki Markdown contract: {error}");
     }
     Ok(())
+}
+
+fn project_model_source_text(input: &str) -> String {
+    // ponytail: This bounded lexical projection is deliberately not a markup parser; add one only when measured corpora require structure-aware text preservation.
+    let mut output = String::with_capacity(input.len());
+    let mut offset = 0;
+    while offset < input.len() {
+        let remaining = &input[offset..];
+        let url_prefix = ["https://", "http://"].into_iter().find(|prefix| {
+            remaining
+                .get(..prefix.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        });
+        if url_prefix.is_some() {
+            output.push_str("external reference");
+            offset += remaining
+                .char_indices()
+                .skip(1)
+                .find(|(_, character)| {
+                    character.is_whitespace()
+                        || matches!(character, ')' | ']' | '>' | '\"' | '\'' | '`')
+                })
+                .map_or(remaining.len(), |(index, _)| index);
+            continue;
+        }
+        let character = remaining.chars().next().expect("non-empty remainder");
+        if matches!(character, '[' | ']' | '<' | '>') {
+            output.push(' ');
+        } else {
+            output.push(character);
+        }
+        offset += character.len_utf8();
+    }
+    if output.len() > MAX_MODEL_PLAIN_TEXT_BYTES {
+        let mut end = MAX_MODEL_PLAIN_TEXT_BYTES;
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
+    }
+    output
+}
+
+fn validate_untrusted_model_markdown_body(body: &str) -> Result<()> {
+    let active = active_markdown(body);
+    let unsafe_angle = active.char_indices().any(|(index, character)| {
+        character == '<'
+            && active[index + 1..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '/' | '!' | '?'))
+    });
+    anyhow::ensure!(
+        inline_link_destinations(&active).is_empty()
+            && !has_reference_link(&active)
+            && !has_reference_definition(&active)
+            && !unsafe_angle
+            && !has_unsafe_model_heading(&active),
+        "invalid model Markdown body: links and raw HTML are not allowed"
+    );
+    Ok(())
+}
+
+fn active_markdown(text: &str) -> String {
+    let mut active = String::with_capacity(text.len());
+    let mut fence = None;
+    for chunk in text.split_inclusive('\n') {
+        let newline = chunk.ends_with('\n');
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some((marker, minimum)) = fence {
+            if markdown_fence(line).is_some_and(|(current, count, suffix)| {
+                current == marker && count >= minimum && suffix.trim().is_empty()
+            }) {
+                fence = None;
+            }
+        } else if let Some((marker, count, _)) = markdown_fence(line) {
+            fence = Some((marker, count));
+        } else {
+            active.push_str(&without_inline_code(line));
+        }
+        if newline {
+            active.push('\n');
+        }
+    }
+    active
+}
+
+fn closing_delimiter(text: &str, opening: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 1usize;
+    let mut cursor = opening.checked_add(1)?;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor = cursor.saturating_add(2),
+            byte if byte == open => {
+                depth = depth.checked_add(1)?;
+                cursor += 1;
+            }
+            byte if byte == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn inline_link_destinations(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut destinations = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\\' {
+            cursor = cursor.saturating_add(2);
+            continue;
+        }
+        if bytes[cursor] != b'[' {
+            cursor += 1;
+            continue;
+        }
+        let Some(label_end) = closing_delimiter(text, cursor, b'[', b']') else {
+            cursor += 1;
+            continue;
+        };
+        let mut destination_start = label_end + 1;
+        while destination_start < bytes.len() && bytes[destination_start].is_ascii_whitespace() {
+            destination_start += 1;
+        }
+        if bytes.get(destination_start) != Some(&b'(') {
+            cursor += 1;
+            continue;
+        }
+        let Some(destination_end) = closing_delimiter(text, destination_start, b'(', b')') else {
+            cursor += 1;
+            continue;
+        };
+        let contents = text[destination_start + 1..destination_end].trim();
+        let destination = if let Some(angle) = contents.strip_prefix('<') {
+            angle.split_once('>').map_or(angle, |(value, _)| value)
+        } else {
+            contents.split_ascii_whitespace().next().unwrap_or("")
+        };
+        destinations.push(destination.to_owned());
+        cursor = destination_end + 1;
+    }
+    destinations
+}
+
+fn has_reference_link(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\\' {
+            cursor = cursor.saturating_add(2);
+            continue;
+        }
+        if bytes[cursor] != b'[' {
+            cursor += 1;
+            continue;
+        }
+        let Some(label_end) = closing_delimiter(text, cursor, b'[', b']') else {
+            cursor += 1;
+            continue;
+        };
+        let mut reference_start = label_end + 1;
+        while reference_start < bytes.len() && bytes[reference_start].is_ascii_whitespace() {
+            reference_start += 1;
+        }
+        if bytes.get(reference_start) == Some(&b'[')
+            && closing_delimiter(text, reference_start, b'[', b']').is_some()
+        {
+            return true;
+        }
+        cursor += 1;
+    }
+    false
+}
+
+fn has_reference_definition(text: &str) -> bool {
+    text.lines().any(|line| {
+        let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+        if indent > 3 || line.as_bytes().get(indent) != Some(&b'[') {
+            return false;
+        }
+        closing_delimiter(line, indent, b'[', b']')
+            .and_then(|closing| line.as_bytes().get(closing + 1))
+            == Some(&b':')
+    })
+}
+
+fn has_unsafe_model_heading(active: &str) -> bool {
+    let mut previous = None;
+    for line in active.lines() {
+        if atx_heading(line)
+            .is_some_and(|(level, title)| level == 1 || title.eq_ignore_ascii_case("sources"))
+            || previous.is_some_and(|title| {
+                setext_heading(title, line).is_some_and(|(level, title)| {
+                    level == 1 || title.eq_ignore_ascii_case("sources")
+                })
+            })
+        {
+            return true;
+        }
+        previous = Some(line);
+    }
+    false
 }
 
 impl OllamaTransport {
@@ -566,6 +819,128 @@ fn is_bare_url(token: &str) -> bool {
         && tld.bytes().all(|byte| byte.is_ascii_alphabetic())
 }
 
+fn without_inline_code(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut visible = String::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let Some(relative) = line[cursor..].find('`') else {
+            visible.push_str(&line[cursor..]);
+            break;
+        };
+        let opening = cursor + relative;
+        visible.push_str(&line[cursor..opening]);
+        let count = bytes[opening..]
+            .iter()
+            .take_while(|byte| **byte == b'`')
+            .count();
+        let mut search = opening + count;
+        let mut closing = None;
+        while search < bytes.len() {
+            let Some(relative) = line[search..].find('`') else {
+                break;
+            };
+            let candidate = search + relative;
+            let candidate_count = bytes[candidate..]
+                .iter()
+                .take_while(|byte| **byte == b'`')
+                .count();
+            if candidate_count == count {
+                closing = Some(candidate + count);
+                break;
+            }
+            search = candidate + candidate_count;
+        }
+        if let Some(closing) = closing {
+            cursor = closing;
+        } else {
+            visible.push_str(&line[opening..]);
+            break;
+        }
+    }
+    visible
+}
+
+fn markdown_fence(line: &str) -> Option<(u8, usize, &str)> {
+    let indent = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b' ')
+        .count();
+    if indent > 3 {
+        return None;
+    }
+    let line = &line[indent..];
+    let marker = *line.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let count = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    (count >= 3).then_some((marker, count, &line[count..]))
+}
+
+fn atx_heading(line: &str) -> Option<(usize, &str)> {
+    let indent = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b' ')
+        .count();
+    if indent > 3 {
+        return None;
+    }
+    let line = &line[indent..];
+    let level = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b'#')
+        .count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let rest = &line[level..];
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return None;
+    }
+    Some((level, rest.trim().trim_end_matches('#').trim_end()))
+}
+
+fn setext_heading<'a>(title: &'a str, underline: &str) -> Option<(usize, &'a str)> {
+    let title = title.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let indent = underline
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b' ')
+        .count();
+    if indent > 3 {
+        return None;
+    }
+    let underline = &underline[indent..];
+    let marker = *underline.as_bytes().first()?;
+    if !matches!(marker, b'=' | b'-') || underline.is_empty() {
+        return None;
+    }
+    let marker_count = underline
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    underline[marker_count..]
+        .trim()
+        .is_empty()
+        .then_some((usize::from(marker == b'-') + 1, title))
+}
+
 fn validate_model(model: &str) -> Result<()> {
     if model.is_empty()
         || model.len() > 256
@@ -602,4 +977,105 @@ pub fn label_timeout(explicit: Option<f64>) -> Result<Duration> {
     }
     Duration::try_from_secs_f64(seconds)
         .map_err(|error| anyhow::anyhow!("{source} is not a valid timeout: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::{BufRead as _, BufReader, Write as _},
+        net::TcpListener,
+        thread,
+    };
+
+    #[test]
+    fn normalized_model_markdown_removes_links_and_raw_markup() {
+        let normalized = normalize_wiki_markdown_body(
+            "# Heading\nSee [the <b>reference</b>](https://example.invalid/path).\n".into(),
+        );
+
+        assert!(normalized.contains("external reference"));
+        assert!(!normalized.contains(['[', ']', '<', '>']));
+        validate_wiki_markdown_body(&normalized).expect("normalized Markdown");
+    }
+
+    #[test]
+    fn model_markdown_validation_rejects_executable_markup() {
+        for body in [
+            "[reference](https://example.invalid)",
+            "<script>alert(1)</script>",
+            "# Title",
+            "Sources\n---",
+        ] {
+            assert!(
+                validate_untrusted_model_markdown_body(body).is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_image_enrichment_uses_the_ollama_chat_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback provider");
+        let address = listener.local_addr().expect("read loopback address");
+        let request = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("accept provider request");
+            let mut reader = BufReader::new(socket.try_clone().expect("clone provider socket"));
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read provider header");
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+            }
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                })
+                .expect("content length")
+                .parse::<usize>()
+                .expect("numeric content length");
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).expect("read provider body");
+            let mut socket = reader.into_inner();
+            let response = r#"{"message":{"content":"{\"summary\":\"image summary\"}"}}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                        response.len()
+                    )
+                    .as_bytes(),
+                )
+                .expect("write provider response");
+            (
+                headers,
+                String::from_utf8(body).expect("UTF-8 provider body"),
+            )
+        });
+
+        let transport = OllamaTransport::local_native(&format!("http://{address}"), "test-model")
+            .expect("build loopback native transport");
+        let response = transport
+            .complete_json_object_with_image(
+                "Return JSON only.",
+                "Summarize this image.",
+                "image/png",
+                b"\x89PNG\r\n\x1a\nfixture",
+            )
+            .expect("complete image enrichment");
+
+        assert_eq!(response["summary"], "image summary");
+        let (headers, body) = request.join().expect("join provider server");
+        assert!(headers.starts_with("POST /api/chat HTTP/1.1\r\n"));
+        let body: Value = serde_json::from_str(&body).expect("parse native provider request");
+        assert_eq!(body["format"], "json");
+        assert_eq!(body["messages"][1]["images"][0], "iVBORw0KGgpmaXh0dXJl");
+    }
 }

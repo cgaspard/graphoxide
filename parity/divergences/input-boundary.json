@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_detect_follows_symlinked_directory"
+          "id": "upstream_detect::test_detect_follows_symlinked_directory"
         }
       ],
       "reason": "Graphoxide deduplicates followed directory aliases by physical target and retains the real path once, while Graphify emits both spellings."
@@ -18,7 +18,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_detect_follows_symlinked_file"
+          "id": "upstream_detect::test_detect_follows_symlinked_file"
         }
       ],
       "reason": "Graphoxide deduplicates followed file aliases by physical target and retains the real path once, while Graphify emits both spellings."
@@ -29,7 +29,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_detect_incremental_propagates_follow_symlinks"
+          "id": "upstream_detect::test_detect_incremental_propagates_follow_symlinks"
         }
       ],
       "reason": "Graphoxide keeps one real-path incremental row per physical target when symlink following is enabled, while Graphify retains the alias row too."
@@ -40,7 +40,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_detect_admits_unknown_extensionless_files_as_t0_inventory_candidates"
+          "id": "upstream_detect::test_detect_admits_unknown_extensionless_files_as_t0_inventory_candidates"
         }
       ],
       "reason": "Graphoxide admits unknown extensionless files (Dockerfile, Makefile, LICENSE, ...) as T0 document inventory candidates, while Graphify records them in the unclassified list."
@@ -51,7 +51,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_collect_files_follows_symlinked_directory"
+          "id": "upstream_extract::test_collect_files_follows_symlinked_directory"
         }
       ],
       "reason": "Graphoxide returns each physical source once under explicit symlink following, while Graphify returns both the real and alias paths."

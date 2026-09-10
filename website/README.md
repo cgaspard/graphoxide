@@ -23,8 +23,9 @@ With Node.js 18 or newer:
 node website/scripts/validate.mjs
 ```
 
-The validator checks local asset references, in-page anchors, image alternative
-text, and accidental remote script, stylesheet, or image dependencies.
+The validator checks both product and knowledgebase pages for local asset
+references, in-page anchors, image alternative text, and accidental remote
+script, stylesheet, or image dependencies.
 
 ## Deploy to GitHub Pages
 
@@ -44,3 +45,7 @@ will create or update `website/CNAME`; keep that file in version control afterwa
   the banner also states that Graphoxide is an independent, unaffiliated project.
 - Repository links assume the project will live at
   `https://github.com/cgaspard/graphoxide`.
+- `knowledgebase.html` documents the direct-source workflow: bootstrap, add,
+  refresh, explicit review, status, retirement, local preview, and MCP
+  capabilities. Keep its examples provider-neutral and never put credentials,
+  source bodies, or private filesystem roots in the static site.

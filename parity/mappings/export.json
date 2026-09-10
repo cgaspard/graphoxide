@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_write_callflow_html_creates_file_and_uses_report"
+          "id": "upstream_callflow_html::test_write_callflow_html_creates_file_and_uses_report"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_callflow_html_cli_creates_file"
+          "id": "upstream_cli_export::test_export_callflow_html_cli_creates_file"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_callflow_html_cli_accepts_positional_graph_path"
+          "id": "upstream_cli_export::test_export_callflow_html_cli_accepts_positional_graph_path"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_derive_sections_groups_by_architecture_keywords"
+          "id": "upstream_callflow_html::test_derive_sections_groups_by_architecture_keywords"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_load_graph_rejects_oversized_file"
+          "id": "upstream_callflow_html::test_load_graph_rejects_oversized_file"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_html_creates_file"
+          "id": "upstream_cli_export::test_export_html_creates_file"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_html_no_viz_removes_file"
+          "id": "upstream_cli_export::test_export_html_no_viz_removes_file"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_html_error_without_graph"
+          "id": "upstream_cli_export::test_export_html_error_without_graph"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_obsidian_creates_vault"
+          "id": "upstream_cli_export::test_export_obsidian_creates_vault"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_obsidian_custom_dir"
+          "id": "upstream_cli_export::test_export_obsidian_custom_dir"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_wiki_creates_articles"
+          "id": "upstream_cli_export::test_export_graph_community_markdown_creates_articles"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_wiki_accepts_edges_only_graph_json"
+          "id": "upstream_cli_export::test_export_graph_community_markdown_accepts_edges_only_graph_json"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_graphml_creates_file"
+          "id": "upstream_cli_export::test_export_graphml_creates_file"
         }
       ]
     },
@@ -137,7 +137,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_neo4j_creates_cypher"
+          "id": "upstream_cli_export::test_export_neo4j_creates_cypher"
         }
       ]
     },
@@ -147,7 +147,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_falkordb_creates_cypher"
+          "id": "upstream_cli_export::test_export_falkordb_creates_cypher"
         }
       ]
     },
@@ -157,7 +157,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_query_returns_output"
+          "id": "upstream_cli_export::test_query_returns_output"
         }
       ]
     },
@@ -167,7 +167,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_query_dfs_flag"
+          "id": "upstream_cli_export::test_query_dfs_flag"
         }
       ]
     },
@@ -177,7 +177,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_query_budget_flag"
+          "id": "upstream_cli_export::test_query_budget_flag"
         }
       ]
     },
@@ -187,7 +187,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_query_missing_graph_fails"
+          "id": "upstream_cli_export::test_query_missing_graph_fails"
         }
       ]
     },
@@ -197,7 +197,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_query_uses_graphify_out_env"
+          "id": "upstream_cli_export::test_query_uses_graphify_out_env"
         }
       ]
     },
@@ -207,7 +207,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_extract_writes_to_graphify_out_env"
+          "id": "upstream_cli_export::test_extract_writes_to_graphify_out_env"
         }
       ]
     },
@@ -217,7 +217,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_path_runs_without_error"
+          "id": "upstream_cli_export::test_path_runs_without_error"
         }
       ]
     },
@@ -227,7 +227,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_path_missing_graph_fails"
+          "id": "upstream_cli_export::test_path_missing_graph_fails"
         }
       ]
     },
@@ -237,7 +237,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_path_uses_graphify_out_env"
+          "id": "upstream_cli_export::test_path_uses_graphify_out_env"
         }
       ]
     },
@@ -247,7 +247,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_explain_runs_without_error"
+          "id": "upstream_cli_export::test_explain_runs_without_error"
         }
       ]
     },
@@ -257,7 +257,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_explain_missing_graph_fails"
+          "id": "upstream_cli_export::test_explain_missing_graph_fails"
         }
       ]
     },
@@ -267,7 +267,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_explain_uses_graphify_out_env"
+          "id": "upstream_cli_export::test_explain_uses_graphify_out_env"
         }
       ]
     },
@@ -277,7 +277,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_unknown_format_fails"
+          "id": "upstream_cli_export::test_export_unknown_format_fails"
         }
       ]
     },
@@ -287,7 +287,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_update_no_cluster_writes_raw_graph"
+          "id": "upstream_cli_export::test_update_no_cluster_writes_raw_graph"
         }
       ]
     },
@@ -297,7 +297,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_cluster_only_creates_output_dir_when_missing"
+          "id": "upstream_cli_export::test_cluster_only_creates_output_dir_when_missing"
         }
       ]
     },
@@ -307,7 +307,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_cluster_only_graph_in_graphify_out_writes_beside_it"
+          "id": "upstream_cli_export::test_cluster_only_graph_in_graphify_out_writes_beside_it"
         }
       ]
     },
@@ -317,7 +317,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_extract_out_does_not_pollute_corpus"
+          "id": "upstream_cli_export::test_extract_out_does_not_pollute_corpus"
         }
       ]
     },
@@ -327,7 +327,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_cluster_only_persists_analysis_sidecar"
+          "id": "upstream_cli_export::test_cluster_only_persists_analysis_sidecar"
         }
       ]
     },
@@ -337,7 +337,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_cluster_only_remaps_labels_to_previous_cids"
+          "id": "upstream_cli_export::test_cluster_only_remaps_labels_to_previous_cids"
         }
       ]
     },
@@ -347,7 +347,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_html_falls_back_to_node_community_attribute"
+          "id": "upstream_cli_export::test_export_html_falls_back_to_node_community_attribute"
         }
       ]
     },
@@ -357,7 +357,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_html_fallback_recovers_multiple_communities"
+          "id": "upstream_cli_export::test_export_html_fallback_recovers_multiple_communities"
         }
       ]
     },
@@ -367,7 +367,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_export_html_no_community_data_at_all_still_succeeds"
+          "id": "upstream_cli_export::test_export_html_no_community_data_at_all_still_succeeds"
         }
       ]
     },
@@ -377,7 +377,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_graph_json_node_ids_are_portable_across_checkout_paths"
+          "id": "upstream_cli_export::test_graph_json_node_ids_are_portable_across_checkout_paths"
         }
       ]
     },
@@ -387,7 +387,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_json_creates_file"
+          "id": "upstream_export::test_to_json_creates_file"
         }
       ]
     },
@@ -397,7 +397,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_json_valid_json"
+          "id": "upstream_export::test_to_json_valid_json"
         }
       ]
     },
@@ -407,7 +407,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_json_nodes_have_community"
+          "id": "upstream_export::test_to_json_nodes_have_community"
         }
       ]
     },
@@ -417,7 +417,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_cypher_creates_file"
+          "id": "upstream_export::test_to_cypher_creates_file"
         }
       ]
     },
@@ -427,7 +427,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_cypher_contains_merge_statements"
+          "id": "upstream_export::test_to_cypher_contains_merge_statements"
         }
       ]
     },
@@ -437,7 +437,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_graphml_creates_file"
+          "id": "upstream_export::test_to_graphml_creates_file"
         }
       ]
     },
@@ -447,7 +447,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_graphml_valid_xml"
+          "id": "upstream_export::test_to_graphml_valid_xml"
         }
       ]
     },
@@ -457,7 +457,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_graphml_has_community_attribute"
+          "id": "upstream_export::test_to_graphml_has_community_attribute"
         }
       ]
     },
@@ -467,7 +467,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_graphml_tolerates_none_attribute_values"
+          "id": "upstream_export::test_to_graphml_tolerates_none_attribute_values"
         }
       ]
     },
@@ -477,7 +477,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_graphml_tolerates_dict_and_list_attribute_values"
+          "id": "upstream_export::test_to_graphml_tolerates_dict_and_list_attribute_values"
         }
       ]
     },
@@ -487,7 +487,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_graphml_preserves_native_scalar_types"
+          "id": "upstream_export::test_to_graphml_preserves_native_scalar_types"
         }
       ]
     },
@@ -497,7 +497,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_creates_file"
+          "id": "upstream_export::test_to_html_creates_file"
         }
       ]
     },
@@ -507,7 +507,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_contains_visjs"
+          "id": "upstream_export::test_to_html_contains_visjs"
         }
       ]
     },
@@ -517,7 +517,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_neighbor_links_have_no_inline_onclick_xss"
+          "id": "upstream_export::test_to_html_neighbor_links_have_no_inline_onclick_xss"
         }
       ]
     },
@@ -527,7 +527,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_pins_visjs_version_with_sri"
+          "id": "upstream_export::test_to_html_pins_visjs_version_with_sri"
         }
       ]
     },
@@ -537,7 +537,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_contains_search"
+          "id": "upstream_export::test_to_html_contains_search"
         }
       ]
     },
@@ -547,7 +547,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_contains_legend_with_labels"
+          "id": "upstream_export::test_to_html_contains_legend_with_labels"
         }
       ]
     },
@@ -557,7 +557,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_contains_nodes_and_edges"
+          "id": "upstream_export::test_to_html_contains_nodes_and_edges"
         }
       ]
     },
@@ -567,7 +567,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_member_counts_accepted"
+          "id": "upstream_export::test_to_html_member_counts_accepted"
         }
       ]
     },
@@ -577,7 +577,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_annotated_node_gets_learning_status_and_ring"
+          "id": "upstream_export::test_to_html_annotated_node_gets_learning_status_and_ring"
         }
       ]
     },
@@ -587,7 +587,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_contested_stale_node_gets_dashed_desaturated_ring"
+          "id": "upstream_export::test_to_html_contested_stale_node_gets_dashed_desaturated_ring"
         }
       ]
     },
@@ -597,7 +597,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_unannotated_identical_to_pre_feature"
+          "id": "upstream_export::test_to_html_unannotated_identical_to_pre_feature"
         }
       ]
     },
@@ -607,7 +607,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_canvas_file_paths_relative_to_vault"
+          "id": "upstream_export::test_to_canvas_file_paths_relative_to_vault"
         }
       ]
     },
@@ -617,7 +617,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_canvas_no_communities_still_populates"
+          "id": "upstream_export::test_to_canvas_no_communities_still_populates"
         }
       ]
     },
@@ -627,7 +627,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_canvas_node_grid_matches_box_columns"
+          "id": "upstream_export::test_to_canvas_node_grid_matches_box_columns"
         }
       ]
     },
@@ -637,7 +637,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_never_emits_punctuation_only_filenames"
+          "id": "upstream_export::test_to_obsidian_never_emits_punctuation_only_filenames"
         }
       ]
     },
@@ -647,7 +647,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_canvas_never_emits_punctuation_only_filenames"
+          "id": "upstream_export::test_to_canvas_never_emits_punctuation_only_filenames"
         }
       ]
     },
@@ -657,7 +657,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_leading_dot_labels_are_not_hidden_filenames"
+          "id": "upstream_export::test_to_obsidian_leading_dot_labels_are_not_hidden_filenames"
         }
       ]
     },
@@ -667,7 +667,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_safe_stem_all_dots_label_falls_back_to_unnamed"
+          "id": "upstream_export::test_obsidian_safe_stem_all_dots_label_falls_back_to_unnamed"
         }
       ]
     },
@@ -677,7 +677,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_preserves_existing_user_notes_and_obsidian_config"
+          "id": "upstream_export::test_to_obsidian_preserves_existing_user_notes_and_obsidian_config"
         }
       ]
     },
@@ -687,7 +687,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_empty_dir_writes_full_vault"
+          "id": "upstream_export::test_to_obsidian_empty_dir_writes_full_vault"
         }
       ]
     },
@@ -697,7 +697,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_rerun_updates_own_notes_but_not_user_files"
+          "id": "upstream_export::test_to_obsidian_rerun_updates_own_notes_but_not_user_files"
         }
       ]
     },
@@ -707,7 +707,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_rerun_prunes_removed_nodes"
+          "id": "upstream_export::test_to_obsidian_rerun_prunes_removed_nodes"
         }
       ]
     },
@@ -717,7 +717,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_removed_node_returning_is_writable_again"
+          "id": "upstream_export::test_to_obsidian_removed_node_returning_is_writable_again"
         }
       ]
     },
@@ -727,7 +727,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_case_only_distinct_labels_dont_overwrite"
+          "id": "upstream_export::test_to_obsidian_case_only_distinct_labels_dont_overwrite"
         }
       ]
     },
@@ -737,7 +737,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_generated_suffix_doesnt_overwrite_literal"
+          "id": "upstream_export::test_to_obsidian_generated_suffix_doesnt_overwrite_literal"
         }
       ]
     },
@@ -747,7 +747,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_canvas_case_only_distinct_labels_get_distinct_files"
+          "id": "upstream_export::test_to_canvas_case_only_distinct_labels_get_distinct_files"
         }
       ]
     },
@@ -757,7 +757,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_canvas_filenames_agree"
+          "id": "upstream_export::test_obsidian_canvas_filenames_agree"
         }
       ]
     },
@@ -767,7 +767,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_obsidian_community_notes_case_collision"
+          "id": "upstream_export::test_to_obsidian_community_notes_case_collision"
         }
       ]
     },
@@ -777,7 +777,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_no_graph_json"
+          "id": "upstream_export::test_backup_no_graph_json"
         }
       ]
     },
@@ -787,7 +787,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_no_markers"
+          "id": "upstream_export::test_backup_no_markers"
         }
       ]
     },
@@ -797,7 +797,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_semantic_marker"
+          "id": "upstream_export::test_backup_semantic_marker"
         }
       ]
     },
@@ -807,7 +807,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_curated_labels"
+          "id": "upstream_export::test_backup_curated_labels"
         }
       ]
     },
@@ -817,7 +817,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_default_labels_only"
+          "id": "upstream_export::test_backup_default_labels_only"
         }
       ]
     },
@@ -827,7 +827,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_same_day_no_accumulation"
+          "id": "upstream_export::test_backup_same_day_no_accumulation"
         }
       ]
     },
@@ -837,7 +837,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_same_day_changed_content"
+          "id": "upstream_export::test_backup_same_day_changed_content"
         }
       ]
     },
@@ -847,7 +847,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_backup_env_disable"
+          "id": "upstream_export::test_backup_env_disable"
         }
       ]
     },
@@ -857,7 +857,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_json_refuses_shrink"
+          "id": "upstream_export::test_to_json_refuses_shrink"
         }
       ]
     },
@@ -867,7 +867,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_json_fails_safe_on_corrupt_existing"
+          "id": "upstream_export::test_to_json_fails_safe_on_corrupt_existing"
         }
       ]
     },
@@ -877,7 +877,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_json_proceeds_on_empty_existing"
+          "id": "upstream_export::test_to_json_proceeds_on_empty_existing"
         }
       ]
     },
@@ -887,7 +887,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_to_html_handles_null_source_file_and_label"
+          "id": "upstream_export::test_to_html_handles_null_source_file_and_label"
         }
       ]
     },
@@ -897,7 +897,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_existing_graph_node_count"
+          "id": "upstream_export::test_existing_graph_node_count"
         }
       ]
     },
@@ -907,7 +907,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_dangling_community_member_does_not_crash"
+          "id": "upstream_obsidian_dangling_member::test_obsidian_dangling_community_member_does_not_crash"
         }
       ]
     },
@@ -917,7 +917,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_community_of_only_dangling_members"
+          "id": "upstream_obsidian_dangling_member::test_obsidian_community_of_only_dangling_members"
         }
       ]
     },
@@ -927,7 +927,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_canvas_dangling_community_member_does_not_crash"
+          "id": "upstream_obsidian_dangling_member::test_canvas_dangling_community_member_does_not_crash"
         }
       ]
     },
@@ -937,7 +937,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_long_ascii_label_does_not_crash"
+          "id": "upstream_obsidian_filename_cap::test_obsidian_long_ascii_label_does_not_crash"
         }
       ]
     },
@@ -947,7 +947,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_long_cjk_label_byte_cap"
+          "id": "upstream_obsidian_filename_cap::test_obsidian_long_cjk_label_byte_cap"
         }
       ]
     },
@@ -957,7 +957,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_distinct_long_labels_sharing_prefix_do_not_collide"
+          "id": "upstream_obsidian_filename_cap::test_obsidian_distinct_long_labels_sharing_prefix_do_not_collide"
         }
       ]
     },
@@ -967,7 +967,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_obsidian_wikilink_resolves_after_truncation"
+          "id": "upstream_obsidian_filename_cap::test_obsidian_wikilink_resolves_after_truncation"
         }
       ]
     },
@@ -977,7 +977,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-export",
-          "id": "test_canvas_long_label_file_ref_capped"
+          "id": "upstream_obsidian_filename_cap::test_canvas_long_label_file_ref_capped"
         }
       ]
     }

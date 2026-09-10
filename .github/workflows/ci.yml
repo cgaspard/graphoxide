@@ -24,12 +24,23 @@ jobs:
         with:
           node-version: 22
       - run: npm ci --ignore-scripts
+      - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+        with:
+          tool: cargo-nextest@0.9.126
+      - name: Fast-feedback topology guards
+        run: |-
+          node scripts/verify-test-parallelism.mjs
+          node scripts/verify-test-consolidation.mjs
+          node scripts/verify-wiki-test-lanes.mjs --list
       - name: Repository regression tests
         run: >-
           node --test
           scripts/agent-artifacts.test.mjs
           scripts/benchmark-graph-build.test.mjs
           scripts/qualify-universal-indexing.test.mjs
+          scripts/verify-test-parallelism.test.mjs
+          scripts/verify-test-consolidation.test.mjs
+          scripts/verify-wiki-test-lanes.test.mjs
           scripts/workflow-dependencies.test.mjs
       - run: cargo build --release --locked --bin graphoxide
       - name: Stage single-link qualification binary
@@ -94,10 +105,47 @@ jobs:
           toolchain: "1.97.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+        with:
+          tool: cargo-nextest@0.9.126
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --no-fail-fast --locked
+      - run: cargo nextest run --workspace --no-fail-fast --test-threads=num-cpus --locked
+      - run: cargo test --workspace --doc --locked
       - run: cargo build --release --workspace --locked
+
+  knowledgebase-portability:
+    name: Knowledgebase (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master (2026-08-10)
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: knowledgebase-${{ matrix.os }}
+      - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+        with:
+          tool: cargo-nextest@0.9.126
+      - name: Direct knowledgebase CLI and lifecycle regressions
+        run: >-
+          cargo nextest run -p graphoxide-cli --test knowledgebase_cli --test-threads=num-cpus --locked
+          --no-fail-fast direct_cli_ direct_source_regressions::
+      - name: Direct source admission and Git provenance
+        run: >-
+          cargo nextest run -p graphoxide-cli --lib --test-threads=num-cpus --locked
+          --no-fail-fast wiki_source::tests::
 
   spsc-model:
     name: SPSC queue model-check and Miri
@@ -194,6 +242,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master (2026-08-10)
         with:
           toolchain: "1.97.1"
+      - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+        with:
+          tool: cargo-nextest@0.9.126
       - run: npm ci
       - run: npm run check
       - run: npm run test:visualizer:browser
@@ -209,6 +260,12 @@ jobs:
         working-directory: ${{ github.workspace }}
       - run: xvfb-run -a npm run test:e2e
       - run: npm run package
+      - name: Smoke packaged VSIX bundled binary
+        run: >-
+          cargo nextest run -p graphoxide-cli --test knowledgebase_cli --test-threads=num-cpus --locked --run-ignored only
+          packaged_artifact_smoke::packaged_vsix_bundled_binary_is_native_and_indexes_fixture
+          -- --exact
+        working-directory: ${{ github.workspace }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: graphoxide-vscode

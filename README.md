@@ -18,6 +18,9 @@ Graphoxide stores its deterministic, queryable graph at
 `graphoxide-out/graph.json`. The format retains compatibility with Graphify's
 graph schema while adding a native CLI/MCP runtime and IDE integration.
 
+For schema-enforced implementation references and agent-managed research, see
+[Knowledgebase](docs/knowledgebase.md).
+
 ## Install
 
 Rust 1.97.1 is pinned in `rust-toolchain.toml`.
@@ -763,92 +766,29 @@ source-derived identifiers, filenames, and truncated comments or docstrings.
 Full files and `source_file` metadata are not included. Structural extraction,
 builds, queries, reports, and exports remain fully offline.
 
-## Registry-backed LLM wiki
+## Knowledgebase
 
-Graphoxide can build an incremental, provenance-bound LLM wiki without copying
-raw source files into the wiki or its Git-tracked registry. The registry stores
-logical origins, normalized relative paths, content digests, lifecycle state,
-and processing records; each user's local SQLite cache stores the real origin
-binding and scan observations.
+Graphoxide's knowledgebase is a direct-only, Git-root workflow. It commits a
+taxonomy, pointer-only source index, derived pages, and review records—not
+source bodies. Source operations are user-owned and manual: add sources as
+provisional content, run the explicit AI review, then confirm the reviewed
+source locally when appropriate. See the [Knowledgebase guide](docs/knowledgebase.md):
 
-```bash
-# In a separate Git repository used for shared registry metadata.
-graphoxide registry init --tree ../graphoxide-catalog --catalog-id engineering
-graphoxide registry origin add --tree ../graphoxide-catalog \
-  --origin-id docs --kind filesystem --logical-name engineering-docs
-graphoxide registry origin bind --tree ../graphoxide-catalog \
-  --origin-id docs --local-root /path/to/docs
-
-# Discovery is reviewable. Limit sampling deterministically when validating a corpus.
-graphoxide registry discover --tree ../graphoxide-catalog --origin-id docs \
-  --max-files 8 --max-per-format-family 1 --accept-discovered
-graphoxide registry scan --tree ../graphoxide-catalog --origin-id docs --mode changed
-graphoxide registry publish --tree ../graphoxide-catalog --origin-id docs \
-  --from-local-state --observed-at 2026-08-28T00:00:00Z
-graphoxide registry validate --tree ../graphoxide-catalog
-```
-
-`scan --mode changed` performs inexpensive identity checks before hashing a
-candidate; `--mode verify` fully rehashes tracked readable sources. Missing or
-inaccessible sources keep their historical capture and wiki evidence but are
-reported as stale. `registry freshness`, `list`, `retire`, `restore`, `rename`,
-and `resolve-source` provide deterministic lifecycle and conflict management.
-`registry run record` appends a secret-free immutable record for an LLM or
-agent run: actor/agent/model, provider request ID, profile/prompt/evidence
-digests, token/cost/latency/retry counters, and outcome—never prompts or
-credentials.
-
-To keep model-backed articles fresh without reprocessing unchanged sources,
-commit an optional `policies/freshness.json` in the registry:
-
-```json
-{
-  "version": 1,
-  "model_stage": "wiki-draft",
-  "model_max_age_seconds": 604800,
-  "source_priorities": { "critical-equipment-guide": 100 }
-}
-```
-
-`graphoxide registry freshness --tree ../graphoxide-catalog --json` reads the
-active capture's latest immutable run for that stage and queues only missing,
-failed/retryable, or expired model work. It never queues model work while an
-extract is pending or a locally scanned source is missing/inaccessible. Use
-`--now <UTC-RFC3339>` for deterministic audits; `registry list --json` includes
-the active capture's `last_runs` with actor, model, provider request ID, and
-integer usage counters.
-
-After indexing an active registry binding and reviewing a canonical plan, live
-materialization publishes a graph-only `source-ready` page for each capture as
-soon as it is complete, then atomically advances `wiki-manifest.json` and
-reconciles navigation:
+Authoring accepts UTF-8 text up to 16 MiB. Git sources require a local binding
+to the pinned revision; network Git fetching is disabled. HTTPS text transfers
+are bounded and require explicit consent. Local preview requires a separately
+installed Hugo 0.165.0 executable.
 
 ```bash
-graphoxide wiki materialize --registry-repo ../graphoxide-catalog \
-  --registry-rev "$(git -C ../graphoxide-catalog rev-parse HEAD)" \
-  --origin docs --graph graphoxide-out/graph.json --plan wiki.plan.json \
-  --output wiki --drafts wiki-drafts --agent-jobs 1 --progress jsonl
+graphoxide wiki init --authoring-profile config/authoring-input.json
+graphoxide wiki source add docs/spec.md https://docs.example.test/spec.md \
+  --allow-network --allow-model-egress
+graphoxide wiki source review src:SOURCE_ID --allow-model-egress
+graphoxide wiki source confirm src:SOURCE_ID
+graphoxide wiki source status --json
+export GRAPHOXIDE_HUGO_BINARY=/absolute/path/to/hugo
+graphoxide wiki live . --port 1313 --open
 ```
-
-The resulting `llms.txt`, manifest, lexical `search.json`, source/reference
-pages, and change ledger are deterministic. Pages expose `source-ready`,
-`draft-ready`, `reviewed-ready`, `stale`, or `historical` state; reviewed prose
-is never silently rewritten when a capture changes. `--drafts` is optional and
-accepts only canonical article files produced by `graphoxide wiki draft --plan`;
-their immutable frontmatter and evidence-block references are revalidated before
-the live manifest advances.
-
-Optional model drafting accepts versioned, secret-free provider profiles for
-OpenAI-compatible services, Anthropic Messages, native Ollama, and MCP agents.
-Use an explicit source-egress consent value when a model sees source-derived
-content. Add `--registry-tree ../graphoxide-catalog` to `wiki plan` or `wiki
-draft` to append one validated, secret-free `wiki-plan` or `wiki-draft` run per
-active cited capture; records retain model/timing/status and content digests,
-never prompts, source bytes, endpoints, or credentials. Private services use
-`graphoxide wiki openapi validate` and `fetch`
-with a pinned OpenAPI digest, HTTPS host allowlist, secret environment-reference,
-and `GET`/`HEAD` operation allowlist; responses are bounded and only metadata
-and a response digest are emitted.
 
 ## Query logging
 

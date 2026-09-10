@@ -338,6 +338,24 @@ pub fn write_text_atomic(path: impl AsRef<Path>, text: &str) -> anyhow::Result<(
     )
 }
 
+/// Atomically write UTF-8 text without following a destination symlink.
+pub fn write_text_atomic_strict(path: impl AsRef<Path>, text: &str) -> anyhow::Result<()> {
+    atomic_write_strict(
+        path.as_ref(),
+        |file| file.write_all(text.as_bytes()),
+        replace_file_strict,
+    )
+}
+
+/// Atomically write binary content without following a destination symlink.
+pub fn write_bytes_atomic_strict(path: impl AsRef<Path>, bytes: &[u8]) -> anyhow::Result<()> {
+    atomic_write_strict(
+        path.as_ref(),
+        |file| file.write_all(bytes),
+        replace_file_strict,
+    )
+}
+
 /// Test/embedding hook for simulating a replace failure without weakening the
 /// production writer's atomicity guarantees.
 #[doc(hidden)]
@@ -746,6 +764,7 @@ mod tests {
         check_graph_file_size_cap_with, parent_directory, prepare_for_export, read_bytes_with_cap,
         read_graph_from_open_file_with_cap, read_graph_with_cap, read_json_object,
         read_json_object_from_open_file_with_cap, read_json_object_from_reader_with_cap,
+        write_bytes_atomic_strict,
     };
     use sha2::{Digest as _, Sha256};
     use std::{
@@ -773,6 +792,17 @@ mod tests {
             parent_directory(Path::new("/abs/dir/out.html")),
             Path::new("/abs/dir")
         );
+    }
+
+    #[test]
+    fn strict_atomic_byte_write_preserves_binary_content() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("asset.woff2");
+        let bytes = [0, 0xff, b'G', b'O'];
+
+        write_bytes_atomic_strict(&path, &bytes).expect("write binary asset");
+
+        assert_eq!(fs::read(path).expect("read binary asset"), bytes);
     }
 
     #[test]

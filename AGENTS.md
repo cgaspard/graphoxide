@@ -81,8 +81,8 @@ coverage; the baseline otherwise acts as a guard against unexplained regressions
 ### Fast local iteration
 
 The gates above are the source of truth for "is it shippable"; they are not the
-right tool for a tight edit loop. Recommended local setup (all optional,
-machine-local, nothing committed to the repo):
+right tool for a tight edit loop. Recommended machine-local setup (only
+`sccache` is optional; `cargo-nextest` is required for `wiki:test-full`):
 
 1. `brew install sccache cargo-nextest`
 2. Add a user-level `~/.cargo/config.toml` (repo-level would break builds on
@@ -97,16 +97,23 @@ machine-local, nothing committed to the repo):
    worktree is a fresh checkout, so this is the biggest structural win:
    a fresh worktree at the same commit compiles from cache instead of from
    scratch, and clippy/release/coverage each cache in their own slot.
-3. Use `cargo nextest run` for the dev loop instead of `cargo test`:
+3. Use the Wiki lanes for Wiki work, or `cargo nextest run` for a crate-level
+   dev loop:
 
    ```bash
-   cargo nextest run -p graphoxide-cli          # whole crate, ~50s vs ~3m
-   cargo nextest run -p graphoxide-cli --lib    # units only
+   npm run wiki:test-fast
+   npm run wiki:test-full
+   cargo nextest run -p graphoxide-cli
+   cargo nextest run -p graphoxide-cli --lib
    ```
 
-   nextest runs every test binary in parallel (the ~2m packaged-artifact smoke
-   test no longer serializes the rest) and supports rerunning only failed
-   tests. CI and the gates keep using plain `cargo test`.
+   `wiki:test-fast` uses Nextest with `--test-threads=num-cpus` when it is
+   installed (and otherwise runs the same exact tests through Cargo).
+   `wiki:test-full` requires Nextest and uses the same dynamic setting; it does
+   not fall back to Cargo. Neither lane has a fixed test-build concurrency cap,
+   and Cargo uses the machine's available cores by default. The expensive
+   packaged-VSIX smoke test is ignored locally and runs only in the VS Code CI
+   job. Nextest supports rerunning only failed tests.
 
 Disable sccache (delete the config line) when running
 `npm run coverage:rust` so the llvm-cov instrumentation is never served from a
@@ -128,8 +135,7 @@ issue number using this exact convention:
 
 For example, issue 42 is `42-universal-capability-indexing`, with branch
 `agent/42-universal-capability-indexing`, stored beneath the sibling directory
-`/Users/cgaspard/Projects/cgaspard/graphoxide-worktrees/42-universal-capability-indexing`
-(relative to this checkout: `../graphoxide-worktrees/42-universal-capability-indexing`).
+`../graphoxide-worktrees/42-universal-capability-indexing`.
 Use lowercase, hyphenated descriptions. One issue owns one branch and one
 worktree; do not use the main checkout for feature work.
 

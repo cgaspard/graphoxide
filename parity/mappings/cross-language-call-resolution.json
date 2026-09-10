@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_tsx_callback_does_not_bind_to_kotlin_method"
+          "id": "upstream_cross_language_call_resolution::test_tsx_callback_does_not_bind_to_kotlin_method"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_python_call_does_not_bind_to_kotlin_function"
+          "id": "upstream_cross_language_call_resolution::test_python_call_does_not_bind_to_kotlin_function"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_same_language_callback_still_resolves"
+          "id": "upstream_cross_language_call_resolution::test_same_language_callback_still_resolves"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_jvm_interop_kotlin_call_to_java_still_resolves"
+          "id": "upstream_cross_language_call_resolution::test_jvm_interop_kotlin_call_to_java_still_resolves"
         }
       ]
     }

@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_ast_cache_schema_preparation_retires_only_pre_redaction_versions"
+          "id": "upstream_cache::test_ast_cache_schema_preparation_retires_only_pre_redaction_versions"
         }
       ],
       "reason": "Graphoxide retires only pre-redaction cache schemas under the managed rebuild lock instead of recursively deleting every older directory during an uncoordinated cache open."

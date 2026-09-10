@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_extract_mode_deep_is_rejected_until_semantic_cli_is_supported"
+          "id": "upstream_extract_cli::test_extract_mode_deep_is_rejected_until_semantic_cli_is_supported"
         }
       ],
       "reason": "Graphoxide does not expose Graphify's hosted semantic deep mode and rejects --mode instead of accepting a no-op compatibility flag."
@@ -18,7 +18,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_extract_without_key_remains_intentionally_offline_when_docs_present"
+          "id": "upstream_extract_cli::test_extract_without_key_remains_intentionally_offline_when_docs_present"
         }
       ],
       "reason": "Graphoxide intentionally indexes mixed code and documents offline, while Graphify requires hosted semantic credentials for this command."
@@ -29,7 +29,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_mixed_repo_without_key_remains_intentionally_offline"
+          "id": "upstream_extract_code_only::test_mixed_repo_without_key_remains_intentionally_offline"
         }
       ],
       "reason": "Graphoxide intentionally indexes mixed repositories offline without forcing --code-only, unlike Graphify's credential error contract."
@@ -40,7 +40,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_default_extract_force_does_not_reuse_legacy_ast_cache"
+          "id": "upstream_extract_cli::test_default_extract_force_does_not_reuse_legacy_ast_cache"
         }
       ],
       "reason": "Graphoxide's default isolated executor re-extracts without refreshing the legacy AST cache, while Graphify force-refreshes its warm semantic cache."
@@ -51,7 +51,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_default_extract_graphify_force_does_not_reuse_legacy_ast_cache"
+          "id": "upstream_extract_cli::test_default_extract_graphify_force_does_not_reuse_legacy_ast_cache"
         }
       ],
       "reason": "Graphoxide's force environment variable selects isolated re-extraction without refreshing the legacy AST cache, unlike Graphify's warm semantic-cache contract."

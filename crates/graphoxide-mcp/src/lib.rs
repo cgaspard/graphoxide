@@ -1,41 +1,38 @@
 //! Graphoxide MCP server and MCP-configuration ingestion.
 
+pub mod direct_source;
 pub mod http;
 pub mod mcp_ingest;
+use anyhow::Context as _;
 use graphoxide_core::KnowledgeGraph;
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{
-        Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
-        ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-        ServerInfo,
+        CallToolRequestParams, CallToolResponse, Implementation, ListResourcesResult,
+        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
     },
     schemars,
     service::RequestContext,
     tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
-use sha2::{Digest as _, Sha256};
+#[cfg(test)]
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
 };
 
 const SERVER_INSTRUCTIONS: &str = "Use Graphoxide before broad filesystem searches when a user asks to explore, explain, navigate, trace, or assess impact in a codebase. Start with project_overview for architecture, query_graph for a focused neighborhood, then get_node, get_neighbors, or shortest_path for exact evidence. Treat results as deterministic static-analysis evidence, synthesize the answer yourself, cite returned source locations, and verify runtime behavior in source or tests. A no-match result does not prove a concept is absent. Clearly distinguish INFERRED edges from EXTRACTED facts.";
-const MAX_WIKI_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_WIKI_SEARCH_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_WIKI_PAGE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_WIKI_DRAFT_BYTES: usize = 256 * 1024;
-const MAX_WIKI_RESPONSE_BYTES: usize = 1024 * 1024;
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct GraphoxideServer {
     cache: Arc<Mutex<GraphCache>>,
     default_graph: Option<PathBuf>,
+    direct_source:
+        Option<direct_source::DirectSourceMcp<Arc<dyn direct_source::DirectSourceService>>>,
     max_project_contexts: usize,
 }
 #[derive(Debug, Default)]
@@ -58,6 +55,7 @@ impl Default for GraphoxideServer {
         Self {
             cache: Arc::new(Mutex::new(GraphCache::default())),
             default_graph: None,
+            direct_source: None,
             max_project_contexts: http::DEFAULT_MAX_CONTEXTS,
         }
     }
@@ -180,67 +178,19 @@ struct PrImpactParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WikiRootParams {
-    #[schemars(description = "Published wiki root containing wiki-manifest.json")]
-    wiki_root: String,
+#[serde(deny_unknown_fields)]
+struct DirectSourceAddParams {
+    inputs: Vec<direct_source::DirectSourceInput>,
+    allow_https_fetch: bool,
+    allow_model_egress: bool,
 }
 
+/// RMCP requires a root object schema; the nested tagged request preserves the
+/// source-ID-only HumanConfirm variant from the direct-source contract.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WikiFreshnessParams {
-    #[schemars(description = "Published wiki root containing wiki-manifest.json")]
-    wiki_root: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WikiSearchParams {
-    #[schemars(description = "Published wiki root containing search.json")]
-    wiki_root: String,
-    #[schemars(
-        description = "Case-insensitive title, alias, citation, locator, evidence ID, or body query"
-    )]
-    query: String,
-    #[schemars(description = "Maximum matches from 1 to 50; defaults to 20")]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WikiPageParams {
-    #[schemars(description = "Published wiki root containing wiki-manifest.json")]
-    wiki_root: String,
-    #[schemars(description = "Manifest-declared relative page path")]
-    page: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WikiEvidenceParams {
-    #[schemars(description = "Published wiki root containing search.json")]
-    wiki_root: String,
-    #[schemars(description = "Exact evidence-block ID from a wiki page or search result")]
-    evidence_id: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WikiDraftValidationParams {
-    #[schemars(description = "Published wiki root containing search.json")]
-    wiki_root: String,
-    #[schemars(description = "Manifest-declared relative article path")]
-    page: String,
-    #[schemars(description = "Canonical JSON draft response with evidence-bound sections")]
-    draft: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct WikiReviewAttestationParams {
-    #[schemars(description = "Published wiki root containing wiki-manifest.json")]
-    wiki_root: String,
-    #[schemars(description = "Exact reviewed plan SHA-256 from wiki-manifest.json")]
-    plan_sha256: String,
-    #[schemars(description = "Active source#capture citations bound to the review")]
-    capture_ids: Vec<String>,
-    #[schemars(
-        description = "Validated article draft JSON; its digest is attested without persisting the draft"
-    )]
-    draft: String,
+#[serde(deny_unknown_fields)]
+struct DirectSourceReviewParams {
+    request: direct_source::DirectSourceReviewRequest,
 }
 
 #[tool_router]
@@ -489,107 +439,117 @@ impl GraphoxideServer {
         gh_owned(p.project_path, &args)
     }
     #[tool(
-        description = "Use to inspect the live manifest, source/page states, and pinned registry provenance of a published Graphoxide LLM wiki. This reads only published artifacts, never raw sources.",
+        description = "Add one or more direct knowledgebase sources by logical bound-path locator or normalized HTTPS URL. The tool never accepts a physical path or source body. Source authoring requires explicit allow_model_egress acknowledgement and server model-egress authorization; HTTPS additionally requires allow_https_fetch and server network authorization.",
         annotations(
-            title = "Inspect LLM wiki status",
-            read_only_hint = true,
+            title = "Add direct knowledgebase sources",
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
-    fn wiki_status(&self, Parameters(p): Parameters<WikiRootParams>) -> String {
-        wiki_status_text(Path::new(&p.wiki_root))
-            .unwrap_or_else(|error| format!("Could not read wiki status: {error}"))
+    fn knowledgebase_source_add(&self, Parameters(p): Parameters<DirectSourceAddParams>) -> String {
+        let consent = p.allow_https_fetch.then(direct_source::allow_https_fetch);
+        self.direct_source
+            .as_ref()
+            .context("direct source writes are disabled for this server")
+            .and_then(|source| {
+                source.add_sources(
+                    direct_source::DirectSourceAddRequest::new(p.inputs, p.allow_model_egress),
+                    consent,
+                )
+            })
+            .and_then(|result| serde_json::to_string_pretty(&result).map_err(Into::into))
+            .unwrap_or_else(|error| format!("Could not add direct knowledgebase sources: {error}"))
     }
     #[tool(
-        description = "Use to identify stale, historical, or otherwise non-ready published LLM wiki sources and pages from the live manifest. It reads only published artifacts.",
+        description = "Read direct knowledgebase source locator, digest, byte-count, and status metadata. This never returns a physical path, raw source body, capture ID, or source-store location.",
         annotations(
-            title = "Inspect LLM wiki freshness",
+            title = "Read direct knowledgebase source status",
             read_only_hint = true,
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false
         )
     )]
-    fn wiki_freshness(&self, Parameters(p): Parameters<WikiFreshnessParams>) -> String {
-        wiki_freshness_text(Path::new(&p.wiki_root))
-            .unwrap_or_else(|error| format!("Could not read wiki freshness: {error}"))
+    fn knowledgebase_source_status(&self) -> String {
+        self.direct_source
+            .as_ref()
+            .context("direct source reads are disabled for this server")
+            .and_then(|source| source.source_status())
+            .and_then(|result| serde_json::to_string_pretty(&result).map_err(Into::into))
+            .unwrap_or_else(|error| {
+                format!("Could not read direct knowledgebase source status: {error}")
+            })
     }
     #[tool(
-        description = "Use to search a published Graphoxide LLM wiki's deterministic lexical index by title, alias, citation, locator, evidence ID, or bounded body text. It reads only published artifacts.",
+        description = "Refresh one direct knowledgebase source by logical source ID. The source is read transiently and its raw body is never stored or returned. Because a changed source may be re-authored, this requires explicit allow_model_egress acknowledgement and server model-egress authorization.",
         annotations(
-            title = "Search LLM wiki",
-            read_only_hint = true,
+            title = "Refresh direct knowledgebase source",
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
-    fn wiki_search(&self, Parameters(p): Parameters<WikiSearchParams>) -> String {
-        wiki_search_text(Path::new(&p.wiki_root), &p.query, p.limit.unwrap_or(20))
-            .unwrap_or_else(|error| format!("Could not search wiki: {error}"))
+    fn knowledgebase_source_refresh(
+        &self,
+        Parameters(p): Parameters<direct_source::DirectSourceRefreshRequest>,
+    ) -> String {
+        self.direct_source
+            .as_ref()
+            .context("direct source refresh is disabled for this server")
+            .and_then(|source| source.refresh_source(p))
+            .and_then(|result| serde_json::to_string_pretty(&result).map_err(Into::into))
+            .unwrap_or_else(|error| {
+                format!("Could not refresh direct knowledgebase source: {error}")
+            })
     }
     #[tool(
-        description = "Use to retrieve one manifest-declared current or historical wiki page after wiki_search or wiki_status. It rejects traversal and never follows a page outside the published wiki root.",
+        description = "Run an AI review or local human confirmation for one direct source. Inputs and results are logical metadata only; no raw source body, path, provider profile, prompt, or credential is accepted or returned.",
         annotations(
-            title = "Read LLM wiki page",
-            read_only_hint = true,
+            title = "Review direct knowledgebase source",
+            read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
-    fn wiki_get_page(&self, Parameters(p): Parameters<WikiPageParams>) -> String {
-        wiki_page_text(Path::new(&p.wiki_root), &p.page)
-            .unwrap_or_else(|error| format!("Could not read wiki page: {error}"))
+    fn knowledgebase_source_review(
+        &self,
+        Parameters(p): Parameters<DirectSourceReviewParams>,
+    ) -> String {
+        self.direct_source
+            .as_ref()
+            .context("direct source review is disabled for this server")
+            .and_then(|source| source.review_source(p.request))
+            .and_then(|result| serde_json::to_string_pretty(&result).map_err(Into::into))
+            .unwrap_or_else(|error| {
+                format!("Could not review direct knowledgebase source: {error}")
+            })
     }
     #[tool(
-        description = "Use to resolve an exact evidence-block ID to the published pages, citations, and artifact locators that contain it. Read the returned pages for the evidence text.",
+        description = "Retire one direct knowledgebase source by logical source ID. This returns logical retirement metadata only.",
         annotations(
-            title = "Resolve LLM wiki evidence",
-            read_only_hint = true,
-            destructive_hint = false,
+            title = "Retire direct knowledgebase source",
+            read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = false
         )
     )]
-    fn wiki_get_evidence(&self, Parameters(p): Parameters<WikiEvidenceParams>) -> String {
-        wiki_evidence_text(Path::new(&p.wiki_root), &p.evidence_id)
-            .unwrap_or_else(|error| format!("Could not resolve wiki evidence: {error}"))
-    }
-    #[tool(
-        description = "Use to validate a canonical JSON article draft against the evidence-block IDs available on its published wiki page. It returns a result only and never writes drafts or pages.",
-        annotations(
-            title = "Validate LLM wiki draft",
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    fn wiki_validate_draft(&self, Parameters(p): Parameters<WikiDraftValidationParams>) -> String {
-        wiki_validate_draft_text(Path::new(&p.wiki_root), &p.page, &p.draft)
-            .unwrap_or_else(|error| format!("Wiki draft is invalid: {error}"))
-    }
-    #[tool(
-        description = "Use after wiki_validate_draft to emit a deterministic review-attestation JSON artifact. The caller must submit that artifact through Git review; this tool never writes registry heads, raw sources, or wiki output.",
-        annotations(
-            title = "Attest LLM wiki review",
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    fn wiki_attest_review(&self, Parameters(p): Parameters<WikiReviewAttestationParams>) -> String {
-        wiki_attest_review_text(
-            Path::new(&p.wiki_root),
-            &p.plan_sha256,
-            &p.capture_ids,
-            &p.draft,
-        )
-        .unwrap_or_else(|error| format!("Could not attest wiki review: {error}"))
+    fn knowledgebase_source_retire(
+        &self,
+        Parameters(p): Parameters<direct_source::DirectSourceRetireRequest>,
+    ) -> String {
+        self.direct_source
+            .as_ref()
+            .context("direct source retirement is disabled for this server")
+            .and_then(|source| source.retire_source(p))
+            .and_then(|result| serde_json::to_string_pretty(&result).map_err(Into::into))
+            .unwrap_or_else(|error| {
+                format!("Could not retire direct knowledgebase source: {error}")
+            })
     }
 }
 
@@ -598,8 +558,25 @@ impl GraphoxideServer {
         Self {
             cache: Arc::new(Mutex::new(GraphCache::default())),
             default_graph: Some(path),
+            direct_source: None,
             max_project_contexts: max_project_contexts.max(1),
         }
+    }
+
+    fn with_default_graph_and_direct_source(
+        path: PathBuf,
+        direct_source: Arc<dyn direct_source::DirectSourceService>,
+        https_fetch_enabled: bool,
+        model_egress_enabled: bool,
+        max_project_contexts: usize,
+    ) -> Self {
+        let mut server = Self::with_default_graph(path, max_project_contexts);
+        server.direct_source = Some(direct_source::DirectSourceMcp::with_capabilities(
+            direct_source,
+            https_fetch_enabled,
+            model_egress_enabled,
+        ));
+        server
     }
 
     fn graph_path(&self, project: Option<String>) -> PathBuf {
@@ -765,6 +742,39 @@ impl ServerHandler for GraphoxideServer {
         .with_instructions(SERVER_INSTRUCTIONS)
     }
 
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if is_direct_source_tool(&request.name) && self.direct_source.is_none() {
+            return Err(ErrorData::invalid_params("tool not found", None));
+        }
+        let context = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_router().call(context).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let tools = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .filter(|tool| !is_direct_source_tool(&tool.name) || self.direct_source.is_some())
+            .collect();
+        Ok(ListToolsResult::with_all_items(tools))
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        if is_direct_source_tool(name) && self.direct_source.is_none() {
+            None
+        } else {
+            Self::tool_router().get(name).cloned()
+        }
+    }
+
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -834,6 +844,17 @@ impl ServerHandler for GraphoxideServer {
         };
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, request.uri)]).into())
     }
+}
+
+fn is_direct_source_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "knowledgebase_source_add"
+            | "knowledgebase_source_status"
+            | "knowledgebase_source_refresh"
+            | "knowledgebase_source_review"
+            | "knowledgebase_source_retire"
+    )
 }
 fn stamp_query(graph: &Path) {
     let Some(out) = graph.parent() else { return };
@@ -1112,481 +1133,6 @@ fn gh_owned(project: Option<String>, args: &[String]) -> String {
     run_gh(project, args).unwrap_or_else(|error| format!("Error: {error}"))
 }
 
-fn canonical_wiki_root(root: &Path) -> anyhow::Result<PathBuf> {
-    let metadata = fs::symlink_metadata(root)?;
-    anyhow::ensure!(
-        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
-        "wiki root must be a non-symlinked directory"
-    );
-    let root = fs::canonicalize(root)?;
-    anyhow::ensure!(
-        fs::metadata(&root)?.is_dir(),
-        "wiki root is not a directory"
-    );
-    Ok(root)
-}
-
-fn safe_wiki_relative_path(path: &str) -> anyhow::Result<&Path> {
-    let path = Path::new(path);
-    anyhow::ensure!(
-        !path.as_os_str().is_empty()
-            && path
-                .components()
-                .all(|component| matches!(component, Component::Normal(_))),
-        "wiki path must be a non-empty relative path without traversal"
-    );
-    Ok(path)
-}
-
-fn read_wiki_file(root: &Path, relative: &str, cap: u64) -> anyhow::Result<Vec<u8>> {
-    let relative = safe_wiki_relative_path(relative)?;
-    let path = root.join(relative);
-    let metadata = fs::symlink_metadata(&path)?;
-    anyhow::ensure!(
-        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
-        "wiki artifact is not a regular file"
-    );
-    anyhow::ensure!(
-        metadata.len() <= cap,
-        "wiki artifact exceeds its byte limit"
-    );
-    let resolved = fs::canonicalize(&path)?;
-    anyhow::ensure!(
-        resolved.starts_with(root),
-        "wiki artifact resolves outside the published wiki root"
-    );
-    let bytes = fs::read(&resolved)?;
-    anyhow::ensure!(
-        bytes.len() <= cap as usize,
-        "wiki artifact exceeds its byte limit"
-    );
-    Ok(bytes)
-}
-
-fn required_array<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a Vec<Value>> {
-    value
-        .get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("wiki JSON has no array field {key:?}"))
-}
-
-fn required_string<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("wiki JSON has no non-empty string field {key:?}"))
-}
-
-fn load_wiki_manifest(root: &Path) -> anyhow::Result<(PathBuf, Vec<u8>, Value)> {
-    let root = canonical_wiki_root(root)?;
-    let bytes = read_wiki_file(&root, "wiki-manifest.json", MAX_WIKI_MANIFEST_BYTES)?;
-    let manifest: Value = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(
-        manifest.get("version").and_then(Value::as_u64) == Some(1),
-        "unsupported wiki manifest version"
-    );
-    let _ = required_array(&manifest, "sources")?;
-    let _ = required_array(&manifest, "pages")?;
-    Ok((root, bytes, manifest))
-}
-
-fn load_wiki_search_index(root: &Path) -> anyhow::Result<Value> {
-    let bytes = read_wiki_file(root, "search.json", MAX_WIKI_SEARCH_BYTES)?;
-    let search: Value = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(
-        search.get("version").and_then(Value::as_u64) == Some(1),
-        "unsupported wiki search index version"
-    );
-    let _ = required_array(&search, "entries")?;
-    Ok(search)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn json_text(value: Value) -> anyhow::Result<String> {
-    let text = serde_json::to_string_pretty(&value)?;
-    anyhow::ensure!(
-        text.len() <= MAX_WIKI_RESPONSE_BYTES,
-        "wiki response exceeds its byte limit; narrow the request"
-    );
-    Ok(text)
-}
-
-fn state_counts(items: &[Value]) -> anyhow::Result<BTreeMap<String, usize>> {
-    let mut counts = BTreeMap::new();
-    for item in items {
-        *counts
-            .entry(required_string(item, "state")?.to_owned())
-            .or_default() += 1;
-    }
-    Ok(counts)
-}
-
-fn wiki_status_text(root: &Path) -> anyhow::Result<String> {
-    let (_, _, manifest) = load_wiki_manifest(root)?;
-    let registry = manifest
-        .get("registry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow::anyhow!("wiki manifest has no registry provenance"))?;
-    let sources = required_array(&manifest, "sources")?;
-    let pages = required_array(&manifest, "pages")?;
-    json_text(json!({
-        "version": 1,
-        "registry": registry,
-        "graph_sha256": required_string(&manifest, "graph_sha256")?,
-        "plan_sha256": required_string(&manifest, "plan_sha256")?,
-        "source_states": state_counts(sources)?,
-        "page_states": state_counts(pages)?,
-        "historical_pages": manifest.get("historical").and_then(Value::as_array).map_or(0, Vec::len),
-    }))
-}
-
-fn non_ready_items(items: &[Value], identity: &str, ready: &[&str]) -> anyhow::Result<Vec<Value>> {
-    let mut result = Vec::new();
-    for item in items {
-        let state = required_string(item, "state")?;
-        if !ready.contains(&state) {
-            result.push(json!({
-                "identity": required_string(item, identity)?,
-                "state": state,
-            }));
-        }
-    }
-    Ok(result)
-}
-
-fn wiki_freshness_text(root: &Path) -> anyhow::Result<String> {
-    let (_, _, manifest) = load_wiki_manifest(root)?;
-    let sources = required_array(&manifest, "sources")?;
-    let pages = required_array(&manifest, "pages")?;
-    let historical = manifest
-        .get("historical")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    json_text(json!({
-        "version": 1,
-        "source_states": state_counts(sources)?,
-        "page_states": state_counts(pages)?,
-        "attention": {
-            "sources": non_ready_items(sources, "citation", &["source-ready"] )?,
-            "pages": non_ready_items(pages, "path", &["source-ready", "reviewed-ready"] )?,
-            "historical": non_ready_items(historical, "archived_path", &[])?,
-        }
-    }))
-}
-
-fn truncated(value: &str, max_chars: usize) -> String {
-    let mut value = value.chars();
-    let text = value.by_ref().take(max_chars).collect::<String>();
-    if value.next().is_some() {
-        format!("{text}…")
-    } else {
-        text
-    }
-}
-
-fn output_strings(entry: &Value, key: &str, max_items: usize) -> anyhow::Result<Vec<String>> {
-    required_array(entry, key)?
-        .iter()
-        .take(max_items)
-        .map(|value| {
-            Ok(truncated(
-                value.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("wiki search entry has a non-string {key:?} value")
-                })?,
-                4096,
-            ))
-        })
-        .collect()
-}
-
-fn search_entry_summary(entry: &Value) -> anyhow::Result<Value> {
-    Ok(json!({
-        "path": truncated(required_string(entry, "path")?, 4096),
-        "title": truncated(required_string(entry, "title")?, 4096),
-        "aliases": output_strings(entry, "aliases", 64)?,
-        "kind": truncated(required_string(entry, "kind")?, 256),
-        "domain": truncated(required_string(entry, "domain")?, 1024),
-        "citations": output_strings(entry, "citations", 256)?,
-        "locators": output_strings(entry, "locators", 256)?,
-        "evidence_ids": output_strings(entry, "evidence_ids", 256)?,
-        "body": truncated(required_string(entry, "body")?, 8192),
-    }))
-}
-
-fn wiki_search_text(root: &Path, query: &str, limit: usize) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        !query.trim().is_empty() && query.len() <= 256,
-        "wiki search query must be 1 to 256 bytes"
-    );
-    anyhow::ensure!(
-        (1..=50).contains(&limit),
-        "wiki search limit must be 1 to 50"
-    );
-    let root = canonical_wiki_root(root)?;
-    let search = load_wiki_search_index(&root)?;
-    let query = query.to_ascii_lowercase();
-    let mut matches = Vec::new();
-    for entry in required_array(&search, "entries")? {
-        if entry.to_string().to_ascii_lowercase().contains(&query) {
-            matches.push(search_entry_summary(entry)?);
-            if matches.len() == limit {
-                break;
-            }
-        }
-    }
-    json_text(json!({ "query": query, "matches": matches }))
-}
-
-fn manifest_page<'a>(manifest: &'a Value, page: &str) -> anyhow::Result<(&'a Value, &'a str)> {
-    for current in required_array(manifest, "pages")? {
-        if current.get("path").and_then(Value::as_str) == Some(page) {
-            return Ok((current, "path"));
-        }
-    }
-    for historical in manifest
-        .get("historical")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-    {
-        if historical.get("archived_path").and_then(Value::as_str) == Some(page) {
-            return Ok((historical, "archived_path"));
-        }
-    }
-    anyhow::bail!("wiki page is not declared by the live manifest")
-}
-
-fn wiki_page_text(root: &Path, page: &str) -> anyhow::Result<String> {
-    let page = safe_wiki_relative_path(page)?;
-    let page = page
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("wiki path is not UTF-8"))?;
-    let (root, _, manifest) = load_wiki_manifest(root)?;
-    let (entry, _) = manifest_page(&manifest, page)?;
-    let expected_sha256 = required_string(entry, "sha256")?;
-    anyhow::ensure!(valid_sha256(expected_sha256), "wiki page digest is invalid");
-    let bytes = read_wiki_file(&root, page, MAX_WIKI_PAGE_BYTES)?;
-    anyhow::ensure!(
-        sha256_hex(&bytes) == expected_sha256,
-        "wiki page changed outside its manifest"
-    );
-    let text = String::from_utf8(bytes)?;
-    Ok(format!(
-        "path: {page}\nstate: {}\nsha256: {expected_sha256}\n\n{text}",
-        required_string(entry, "state")?
-    ))
-}
-
-fn string_set(entry: &Value, key: &str) -> anyhow::Result<BTreeSet<String>> {
-    required_array(entry, key)?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("wiki entry has an invalid {key:?} value"))
-        })
-        .collect()
-}
-
-fn search_entry_for_path<'a>(search: &'a Value, page: &str) -> anyhow::Result<&'a Value> {
-    required_array(search, "entries")?
-        .iter()
-        .find(|entry| entry.get("path").and_then(Value::as_str) == Some(page))
-        .ok_or_else(|| anyhow::anyhow!("wiki page is not present in the search index"))
-}
-
-fn evidence_for_citations(
-    search: &Value,
-    citations: &BTreeSet<String>,
-) -> anyhow::Result<BTreeSet<String>> {
-    let mut evidence = BTreeSet::new();
-    for entry in required_array(search, "entries")? {
-        if !string_set(entry, "citations")?.is_disjoint(citations) {
-            evidence.extend(string_set(entry, "evidence_ids")?);
-        }
-    }
-    Ok(evidence)
-}
-
-fn wiki_evidence_text(root: &Path, evidence_id: &str) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        !evidence_id.is_empty() && evidence_id.len() <= 1024,
-        "evidence ID must be 1 to 1024 bytes"
-    );
-    let root = canonical_wiki_root(root)?;
-    let search = load_wiki_search_index(&root)?;
-    let mut matches = Vec::new();
-    for entry in required_array(&search, "entries")? {
-        if string_set(entry, "evidence_ids")?.contains(evidence_id) {
-            matches.push(json!({
-                "path": required_string(entry, "path")?,
-                "citations": output_strings(entry, "citations", 256)?,
-                "locators": output_strings(entry, "locators", 256)?,
-                "evidence_ids": output_strings(entry, "evidence_ids", 256)?,
-            }));
-        }
-    }
-    anyhow::ensure!(
-        !matches.is_empty(),
-        "evidence ID is not published by this wiki"
-    );
-    json_text(json!({ "evidence_id": evidence_id, "matches": matches }))
-}
-
-fn validate_draft_body(body: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !body.trim().is_empty()
-            && body.len() <= 64 * 1024
-            && body
-                .chars()
-                .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t')),
-        "draft section body is empty, too large, or contains a control character"
-    );
-    anyhow::ensure!(
-        !body.contains("](")
-            && !body.contains("][")
-            && !body.contains("<!--")
-            && !body.lines().any(|line| {
-                let line = line.trim_start();
-                line.starts_with('#') || (line.starts_with('[') && line.contains("]:"))
-            })
-            && !body.as_bytes().windows(2).any(|bytes| {
-                bytes[0] == b'<'
-                    && (bytes[1].is_ascii_alphabetic() || matches!(bytes[1], b'/' | b'!' | b'?'))
-            }),
-        "draft section body contains an uncontrolled heading, link, or HTML"
-    );
-    Ok(())
-}
-
-fn validate_draft_sections(draft: &str, allowed: &BTreeSet<String>) -> anyhow::Result<Vec<String>> {
-    anyhow::ensure!(
-        draft.len() <= MAX_WIKI_DRAFT_BYTES,
-        "draft exceeds its byte limit"
-    );
-    let draft: Value = serde_json::from_str(draft)?;
-    let object = draft
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("draft must be a JSON object"))?;
-    anyhow::ensure!(
-        object.len() == 1 && object.contains_key("sections"),
-        "draft has unknown fields"
-    );
-    let sections = required_array(&draft, "sections")?;
-    anyhow::ensure!(
-        (1..=8).contains(&sections.len()),
-        "draft has an invalid section count"
-    );
-    let mut headings = BTreeSet::new();
-    let mut evidence = BTreeSet::new();
-    for section in sections {
-        let object = section
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("draft section must be a JSON object"))?;
-        anyhow::ensure!(
-            object.len() == 3
-                && object.contains_key("heading")
-                && object.contains_key("evidence_block_ids")
-                && object.contains_key("body"),
-            "draft section has unknown fields"
-        );
-        let heading = required_string(section, "heading")?;
-        anyhow::ensure!(
-            heading.len() <= 200
-                && !heading.chars().any(char::is_control)
-                && !heading.trim_start().starts_with('#')
-                && !heading.eq_ignore_ascii_case("sources")
-                && headings.insert(heading),
-            "draft section heading is invalid or duplicated"
-        );
-        validate_draft_body(required_string(section, "body")?)?;
-        let ids = string_set(section, "evidence_block_ids")?;
-        anyhow::ensure!(
-            !ids.is_empty()
-                && ids.iter().all(|id| allowed.contains(id))
-                && ids.iter().all(|id| evidence.insert(id.clone())),
-            "draft section has unsupported or duplicate evidence block IDs"
-        );
-    }
-    Ok(evidence.into_iter().collect())
-}
-
-fn wiki_validate_draft_text(root: &Path, page: &str, draft: &str) -> anyhow::Result<String> {
-    let page = safe_wiki_relative_path(page)?;
-    let page = page
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("wiki path is not UTF-8"))?;
-    let root = canonical_wiki_root(root)?;
-    let search = load_wiki_search_index(&root)?;
-    let target = search_entry_for_path(&search, page)?;
-    anyhow::ensure!(
-        required_string(target, "kind")? == "article",
-        "draft target is not an article"
-    );
-    let citations = string_set(target, "citations")?;
-    anyhow::ensure!(!citations.is_empty(), "draft target has no citations");
-    let evidence = evidence_for_citations(&search, &citations)?;
-    let evidence_block_ids = validate_draft_sections(draft, &evidence)?;
-    json_text(json!({
-        "valid": true,
-        "path": page,
-        "sections": required_array(&serde_json::from_str::<Value>(draft)?, "sections")?.len(),
-        "evidence_block_ids": evidence_block_ids,
-        "draft_sha256": sha256_hex(draft.as_bytes()),
-    }))
-}
-
-fn wiki_attest_review_text(
-    root: &Path,
-    plan_sha256: &str,
-    capture_ids: &[String],
-    draft: &str,
-) -> anyhow::Result<String> {
-    let (root, manifest_bytes, manifest) = load_wiki_manifest(root)?;
-    anyhow::ensure!(
-        valid_sha256(plan_sha256) && required_string(&manifest, "plan_sha256")? == plan_sha256,
-        "review plan digest does not match the published wiki"
-    );
-    let captures = capture_ids.iter().cloned().collect::<BTreeSet<_>>();
-    anyhow::ensure!(
-        !captures.is_empty() && captures.len() == capture_ids.len(),
-        "review capture IDs must be non-empty and unique"
-    );
-    let active = required_array(&manifest, "sources")?
-        .iter()
-        .map(|source| required_string(source, "citation").map(str::to_owned))
-        .collect::<anyhow::Result<BTreeSet<_>>>()?;
-    anyhow::ensure!(
-        captures.is_subset(&active),
-        "review includes a non-active capture ID"
-    );
-    let search = load_wiki_search_index(&root)?;
-    let evidence = evidence_for_citations(&search, &captures)?;
-    let evidence_block_ids = validate_draft_sections(draft, &evidence)?;
-    json_text(json!({
-        "version": 1,
-        "plan_sha256": plan_sha256,
-        "capture_ids": captures,
-        "article_draft_sha256": sha256_hex(draft.as_bytes()),
-        "evidence_block_ids": evidence_block_ids,
-        "wiki_manifest_sha256": sha256_hex(&manifest_bytes),
-    }))
-}
-
 pub fn serve() -> anyhow::Result<()> {
     serve_graph("graphoxide-out/graph.json")
 }
@@ -1603,111 +1149,98 @@ pub fn serve_graph(graph_path: impl Into<PathBuf>) -> anyhow::Result<()> {
     })
 }
 
+/// Serve stdio MCP with one explicitly bound direct-source service.
+pub fn serve_graph_with_direct_source_service(
+    graph_path: impl Into<PathBuf>,
+    direct_source: Arc<dyn direct_source::DirectSourceService>,
+    https_fetch_enabled: bool,
+    model_egress_enabled: bool,
+) -> anyhow::Result<()> {
+    let graph_path = graph_path.into();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let service = GraphoxideServer::with_default_graph_and_direct_source(
+            graph_path,
+            direct_source,
+            https_fetch_enabled,
+            model_egress_enabled,
+            http::max_server_contexts_from_env(),
+        )
+        .serve(rmcp::transport::stdio())
+        .await?;
+        service.waiting().await?;
+        anyhow::Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn published_wiki_fixture() -> tempfile::TempDir {
-        let temp = tempfile::tempdir().expect("temporary wiki root");
-        let root = temp.path();
-        let page = "---\ntitle: \"Operations overview\"\nkind: \"article\"\ndomain: \"operations\"\n---\n# Operations overview\n\nDefault username is `admin`; default password is `fake-password`.\n";
-        let page_sha256 = sha256_hex(page.as_bytes());
-        fs::create_dir_all(root.join("operations")).expect("wiki page directory");
-        fs::write(root.join("operations/overview.md"), page).expect("wiki page");
-        fs::write(
-            root.join("wiki-manifest.json"),
-            serde_json::to_vec_pretty(&json!({
-                "version": 1,
-                "registry": {
-                    "catalog_id": "test-catalog",
-                    "tree_sha256": "a".repeat(64),
-                    "git_commit": "b".repeat(40),
-                    "origin_id": "test-origin",
-                    "policy": null
-                },
-                "graph_sha256": "c".repeat(64),
-                "plan_sha256": "d".repeat(64),
-                "sources": [{
-                    "citation": "guide#capture-1",
-                    "state": "source-ready",
-                    "pages": ["operations/overview.md"]
-                }],
-                "pages": [{
-                    "path": "operations/overview.md",
-                    "sha256": page_sha256,
-                    "state": "reviewed-ready"
-                }],
-                "historical": []
-            }))
-            .expect("manifest JSON"),
-        )
-        .expect("wiki manifest");
-        fs::write(
-            root.join("search.json"),
-            serde_json::to_vec_pretty(&json!({
-                "version": 1,
-                "entries": [{
-                    "path": "operations/overview.md",
-                    "title": "Operations overview",
-                    "aliases": ["operations"],
-                    "kind": "article",
-                    "domain": "operations",
-                    "citations": ["guide#capture-1"],
-                    "locators": ["guide.md:L4"],
-                    "evidence_ids": ["evidence-1"],
-                    "body": "Default username is admin; default password is fake-password."
-                }]
-            }))
-            .expect("search JSON"),
-        )
-        .expect("search index");
-        temp
+    struct TestDirectSourceService;
+
+    impl direct_source::DirectSourceService for TestDirectSourceService {
+        fn add_sources(
+            &self,
+            _request: direct_source::DirectSourceAddRequest,
+            _model_egress: Option<direct_source::ModelEgressConsent>,
+        ) -> anyhow::Result<direct_source::DirectSourceAddResult> {
+            Ok(direct_source::DirectSourceAddResult {
+                sources: vec![test_direct_source_status()],
+            })
+        }
+
+        fn source_status(&self) -> anyhow::Result<direct_source::DirectSourceStatusResult> {
+            Ok(direct_source::DirectSourceStatusResult {
+                sources: vec![test_direct_source_status()],
+            })
+        }
     }
 
-    #[test]
-    fn published_wiki_tools_are_manifest_bound_and_preserve_knowledge_plane_text() {
-        let temp = published_wiki_fixture();
-        let root = temp.path();
-        let draft = json!({
-            "sections": [{
-                "heading": "Defaults",
-                "evidence_block_ids": ["evidence-1"],
-                "body": "The documented defaults are available for this test system."
-            }]
-        })
-        .to_string();
+    struct ModelEgressService(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
-        assert!(wiki_status_text(root)
-            .expect("wiki status")
-            .contains("source-ready"));
-        assert!(wiki_freshness_text(root)
-            .expect("wiki freshness")
-            .contains("reviewed-ready"));
-        assert!(wiki_search_text(root, "fake-password", 1)
-            .expect("wiki search")
-            .contains("operations/overview.md"));
-        assert!(wiki_page_text(root, "operations/overview.md")
-            .expect("wiki page")
-            .contains("fake-password"));
-        assert!(wiki_evidence_text(root, "evidence-1")
-            .expect("wiki evidence")
-            .contains("guide#capture-1"));
-        assert!(
-            wiki_validate_draft_text(root, "operations/overview.md", &draft)
-                .expect("wiki draft")
-                .contains("\"valid\": true")
-        );
-        assert!(wiki_attest_review_text(
-            root,
-            &"d".repeat(64),
-            &["guide#capture-1".into()],
-            &draft,
-        )
-        .expect("wiki review")
-        .contains("article_draft_sha256"));
-        assert!(wiki_page_text(root, "../outside.md").is_err());
-        fs::write(root.join("operations/overview.md"), "changed").expect("mutate wiki page");
-        assert!(wiki_page_text(root, "operations/overview.md").is_err());
+    impl direct_source::DirectSourceService for ModelEgressService {
+        fn add_sources(
+            &self,
+            _request: direct_source::DirectSourceAddRequest,
+            _model_egress: Option<direct_source::ModelEgressConsent>,
+        ) -> anyhow::Result<direct_source::DirectSourceAddResult> {
+            Ok(direct_source::DirectSourceAddResult { sources: vec![] })
+        }
+
+        fn source_status(&self) -> anyhow::Result<direct_source::DirectSourceStatusResult> {
+            Ok(direct_source::DirectSourceStatusResult { sources: vec![] })
+        }
+
+        fn review_source(
+            &self,
+            _request: direct_source::DirectSourceReviewRequest,
+            _remote_fetch: Option<direct_source::HttpsFetchConsent>,
+            model_egress: Option<direct_source::ModelEgressConsent>,
+        ) -> anyhow::Result<direct_source::DirectSourceReviewResult> {
+            anyhow::ensure!(model_egress.is_some(), "missing model egress consent");
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(direct_source::DirectSourceReviewResult {
+                source: direct_source::DirectSourceLifecycleResult {
+                    source_id: "src:docs".into(),
+                    content_sha256: "a".repeat(64),
+                    bytes: 3,
+                    status: "ai-reviewed".into(),
+                },
+                decision: direct_source::DirectSourceReviewDecision::Approve,
+            })
+        }
+    }
+
+    fn test_direct_source_status() -> direct_source::DirectSourceStatus {
+        direct_source::DirectSourceStatus {
+            source_id: "src:docs".into(),
+            location: direct_source::DirectSourceLocation::Https {
+                url: "https://docs.example.test/reference.md".into(),
+            },
+            content_sha256: "a".repeat(64),
+            bytes: 3,
+            status: "human-confirmed".into(),
+        }
     }
 
     #[test]
@@ -1726,13 +1259,6 @@ mod tests {
             GraphoxideServer::query_graph_tool_attr(),
             GraphoxideServer::get_node_tool_attr(),
             GraphoxideServer::get_neighbors_tool_attr(),
-            GraphoxideServer::wiki_status_tool_attr(),
-            GraphoxideServer::wiki_freshness_tool_attr(),
-            GraphoxideServer::wiki_search_tool_attr(),
-            GraphoxideServer::wiki_get_page_tool_attr(),
-            GraphoxideServer::wiki_get_evidence_tool_attr(),
-            GraphoxideServer::wiki_validate_draft_tool_attr(),
-            GraphoxideServer::wiki_attest_review_tool_attr(),
         ] {
             let annotations = tool.annotations.expect("tool annotations");
             assert_eq!(annotations.read_only_hint, Some(true));
@@ -1742,6 +1268,216 @@ mod tests {
                 .description
                 .is_some_and(|description| description.len() > 60));
         }
+    }
+
+    #[test]
+    fn direct_source_tools_require_a_bound_service_and_explicit_egress_consents() {
+        let disabled = GraphoxideServer::default();
+        assert!(disabled.get_tool("knowledgebase_source_add").is_none());
+        assert!(disabled.get_tool("knowledgebase_source_status").is_none());
+
+        let enabled = GraphoxideServer::with_default_graph_and_direct_source(
+            PathBuf::from("graphoxide-out/graph.json"),
+            Arc::new(TestDirectSourceService),
+            true,
+            true,
+            http::DEFAULT_MAX_CONTEXTS,
+        );
+        let add = enabled
+            .get_tool("knowledgebase_source_add")
+            .expect("bound direct-source add tool");
+        let properties = add
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("direct add properties");
+        assert!(properties.contains_key("inputs"));
+        assert!(properties.contains_key("allow_https_fetch"));
+        assert!(properties.contains_key("allow_model_egress"));
+        for forbidden in [
+            "path",
+            "physical_path",
+            "raw_body",
+            "capture_id",
+            "source_store",
+        ] {
+            assert!(
+                !properties.contains_key(forbidden),
+                "direct add leaked {forbidden}"
+            );
+        }
+        assert!(enabled.get_tool("knowledgebase_source_status").is_some());
+
+        let request = DirectSourceAddParams {
+            inputs: vec![direct_source::DirectSourceInput::Https {
+                url: "https://docs.example.test/reference.md".into(),
+            }],
+            allow_https_fetch: false,
+            allow_model_egress: true,
+        };
+        assert!(enabled
+            .knowledgebase_source_add(Parameters(request))
+            .contains("explicit per-call fetch consent"));
+        assert!(enabled
+            .knowledgebase_source_add(Parameters(DirectSourceAddParams {
+                inputs: vec![direct_source::DirectSourceInput::BoundPath {
+                    binding: "raw-root-01".into(),
+                    relative_path: "reference.md".into(),
+                }],
+                allow_https_fetch: false,
+                allow_model_egress: false,
+            }))
+            .contains("explicit model egress acknowledgement"));
+        assert!(enabled.knowledgebase_source_status().contains("src:docs"));
+
+        let network_disabled = GraphoxideServer::with_default_graph_and_direct_source(
+            PathBuf::from("graphoxide-out/graph.json"),
+            Arc::new(TestDirectSourceService),
+            false,
+            true,
+            http::DEFAULT_MAX_CONTEXTS,
+        );
+        assert!(network_disabled
+            .knowledgebase_source_add(Parameters(DirectSourceAddParams {
+                inputs: vec![direct_source::DirectSourceInput::Https {
+                    url: "https://docs.example.test/reference.md".into(),
+                }],
+                allow_https_fetch: true,
+                allow_model_egress: true,
+            }))
+            .contains("not authorized to fetch HTTPS"));
+    }
+
+    #[test]
+    fn hard_cutover_exposes_only_bound_direct_source_lifecycle_tools() {
+        let retired = [
+            "wiki_status",
+            "wiki_freshness",
+            "wiki_get_page",
+            "wiki_get_claim",
+            "wiki_get_evidence",
+            "wiki_model_status",
+            "wiki_routing",
+            "wiki_source_status",
+            "wiki_research_status",
+            "wiki_research_next",
+            "wiki_source_admit",
+            "wiki_research_submit",
+            "wiki_research_fetch",
+            "wiki_research_extract",
+            "wiki_research_material",
+            "wiki_research_evidence",
+            "wiki_research_assess",
+            "wiki_research_synthesize",
+            "wiki_research_proposal_status",
+            "wiki_research_digest",
+            "wiki_research_review",
+            "wiki_research_promote",
+            "wiki_research_enrich_auto",
+            "wiki_research_enrich_next",
+            "wiki_research_enrich_artifact",
+            "wiki_research_enrich_submit",
+            "wiki_research_enrich_material",
+            "wiki_neighbors",
+            "wiki_search",
+        ];
+        let lifecycle = [
+            "knowledgebase_source_add",
+            "knowledgebase_source_status",
+            "knowledgebase_source_refresh",
+            "knowledgebase_source_review",
+            "knowledgebase_source_retire",
+        ];
+
+        let disabled = GraphoxideServer::default();
+        for name in retired {
+            assert!(
+                disabled.get_tool(name).is_none(),
+                "retired tool {name} remains discoverable"
+            );
+        }
+        for name in lifecycle {
+            assert!(
+                disabled.get_tool(name).is_none(),
+                "unbound direct tool {name} is discoverable"
+            );
+        }
+
+        let direct = GraphoxideServer::with_default_graph_and_direct_source(
+            PathBuf::from("graphoxide-out/graph.json"),
+            Arc::new(TestDirectSourceService),
+            true,
+            true,
+            http::DEFAULT_MAX_CONTEXTS,
+        );
+        for name in retired {
+            assert!(
+                direct.get_tool(name).is_none(),
+                "retired tool {name} remains registered"
+            );
+        }
+        for name in lifecycle {
+            assert!(
+                direct.get_tool(name).is_some(),
+                "bound lifecycle tool {name} is absent"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_source_bridge_requires_server_and_call_model_egress() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = GraphoxideServer::with_default_graph_and_direct_source(
+            PathBuf::from("graphoxide-out/graph.json"),
+            Arc::new(ModelEgressService(calls.clone())),
+            true,
+            false,
+            http::DEFAULT_MAX_CONTEXTS,
+        );
+        let error = server
+            .direct_source
+            .as_ref()
+            .expect("direct source bridge")
+            .review_source(direct_source::DirectSourceReviewRequest::Ai {
+                source_id: "src:docs".into(),
+                allow_remote_fetch: false,
+                allow_model_egress: true,
+            })
+            .expect_err("model egress server capability defaults false");
+        assert!(error.to_string().contains("model egress"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let server = GraphoxideServer::with_default_graph_and_direct_source(
+            PathBuf::from("graphoxide-out/graph.json"),
+            Arc::new(ModelEgressService(calls.clone())),
+            true,
+            true,
+            http::DEFAULT_MAX_CONTEXTS,
+        );
+        let error = server
+            .direct_source
+            .as_ref()
+            .expect("direct source bridge")
+            .review_source(direct_source::DirectSourceReviewRequest::Ai {
+                source_id: "src:docs".into(),
+                allow_remote_fetch: false,
+                allow_model_egress: false,
+            })
+            .expect_err("AI model egress still needs request acknowledgement");
+        assert!(error.to_string().contains("model egress"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        server
+            .direct_source
+            .as_ref()
+            .expect("direct source bridge")
+            .review_source(direct_source::DirectSourceReviewRequest::Ai {
+                source_id: "src:docs".into(),
+                allow_remote_fetch: false,
+                allow_model_egress: true,
+            })
+            .expect("both model egress authorizations dispatch once");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

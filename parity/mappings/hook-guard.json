@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_nudges"
+          "id": "upstream_hook_guard::test_search_nudges"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -137,7 +137,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -147,7 +147,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -157,7 +157,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -167,7 +167,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -177,7 +177,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -187,7 +187,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent"
+          "id": "upstream_hook_guard::test_search_silent"
         }
       ]
     },
@@ -197,7 +197,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_silent_without_graph"
+          "id": "upstream_hook_guard::test_search_silent_without_graph"
         }
       ]
     },
@@ -207,7 +207,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_missing_command_key"
+          "id": "upstream_hook_guard::test_search_missing_command_key"
         }
       ]
     },
@@ -217,7 +217,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_non_string_command_is_silent"
+          "id": "upstream_hook_guard::test_search_non_string_command_is_silent"
         }
       ]
     },
@@ -227,7 +227,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_top_level_command_without_tool_input"
+          "id": "upstream_hook_guard::test_search_top_level_command_without_tool_input"
         }
       ]
     },
@@ -237,7 +237,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_non_dict_tool_input_is_silent"
+          "id": "upstream_hook_guard::test_search_non_dict_tool_input_is_silent"
         }
       ]
     },
@@ -247,7 +247,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -257,7 +257,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -267,7 +267,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -277,7 +277,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -287,7 +287,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -297,7 +297,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -307,7 +307,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -317,7 +317,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -327,7 +327,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -337,7 +337,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -347,7 +347,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges"
+          "id": "upstream_hook_guard::test_read_nudges"
         }
       ]
     },
@@ -357,7 +357,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -367,7 +367,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -377,7 +377,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -387,7 +387,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -397,7 +397,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -407,7 +407,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -417,7 +417,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -427,7 +427,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -437,7 +437,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -447,7 +447,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -457,7 +457,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -467,7 +467,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent"
+          "id": "upstream_hook_guard::test_read_silent"
         }
       ]
     },
@@ -477,7 +477,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_silent_without_graph"
+          "id": "upstream_hook_guard::test_read_silent_without_graph"
         }
       ]
     },
@@ -487,7 +487,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_non_dict_tool_input_is_silent"
+          "id": "upstream_hook_guard::test_read_non_dict_tool_input_is_silent"
         }
       ]
     },
@@ -497,7 +497,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_respects_custom_output_dir_name"
+          "id": "upstream_hook_guard::test_read_respects_custom_output_dir_name"
         }
       ]
     },
@@ -507,7 +507,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudges_source_outside_custom_output_dir"
+          "id": "upstream_hook_guard::test_read_nudges_source_outside_custom_output_dir"
         }
       ]
     },
@@ -517,7 +517,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -527,7 +527,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -537,7 +537,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -547,7 +547,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -557,7 +557,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -567,7 +567,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -577,7 +577,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -587,7 +587,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_fail_open_on_bad_stdin"
+          "id": "upstream_hook_guard::test_fail_open_on_bad_stdin"
         }
       ]
     },
@@ -597,7 +597,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_search_out_path_error_is_swallowed"
+          "id": "upstream_hook_guard::test_search_out_path_error_is_swallowed"
         }
       ]
     },
@@ -607,7 +607,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_gemini_allow_with_nudge"
+          "id": "upstream_hook_guard::test_gemini_allow_with_nudge"
         }
       ]
     },
@@ -617,7 +617,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_gemini_allow_without_graph"
+          "id": "upstream_hook_guard::test_gemini_allow_without_graph"
         }
       ]
     },
@@ -627,7 +627,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_gemini_always_allows_even_when_check_throws"
+          "id": "upstream_hook_guard::test_gemini_always_allows_even_when_check_throws"
         }
       ]
     },
@@ -637,7 +637,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_dispatch_missing_mode_exits_zero_silent"
+          "id": "upstream_hook_guard::test_dispatch_missing_mode_exits_zero_silent"
         }
       ]
     },
@@ -647,7 +647,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_dispatch_unknown_mode_exits_zero_silent"
+          "id": "upstream_hook_guard::test_dispatch_unknown_mode_exits_zero_silent"
         }
       ]
     },
@@ -657,7 +657,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_dispatch_always_exits_zero"
+          "id": "upstream_hook_guard::test_dispatch_always_exits_zero"
         }
       ]
     },
@@ -667,7 +667,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_dispatch_always_exits_zero"
+          "id": "upstream_hook_guard::test_dispatch_always_exits_zero"
         }
       ]
     },
@@ -677,7 +677,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_dispatch_always_exits_zero"
+          "id": "upstream_hook_guard::test_dispatch_always_exits_zero"
         }
       ]
     },
@@ -687,7 +687,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_read_nudge_em_dash_survives_utf8"
+          "id": "upstream_hook_guard::test_read_nudge_em_dash_survives_utf8"
         }
       ]
     }

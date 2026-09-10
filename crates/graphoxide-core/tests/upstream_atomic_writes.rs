@@ -3,8 +3,8 @@
 use graphoxide_core::{
     permission_fallback, write_graph_atomic, write_graph_atomic_strict,
     write_graph_atomic_strict_with_replacer, write_json_atomic, write_json_atomic_strict,
-    write_json_atomic_strict_with_replacer, write_text_atomic, write_text_atomic_with_replacer,
-    KnowledgeGraph, Node,
+    write_json_atomic_strict_with_replacer, write_text_atomic, write_text_atomic_strict,
+    write_text_atomic_with_replacer, KnowledgeGraph, Node,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, fs};
@@ -292,6 +292,20 @@ fn strict_json_rejects_a_symlink_without_touching_its_external_target() {
     assert_eq!(fs::read(&external).unwrap(), b"external manifest\n");
     assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     assert_eq!(fs::read_dir(&managed).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_text_rejects_a_symlink_without_touching_its_external_target() {
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("target.md");
+    let link = temporary.path().join("link.md");
+    fs::write(&target, "original").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let error = write_text_atomic_strict(&link, "replacement").unwrap_err();
+    assert!(error.to_string().contains("symlinked"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "original");
 }
 
 #[test]

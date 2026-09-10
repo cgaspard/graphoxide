@@ -4,37 +4,83 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(root, '..');
-const html = await readFile(join(root, 'index.html'), 'utf8');
+const pageNames = ['index.html', 'knowledgebase.html'];
+const pages = await Promise.all(pageNames.map(async (name) => [name, await readFile(join(root, name), 'utf8')]));
 const errors = [];
 
-const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
-for (const match of html.matchAll(/\bhref="#([^"]+)"/g)) {
-  if (!ids.has(match[1])) errors.push(`Missing in-page target: #${match[1]}`);
-}
-
-const localAssets = [...html.matchAll(/\b(?:src|href)="((?:assets\/|styles\.css|app\.js)[^"]*)"/g)]
-  .map((match) => match[1]);
-for (const asset of localAssets) {
-  try {
-    await access(join(root, asset));
-  } catch {
-    errors.push(`Missing local asset: ${asset}`);
+for (const [name, html] of pages) {
+  const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  for (const match of html.matchAll(/\bhref="#([^"]+)"/g)) {
+    if (!ids.has(match[1])) errors.push(`${name}: missing in-page target #${match[1]}`);
+  }
+  const localAssets = [...html.matchAll(/\b(?:src|href)="((?:assets\/|styles\.css|app\.js)[^"]*)"/g)]
+    .map((match) => match[1]);
+  for (const asset of localAssets) {
+    try {
+      await access(join(root, asset));
+    } catch {
+      errors.push(`${name}: missing local asset ${asset}`);
+    }
+  }
+  const localPages = [...html.matchAll(/\bhref="([^"#?]+\.html)"/g)].map((match) => match[1]);
+  for (const page of localPages) {
+    try {
+      await access(join(root, page));
+    } catch {
+      errors.push(`${name}: missing local page ${page}`);
+    }
+  }
+  for (const tag of html.matchAll(/<(?:script|link|img)\b[^>]*(?:src|href)="(https?:\/\/[^"\s]+)"[^>]*>/g)) {
+    errors.push(`${name}: remote page dependency ${tag[1]}`);
+  }
+  for (const img of html.matchAll(/<img\b[^>]*>/g)) {
+    if (!/\balt="[^"]*"/.test(img[0])) errors.push(`${name}: image without alt text ${img[0]}`);
   }
 }
 
-for (const tag of html.matchAll(/<(?:script|link|img)\b[^>]*(?:src|href)="(https?:\/\/[^"\s]+)"[^>]*>/g)) {
-  errors.push(`Remote page dependency: ${tag[1]}`);
+const indexHtml = pages[0][1];
+const knowledgebaseHtml = pages[1][1];
+const knowledgebaseDoc = await readFile(join(repositoryRoot, 'docs/knowledgebase.md'), 'utf8');
+if (!indexHtml.includes('the original Graphify project')) errors.push('Missing top Graphify attribution');
+if (!indexHtml.includes('not affiliated with Graphify Labs')) errors.push('Missing independence statement');
+if (!indexHtml.includes('Licensed under Apache-2.0; portions originally MIT.')) errors.push('Missing license attribution');
+for (const phrase of [
+  'graphoxide wiki init',
+  'graphoxide wiki source add',
+  'graphoxide wiki source refresh',
+  'graphoxide wiki source review',
+  'graphoxide wiki source status',
+  'graphoxide wiki source retire',
+  'graphoxide wiki live',
+  '--allow-wiki-network',
+  '--allow-wiki-model-egress',
+]) {
+  if (!knowledgebaseHtml.includes(phrase)) errors.push(`Missing direct knowledgebase workflow: ${phrase}`);
 }
-
-for (const img of html.matchAll(/<img\b[^>]*>/g)) {
-  if (!/\balt="[^"]*"/.test(img[0])) errors.push(`Image without alt text: ${img[0]}`);
+for (const phrase of [
+  'graphoxide wiki init',
+  'graphoxide wiki source add',
+  'graphoxide wiki source refresh',
+  'graphoxide wiki source review',
+  'graphoxide wiki source status',
+  'graphoxide wiki source retire',
+  'graphoxide wiki live',
+  'pointer-only',
+  'transiently',
+]) {
+  if (!knowledgebaseDoc.includes(phrase)) errors.push(`Missing direct knowledgebase documentation: ${phrase}`);
 }
-
-if (!html.includes('the original Graphify project')) errors.push('Missing top Graphify attribution');
-if (!html.includes('not affiliated with Graphify Labs')) errors.push('Missing independence statement');
-if (!html.includes('Licensed under Apache-2.0; portions originally MIT.')) errors.push('Missing license attribution');
+for (const [name, prose] of [
+  ['website/knowledgebase.html', knowledgebaseHtml],
+  ['docs/knowledgebase.md', knowledgebaseDoc],
+  ['README.md', await readFile(join(repositoryRoot, 'README.md'), 'utf8')],
+]) {
+  for (const phrase of ['Knowledgebase v2', 'technical-v2', 'source-store', 'wiki source sync', 'wiki plan', 'wiki draft']) {
+    if (prose.includes(phrase)) errors.push(`${name}: retired knowledgebase phrase ${phrase}`);
+  }
+}
 const publishedProse = [
-  ['website/index.html', html],
+  ...pages.map(([name, html]) => [`website/${name}`, html]),
   ['README.md', await readFile(join(repositoryRoot, 'README.md'), 'utf8')],
   ['HANDOFF.md', await readFile(join(repositoryRoot, 'HANDOFF.md'), 'utf8')],
   ['BENCHMARKS.md', await readFile(join(repositoryRoot, 'BENCHMARKS.md'), 'utf8')],
@@ -82,7 +128,7 @@ for (const [name, prose] of publishedProse) {
     if (pattern.test(prose)) errors.push(`Unsupported performance claim in ${name}: ${pattern}`);
   }
 }
-if (!html.includes('prefers-reduced-motion')) {
+if (!indexHtml.includes('prefers-reduced-motion')) {
   const css = await readFile(join(root, 'styles.css'), 'utf8');
   if (!css.includes('prefers-reduced-motion')) errors.push('Missing reduced-motion styles');
 }
@@ -91,5 +137,5 @@ if (errors.length) {
   console.error(errors.map((error) => `- ${error}`).join('\n'));
   process.exitCode = 1;
 } else {
-  console.log(`Website validation passed (${ids.size} anchors, ${localAssets.length} local assets).`);
+  console.log(`Website validation passed (${pages.length} pages).`);
 }

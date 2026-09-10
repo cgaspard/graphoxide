@@ -1,8 +1,14 @@
 use flate2::{write::ZlibEncoder, Compression};
 use graphoxide_core::{sanitize_metadata_string, Edge, Extraction, Node};
-use graphoxide_extract::extract;
+use graphoxide_extract::{extract, pdf_embedded_attachment};
 use serde_json::Value;
-use std::{collections::BTreeMap, fs, io::Write as _, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{Cursor, Write as _},
+    path::Path,
+};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 const MIB: usize = 1024 * 1024;
 const MAX_SERIALIZED_FACT_BYTES: usize = MIB;
@@ -82,6 +88,167 @@ fn assert_no_payload(extraction: &Extraction, payload: &str) {
         !serialized.contains(payload),
         "unsupported payload {payload:?} leaked into graph facts"
     );
+}
+
+fn encrypted_pdf(user_password: &str, payload: &str) -> Vec<u8> {
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(payload.as_bytes()), b"")],
+        b"",
+        b"",
+        vec![],
+    );
+    encrypt_pdf(source, "fixture-owner-password", user_password)
+}
+
+fn encrypt_pdf(source: Vec<u8>, owner_password: &str, user_password: &str) -> Vec<u8> {
+    let mut document = lopdf::Document::load_mem(&source).expect("load PDF before encryption");
+    document.trailer.set(
+        "ID",
+        lopdf::Object::Array(vec![
+            lopdf::Object::String(vec![1; 16], lopdf::StringFormat::Hexadecimal),
+            lopdf::Object::String(vec![2; 16], lopdf::StringFormat::Hexadecimal),
+        ]),
+    );
+    let encryption = lopdf::EncryptionVersion::V2 {
+        document: &document,
+        owner_password,
+        user_password,
+        key_length: 128,
+        permissions: lopdf::Permissions::all(),
+    };
+    let encryption = lopdf::EncryptionState::try_from(encryption).expect("build PDF encryption");
+    document.encrypt(&encryption).expect("encrypt PDF fixture");
+    let mut output = Vec::new();
+    document
+        .save_to(&mut output)
+        .expect("serialize encrypted PDF fixture");
+    output
+}
+
+fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for (path, bytes) in entries {
+        writer.start_file(path, options).expect("start ZIP member");
+        writer.write_all(bytes).expect("write ZIP member");
+    }
+    writer.finish().expect("finish ZIP fixture").into_inner()
+}
+
+fn encrypted_pdf_with_attachment(name: &str, bytes: &[u8]) -> Vec<u8> {
+    let encoded = deflate(bytes);
+    encrypt_pdf(
+        pdf_with_attachment(
+            name,
+            stream_body(
+                &encoded,
+                format!(
+                    "/Type /EmbeddedFile /Filter /FlateDecode /Params << /Size {} >>",
+                    bytes.len()
+                )
+                .as_bytes(),
+            ),
+        ),
+        "fixture-owner-password",
+        "",
+    )
+}
+
+fn pdf_with_attachment(name: &str, attachment_object: Vec<u8>) -> Vec<u8> {
+    let file_spec =
+        format!("<< /Type /Filespec /F ({name}) /UF ({name}) /EF << /F 6 0 R >> >>").into_bytes();
+    let catalog = format!("/Names << /EmbeddedFiles << /Names [({name}) 7 0 R] >> >>");
+    one_page_pdf(
+        vec![stream_body(&literal_text_content(b"page text"), b"")],
+        catalog.as_bytes(),
+        b"",
+        vec![(6, attachment_object), (7, file_spec)],
+    )
+}
+
+fn encrypted_pdf_with_duplicate_attachment_names(name: &str) -> Vec<u8> {
+    let first = stream_body(b"first payload", b"/Type /EmbeddedFile");
+    let second = stream_body(b"second payload", b"/Type /EmbeddedFile");
+    let first_spec =
+        format!("<< /Type /Filespec /F ({name}) /UF ({name}) /EF << /F 6 0 R >> >>").into_bytes();
+    let second_spec =
+        format!("<< /Type /Filespec /F ({name}) /UF ({name}) /EF << /F 8 0 R >> >>").into_bytes();
+    let catalog =
+        format!("/Names << /EmbeddedFiles << /Names [({name}) 7 0 R ({name}) 9 0 R] >> >>");
+    encrypt_pdf(
+        one_page_pdf(
+            vec![stream_body(&literal_text_content(b"page text"), b"")],
+            catalog.as_bytes(),
+            b"",
+            vec![(6, first), (7, first_spec), (8, second), (9, second_spec)],
+        ),
+        "fixture-owner-password",
+        "",
+    )
+}
+
+fn encrypted_pdf_with_attachment_count(count: usize) -> Vec<u8> {
+    let mut names = b"/Names << /EmbeddedFiles << /Names [".to_vec();
+    let mut objects = Vec::new();
+    for index in 0..count {
+        let index = u32::try_from(index).expect("attachment index");
+        let stream_id = 6 + index * 2;
+        let filespec_id = stream_id + 1;
+        write!(&mut names, " (file-{index:03}.txt) {filespec_id} 0 R")
+            .expect("write attachment name entry");
+        objects.push((
+            stream_id,
+            stream_body(b"", b"/Type /EmbeddedFile /Params << /Size 0 >>"),
+        ));
+        objects.push((
+            filespec_id,
+            format!("<< /Type /Filespec /F (file-{index:03}.txt) /EF << /F {stream_id} 0 R >> >>")
+                .into_bytes(),
+        ));
+    }
+    names.extend_from_slice(b" ] >> >>");
+    encrypt_pdf(
+        one_page_pdf(
+            vec![stream_body(&literal_text_content(b"page text"), b"")],
+            &names,
+            b"",
+            objects,
+        ),
+        "fixture-owner-password",
+        "",
+    )
+}
+
+fn encrypted_pdf_with_deep_attachment_tree(depth: usize) -> Vec<u8> {
+    assert!(depth > 0);
+    let mut objects = Vec::new();
+    for index in 0..depth {
+        let id = 6 + u32::try_from(index).expect("name-tree depth");
+        let body = if index + 1 == depth {
+            b"<< /Names [(deep.txt) 101 0 R] >>".to_vec()
+        } else {
+            format!("<< /Kids [{} 0 R] >>", id + 1).into_bytes()
+        };
+        objects.push((id, body));
+    }
+    objects.push((
+        100,
+        stream_body(b"deep", b"/Type /EmbeddedFile /Params << /Size 4 >>"),
+    ));
+    objects.push((
+        101,
+        b"<< /Type /Filespec /F (deep.txt) /EF << /F 100 0 R >> >>".to_vec(),
+    ));
+    encrypt_pdf(
+        one_page_pdf(
+            vec![stream_body(&literal_text_content(b"page text"), b"")],
+            b"/Names << /EmbeddedFiles 6 0 R >>",
+            b"",
+            objects,
+        ),
+        "fixture-owner-password",
+        "",
+    )
 }
 
 fn render_classic(objects: Vec<PdfObject>, trailer_extra: &[u8]) -> Vec<u8> {
@@ -217,9 +384,17 @@ fn one_page_pdf(
 }
 
 fn multi_page_pdf(contents: &[Vec<u8>]) -> Vec<u8> {
+    let streams = contents
+        .iter()
+        .map(|content| stream_body(content, b""))
+        .collect::<Vec<_>>();
+    multi_page_pdf_with_streams(&streams)
+}
+
+fn multi_page_pdf_with_streams(streams: &[Vec<u8>]) -> Vec<u8> {
     let font_id = 3_u32
         .checked_add(
-            u32::try_from(contents.len())
+            u32::try_from(streams.len())
                 .expect("page count")
                 .checked_mul(2)
                 .expect("page object IDs"),
@@ -227,7 +402,7 @@ fn multi_page_pdf(contents: &[Vec<u8>]) -> Vec<u8> {
         .expect("font object ID");
     let mut kids = b"[".to_vec();
     let mut objects = vec![(1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec())];
-    for (index, content) in contents.iter().enumerate() {
+    for (index, stream) in streams.iter().enumerate() {
         let index = u32::try_from(index).expect("page index");
         let page_id = 3 + index * 2;
         let content_id = page_id + 1;
@@ -239,10 +414,10 @@ fn multi_page_pdf(contents: &[Vec<u8>]) -> Vec<u8> {
             )
             .into_bytes(),
         ));
-        objects.push((content_id, stream_body(content, b"")));
+        objects.push((content_id, stream.clone()));
     }
     kids.extend_from_slice(b" ]");
-    let mut pages = format!("<< /Type /Pages /Count {} /Kids ", contents.len()).into_bytes();
+    let mut pages = format!("<< /Type /Pages /Count {} /Kids ", streams.len()).into_bytes();
     pages.extend_from_slice(&kids);
     pages.extend_from_slice(b" >>");
     objects.push((2, pages));
@@ -607,16 +782,6 @@ fn encrypted_incremental_xref_stream_and_object_stream_forms_fail_closed() {
         "ESCAPED_SECRET",
     );
 
-    for (name, trailer) in [
-        ("incremental.pdf", b"/Prev 0".as_slice()),
-        ("escaped-incremental.pdf", b"/Pr#65v 0".as_slice()),
-    ] {
-        assert_rejected(
-            name,
-            &one_page_pdf(vec![content.clone()], b"", trailer, vec![]),
-            "pdf_incremental_unsupported",
-        );
-    }
     // An oversized fixed-width field in a cross-reference stream is a decode
     // bomb and must be rejected (it no longer maps to "unsupported xref").
     let mut xref_stream = b"%PDF-1.7\n".to_vec();
@@ -642,10 +807,729 @@ fn encrypted_incremental_xref_stream_and_object_stream_forms_fail_closed() {
     );
 }
 
-// Incremental-update detection is structural (trailer/xref-stream `/Prev`
-// and duplicate `startxref`/`%%EOF` markers), never the name-lexing
-// blacklist: standard pages-tree `/Prev`/`/Next` sibling references and
-// plain `/URI` link annotations must not reject their documents (issue #131).
+#[test]
+fn incremental_classic_xref_replaces_page_content_with_latest_revision() {
+    let mut pdf = one_page_pdf(
+        vec![stream_body(&literal_text_content(b"old revision"), b"")],
+        b"",
+        b"",
+        vec![],
+    );
+    let previous_xref = pdf
+        .windows(b"startxref".len())
+        .rposition(|window| window == b"startxref")
+        .and_then(|position| {
+            let start = position + b"startxref\n".len();
+            std::str::from_utf8(&pdf[start..])
+                .ok()?
+                .lines()
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .expect("base cross-reference offset");
+    let replacement_offset = pdf.len();
+    pdf.extend_from_slice(b"4 0 obj\n");
+    pdf.extend_from_slice(&stream_body(&literal_text_content(b"latest revision"), b""));
+    pdf.extend_from_slice(b"\nendobj\n");
+    let xref_offset = pdf.len();
+    write!(
+        &mut pdf,
+        "xref\n4 1\n{replacement_offset:010} 00000 n \ntrailer\n<< /Size 6 /Root 1 0 R /Prev {previous_xref} >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    )
+    .expect("append incremental revision");
+
+    let extraction = extract_source("incremental-classic.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete")),
+        "{extraction:#?}"
+    );
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("latest revision"))
+    );
+}
+
+#[test]
+fn empty_password_encrypted_pdf_extracts_page_text() {
+    let extraction = extract_source(
+        "readable-encrypted.pdf",
+        &encrypted_pdf("", "Readable encrypted PDF"),
+    );
+    let pages = pdf_pages(&extraction);
+    assert_eq!(pages.len(), 1, "{extraction:#?}");
+
+    assert_eq!(
+        pages[0].extra.get("text"),
+        Some(&Value::from("Readable encrypted PDF"))
+    );
+    assert_eq!(
+        pages[0].extra.get("media_box_width"),
+        Some(&Value::from(612))
+    );
+    assert_eq!(
+        pages[0].extra.get("media_box_height"),
+        Some(&Value::from(792))
+    );
+}
+
+#[test]
+fn password_protected_pdf_stays_rejected_without_payload() {
+    let payload = "PASSWORD_PROTECTED_PAYLOAD";
+    let extraction = assert_rejected(
+        "password-protected.pdf",
+        &encrypted_pdf("required-password", payload),
+        "pdf_encrypted",
+    );
+
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn empty_owner_password_does_not_bypass_required_user_password() {
+    let payload = "EMPTY_OWNER_MUST_NOT_BYPASS_USER_PASSWORD";
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(payload.as_bytes()), b"")],
+        b"",
+        b"",
+        vec![],
+    );
+    let extraction = assert_rejected(
+        "empty-owner-password.pdf",
+        &encrypt_pdf(source, "", "required-password"),
+        "pdf_encrypted",
+    );
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn encrypted_embedded_archive_is_routed_through_native_container_dispatch() {
+    let archive = zip_bytes(&[("nested/spec.json", br#"{"kind":"fixture"}"#)]);
+    let extraction = extract_source(
+        "encrypted-attachment.pdf",
+        &encrypted_pdf_with_attachment("attachments.zip", &archive),
+    );
+
+    let root = pdf_document(&extraction);
+    assert_eq!(
+        root.extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert!(
+        root.extra
+            .get("ignored_pdf_features")
+            .and_then(Value::as_str)
+            .is_none_or(|features| !features
+                .split(',')
+                .any(|feature| feature == "embedded_files")),
+        "processed attachments must not remain an ignored feature: {extraction:#?}"
+    );
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+
+    let attachment = extraction
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "attachments.zip"
+                && node.extra.get("member_kind").and_then(Value::as_str) == Some("pdf_attachment")
+        })
+        .expect("PDF attachment partition");
+    assert_eq!(
+        attachment.extra.get("dispatch_status"),
+        Some(&Value::from("processed"))
+    );
+    assert_eq!(
+        attachment.extra.get("compressed_bytes"),
+        Some(&Value::from(
+            u64::try_from(deflate(&archive).len()).expect("encoded attachment size")
+        ))
+    );
+    assert_eq!(
+        attachment.extra.get("declared_uncompressed_bytes"),
+        Some(&Value::from(
+            u64::try_from(archive.len()).expect("decoded attachment size")
+        ))
+    );
+    assert!(
+        extraction.nodes.iter().any(|node| {
+            node.label == "nested/spec.json"
+                && node.extra.get("type").and_then(Value::as_str) == Some("container_member")
+                && node.source_file.ends_with("!/attachments.zip")
+        }),
+        "native archive member partition: {extraction:#?}"
+    );
+    assert_no_payload(&extraction, "PK\u{3}\u{4}");
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn exact_embedded_attachment_bytes_are_available_for_locator_resolution() {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    writer
+        .start_file("nested/spec.json", stored)
+        .expect("start nested attachment member");
+    writer
+        .write_all(br#"{"kind":"fixture"}"#)
+        .expect("write nested attachment member");
+    writer
+        .start_file("padding.bin", stored)
+        .expect("start attachment padding member");
+    let mut state = 0x5eed_1234_u32;
+    let padding = (0..(128 * 1024))
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state.to_be_bytes()[0]
+        })
+        .collect::<Vec<_>>();
+    writer
+        .write_all(&padding)
+        .expect("write attachment padding member");
+    let archive = writer.finish().expect("finish attachment").into_inner();
+    assert!(archive.len() > 64 * 1024);
+    let source = encrypted_pdf_with_attachment("attachments.zip", &archive);
+
+    assert_eq!(
+        pdf_embedded_attachment(&source, "attachments.zip", 4 * MIB)
+            .expect("resolve the exact admitted PDF attachment"),
+        archive
+    );
+}
+
+#[test]
+fn duplicate_embedded_attachment_name_retains_the_unreadable_blocker() {
+    let source = encrypted_pdf_with_duplicate_attachment_names("duplicate.txt");
+    let extraction = extract_source("duplicate-attachments.pdf", &source);
+    assert!(extraction.nodes.iter().any(|node| {
+        node.label == "attachment-000002"
+            && node.extra.get("blocker").and_then(Value::as_str)
+                == Some("pdf-attachment-unreadable")
+    }));
+
+    assert_eq!(
+        pdf_embedded_attachment(&source, "attachment-000002", 4 * MIB)
+            .expect_err("a duplicate attachment is not admitted as source material")
+            .code(),
+        "pdf-attachment-unreadable"
+    );
+}
+
+#[test]
+fn embedded_attachment_resolver_preserves_count_and_depth_blockers() {
+    assert_eq!(
+        pdf_embedded_attachment(
+            &encrypted_pdf_with_attachment_count(65),
+            "not-admitted.txt",
+            4 * MIB,
+        )
+        .expect_err("attachment count overflow stays explicit")
+        .code(),
+        "pdf-attachment-count-limit"
+    );
+    assert_eq!(
+        pdf_embedded_attachment(
+            &encrypted_pdf_with_deep_attachment_tree(10),
+            "not-admitted.txt",
+            4 * MIB,
+        )
+        .expect_err("attachment tree depth overflow stays explicit")
+        .code(),
+        "pdf-attachment-depth-limit"
+    );
+}
+
+#[test]
+fn oversized_encrypted_attachment_keeps_page_and_typed_blocker_partition() {
+    let attachment = stream_body(b"small", b"/Type /EmbeddedFile /Params << /Size 5242880 >>");
+    let source = encrypt_pdf(
+        pdf_with_attachment("oversized.zip", attachment),
+        "fixture-owner-password",
+        "",
+    );
+    let extraction = extract_source("oversized-attachment.pdf", &source);
+
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    let root = pdf_document(&extraction);
+    assert_eq!(
+        root.extra.get("parse_status"),
+        Some(&Value::from("partial"))
+    );
+    assert!(!root.extra.contains_key("ignored_pdf_features"));
+    let attachment = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "oversized.zip")
+        .expect("oversized attachment partition");
+    assert_eq!(
+        attachment.extra.get("blocker"),
+        Some(&Value::from("pdf-attachment-byte-limit"))
+    );
+    assert_eq!(
+        attachment.extra.get("retry_route"),
+        Some(&Value::from("raise-pdf-attachment-byte-limit"))
+    );
+}
+
+#[test]
+fn unreadable_encrypted_attachment_keeps_page_and_typed_blocker_partition() {
+    let source = encrypt_pdf(
+        pdf_with_attachment("broken.zip", b"<< /Type /EmbeddedFile >>".to_vec()),
+        "fixture-owner-password",
+        "",
+    );
+    let extraction = extract_source("broken-attachment.pdf", &source);
+
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    let root = pdf_document(&extraction);
+    assert_eq!(
+        root.extra.get("parse_status"),
+        Some(&Value::from("partial"))
+    );
+    assert!(!root.extra.contains_key("ignored_pdf_features"));
+    let attachment = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "broken.zip")
+        .expect("unreadable attachment partition");
+    assert_eq!(
+        attachment.extra.get("blocker"),
+        Some(&Value::from("pdf-attachment-unreadable"))
+    );
+    assert_eq!(
+        attachment.extra.get("retry_route"),
+        Some(&Value::from("repair-pdf-attachment"))
+    );
+}
+
+#[test]
+fn locked_pdf_attachment_is_never_enumerated() {
+    let payload = "LOCKED_ATTACHMENT_PAYLOAD";
+    let source = encrypt_pdf(
+        pdf_with_attachment(
+            "locked.txt",
+            stream_body(payload.as_bytes(), b"/Type /EmbeddedFile"),
+        ),
+        "fixture-owner-password",
+        "required-user-password",
+    );
+    let extraction = assert_rejected("locked-attachment.pdf", &source, "pdf_encrypted");
+    assert_no_payload(&extraction, payload);
+    assert!(!extraction.nodes.iter().any(|node| {
+        node.extra.get("member_kind").and_then(Value::as_str) == Some("pdf_attachment")
+    }));
+}
+
+#[test]
+fn encrypted_external_attachment_stream_stays_hard_blocked() {
+    let payload = "EXTERNAL_ATTACHMENT_PAYLOAD";
+    let source = encrypt_pdf(
+        pdf_with_attachment(
+            "external.txt",
+            stream_body(payload.as_bytes(), b"/Type /EmbeddedFile /F (external.bin)"),
+        ),
+        "fixture-owner-password",
+        "",
+    );
+    let extraction = assert_rejected(
+        "external-attachment.pdf",
+        &source,
+        "pdf_active_content_unsupported",
+    );
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn encrypted_untyped_external_filespec_stays_hard_blocked() {
+    let payload = "UNTYPED_EXTERNAL_FILESPEC_PAYLOAD";
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(b"page"), b"")],
+        b"",
+        b"",
+        vec![(6, format!("<< /FS /URL /F ({payload}) >>").into_bytes())],
+    );
+    let extraction = assert_rejected(
+        "untyped-external-filespec.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_active_content_unsupported",
+    );
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn encrypted_gotoe_action_stays_hard_blocked() {
+    let payload = "EXTERNAL_GOTOE_PAYLOAD";
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(b"page"), b"")],
+        b"/OpenAction 6 0 R",
+        b"",
+        vec![(
+            6,
+            format!("<< /Type /Action /S /GoToE /D ({payload}) >>").into_bytes(),
+        )],
+    );
+    let extraction = assert_rejected(
+        "external-gotoe.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_active_content_unsupported",
+    );
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn encrypted_sensitive_attachment_keeps_authorization_blocker_partition() {
+    let payload = "SENSITIVE_ATTACHMENT_PAYLOAD";
+    let extraction = extract_source(
+        "sensitive-attachment.pdf",
+        &encrypted_pdf_with_attachment("secrets/token.json", payload.as_bytes()),
+    );
+
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    let root = pdf_document(&extraction);
+    assert_eq!(
+        root.extra.get("parse_status"),
+        Some(&Value::from("partial"))
+    );
+    let attachment = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "secrets/token.json")
+        .expect("sensitive attachment partition");
+    assert_eq!(
+        attachment.extra.get("dispatch_status"),
+        Some(&Value::from("sensitive_path_skipped"))
+    );
+    assert_eq!(
+        attachment.extra.get("blocker"),
+        Some(&Value::from("pdf-attachment-sensitive-path"))
+    );
+    assert_eq!(
+        attachment.extra.get("retry_route"),
+        Some(&Value::from("authorize-sensitive-member-processing"))
+    );
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn encrypted_attachment_count_limit_is_an_explicit_partition() {
+    let extraction = extract_source(
+        "many-attachments.pdf",
+        &encrypted_pdf_with_attachment_count(65),
+    );
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    assert_eq!(
+        extraction
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.extra.get("member_kind").and_then(Value::as_str) == Some("pdf_attachment")
+            })
+            .count(),
+        65,
+        "64 admitted attachments plus one explicit count blocker"
+    );
+    assert!(extraction.nodes.iter().any(|node| {
+        node.extra.get("blocker").and_then(Value::as_str) == Some("pdf-attachment-count-limit")
+            && node.extra.get("retry_route").and_then(Value::as_str)
+                == Some("raise-pdf-attachment-count-limit")
+    }));
+    assert!(!pdf_document(&extraction)
+        .extra
+        .contains_key("ignored_pdf_features"));
+}
+
+#[test]
+fn encrypted_attachment_tree_depth_limit_is_an_explicit_partition() {
+    let extraction = extract_source(
+        "deep-attachment-tree.pdf",
+        &encrypted_pdf_with_deep_attachment_tree(10),
+    );
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    assert!(extraction.nodes.iter().any(|node| {
+        node.extra.get("blocker").and_then(Value::as_str) == Some("pdf-attachment-depth-limit")
+            && node.extra.get("retry_route").and_then(Value::as_str)
+                == Some("raise-pdf-attachment-depth-limit")
+    }));
+    assert!(!pdf_document(&extraction)
+        .extra
+        .contains_key("ignored_pdf_features"));
+}
+
+#[test]
+fn encrypted_catalog_goto_open_action_is_inert_partial_content() {
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(b"page"), b"")],
+        b"/OpenAction 6 0 R",
+        b"",
+        vec![(
+            6,
+            b"<< /Type /Action /S /GoTo /D [3 0 R /XYZ null null 1] >>".to_vec(),
+        )],
+    );
+    let extraction = extract_source(
+        "encrypted-open-action.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+    );
+    let pages = pdf_pages(&extraction);
+    assert_eq!(pages.len(), 1, "{extraction:#?}");
+    assert_eq!(pages[0].extra.get("text"), Some(&Value::from("page")));
+    assert_eq!(
+        extraction.nodes[0].extra.get("parse_status"),
+        Some(&Value::from("partial"))
+    );
+    assert_eq!(
+        extraction.nodes[0].extra.get("ignored_pdf_features"),
+        Some(&Value::from("open_actions"))
+    );
+}
+
+#[test]
+fn encrypted_catalog_direct_destination_open_action_is_inert() {
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(b"page"), b"")],
+        b"/OpenAction [3 0 R /Fit]",
+        b"",
+        vec![],
+    );
+    let extraction = extract_source(
+        "encrypted-direct-destination.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+    );
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    assert_eq!(
+        extraction.nodes[0].extra.get("ignored_pdf_features"),
+        Some(&Value::from("open_actions"))
+    );
+}
+
+#[test]
+fn encrypted_catalog_goto_with_next_javascript_stays_rejected() {
+    let payload = "NEXT_JAVASCRIPT_MUST_NOT_PUBLISH";
+    let action =
+        format!("<< /S /GoTo /D [3 0 R /Fit] /Next << /S /JavaScript /JS ({payload}) >> >>");
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(b"page"), b"")],
+        b"/OpenAction 6 0 R",
+        b"",
+        vec![(6, action.into_bytes())],
+    );
+    let extraction = assert_rejected(
+        "encrypted-next-action.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_active_content_unsupported",
+    );
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn encrypted_catalog_external_open_actions_stay_rejected() {
+    for (name, action) in [
+        (
+            "uri",
+            b"<< /S /URI /URI (https://example.invalid) >>".as_slice(),
+        ),
+        (
+            "remote",
+            b"<< /S /GoToR /D [3 0 R /Fit] /F (remote.pdf) >>".as_slice(),
+        ),
+    ] {
+        let source = one_page_pdf(
+            vec![stream_body(&literal_text_content(b"page"), b"")],
+            b"/OpenAction 6 0 R",
+            b"",
+            vec![(6, action.to_vec())],
+        );
+        assert_rejected(
+            &format!("encrypted-{name}-action.pdf"),
+            &encrypt_pdf(source, "fixture-owner-password", ""),
+            "pdf_active_content_unsupported",
+        );
+    }
+}
+
+#[test]
+fn encrypted_catalog_goto_target_must_be_a_current_page() {
+    let source = one_page_pdf(
+        vec![stream_body(&literal_text_content(b"page"), b"")],
+        b"/OpenAction << /S /GoTo /D [2 0 R /Fit] >>",
+        b"",
+        vec![],
+    );
+    assert_rejected(
+        "encrypted-non-page-action.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_active_content_unsupported",
+    );
+}
+
+#[test]
+fn encrypted_catalog_malformed_open_actions_stay_rejected() {
+    for (name, open_action, action) in [
+        ("named", b"/OpenAction /ChapterOne".as_slice(), None),
+        ("string", b"/OpenAction (ChapterOne)".as_slice(), None),
+        ("integer", b"/OpenAction 3".as_slice(), None),
+        ("unresolved", b"/OpenAction 99 0 R".as_slice(), None),
+        (
+            "bad-type",
+            b"/OpenAction 6 0 R".as_slice(),
+            Some(b"<< /Type /Bogus /S /GoTo /D [3 0 R /Fit] >>".as_slice()),
+        ),
+        (
+            "bad-operands",
+            b"/OpenAction 6 0 R".as_slice(),
+            Some(b"<< /S /GoTo /D [3 0 R /Fit 1] >>".as_slice()),
+        ),
+    ] {
+        let extra_objects = action.map_or_else(Vec::new, |action| vec![(6, action.to_vec())]);
+        let source = one_page_pdf(
+            vec![stream_body(&literal_text_content(b"page"), b"")],
+            open_action,
+            b"",
+            extra_objects,
+        );
+        assert_rejected(
+            &format!("encrypted-{name}-open-action.pdf"),
+            &encrypt_pdf(source, "fixture-owner-password", ""),
+            "pdf_active_content_unsupported",
+        );
+    }
+}
+
+#[test]
+fn encrypted_catalog_root_requires_catalog_type_before_open_action_exception() {
+    let payload = "MALFORMED_CATALOG_ROOT_PAYLOAD";
+    let mut source = one_page_pdf(
+        vec![stream_body(&literal_text_content(payload.as_bytes()), b"")],
+        b"/OpenAction [3 0 R /Fit]",
+        b"",
+        vec![],
+    );
+    let marker = b"/Type /Catalog";
+    let offset = source
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("catalog type marker");
+    source[offset..offset + marker.len()].copy_from_slice(b"/Type /BogusXX");
+    let extraction = assert_rejected(
+        "encrypted-malformed-catalog-root.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_active_content_unsupported",
+    );
+    assert_no_payload(&extraction, payload);
+}
+
+#[test]
+fn encrypted_dense_multi_page_content_scales_operation_budget() {
+    let page = b"q Q ".repeat(601);
+    let source = multi_page_pdf(&vec![page; 87]);
+    let extraction = extract_source(
+        "encrypted-dense-multi-page.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+    );
+    assert_eq!(pdf_pages(&extraction).len(), 87, "{extraction:#?}");
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+}
+
+#[test]
+fn encrypted_multi_page_streams_share_the_content_operation_budget() {
+    let operations = b"q Q ".repeat(50_001);
+    let source = multi_page_pdf(&[operations.clone(), operations]);
+    assert_rejected(
+        "encrypted-operation-budget.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_content_limit",
+    );
+}
+
+#[test]
+fn encrypted_many_page_operation_budget_retains_a_hard_cap() {
+    let page = b"q Q ".repeat(490);
+    let source = multi_page_pdf(&vec![page; 1_024]);
+    assert_rejected(
+        "encrypted-hard-operation-cap.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_content_limit",
+    );
+}
+
+#[test]
+fn encrypted_stream_count_is_bounded_document_wide() {
+    let streams = (0..2_049)
+        .map(|_| stream_body(b"q Q", b""))
+        .collect::<Vec<_>>();
+    let source = one_page_pdf(streams, b"", b"", vec![]);
+    assert_rejected(
+        "encrypted-stream-count.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_object_limit",
+    );
+}
+
+#[test]
+fn encrypted_pages_share_the_total_decoded_byte_budget() {
+    let decoded = vec![b' '; 4 * 1024 * 1024];
+    let compressed = deflate(&decoded);
+    let streams = (0..5)
+        .map(|_| stream_body(&compressed, b"/Filter /FlateDecode"))
+        .collect::<Vec<_>>();
+    let source = multi_page_pdf_with_streams(&streams);
+    assert_rejected(
+        "encrypted-total-decoded.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_decompression_limit",
+    );
+}
+
+#[test]
+fn encrypted_page_font_cmaps_share_the_total_decoded_byte_budget() {
+    let mut font_resources = Vec::new();
+    for index in 0..5_u32 {
+        write!(&mut font_resources, "/F{} {} 0 R ", index + 1, index + 4)
+            .expect("write font resource");
+    }
+    let page = format!(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << {} >> >> /Contents 9 0 R >>",
+        String::from_utf8(font_resources).expect("ASCII font resources")
+    )
+    .into_bytes();
+    let mut objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, page),
+        (9, stream_body(b"q Q", b"")),
+    ];
+    let decoded_cmap = vec![b' '; 4 * 1024 * 1024];
+    let encoded_cmap = deflate(&decoded_cmap);
+    for index in 0..5_u32 {
+        objects.push((
+            index + 4,
+            format!(
+                "<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /Identity-H /ToUnicode {} 0 R >>",
+                index + 10
+            )
+            .into_bytes(),
+        ));
+        objects.push((
+            index + 10,
+            stream_body(&encoded_cmap, b"/Filter /FlateDecode"),
+        ));
+    }
+    let source = render_classic(objects, b"");
+    assert_rejected(
+        "encrypted-cmap-total-decoded.pdf",
+        &encrypt_pdf(source, "fixture-owner-password", ""),
+        "pdf_decompression_limit",
+    );
+}
+
+// Incremental-update ancestry is structural (exact trailer `/Prev` links),
+// never the name-lexing blacklist or marker-like stream data. Standard
+// pages-tree `/Prev`/`/Next` sibling references and plain `/URI` link
+// annotations must not reject their documents (issue #131).
 
 #[test]
 fn threaded_pages_tree_prev_next_references_extract() {
@@ -691,7 +1575,7 @@ fn threaded_pages_tree_prev_next_references_extract() {
 
 #[test]
 fn plain_uri_link_annotation_extracts_without_publishing_the_uri() {
-    let uri = "file:///Users/cgaspard/docs/camera-decision-matrix.pdf";
+    let uri = "file:///documents/camera-decision-matrix.pdf";
     let objects = vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
         (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
@@ -744,10 +1628,10 @@ fn xref_stream_prev_reference_still_rejects_incremental_documents() {
 }
 
 #[test]
-fn pdf_whitespace_cannot_hide_duplicate_incremental_markers_inside_streams() {
-    // NUL and form feed are PDF whitespace even though they are not ordinary
-    // line indentation. An old revision marker hidden this way must still make
-    // the document multi-revision before any stream or page facts publish.
+fn marker_like_bytes_inside_an_unreferenced_stream_are_inert() {
+    // Revision ancestry is established by exact trailer `/Prev` links. Marker-
+    // like bytes inside an unreferenced stream are data, even when preceded by
+    // PDF whitespace, and must not create a false incremental revision.
     let hidden_markers = b"\x0c\0startxref\n0\n\x0c\0%%EOF\n";
     let pdf = one_page_pdf(
         vec![stream_body(&literal_text_content(b"safe page"), b"")],
@@ -755,10 +1639,15 @@ fn pdf_whitespace_cannot_hide_duplicate_incremental_markers_inside_streams() {
         b"",
         vec![(6, stream_body(hidden_markers, b""))],
     );
-    assert_rejected(
-        "whitespace-hidden-incremental.pdf",
-        &pdf,
-        "pdf_incremental_unsupported",
+    let extraction = extract_source("inert-marker-like-stream.pdf", &pdf);
+    assert_eq!(
+        pdf_document(&extraction).extra.get("parse_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(pdf_pages(&extraction).len(), 1, "{extraction:#?}");
+    assert_eq!(
+        pdf_pages(&extraction)[0].extra.get("text"),
+        Some(&Value::from("safe page"))
     );
 }
 
@@ -1141,6 +2030,122 @@ fn image_xobject_with_undecodable_filter_is_inert() {
 }
 
 #[test]
+fn retains_page_visual_inventory_and_text_grounded_caption_candidates() {
+    let content = b"BT /F1 12 Tf 72 720 Td (Figure 2. Thermal layout) Tj 0 -20 Td (Table 3. Power budget) Tj ET";
+    let pdf = render_classic(
+        vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (
+                2,
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R /Diagram0 7 0 R >> >> >>"
+                    .to_vec(),
+            ),
+            (3, b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>".to_vec()),
+            (4, stream_body(content, b"")),
+            (
+                5,
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+                    .to_vec(),
+            ),
+            (
+                6,
+                stream_body(
+                    b"not-decoded-image-bytes",
+                    b"/Type /XObject /Subtype /Image /Width 320 /Height 180 /Filter /DCTDecode",
+                ),
+            ),
+            (
+                7,
+                stream_body(
+                    b"q Q",
+                    b"/Type /XObject /Subtype /Form /BBox [0 0 100 100]",
+                ),
+            ),
+        ],
+        b"",
+    );
+
+    let extraction = extract_source("visual-inventory.pdf", &pdf);
+    let page = pdf_pages(&extraction)[0];
+    assert_eq!(page.extra.get("media_box_width"), Some(&Value::from(612)));
+    assert_eq!(page.extra.get("media_box_height"), Some(&Value::from(792)));
+    assert_eq!(
+        page.extra.get("media_box_unit"),
+        Some(&Value::from("default_user_space"))
+    );
+    assert_eq!(
+        page.extra.get("xobject_resource_count"),
+        Some(&Value::from(2))
+    );
+    assert_eq!(page.extra.get("image_xobject_count"), Some(&Value::from(1)));
+    assert_eq!(page.extra.get("form_xobject_count"), Some(&Value::from(1)));
+    assert_eq!(
+        page.extra.get("image_xobject_dimensions"),
+        Some(&serde_json::json!([{ "width": 320, "height": 180 }]))
+    );
+    assert_eq!(
+        page.extra.get("visual_inventory_status"),
+        Some(&Value::from("complete"))
+    );
+    assert_eq!(
+        page.extra.get("figure_caption_candidates"),
+        Some(&serde_json::json!(["Figure 2. Thermal layout"]))
+    );
+    assert_eq!(
+        page.extra.get("table_caption_candidates"),
+        Some(&serde_json::json!(["Table 3. Power budget"]))
+    );
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
+fn marks_a_large_page_xobject_inventory_partial_without_subset_counts() {
+    let mut xobjects = Vec::new();
+    let mut objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /XObject <<"
+                .to_vec(),
+        ),
+        (4, stream_body(&literal_text_content(b"bounded layout"), b"")),
+        (
+            5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+                .to_vec(),
+        ),
+    ];
+    for index in 0..257_u32 {
+        let object_id = 6 + index;
+        xobjects.extend_from_slice(format!(" /Im{index} {object_id} 0 R").as_bytes());
+        objects.push((
+            object_id,
+            stream_body(
+                b"inert-image",
+                b"/Type /XObject /Subtype /Image /Width 1 /Height 1 /Filter /DCTDecode",
+            ),
+        ));
+    }
+    objects[2].1.extend_from_slice(&xobjects);
+    objects[2].1.extend_from_slice(b" >> >> /Contents 4 0 R >>");
+
+    let extraction = extract_source("xobject-resource-limit.pdf", &render_classic(objects, b""));
+    let page = pdf_pages(&extraction)[0];
+    assert_eq!(
+        page.extra.get("visual_inventory_status"),
+        Some(&Value::from("partial"))
+    );
+    assert_eq!(
+        page.extra.get("visual_inventory_diagnostic"),
+        Some(&Value::from("pdf_xobject_resource_limit"))
+    );
+    assert!(!page.extra.contains_key("image_xobject_count"));
+    assert!(!page.extra.contains_key("xobject_resource_count"));
+    assert_fact_sizes(&extraction);
+}
+
+#[test]
 fn image_xobject_with_decode_parms_is_inert() {
     // Parameterized (Predictor/CCITT-style) streams are inert when the
     // extractor never decodes them.
@@ -1293,7 +2298,7 @@ fn page_tree_cycles_and_page_count_excess_fail_before_page_facts() {
     assert_rejected("page-cycle.pdf", &cycle, "pdf_reference_limit");
 
     let empty = b"BT ET".to_vec();
-    let contents = std::iter::repeat_n(empty, 513).collect::<Vec<_>>();
+    let contents = std::iter::repeat_n(empty, 1_025).collect::<Vec<_>>();
     let too_many_pages = multi_page_pdf(&contents);
     assert_rejected("too-many-pages.pdf", &too_many_pages, "pdf_page_limit");
 }

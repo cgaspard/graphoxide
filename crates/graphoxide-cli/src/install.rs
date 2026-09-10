@@ -29,7 +29,7 @@ See graphoxide-out/GRAPH_REPORT.md for the architecture summary.
 const PROJECT_SECTION: &str = r#"## graphoxide
 
 For codebase questions, run `graphoxide query "<question>"` before broad source searches.
-If graphoxide-out/wiki/index.md exists, use it for broad navigation instead of scanning raw files.
+If graphoxide-out/community-markdown/index.md exists, use it for broad navigation instead of scanning raw files.
 Use graphoxide-out/GRAPH_REPORT.md as a fallback for broad architecture review. Rebuild with
 `graphoxide update .` after structural changes.
 "#;

@@ -1,8 +1,9 @@
 //! Input validation helpers derived from upstream Graphify's `security.py`.
 
+use anyhow::Context;
 use serde_json::{Map, Value};
 use std::{
-    io::Read,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     time::Duration,
@@ -12,7 +13,63 @@ pub const MAX_FETCH_BYTES: usize = 50 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const METADATA_MAX_VALUE_LEN: usize = 512;
 pub const METADATA_MAX_LIST_ITEMS: usize = 50;
-const MAX_REDIRECTS: usize = 10;
+const MAX_REDIRECTS: usize = 5;
+
+struct FetchOptions<'a> {
+    max_bytes: usize,
+    timeout: Duration,
+    require_https: bool,
+    if_none_match: Option<&'a str>,
+    if_modified_since: Option<&'a str>,
+    max_redirects: usize,
+}
+
+/// Stable, secret-free metadata retained for an external fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchResponseMetadata {
+    pub final_url: String,
+    pub redirects: Vec<String>,
+    pub status: u16,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub content_type: Option<String>,
+}
+
+/// Result of a bounded conditional HTTPS fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalFetchResult {
+    Modified {
+        bytes: u64,
+        metadata: FetchResponseMetadata,
+    },
+    NotModified {
+        metadata: FetchResponseMetadata,
+    },
+}
+
+/// Return only the response headers that are safe and useful to retain.
+pub fn fetch_response_metadata(
+    final_url: &str,
+    redirects: &[String],
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+) -> FetchResponseMetadata {
+    let retained = |name: reqwest::header::HeaderName| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= METADATA_MAX_VALUE_LEN)
+            .map(str::to_owned)
+    };
+    FetchResponseMetadata {
+        final_url: final_url.into(),
+        redirects: redirects.to_vec(),
+        status,
+        etag: retained(reqwest::header::ETAG),
+        last_modified: retained(reqwest::header::LAST_MODIFIED),
+        content_type: retained(reqwest::header::CONTENT_TYPE),
+    }
+}
 
 /// Validate an external URL before fetching it. Only HTTP(S) is accepted, and
 /// every resolved address must be public. DNS failures are rejected rather than
@@ -31,6 +88,10 @@ fn parse_external_url(url: &str) -> anyhow::Result<reqwest::Url> {
     anyhow::ensure!(
         matches!(scheme.as_str(), "http" | "https"),
         "Blocked URL scheme '{scheme}' - only http and https are allowed. Got: {url:?}"
+    );
+    anyhow::ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "external URL userinfo is not allowed"
     );
     let host = parsed
         .host_str()
@@ -138,8 +199,127 @@ fn ipv6_is_blocked(ip: Ipv6Addr) -> bool {
 
 /// Fetch a bounded HTTP(S) response body.
 pub fn safe_fetch(url: &str, max_bytes: usize, timeout: Duration) -> anyhow::Result<Vec<u8>> {
+    safe_fetch_with_scheme(url, max_bytes, timeout, false)
+}
+
+/// Fetch a bounded HTTPS response body without allowing redirect downgrade.
+pub fn safe_fetch_https(url: &str, max_bytes: usize, timeout: Duration) -> anyhow::Result<Vec<u8>> {
+    safe_fetch_with_scheme(url, max_bytes, timeout, true)
+}
+
+/// Fetch an HTTPS response into a caller-owned writer without buffering its body.
+pub fn safe_fetch_https_to_writer(
+    url: &str,
+    writer: &mut impl Write,
+    max_bytes: usize,
+    timeout: Duration,
+) -> anyhow::Result<u64> {
+    safe_fetch_https_to_writer_with_metadata(url, writer, max_bytes, timeout)
+        .map(|(bytes, _)| bytes)
+}
+
+/// Fetch an HTTPS response into a caller-owned writer without following redirects.
+pub fn safe_fetch_https_to_writer_no_redirect(
+    url: &str,
+    writer: &mut impl Write,
+    max_bytes: usize,
+    timeout: Duration,
+) -> anyhow::Result<u64> {
+    match safe_fetch_with_scheme_to_writer(
+        url,
+        writer,
+        FetchOptions {
+            max_bytes,
+            timeout,
+            require_https: true,
+            if_none_match: None,
+            if_modified_since: None,
+            max_redirects: 0,
+        },
+    )? {
+        ConditionalFetchResult::Modified { bytes, .. } => Ok(bytes),
+        ConditionalFetchResult::NotModified { .. } => {
+            unreachable!("an unconditional request cannot be not modified")
+        }
+    }
+}
+
+/// Fetch an HTTPS response into a caller-owned writer and return bounded provenance metadata.
+pub fn safe_fetch_https_to_writer_with_metadata(
+    url: &str,
+    writer: &mut impl Write,
+    max_bytes: usize,
+    timeout: Duration,
+) -> anyhow::Result<(u64, FetchResponseMetadata)> {
+    match safe_fetch_https_to_writer_conditional(url, writer, max_bytes, timeout, None, None)? {
+        ConditionalFetchResult::Modified { bytes, metadata } => Ok((bytes, metadata)),
+        ConditionalFetchResult::NotModified { .. } => {
+            unreachable!("an unconditional request cannot be not modified")
+        }
+    }
+}
+
+/// Fetch an HTTPS response with optional HTTP validators, preserving all normal URL safety checks.
+pub fn safe_fetch_https_to_writer_conditional(
+    url: &str,
+    writer: &mut impl Write,
+    max_bytes: usize,
+    timeout: Duration,
+    if_none_match: Option<&str>,
+    if_modified_since: Option<&str>,
+) -> anyhow::Result<ConditionalFetchResult> {
+    safe_fetch_with_scheme_to_writer(
+        url,
+        writer,
+        FetchOptions {
+            max_bytes,
+            timeout,
+            require_https: true,
+            if_none_match,
+            if_modified_since,
+            max_redirects: MAX_REDIRECTS,
+        },
+    )
+}
+
+fn safe_fetch_with_scheme(
+    url: &str,
+    max_bytes: usize,
+    timeout: Duration,
+    require_https: bool,
+) -> anyhow::Result<Vec<u8>> {
+    let mut result = Vec::new();
+    match safe_fetch_with_scheme_to_writer(
+        url,
+        &mut result,
+        FetchOptions {
+            max_bytes,
+            timeout,
+            require_https,
+            if_none_match: None,
+            if_modified_since: None,
+            max_redirects: MAX_REDIRECTS,
+        },
+    )? {
+        ConditionalFetchResult::Modified { .. } => {}
+        ConditionalFetchResult::NotModified { .. } => {
+            unreachable!("an unconditional request cannot be not modified")
+        }
+    }
+    Ok(result)
+}
+
+fn safe_fetch_with_scheme_to_writer(
+    url: &str,
+    writer: &mut impl Write,
+    options: FetchOptions<'_>,
+) -> anyhow::Result<ConditionalFetchResult> {
+    let if_none_match = refresh_header(options.if_none_match, "If-None-Match")?;
+    let if_modified_since = refresh_header(options.if_modified_since, "If-Modified-Since")?;
     let mut current = parse_external_url(url)?;
-    for redirects in 0..=MAX_REDIRECTS {
+    ensure_https(&current, options.require_https)?;
+    let mut redirects = Vec::new();
+    for redirect_count in 0..=options.max_redirects {
         let address = resolve_and_validate(&current)?;
         let host = current
             .host_str()
@@ -148,18 +328,24 @@ pub fn safe_fetch(url: &str, max_bytes: usize, timeout: Duration) -> anyhow::Res
         // DNS-pinned client. `resolve` keeps the original hostname for HTTP Host
         // and TLS SNI while connecting to exactly the address checked above.
         let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
+            .timeout(options.timeout)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .resolve(host, address)
-            .user_agent("Mozilla/5.0 graphoxide/1.0")
+            .user_agent(concat!("graphoxide/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        let mut response = client.get(current.clone()).send()?;
+        let mut request = client
+            .get(current.clone())
+            .header(reqwest::header::ACCEPT_ENCODING, "identity");
+        if let Some(value) = &if_none_match {
+            request = request.header(reqwest::header::IF_NONE_MATCH, value.clone());
+        }
+        if let Some(value) = &if_modified_since {
+            request = request.header(reqwest::header::IF_MODIFIED_SINCE, value.clone());
+        }
+        let mut response = request.send()?;
         if is_redirect(response.status().as_u16()) {
-            anyhow::ensure!(
-                redirects < MAX_REDIRECTS,
-                "too many redirects while fetching {url:?}"
-            );
+            ensure_redirect_allowed(redirect_count, options.max_redirects, url)?;
             let location = response
                 .headers()
                 .get(reqwest::header::LOCATION)
@@ -175,13 +361,59 @@ pub fn safe_fetch(url: &str, max_bytes: usize, timeout: Duration) -> anyhow::Res
             current = current.join(location).map_err(|error| {
                 anyhow::anyhow!("invalid redirect target {location:?} from {current}: {error}")
             })?;
-            parse_external_url(current.as_str())?;
+            current = parse_external_url(current.as_str())?;
+            ensure_https(&current, options.require_https)?;
+            redirects.push(current.to_string());
             continue;
         }
+        let metadata = fetch_response_metadata(
+            current.as_str(),
+            &redirects,
+            response.status().as_u16(),
+            response.headers(),
+        );
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED
+            && (if_none_match.is_some() || if_modified_since.is_some())
+        {
+            return Ok(ConditionalFetchResult::NotModified { metadata });
+        }
         ensure_success_status(response.status().as_u16(), current.as_str())?;
-        return read_limited(&mut response, max_bytes, current.as_str());
+        return read_limited_to_writer(&mut response, writer, options.max_bytes, current.as_str())
+            .map(|bytes| ConditionalFetchResult::Modified { bytes, metadata });
     }
     unreachable!("redirect loop either returns or errors at the configured cap")
+}
+
+fn ensure_redirect_allowed(
+    redirect_count: usize,
+    max_redirects: usize,
+    url: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        redirect_count < max_redirects,
+        "too many redirects while fetching {url:?}"
+    );
+    Ok(())
+}
+
+fn refresh_header(
+    value: Option<&str>,
+    name: &str,
+) -> anyhow::Result<Option<reqwest::header::HeaderValue>> {
+    value
+        .map(|value| {
+            reqwest::header::HeaderValue::from_str(value)
+                .with_context(|| format!("invalid {name} refresh validator"))
+        })
+        .transpose()
+}
+
+fn ensure_https(url: &reqwest::Url, required: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !required || url.scheme() == "https",
+        "HTTPS is required for this fetch"
+    );
+    Ok(())
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -213,6 +445,18 @@ pub fn read_limited(
     source: &str,
 ) -> anyhow::Result<Vec<u8>> {
     let mut result = Vec::new();
+    read_limited_to_writer(reader, &mut result, max_bytes, source)?;
+    Ok(result)
+}
+
+/// Stream a bounded response into a caller-owned writer and return its byte count.
+pub fn read_limited_to_writer(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    max_bytes: usize,
+    source: &str,
+) -> anyhow::Result<u64> {
+    let mut total = 0_usize;
     let mut chunk = [0_u8; 65_536];
     loop {
         let read = reader.read(&mut chunk)?;
@@ -220,12 +464,13 @@ pub fn read_limited(
             break;
         }
         anyhow::ensure!(
-            result.len().saturating_add(read) <= max_bytes,
+            total.saturating_add(read) <= max_bytes,
             "Response from {source:?} exceeds size limit ({max_bytes} bytes)"
         );
-        result.extend_from_slice(&chunk[..read]);
+        writer.write_all(&chunk[..read])?;
+        total += read;
     }
-    Ok(result)
+    Ok(total as u64)
 }
 
 /// Resolve a graph path and ensure it remains inside its allowed output base.
@@ -404,7 +649,10 @@ pub fn sanitize_metadata(metadata: Option<&Map<String, Value>>) -> Map<String, V
 
 #[cfg(test)]
 mod tests {
-    use super::{ip_is_blocked, sanitize_label, validate_url};
+    use super::{
+        ensure_redirect_allowed, ip_is_blocked, refresh_header, sanitize_label, validate_url,
+    };
+
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -417,6 +665,13 @@ mod tests {
     fn dns_hostnames_resolving_to_loopback_are_blocked() {
         let error = validate_url("http://localhost/").expect_err("loopback DNS must be blocked");
         assert!(error.to_string().contains("private/internal IP"));
+    }
+
+    #[test]
+    fn external_urls_with_userinfo_are_rejected_before_fetch_or_metadata() {
+        let error = validate_url("https://user:password@8.8.8.8/document")
+            .expect_err("userinfo must never enter fetch provenance metadata");
+        assert!(error.to_string().contains("userinfo"));
     }
 
     #[test]
@@ -443,5 +698,26 @@ mod tests {
         assert!(!ip_is_blocked(IpAddr::V6(
             "64:ff9b::8.8.8.8".parse().unwrap()
         )));
+    }
+
+    #[test]
+    fn conditional_refresh_validators_must_be_valid_http_header_values() {
+        assert_eq!(
+            refresh_header(Some("\"revision-1\""), "If-None-Match")
+                .expect("valid ETag")
+                .expect("header")
+                .to_str()
+                .expect("ASCII ETag"),
+            "\"revision-1\""
+        );
+        assert!(refresh_header(Some("bad\nvalue"), "If-None-Match").is_err());
+    }
+
+    #[test]
+    fn safe_fetch_https_to_writer_no_redirect_rejects_the_first_redirect() {
+        let error = ensure_redirect_allowed(0, 0, "https://example.com/source")
+            .expect_err("a no-redirect fetch must reject its first redirect response");
+
+        assert!(error.to_string().contains("too many redirects"));
     }
 }

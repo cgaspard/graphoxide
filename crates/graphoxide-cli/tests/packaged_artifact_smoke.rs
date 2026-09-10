@@ -233,6 +233,7 @@ fn build_vsix() -> (PathBuf, PathBuf) {
 }
 
 #[test]
+#[ignore = "release-artifact smoke packages a VSIX and release binary; run explicitly in the VS Code CI job"]
 fn packaged_vsix_bundled_binary_is_native_and_indexes_fixture() {
     if host_vscode_target().is_none() {
         eprintln!("packaged-artifact smoke: skipped (no native target for this host)");

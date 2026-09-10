@@ -1,0 +1,21 @@
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+# Packaging can rebuild the release binary inside this ignored smoke test.
+filter = 'binary(=knowledgebase_cli) & test(=packaged_artifact_smoke::packaged_vsix_bundled_binary_is_native_and_indexes_fixture)'
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[profile.fast]
+slow-timeout = { period = "15s", terminate-after = 1 }
+fail-fast = true
+retries = 0
+
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 2 }
+fail-fast = false
+
+[profile.ci.junit]
+path = "target/nextest/ci/wiki-test-full.junit.xml"
+store-success-output = false
+store-failure-output = false

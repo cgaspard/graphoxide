@@ -150,16 +150,19 @@ fn test_export_obsidian_custom_dir() {
 }
 
 #[test]
-fn test_export_wiki_creates_articles() {
+fn test_export_graph_community_markdown_creates_articles() {
     let tmp = tempdir().unwrap();
     make_graph(tmp.path());
-    let result = run(tmp.path(), &["export", "wiki"]);
+    let result = run(tmp.path(), &["export", "community-markdown"]);
     assert!(result.status.success(), "{}", text(&result.stderr));
-    assert!(tmp.path().join("graphoxide-out/wiki/index.md").is_file());
+    assert!(tmp
+        .path()
+        .join("graphoxide-out/community-markdown/index.md")
+        .is_file());
 }
 
 #[test]
-fn test_export_wiki_accepts_edges_only_graph_json() {
+fn test_export_graph_community_markdown_accepts_edges_only_graph_json() {
     let tmp = tempdir().unwrap();
     let output = make_graph(tmp.path());
     let path = output.join("graph.json");
@@ -167,9 +170,9 @@ fn test_export_wiki_accepts_edges_only_graph_json() {
     graph["edges"] = graph["links"].take();
     graph.as_object_mut().unwrap().remove("links");
     fs::write(&path, serde_json::to_vec(&graph).unwrap()).unwrap();
-    let result = run(tmp.path(), &["export", "wiki"]);
+    let result = run(tmp.path(), &["export", "community-markdown"]);
     assert!(result.status.success(), "{}", text(&result.stderr));
-    assert!(output.join("wiki/index.md").is_file());
+    assert!(output.join("community-markdown/index.md").is_file());
 }
 
 #[test]

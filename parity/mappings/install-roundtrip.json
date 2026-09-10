@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_agents"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_agents"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_aider"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_aider"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_amp"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_amp"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_antigravity"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_antigravity"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_antigravity_windows"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_antigravity_windows"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_claude"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_claude"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_claw"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_claw"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_codebuddy"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_codebuddy"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_codex"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_codex"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_copilot"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_copilot"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_devin"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_devin"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_droid"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_droid"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_hermes"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_hermes"
         }
       ]
     },
@@ -137,7 +137,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_kilo"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_kilo"
         }
       ]
     },
@@ -147,7 +147,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_kimi"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_kimi"
         }
       ]
     },
@@ -157,7 +157,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_kiro"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_kiro"
         }
       ]
     },
@@ -167,7 +167,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_opencode"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_opencode"
         }
       ]
     },
@@ -177,7 +177,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_pi"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_pi"
         }
       ]
     },
@@ -187,7 +187,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_trae"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_trae"
         }
       ]
     },
@@ -197,7 +197,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_trae_cn"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_trae_cn"
         }
       ]
     },
@@ -207,7 +207,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_user_windows"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_user_windows"
         }
       ]
     },
@@ -217,7 +217,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_agents"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_agents"
         }
       ]
     },
@@ -227,7 +227,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_aider"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_aider"
         }
       ]
     },
@@ -237,7 +237,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_amp"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_amp"
         }
       ]
     },
@@ -247,7 +247,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_antigravity"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_antigravity"
         }
       ]
     },
@@ -257,7 +257,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_antigravity_windows"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_antigravity_windows"
         }
       ]
     },
@@ -267,7 +267,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_claude"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_claude"
         }
       ]
     },
@@ -277,7 +277,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_claw"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_claw"
         }
       ]
     },
@@ -287,7 +287,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_codebuddy"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_codebuddy"
         }
       ]
     },
@@ -297,7 +297,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_codex"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_codex"
         }
       ]
     },
@@ -307,7 +307,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_copilot"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_copilot"
         }
       ]
     },
@@ -317,7 +317,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_devin"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_devin"
         }
       ]
     },
@@ -327,7 +327,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_droid"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_droid"
         }
       ]
     },
@@ -337,7 +337,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_hermes"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_hermes"
         }
       ]
     },
@@ -347,7 +347,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_kilo"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_kilo"
         }
       ]
     },
@@ -357,7 +357,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_kimi"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_kimi"
         }
       ]
     },
@@ -367,7 +367,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_kiro"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_kiro"
         }
       ]
     },
@@ -377,7 +377,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_opencode"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_opencode"
         }
       ]
     },
@@ -387,7 +387,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_pi"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_pi"
         }
       ]
     },
@@ -397,7 +397,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_trae"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_trae"
         }
       ]
     },
@@ -407,7 +407,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_trae_cn"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_trae_cn"
         }
       ]
     },
@@ -417,7 +417,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_skill_roundtrip_project_windows"
+          "id": "upstream_install_roundtrip::test_skill_roundtrip_project_windows"
         }
       ]
     },
@@ -427,7 +427,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_amp_user_install_at_corrected_agents_path"
+          "id": "upstream_install_roundtrip::test_amp_user_install_at_corrected_agents_path"
         }
       ]
     },
@@ -437,7 +437,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_amp_project_install_at_agents_path"
+          "id": "upstream_install_roundtrip::test_amp_project_install_at_agents_path"
         }
       ]
     },
@@ -447,7 +447,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_vscode_install_uninstall_roundtrip"
+          "id": "upstream_install_roundtrip::test_vscode_install_uninstall_roundtrip"
         }
       ]
     },
@@ -457,7 +457,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_install_entrypoint_roundtrip_for_progressive_and_monolith"
+          "id": "upstream_install_roundtrip::test_install_entrypoint_roundtrip_for_progressive_and_monolith"
         }
       ]
     },
@@ -467,7 +467,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_monolith_to_progressive_upgrade"
+          "id": "upstream_install_roundtrip::test_monolith_to_progressive_upgrade"
         }
       ]
     },
@@ -477,7 +477,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_progressive_to_monolith_downgrade_clears_references"
+          "id": "upstream_install_roundtrip::test_progressive_to_monolith_downgrade_clears_references"
         }
       ]
     },
@@ -487,7 +487,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_interrupted_references_staging_self_heals"
+          "id": "upstream_install_roundtrip::test_interrupted_references_staging_self_heals"
         }
       ]
     },
@@ -497,7 +497,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-cli",
-          "id": "test_failed_copytree_leaves_no_partial_references"
+          "id": "upstream_install_roundtrip::test_failed_copytree_leaves_no_partial_references"
         }
       ]
     }

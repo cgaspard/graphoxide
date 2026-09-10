@@ -207,7 +207,9 @@ pub(crate) fn extract_as_admitted_bytes_with_path_probes(
 ///
 /// This is the compute-plane entrypoint: it classifies and parses the supplied
 /// allocation, but never opens, reads, stats, or probes `path`.
-pub(crate) fn extract_as_bytes(
+/// Extract one already-admitted byte buffer using the normal format registry.
+/// Callers retain ownership of path safety and input-size limits.
+pub fn extract_as_bytes(
     path: &Path,
     source_file: &str,
     source: &[u8],

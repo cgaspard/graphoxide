@@ -27,11 +27,12 @@ pub use io::{
     check_graph_file_size_cap, check_graph_file_size_cap_with, max_graph_bytes,
     parse_max_graph_bytes, permission_fallback, read_graph, read_graph_capped, read_graph_with_cap,
     read_json_object, read_json_object_with_cap, replace_file, replace_file_strict,
-    write_graph_atomic, write_graph_atomic_strict, write_graph_atomic_strict_with_replacer,
-    write_json_atomic, write_json_atomic_strict, write_json_atomic_strict_with_replacer,
-    write_raw_extractions_atomic, write_raw_extractions_atomic_strict,
-    write_raw_extractions_atomic_strict_with_replacer, write_text_atomic,
-    write_text_atomic_with_replacer, CappedGraphRead, DEFAULT_MAX_GRAPH_BYTES,
+    write_bytes_atomic_strict, write_graph_atomic, write_graph_atomic_strict,
+    write_graph_atomic_strict_with_replacer, write_json_atomic, write_json_atomic_strict,
+    write_json_atomic_strict_with_replacer, write_raw_extractions_atomic,
+    write_raw_extractions_atomic_strict, write_raw_extractions_atomic_strict_with_replacer,
+    write_text_atomic, write_text_atomic_strict, write_text_atomic_with_replacer, CappedGraphRead,
+    DEFAULT_MAX_GRAPH_BYTES,
 };
 pub use jsonc::{parse_jsonc, parse_jsonc_slice};
 pub use mcp_config::{is_mcp_config_path, mcp_server_map, MCP_CONFIG_FILENAMES};
@@ -47,10 +48,13 @@ pub use reflect::{
     ReflectOptions, SaveResultOptions, SourceLesson, LEARNING_SIDECAR_NAME,
 };
 pub use security::{
-    decode_utf8_lossy, ensure_success_status, read_limited, safe_fetch, safe_fetch_text,
-    sanitize_label, sanitize_metadata, sanitize_metadata_string, sanitize_metadata_value,
-    sanitize_optional_label, validate_graph_path, validate_graph_path_with_output_name,
-    validate_url, METADATA_MAX_LIST_ITEMS, METADATA_MAX_VALUE_LEN,
+    decode_utf8_lossy, ensure_success_status, fetch_response_metadata, read_limited,
+    read_limited_to_writer, safe_fetch, safe_fetch_https, safe_fetch_https_to_writer,
+    safe_fetch_https_to_writer_conditional, safe_fetch_https_to_writer_no_redirect,
+    safe_fetch_https_to_writer_with_metadata, safe_fetch_text, sanitize_label, sanitize_metadata,
+    sanitize_metadata_string, sanitize_metadata_value, sanitize_optional_label,
+    validate_graph_path, validate_graph_path_with_output_name, validate_url,
+    ConditionalFetchResult, FetchResponseMetadata, METADATA_MAX_LIST_ITEMS, METADATA_MAX_VALUE_LEN,
 };
 pub use semantic::{
     load_validated_semantic_fragment, load_validated_semantic_fragment_with_limits,

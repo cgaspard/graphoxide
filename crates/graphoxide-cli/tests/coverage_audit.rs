@@ -158,7 +158,9 @@ fn graph_audit_uses_the_configured_output_for_cache_and_schema_migration() {
     let _: Value = serde_json::from_slice(&audit.stdout).expect("graph audit JSON");
     assert!(!retired.exists(), "pre-redaction cache was not retired");
     assert!(output.join("manifest.json").is_file());
-    let current = output.join("cache/ast/v32");
+    let current = output
+        .join("cache/ast")
+        .join(format!("v{}", graphoxide_extract::cache::AST_CACHE_VERSION));
     assert!(
         current
             .read_dir()
@@ -168,7 +170,9 @@ fn graph_audit_uses_the_configured_output_for_cache_and_schema_migration() {
         "audit did not populate the configured current cache"
     );
     assert!(
-        !project.join("graphoxide-out").exists(),
+        !project
+            .join(graphoxide_cli::watch::OUTPUT_DIRECTORY)
+            .exists(),
         "audit created a cache below the source root instead of GRAPHOXIDE_OUT"
     );
     for secret in [SOURCE_SECRET, RETIRED_SECRET] {

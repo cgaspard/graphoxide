@@ -327,7 +327,7 @@ fn references(platform: &Platform) -> BTreeMap<&'static str, String> {
         ),
         (
             "exports",
-            "# Exports\n\nRun `graphoxide export wiki`, `graphoxide export neo4j`, `graphoxide export graphml`, or `graphoxide export obsidian` only when requested.\n".to_owned(),
+            "# Exports\n\nRun `graphoxide export community-markdown`, `graphoxide export neo4j`, `graphoxide export graphml`, or `graphoxide export obsidian` only when requested.\n".to_owned(),
         ),
         ("extraction-spec", extraction_reference(platform)),
         (

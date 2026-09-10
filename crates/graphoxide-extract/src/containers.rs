@@ -15,6 +15,7 @@ use std::{
     cmp,
     collections::BTreeSet,
     io::{BufRead, Cursor, Read},
+    path::Path,
     ptr,
 };
 use unicode_normalization::UnicodeNormalization as _;
@@ -138,6 +139,25 @@ pub enum ArchiveKind {
     Rar,
 }
 
+/// Why a bounded archive-member read was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveMemberReadError {
+    InvalidMemberPath,
+    SensitiveMemberPath,
+    UnsupportedArchive,
+    InvalidByteLimit,
+    ArchiveRejected(InspectionDiagnostic),
+    MemberNotFound,
+}
+
+impl std::fmt::Display for ArchiveMemberReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "archive member read rejected: {self:?}")
+    }
+}
+
+impl std::error::Error for ArchiveMemberReadError {}
+
 /// A recognized raster or vector media encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -188,6 +208,7 @@ pub enum InspectionDiagnostic {
     GzipHeaderLimit,
     GzipMultipleMembers,
     GzipTrailingBytes,
+    TrailingEncodedData,
     TarHeaderInvalid,
     TarChecksumInvalid,
     TarTruncated,
@@ -589,6 +610,282 @@ pub fn recursive_archive_kind(source_name: &str, bytes: &[u8]) -> Option<Archive
         Some(ArchiveKind::Lz4) => Some(ArchiveKind::Lz4),
         _ => None,
     }
+}
+
+/// Read one exact, non-sensitive member from a supported archive into memory.
+///
+/// This is intentionally a small adapter over the bounded visitor APIs: it
+/// neither stages a member on disk nor invokes an extractor. `member_path`
+/// must already be canonical, so equivalent spellings cannot select a member
+/// ambiguously. The returned allocation is capped by `max_bytes`.
+pub fn read_archive_member(
+    source_name: &str,
+    bytes: &[u8],
+    member_path: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ArchiveMemberReadError> {
+    let limits = ContainerLimits::default();
+    let paths = member_path
+        .split("!/")
+        .map(|path| {
+            let normalized = normalized_member_path(path, limits.max_member_name_bytes)
+                .ok_or(ArchiveMemberReadError::InvalidMemberPath)?;
+            if normalized != path {
+                return Err(ArchiveMemberReadError::InvalidMemberPath);
+            }
+            if is_sensitive_archive_member_path(path) {
+                return Err(ArchiveMemberReadError::SensitiveMemberPath);
+            }
+            Ok(normalized)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if paths.len() > usize::from(limits.max_recursion_depth) + 1 {
+        return Err(ArchiveMemberReadError::InvalidMemberPath);
+    }
+    read_archive_member_at_path(source_name, bytes, &paths, max_bytes)
+}
+
+fn read_archive_member_at_path(
+    source_name: &str,
+    bytes: &[u8],
+    paths: &[String],
+    max_bytes: usize,
+) -> Result<Vec<u8>, ArchiveMemberReadError> {
+    let path = paths
+        .first()
+        .expect("validated archive member path must contain one segment")
+        .as_str();
+    let Some(kind) = recursive_archive_kind(source_name, bytes) else {
+        return Err(ArchiveMemberReadError::UnsupportedArchive);
+    };
+    if max_bytes == 0 {
+        return Err(ArchiveMemberReadError::InvalidByteLimit);
+    }
+    let limits = ContainerLimits {
+        max_member_uncompressed_bytes: max_bytes as u64,
+        max_total_uncompressed_bytes: max_bytes as u64,
+        ..ContainerLimits::default()
+    };
+    let mut result = None;
+    let mut take = |member: &ContainerMember, payload: &[u8]| {
+        if member.path == path {
+            result = Some(if paths.len() == 1 {
+                Ok(payload.to_vec())
+            } else {
+                read_archive_member_at_path(&member.path, payload, &paths[1..], max_bytes)
+            });
+        }
+        true
+    };
+    let inspection = match kind {
+        ArchiveKind::Tar => visit_tar_members_bounded(
+            bytes,
+            0,
+            limits,
+            || false,
+            |child| take(child.member, child.bytes),
+        ),
+        ArchiveKind::Zip => visit_zip_members_bounded(
+            bytes,
+            0,
+            limits,
+            || false,
+            |member| {
+                if member.path == path {
+                    CompressedMemberAdmission::Dispatch(())
+                } else {
+                    CompressedMemberAdmission::Skip
+                }
+            },
+            |child| take(child.member, child.bytes),
+        ),
+        ArchiveKind::Gzip => visit_gzip_member_bounded(
+            source_name,
+            bytes,
+            0,
+            limits,
+            || false,
+            |member| {
+                if member.path == path {
+                    CompressedMemberAdmission::Dispatch(())
+                } else {
+                    CompressedMemberAdmission::Skip
+                }
+            },
+            |child| take(child.member, child.bytes),
+        ),
+        ArchiveKind::Bzip2 => visit_bzip2_member_bounded(
+            source_name,
+            bytes,
+            0,
+            limits,
+            || false,
+            |_| true,
+            |member| {
+                if member.path == path {
+                    CompressedMemberAdmission::Dispatch(())
+                } else {
+                    CompressedMemberAdmission::Skip
+                }
+            },
+            |child| take(child.member, child.bytes),
+        ),
+        ArchiveKind::Xz => visit_xz_member_bounded(
+            source_name,
+            bytes,
+            0,
+            limits,
+            || false,
+            |_| true,
+            |member| {
+                if member.path == path {
+                    CompressedMemberAdmission::Dispatch(())
+                } else {
+                    CompressedMemberAdmission::Skip
+                }
+            },
+            |child| take(child.member, child.bytes),
+        ),
+        ArchiveKind::Zstd => visit_zstd_member_bounded(
+            source_name,
+            bytes,
+            0,
+            limits,
+            || false,
+            |_| true,
+            |member| {
+                if member.path == path {
+                    CompressedMemberAdmission::Dispatch(())
+                } else {
+                    CompressedMemberAdmission::Skip
+                }
+            },
+            |child| take(child.member, child.bytes),
+        ),
+        ArchiveKind::Lz4 => visit_lz4_member_bounded(
+            source_name,
+            bytes,
+            0,
+            limits,
+            || false,
+            |_| true,
+            |member| {
+                if member.path == path {
+                    CompressedMemberAdmission::Dispatch(())
+                } else {
+                    CompressedMemberAdmission::Skip
+                }
+            },
+            |child| take(child.member, child.bytes),
+        ),
+        ArchiveKind::SevenZip | ArchiveKind::Rar => {
+            return Err(ArchiveMemberReadError::UnsupportedArchive)
+        }
+    };
+    if inspection.status == InspectionStatus::Rejected {
+        return Err(ArchiveMemberReadError::ArchiveRejected(
+            inspection.diagnostics[0],
+        ));
+    }
+    if result.is_none()
+        && paths.len() == 1
+        && inspection
+            .members
+            .iter()
+            .any(|member| member.path == path && member.kind == ContainerMemberKind::Directory)
+    {
+        return Ok(Vec::new());
+    }
+    result.unwrap_or(Err(ArchiveMemberReadError::MemberNotFound))
+}
+
+/// Reject logical archive paths that should never be exposed as source text.
+pub fn is_sensitive_archive_member_path(member_path: &str) -> bool {
+    let path = Path::new(member_path);
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => {
+                Some(value.to_string_lossy().to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.iter().any(|component| {
+        matches!(
+            component.as_str(),
+            ".ssh" | ".gnupg" | ".aws" | ".gcloud" | "secrets" | ".secrets" | "credentials"
+        )
+    }) {
+        return true;
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let env_template = [".example", ".sample", ".template", ".dist"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+        && (name.starts_with(".env.") || name.starts_with(".envrc."));
+    if (name.starts_with(".env") || name.starts_with(".envrc")) && !env_template {
+        return true;
+    }
+    let private_key_name = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
+        .iter()
+        .any(|key| {
+            name.strip_suffix(key).is_some_and(|prefix| {
+                prefix
+                    .chars()
+                    .next_back()
+                    .is_none_or(|character| !character.is_ascii_alphanumeric())
+            })
+        });
+    if [
+        ".netrc",
+        ".pgpass",
+        ".htpasswd",
+        ".npmrc",
+        ".pypirc",
+        ".git-credentials",
+        ".boto",
+        "secring",
+        "secring.gpg",
+        "secring.pgp",
+    ]
+    .contains(&name.as_str())
+        || private_key_name
+        || [
+            ".pem", ".key", ".p12", ".pfx", ".cert", ".crt", ".der", ".p8",
+        ]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+    {
+        return true;
+    }
+    if path.extension().is_some() {
+        return crate::detect::is_sensitive_path_only(path);
+    }
+    let stem = name.trim_start_matches('.');
+    ["service_account", "service-account", "service.account"]
+        .iter()
+        .any(|marker| stem.contains(marker))
+        || stem.split(['-', '_', '.', ' ', '\t']).any(|part| {
+            matches!(
+                part,
+                "credential"
+                    | "credentials"
+                    | "secret"
+                    | "secrets"
+                    | "passwd"
+                    | "passwds"
+                    | "password"
+                    | "passwords"
+                    | "token"
+                    | "tokens"
+                    | "serviceaccount"
+            )
+        })
 }
 
 /// Inspect a known archive using only the supplied bytes.
@@ -1483,8 +1780,14 @@ where
         &mut is_cancelled,
         &mut encounter,
         &mut admit,
-        || Ok(BzDecoder::new(Cursor::new(bytes))),
-        |_| Ok(()),
+        || Ok(BzDecoder::new(bytes)),
+        |decoder| {
+            decoder
+                .into_inner()
+                .is_empty()
+                .then_some(())
+                .ok_or(InspectionDiagnostic::TrailingEncodedData)
+        },
         |member, payload| {
             visitor(DispatchableBzip2Member {
                 member,
@@ -1525,8 +1828,14 @@ where
         &mut is_cancelled,
         &mut encounter,
         &mut admit,
-        || Ok(XzDecoder::new(Cursor::new(bytes))),
-        |_| Ok(()),
+        || Ok(XzDecoder::new(bytes)),
+        |decoder| {
+            decoder
+                .into_inner()
+                .is_empty()
+                .then_some(())
+                .ok_or(InspectionDiagnostic::TrailingEncodedData)
+        },
         |member, payload| {
             visitor(DispatchableXzMember {
                 member,
@@ -1568,10 +1877,17 @@ where
         &mut encounter,
         &mut admit,
         || {
-            ZstdDecoder::new(Cursor::new(bytes))
+            ZstdDecoder::with_buffer(bytes)
                 .map_err(|_| InspectionDiagnostic::ZstdHeaderInvalid)
+                .map(ZstdDecoder::single_frame)
         },
-        |_| Ok(()),
+        |decoder| {
+            decoder
+                .finish()
+                .is_empty()
+                .then_some(())
+                .ok_or(InspectionDiagnostic::TrailingEncodedData)
+        },
         |member, payload| {
             visitor(DispatchableZstdMember {
                 member,
@@ -1612,8 +1928,14 @@ where
         &mut is_cancelled,
         &mut encounter,
         &mut admit,
-        || Ok(FrameDecoder::new(Cursor::new(bytes))),
-        |_| Ok(()),
+        || Ok(FrameDecoder::new(bytes)),
+        |decoder| {
+            decoder
+                .into_inner()
+                .is_empty()
+                .then_some(())
+                .ok_or(InspectionDiagnostic::TrailingEncodedData)
+        },
         |member, payload| {
             visitor(DispatchableLz4Member {
                 member,
@@ -1914,7 +2236,12 @@ fn tar_member_path(header: &[u8], maximum_bytes: usize) -> Result<String, Inspec
     } else {
         format!("{prefix}/{name}")
     };
-    normalized_member_path(&raw, maximum_bytes).ok_or(InspectionDiagnostic::InvalidMemberName)
+    let path = normalized_member_path(&raw, maximum_bytes)
+        .ok_or(InspectionDiagnostic::InvalidMemberName)?;
+    if path != raw {
+        return Err(InspectionDiagnostic::InvalidMemberName);
+    }
+    Ok(path)
 }
 
 fn tar_field_string(field: &[u8]) -> Result<String, InspectionDiagnostic> {
@@ -2540,12 +2867,27 @@ fn validated_zip<'a>(
                 InspectionDiagnostic::MemberNameLimit,
             ));
         }
-        let Some(path) = normalized_member_path(member.name(), limits.max_member_name_bytes) else {
+        let name = member.name();
+        let Some(path) = normalized_member_path(name, limits.max_member_name_bytes) else {
             return Err(rejected_container(
                 ArchiveKind::Zip,
                 InspectionDiagnostic::InvalidMemberName,
             ));
         };
+        // ZIP directories canonically end in one slash, while our public
+        // member path omits it. Preserve exact-name validation for every
+        // other entry so aliases such as `a//`, `a/./`, and `a\\b` remain
+        // rejected before any member is opened.
+        let canonical_name = name
+            .strip_suffix('/')
+            .filter(|_| member.is_dir() && !name.ends_with("//"))
+            .unwrap_or(name);
+        if path != canonical_name {
+            return Err(rejected_container(
+                ArchiveKind::Zip,
+                InspectionDiagnostic::InvalidMemberName,
+            ));
+        }
         if !seen_paths.insert(path.clone()) {
             return Err(rejected_container(
                 ArchiveKind::Zip,
@@ -2911,7 +3253,7 @@ fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
     ]))
 }
 
-fn normalized_member_path(name: &str, max_bytes: usize) -> Option<String> {
+pub(crate) fn normalized_member_path(name: &str, max_bytes: usize) -> Option<String> {
     if name.is_empty()
         || name.len() > max_bytes
         || name.contains('\0')
@@ -3718,6 +4060,16 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
+    fn zip_directory_bytes(directories: &[&str]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+        for directory in directories {
+            writer.add_directory(*directory, options).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     fn gzip_bytes(value: &[u8]) -> Vec<u8> {
         let mut writer = GzEncoder::new(Vec::new(), Compression::default());
         writer.write_all(value).unwrap();
@@ -4290,6 +4642,21 @@ mod tests {
             rejected.diagnostics,
             vec![InspectionDiagnostic::InvalidMemberName]
         );
+    }
+
+    #[test]
+    fn zip_directory_member_allows_only_its_canonical_trailing_slash() {
+        let inspection = visit_zip_members(
+            &zip_directory_bytes(&["docs/"]),
+            0,
+            ContainerLimits::default(),
+            |_| panic!("a directory must not be dispatched"),
+        );
+
+        assert_eq!(inspection.status, InspectionStatus::Parsed);
+        assert_eq!(inspection.members.len(), 1);
+        assert_eq!(inspection.members[0].path, "docs");
+        assert_eq!(inspection.members[0].kind, ContainerMemberKind::Directory);
     }
 
     #[test]
@@ -4913,6 +5280,98 @@ mod tests {
     }
 
     #[test]
+    fn archive_member_reader_returns_only_the_exact_safe_requested_member() {
+        let payload = b"bounded archive material";
+        let cases = [
+            (
+                "bundle.tar",
+                tar_bytes(&[("docs/readme.txt", payload)]),
+                "docs/readme.txt",
+            ),
+            (
+                "bundle.zip",
+                zip_bytes(&[("docs/readme.txt", payload)]),
+                "docs/readme.txt",
+            ),
+            (
+                "bundle.txt.gz",
+                named_gzip_bytes("docs/readme.txt", payload),
+                "docs/readme.txt",
+            ),
+            ("bundle.txt.bz2", bzip2_bytes(payload), "bundle.txt"),
+            ("bundle.txt.xz", xz_bytes(payload), "bundle.txt"),
+            ("bundle.txt.zst", zstd_bytes(payload), "bundle.txt"),
+            ("bundle.txt.lz4", lz4_bytes(payload), "bundle.txt"),
+        ];
+
+        for (source_name, archive, member_path) in cases {
+            assert_eq!(
+                read_archive_member(source_name, &archive, member_path, 64 * 1024)
+                    .expect("read the requested archive member"),
+                payload
+            );
+        }
+
+        let archive = zip_bytes(&[("docs/readme.txt", payload)]);
+        assert!(
+            read_archive_member("bundle.zip", &archive, "docs//readme.txt", 64 * 1024).is_err()
+        );
+        assert!(read_archive_member("bundle.zip", &archive, ".env", 64 * 1024).is_err());
+    }
+
+    #[test]
+    fn archive_member_reader_resolves_an_admitted_directory_as_empty_material() {
+        let archive = zip_directory_bytes(&["docs/"]);
+
+        assert_eq!(
+            read_archive_member("bundle.zip", &archive, "docs", 64 * 1024)
+                .expect("resolve canonical directory inventory member"),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn archive_member_reader_resolves_canonical_nested_member_paths() {
+        let payload = b"nested archive material";
+        let nested = zip_bytes(&[("docs/readme.txt", payload)]);
+        let archive = tar_bytes(&[("bundles/reference.zip", &nested)]);
+
+        assert_eq!(
+            read_archive_member(
+                "bundle.tar",
+                &archive,
+                "bundles/reference.zip!/docs/readme.txt",
+                64 * 1024,
+            )
+            .expect("read the requested nested archive member"),
+            payload
+        );
+        assert!(read_archive_member(
+            "bundle.tar",
+            &archive,
+            "bundles/reference.zip!/.env",
+            64 * 1024,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn archive_member_reader_rejects_noncanonical_physical_member_paths() {
+        let payload = b"bounded archive material";
+        let cases = [
+            ("bundle.tar", tar_bytes(&[("docs//readme.txt", payload)])),
+            ("bundle.zip", zip_bytes(&[("docs//readme.txt", payload)])),
+        ];
+
+        for (source_name, archive) in cases {
+            assert!(
+                read_archive_member(source_name, &archive, "docs/readme.txt", 64 * 1024).is_err(),
+                "{source_name} must reject a noncanonical physical member path"
+            );
+        }
+    }
+
+    #[test]
     fn single_stream_codecs_are_detected_by_magic_and_suffix() {
         // Magic detection.
         assert_eq!(
@@ -4949,6 +5408,41 @@ mod tests {
             recursive_archive_kind("a.tar.lz4", b"\0\0\0"),
             Some(ArchiveKind::Lz4)
         );
+    }
+
+    #[test]
+    fn single_stream_codecs_reject_trailing_and_concatenated_encoded_data() {
+        let payload = b"bounded member";
+        type Codec = (&'static str, &'static str, fn(&[u8]) -> Vec<u8>);
+        let codecs: [Codec; 4] = [
+            ("bundle.txt.bz2", "bundle.txt", bzip2_bytes),
+            ("bundle.txt.xz", "bundle.txt", xz_bytes),
+            ("bundle.txt.zst", "bundle.txt", zstd_bytes),
+            ("bundle.txt.lz4", "bundle.txt", lz4_bytes),
+        ];
+
+        for (source_name, member_path, encode) in codecs {
+            let encoded = encode(payload);
+            let mut trailing = encoded.clone();
+            trailing.extend(b"trailing");
+            assert!(
+                matches!(
+                    read_archive_member(source_name, &trailing, member_path, 64 * 1024),
+                    Err(ArchiveMemberReadError::ArchiveRejected(_))
+                ),
+                "{source_name} must reject trailing encoded data"
+            );
+
+            let mut concatenated = encoded.clone();
+            concatenated.extend(encode(payload));
+            assert!(
+                matches!(
+                    read_archive_member(source_name, &concatenated, member_path, 64 * 1024),
+                    Err(ArchiveMemberReadError::ArchiveRejected(_))
+                ),
+                "{source_name} must reject concatenated encoded data"
+            );
+        }
     }
 
     #[test]

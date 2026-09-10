@@ -18,6 +18,8 @@ rmcp.workspace = true
 tokio.workspace = true
 regex.workspace = true
 sha2.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 
 [dev-dependencies]

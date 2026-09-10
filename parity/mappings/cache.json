@@ -7,7 +7,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_file_hash_consistent"
+          "id": "upstream_cache::test_file_hash_consistent"
         }
       ]
     },
@@ -17,7 +17,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_file_hash_changes"
+          "id": "upstream_cache::test_file_hash_changes"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_cache_roundtrip"
+          "id": "upstream_cache::test_cache_roundtrip"
         }
       ]
     },
@@ -37,7 +37,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_cache_miss_on_change"
+          "id": "upstream_cache::test_cache_miss_on_change"
         }
       ]
     },
@@ -47,7 +47,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_cached_files"
+          "id": "upstream_cache::test_cached_files"
         }
       ]
     },
@@ -57,7 +57,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_clear_cache"
+          "id": "upstream_cache::test_clear_cache"
         }
       ]
     },
@@ -67,7 +67,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_md_frontmatter_only_change_same_hash"
+          "id": "upstream_cache::test_md_frontmatter_only_change_same_hash"
         }
       ]
     },
@@ -77,7 +77,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_md_body_change_different_hash"
+          "id": "upstream_cache::test_md_body_change_different_hash"
         }
       ]
     },
@@ -87,7 +87,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_md_no_frontmatter_hashed_normally"
+          "id": "upstream_cache::test_md_no_frontmatter_hashed_normally"
         }
       ]
     },
@@ -97,7 +97,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_non_md_file_hashed_fully"
+          "id": "upstream_cache::test_non_md_file_hashed_fully"
         }
       ]
     },
@@ -107,7 +107,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_body_content_strips_frontmatter"
+          "id": "upstream_cache::test_body_content_strips_frontmatter"
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_body_content_no_frontmatter"
+          "id": "upstream_cache::test_body_content_no_frontmatter"
         }
       ]
     },
@@ -127,7 +127,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_body_content_hr_start_is_not_frontmatter"
+          "id": "upstream_cache::test_body_content_hr_start_is_not_frontmatter"
         }
       ]
     },
@@ -137,7 +137,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_body_content_dash_title_start_is_not_frontmatter"
+          "id": "upstream_cache::test_body_content_dash_title_start_is_not_frontmatter"
         }
       ]
     },
@@ -147,7 +147,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_body_content_dash_text_line_is_not_close_delimiter"
+          "id": "upstream_cache::test_body_content_dash_text_line_is_not_close_delimiter"
         }
       ]
     },
@@ -157,7 +157,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_body_content_later_proper_close_skips_dash_text_lines"
+          "id": "upstream_cache::test_body_content_later_proper_close_skips_dash_text_lines"
         }
       ]
     },
@@ -167,7 +167,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_body_content_well_formed_output_byte_identical"
+          "id": "upstream_cache::test_body_content_well_formed_output_byte_identical"
         }
       ]
     },
@@ -177,7 +177,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_md_edit_above_hr_changes_hash"
+          "id": "upstream_cache::test_md_edit_above_hr_changes_hash"
         }
       ]
     },
@@ -187,7 +187,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_cached_relativizes_source_file"
+          "id": "upstream_cache::test_save_cached_relativizes_source_file"
         }
       ]
     },
@@ -197,7 +197,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_load_cached_absolutizes_source_file"
+          "id": "upstream_cache::test_load_cached_absolutizes_source_file"
         }
       ]
     },
@@ -207,7 +207,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_load_cached_passes_through_legacy_absolute_source_file"
+          "id": "upstream_cache::test_load_cached_passes_through_legacy_absolute_source_file"
         }
       ]
     },
@@ -217,7 +217,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_cache_portable_across_roots"
+          "id": "upstream_cache::test_cache_portable_across_roots"
         }
       ]
     },
@@ -227,7 +227,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_warm_cache_from_another_root_does_not_leak_that_root"
+          "id": "upstream_cache::test_warm_cache_from_another_root_does_not_leak_that_root"
         }
       ]
     },
@@ -237,7 +237,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_cached_ids_round_trip_under_the_same_root"
+          "id": "upstream_cache::test_cached_ids_round_trip_under_the_same_root"
         }
       ]
     },
@@ -247,7 +247,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_relative_root_does_not_reanchor_an_already_canonical_id"
+          "id": "upstream_cache::test_relative_root_does_not_reanchor_an_already_canonical_id"
         }
       ]
     },
@@ -257,7 +257,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_ast_cache_invalidated_on_version_bump"
+          "id": "upstream_cache::test_ast_cache_invalidated_on_version_bump"
         }
       ]
     },
@@ -267,7 +267,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_legacy_unversioned_ast_entries_not_served"
+          "id": "upstream_cache::test_legacy_unversioned_ast_entries_not_served"
         }
       ]
     },
@@ -277,7 +277,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_survives_version_bump"
+          "id": "upstream_cache::test_semantic_cache_survives_version_bump"
         }
       ]
     },
@@ -287,7 +287,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_cached_in_root_symlink_keeps_symlink_name"
+          "id": "upstream_cache::test_save_cached_in_root_symlink_keeps_symlink_name"
         }
       ]
     },
@@ -297,7 +297,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_prune_removes_orphan_entries"
+          "id": "upstream_cache::test_semantic_prune_removes_orphan_entries"
         }
       ]
     },
@@ -307,7 +307,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_prune_keeps_live_unchanged_entries"
+          "id": "upstream_cache::test_semantic_prune_keeps_live_unchanged_entries"
         }
       ]
     },
@@ -317,7 +317,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_prune_handles_deleted_file"
+          "id": "upstream_cache::test_semantic_prune_handles_deleted_file"
         }
       ]
     },
@@ -327,7 +327,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_prune_ignores_ast_and_tmp"
+          "id": "upstream_cache::test_semantic_prune_ignores_ast_and_tmp"
         }
       ]
     },
@@ -337,7 +337,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_overwrites_by_default"
+          "id": "upstream_cache::test_save_semantic_cache_overwrites_by_default"
         }
       ]
     },
@@ -347,7 +347,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_rejects_out_of_scope_source_file"
+          "id": "upstream_cache::test_save_semantic_cache_rejects_out_of_scope_source_file"
         }
       ]
     },
@@ -357,7 +357,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_deep_mode_roundtrip_under_deep_namespace"
+          "id": "upstream_cache::test_semantic_cache_deep_mode_roundtrip_under_deep_namespace"
         }
       ]
     },
@@ -367,7 +367,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_deep_invisible_to_plain_reads_and_vice_versa"
+          "id": "upstream_cache::test_semantic_cache_deep_invisible_to_plain_reads_and_vice_versa"
         }
       ]
     },
@@ -377,7 +377,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_mode_none_layout_unchanged"
+          "id": "upstream_cache::test_semantic_cache_mode_none_layout_unchanged"
         }
       ]
     },
@@ -387,7 +387,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_clear_cache_removes_deep_namespace"
+          "id": "upstream_cache::test_clear_cache_removes_deep_namespace"
         }
       ]
     },
@@ -397,7 +397,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_cached_files_includes_deep_namespace"
+          "id": "upstream_cache::test_cached_files_includes_deep_namespace"
         }
       ]
     },
@@ -407,7 +407,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_prune_sweeps_both_namespaces_against_same_live_set"
+          "id": "upstream_cache::test_semantic_prune_sweeps_both_namespaces_against_same_live_set"
         }
       ]
     },
@@ -417,7 +417,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_merge_existing_unions"
+          "id": "upstream_cache::test_save_semantic_cache_merge_existing_unions"
         }
       ]
     },
@@ -427,7 +427,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_drops_edges_to_out_of_scope_nodes"
+          "id": "upstream_cache::test_save_semantic_cache_drops_edges_to_out_of_scope_nodes"
         }
       ]
     },
@@ -437,7 +437,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_drops_edges_to_ghost_file_nodes"
+          "id": "upstream_cache::test_save_semantic_cache_drops_edges_to_ghost_file_nodes"
         }
       ]
     },
@@ -447,7 +447,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_drops_hyperedges_touching_skipped_nodes"
+          "id": "upstream_cache::test_save_semantic_cache_drops_hyperedges_touching_skipped_nodes"
         }
       ]
     },
@@ -457,7 +457,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_unscoped_preserves_dangling_refs_verbatim"
+          "id": "upstream_cache::test_save_semantic_cache_unscoped_preserves_dangling_refs_verbatim"
         }
       ]
     },
@@ -467,7 +467,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_save_semantic_cache_merge_existing_prunes_only_incoming"
+          "id": "upstream_cache::test_save_semantic_cache_merge_existing_prunes_only_incoming"
         }
       ]
     },
@@ -477,7 +477,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_prompt_fingerprint_stable_and_prompt_sensitive"
+          "id": "upstream_cache::test_prompt_fingerprint_stable_and_prompt_sensitive"
         }
       ]
     },
@@ -487,7 +487,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_prompt_fingerprint_ignores_line_endings"
+          "id": "upstream_cache::test_prompt_fingerprint_ignores_line_endings"
         }
       ]
     },
@@ -497,7 +497,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_prompt_change_invalidates"
+          "id": "upstream_cache::test_semantic_cache_prompt_change_invalidates"
         }
       ]
     },
@@ -507,7 +507,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_prompt_namespaced_layout"
+          "id": "upstream_cache::test_semantic_cache_prompt_namespaced_layout"
         }
       ]
     },
@@ -517,7 +517,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_prompt_and_mode_compose"
+          "id": "upstream_cache::test_semantic_cache_prompt_and_mode_compose"
         }
       ]
     },
@@ -527,7 +527,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_legacy_entries_served_with_warning"
+          "id": "upstream_cache::test_semantic_cache_legacy_entries_served_with_warning"
         }
       ]
     },
@@ -537,7 +537,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_fingerprinted_entry_beats_legacy"
+          "id": "upstream_cache::test_semantic_cache_fingerprinted_entry_beats_legacy"
         }
       ]
     },
@@ -547,7 +547,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_merge_existing_never_fuses_legacy_vintage"
+          "id": "upstream_cache::test_semantic_cache_merge_existing_never_fuses_legacy_vintage"
         }
       ]
     },
@@ -557,7 +557,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_prune_and_clear_reach_fingerprint_subdirs"
+          "id": "upstream_cache::test_semantic_prune_and_clear_reach_fingerprint_subdirs"
         }
       ]
     },
@@ -567,7 +567,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_semantic_cache_unreadable_prompt_file_warns_and_falls_back"
+          "id": "upstream_cache::test_semantic_cache_unreadable_prompt_file_warns_and_falls_back"
         }
       ]
     },
@@ -577,7 +577,7 @@
         {
           "runner": "rust",
           "package": "graphoxide-extract",
-          "id": "test_prompt_file_reflects_edited_spec"
+          "id": "upstream_cache::test_prompt_file_reflects_edited_spec"
         }
       ]
     }

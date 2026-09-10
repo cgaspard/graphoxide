@@ -4,6 +4,11 @@ description = "Report, Obsidian vault, graph.json, HTML viewers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
+
+[[test]]
+name = "export_integration"
+path = "tests/export_integration.rs"
 
 [dependencies]
 graphoxide-core.workspace = true
@@ -14,6 +19,8 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+toml.workspace = true
+schemars.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

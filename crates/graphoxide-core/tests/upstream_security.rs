@@ -2,11 +2,13 @@
 
 use graphoxide_core::{
     check_graph_file_size_cap_with, decode_utf8_lossy, ensure_success_status,
-    parse_max_graph_bytes, read_limited, safe_fetch, sanitize_label, sanitize_metadata,
-    sanitize_metadata_string, sanitize_metadata_value, sanitize_optional_label,
-    validate_graph_path, validate_graph_path_with_output_name, validate_url,
-    DEFAULT_MAX_GRAPH_BYTES, METADATA_MAX_LIST_ITEMS, METADATA_MAX_VALUE_LEN,
+    fetch_response_metadata, parse_max_graph_bytes, read_limited, read_limited_to_writer,
+    safe_fetch, safe_fetch_https, sanitize_label, sanitize_metadata, sanitize_metadata_string,
+    sanitize_metadata_value, sanitize_optional_label, validate_graph_path,
+    validate_graph_path_with_output_name, validate_url, DEFAULT_MAX_GRAPH_BYTES,
+    METADATA_MAX_LIST_ITEMS, METADATA_MAX_VALUE_LEN,
 };
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use serde_json::{json, Map, Value};
 use std::{fs, io::Cursor, path::Path, time::Duration};
 use tempfile::tempdir;
@@ -67,12 +69,64 @@ fn safe_fetch_rejects_ftp_url() {
 }
 
 #[test]
+fn safe_https_fetch_rejects_http_before_network_access() {
+    assert!(safe_fetch_https(
+        "http://example.com/reference",
+        1024,
+        Duration::from_millis(1)
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("HTTPS"));
+}
+
+#[test]
 fn safe_fetch_returns_bytes() {
     let mut source = Cursor::new(b"hello world");
     assert_eq!(
         read_limited(&mut source, 1024, "fixture").unwrap(),
         b"hello world"
     );
+}
+
+#[test]
+fn bounded_fetch_streams_to_the_supplied_writer() {
+    let mut source = Cursor::new(b"hello world");
+    let mut output = Vec::new();
+    assert_eq!(
+        read_limited_to_writer(&mut source, &mut output, 1024, "fixture").unwrap(),
+        11
+    );
+    assert_eq!(output, b"hello world");
+}
+
+#[test]
+fn fetch_metadata_keeps_only_allowlisted_response_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert(ETAG, HeaderValue::from_static("\"revision-1\""));
+    headers.insert(
+        LAST_MODIFIED,
+        HeaderValue::from_static("Tue, 01 Sep 2026 00:00:00 GMT"),
+    );
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
+    headers.insert("set-cookie", HeaderValue::from_static("secret=value"));
+
+    let metadata = fetch_response_metadata(
+        "https://example.org/reference.pdf",
+        &["https://example.org/redirect".into()],
+        200,
+        &headers,
+    );
+
+    assert_eq!(metadata.final_url, "https://example.org/reference.pdf");
+    assert_eq!(metadata.redirects, vec!["https://example.org/redirect"]);
+    assert_eq!(metadata.status, 200);
+    assert_eq!(metadata.etag.as_deref(), Some("\"revision-1\""));
+    assert_eq!(
+        metadata.last_modified.as_deref(),
+        Some("Tue, 01 Sep 2026 00:00:00 GMT")
+    );
+    assert_eq!(metadata.content_type.as_deref(), Some("application/pdf"));
 }
 
 #[test]

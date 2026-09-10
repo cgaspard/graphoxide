@@ -26,6 +26,7 @@ const DEFAULT_MAX_FACTS: usize = crate::format_registry::STRUCTURED_TEXT_LIMITS.
 const DEFAULT_MAX_DEPTH: usize = crate::format_registry::STRUCTURED_TEXT_LIMITS.max_nesting;
 const DEFAULT_MAX_ROWS: usize = crate::format_registry::STRUCTURED_TEXT_LIMITS.max_records;
 const DEFAULT_MAX_SCALAR_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_DELIMITED_FIELDS: usize = 256;
 const MAX_SENSITIVE_KEY_BYTES: usize = 256;
 const MAX_SENSITIVE_VALUE_BYTES: usize = DEFAULT_MAX_SCALAR_BYTES;
 pub(crate) const REDACTED_STRUCTURED_VALUE: &str = "<redacted>";
@@ -71,6 +72,7 @@ pub(crate) struct StructuredLimits {
     pub max_depth: usize,
     pub max_rows: usize,
     pub max_scalar_bytes: usize,
+    pub max_delimited_fields: usize,
 }
 
 impl Default for StructuredLimits {
@@ -81,6 +83,7 @@ impl Default for StructuredLimits {
             max_depth: DEFAULT_MAX_DEPTH,
             max_rows: DEFAULT_MAX_ROWS,
             max_scalar_bytes: DEFAULT_MAX_SCALAR_BYTES,
+            max_delimited_fields: DEFAULT_MAX_DELIMITED_FIELDS,
         }
     }
 }
@@ -92,6 +95,7 @@ impl StructuredLimits {
             && self.max_depth > 0
             && self.max_rows > 0
             && self.max_scalar_bytes > 0
+            && self.max_delimited_fields > 0
     }
 }
 
@@ -423,12 +427,18 @@ impl<'a> State<'a> {
     }
 
     fn finish(mut self) -> StructuredExtraction {
-        if self.parser_budget_exhausted
+        if (self.parser_budget_exhausted
+            || self
+                .diagnostics
+                .iter()
+                .any(diagnostic_omits_source_material))
             && let Some(root) = self.nodes.first_mut()
         {
             root.extra.insert("parse_status".into(), "partial".into());
-            root.extra
-                .insert("parser_diagnostic".into(), "parser_arena_fact_limit".into());
+            if self.parser_budget_exhausted {
+                root.extra
+                    .insert("parser_diagnostic".into(), "parser_arena_fact_limit".into());
+            }
         }
         if !self.diagnostics.is_empty()
             && let Some(root) = self.nodes.first_mut()
@@ -682,6 +692,21 @@ impl<'a> State<'a> {
         node.extra
             .insert("structured_text".into(), Value::String(candidate));
     }
+}
+
+fn diagnostic_omits_source_material(diagnostic: &StructuredDiagnostic) -> bool {
+    matches!(
+        diagnostic.code,
+        "csv_parse_error"
+            | "depth_limit"
+            | "fact_limit"
+            | "field_limit"
+            | "input_too_large"
+            | "json_lines_parse_error"
+            | "path_limit"
+            | "row_limit"
+            | "scalar_limit"
+    )
 }
 
 fn extract_json(state: &mut State<'_>, bytes: &[u8], mcp: bool) {
@@ -1479,10 +1504,9 @@ fn extract_xml(state: &mut State<'_>, bytes: &[u8]) {
 }
 
 fn extract_delimited(state: &mut State<'_>, bytes: &[u8], delimiter: u8) {
-    // Delimited data has no recursive nesting, so the registry's max_nesting
-    // ceiling is its per-record field ceiling. This keeps even delimiter-only
-    // records bounded before facts are admitted.
-    let max_fields = state.limits.max_depth;
+    // Delimited fields are independent of recursive nesting. Keep a dedicated
+    // ceiling so ordinary wide tables do not inherit JSON/XML's depth cap.
+    let max_fields = state.limits.max_delimited_fields;
     let max_field_bytes = state.limits.max_scalar_bytes;
     let mut headers: Option<Vec<String>> = None;
     let mut field_limit_reported = false;
@@ -1740,10 +1764,10 @@ impl DocumentBlocks {
         kind: &str,
         line: usize,
         value: &str,
-    ) {
+    ) -> Option<String> {
         let value = value.trim();
         if value.is_empty() {
-            return;
+            return None;
         }
         if kind == "document_table_row" {
             if self.table_rows >= state.limits.max_rows {
@@ -1758,20 +1782,165 @@ impl DocumentBlocks {
                         ),
                     );
                 }
-                return;
+                return None;
             }
             self.table_rows += 1;
         }
         let path = format!("$blocks[{}]", self.next);
         self.next += 1;
-        let _ = state.child(
+        state.child(
             parent,
             &path,
             label,
             kind,
             line,
             ChildOptions::string(value).in_sensitive_context(document_block_is_sensitive(value)),
+        )
+    }
+}
+
+fn markdown_fence_language(line: &str) -> Option<&str> {
+    line.trim_start_matches(['`', '~'])
+        .split_ascii_whitespace()
+        .next()
+}
+
+fn is_mermaid_language(language: &str) -> bool {
+    matches!(language.to_ascii_lowercase().as_str(), "mermaid" | "mmd")
+}
+
+fn source_line(location: Option<&str>) -> usize {
+    location
+        .and_then(|location| location.strip_prefix('L'))
+        .and_then(|line| line.parse().ok())
+        .filter(|line: &usize| *line > 0)
+        .unwrap_or(1)
+}
+
+fn emit_markdown_code_fence(
+    state: &mut State<'_>,
+    blocks: &mut DocumentBlocks,
+    headings: &[(usize, String)],
+    fence_line: usize,
+    language: Option<&str>,
+    code: &str,
+) {
+    let parent = active_heading(state, headings);
+    let Some(code_block) = blocks.emit(
+        state,
+        &parent,
+        "code block",
+        "document_code_block",
+        fence_line,
+        code,
+    ) else {
+        return;
+    };
+    let Some(language) = language.filter(|language| is_mermaid_language(language)) else {
+        return;
+    };
+    if let Some(position) = state.node_positions.get(&code_block).copied() {
+        let node = &mut state.nodes[position];
+        node.extra
+            .insert("code_language".into(), language.to_ascii_lowercase().into());
+        node.extra.insert(
+            "code_fence_source_location".into(),
+            format!("L{}", fence_line.max(1)).into(),
         );
+    }
+    append_mermaid_fence_semantics(state, &code_block, fence_line, code);
+}
+
+/// Parse a Mermaid fence as inert source and retain the parser's explicitly
+/// declared participants and relations under the source code block.
+fn append_mermaid_fence_semantics(
+    state: &mut State<'_>,
+    code_block: &str,
+    fence_line: usize,
+    code: &str,
+) {
+    // A fence-specific logical name prevents identically named participants in
+    // separate fences from sharing graph identifiers. It is never dereferenced.
+    let synthetic_source = format!("{}#mermaid-fence-{}.mmd", state.source_file, fence_line);
+    let diagram = match crate::diagrams::extract_diagram_bytes(
+        Path::new(&synthetic_source),
+        &synthetic_source,
+        code.as_bytes(),
+    ) {
+        Ok(diagram) => diagram,
+        Err(error) => {
+            state.diagnostic(
+                "mermaid_parse_error",
+                fence_line,
+                format!("Mermaid fence was not structurally extracted: {error}"),
+            );
+            return;
+        }
+    };
+
+    let mut ids = BTreeMap::new();
+    for mut node in diagram.nodes.into_iter().filter(|node| {
+        node.extra
+            .get("diagram_kind")
+            .and_then(Value::as_str)
+            .is_some()
+    }) {
+        let line = fence_line.saturating_add(source_line(node.source_location.as_deref()));
+        if state.seen_ids.contains(&node.id) || !state.has_capacity(2, line) {
+            return;
+        }
+        let original_id = node.id.clone();
+        node.source_file = state.source_file.into();
+        node.source_location = Some(format!("L{}", line.max(1)));
+        node.extra.insert("_origin".into(), "structured".into());
+        node.extra
+            .insert("structured_format".into(), "markdown".into());
+        node.extra.insert(
+            "structured_path".into(),
+            format!("$blocks.mermaid[{fence_line}].participants[{}]", ids.len()).into(),
+        );
+        node.extra
+            .insert("mermaid_source_block".into(), code_block.into());
+        node.extra.insert(
+            "mermaid_fence_source_location".into(),
+            format!("L{}", fence_line.max(1)).into(),
+        );
+        let imported = node.id.clone();
+        state
+            .node_positions
+            .insert(node.id.clone(), state.nodes.len());
+        state.seen_ids.insert(node.id.clone());
+        ids.insert(original_id, imported.clone());
+        state.nodes.push(node);
+        state.retain_edge(code_block, &imported, "contains", line);
+    }
+    for edge in diagram.edges {
+        if edge.relation == "contains" {
+            continue;
+        }
+        let (Some(source), Some(target)) = (ids.get(&edge.source), ids.get(&edge.target)) else {
+            continue;
+        };
+        let line = fence_line.saturating_add(source_line(
+            edge.extra.get("source_location").and_then(Value::as_str),
+        ));
+        if !state.has_capacity(1, line) {
+            return;
+        }
+        let edge_count = state.edges.len();
+        state.retain_edge(source, target, &edge.relation, line);
+        if state.edges.len() == edge_count + 1 {
+            let retained = state.edges.last_mut().expect("retained Mermaid edge");
+            retained
+                .extra
+                .insert("diagram_format".into(), "mermaid".into());
+            retained
+                .extra
+                .insert("mermaid_source_block".into(), code_block.into());
+            if let Some(label) = edge.extra.get("label") {
+                retained.extra.insert("label".into(), label.clone());
+            }
+        }
     }
 }
 
@@ -1906,28 +2075,47 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
     let mut blocks = DocumentBlocks::default();
     let mut paragraph = Vec::new();
     let mut paragraph_line = 1;
-    let mut fence = None::<(u8, usize)>;
+    let mut fence = None::<(u8, usize, Option<String>)>;
     let mut fence_line = 1;
     let mut code = Vec::new();
+    let mut display_math_line = None::<usize>;
+    let mut display_math = Vec::new();
     for (index, raw_line) in text.lines().enumerate() {
         let line = index + 1;
         let trimmed = raw_line.trim();
-        if let Some((marker, width)) = fence {
-            let closing = trimmed.as_bytes().first() == Some(&marker)
-                && trimmed.bytes().take_while(|byte| *byte == marker).count() >= width
-                && trimmed.bytes().all(|byte| byte == marker);
-            if closing {
+        if let Some(formula_line) = display_math_line {
+            if trimmed == "$$" {
                 let parent = active_heading(state, &headings);
                 blocks.emit(
                     state,
                     &parent,
-                    "code block",
-                    "document_code_block",
+                    "formula",
+                    "document_formula",
+                    formula_line,
+                    &display_math.join("\n"),
+                );
+                display_math.clear();
+                display_math_line = None;
+            } else {
+                display_math.push(raw_line);
+            }
+            continue;
+        }
+        if let Some((marker, width, _)) = fence.as_ref() {
+            let closing = trimmed.as_bytes().first() == Some(marker)
+                && trimmed.bytes().take_while(|byte| *byte == *marker).count() >= *width
+                && trimmed.bytes().all(|byte| byte == *marker);
+            if closing {
+                let (_, _, language) = fence.take().expect("active Markdown fence");
+                emit_markdown_code_fence(
+                    state,
+                    &mut blocks,
+                    &headings,
                     fence_line,
+                    language.as_deref(),
                     &code.join("\n"),
                 );
                 code.clear();
-                fence = None;
             } else {
                 code.push(raw_line);
             }
@@ -1946,8 +2134,8 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
                 &mut paragraph,
                 &mut paragraph_line,
             );
-            let language = trimmed.trim_start_matches(['`', '~']).trim();
-            if !language.is_empty() {
+            let language = markdown_fence_language(trimmed);
+            if let Some(language) = language {
                 let _ = state.child(
                     &state.file_id.clone(),
                     &format!("$code[{line}]"),
@@ -1957,8 +2145,23 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
                     ChildOptions::string(language),
                 );
             }
-            fence = Some((marker.expect("fence marker"), marker_width));
+            fence = Some((
+                marker.expect("fence marker"),
+                marker_width,
+                language.map(str::to_owned),
+            ));
             fence_line = line;
+            continue;
+        }
+        if trimmed == "$$" {
+            flush_document_paragraph(
+                state,
+                &mut blocks,
+                &headings,
+                &mut paragraph,
+                &mut paragraph_line,
+            );
+            display_math_line = Some(line + 1);
             continue;
         }
         let hashes = trimmed
@@ -2068,15 +2271,25 @@ fn extract_markdown(state: &mut State<'_>, bytes: &[u8]) {
             paragraph.push(trimmed);
         }
     }
-    if fence.is_some() {
+    if let Some((_, _, language)) = fence {
+        emit_markdown_code_fence(
+            state,
+            &mut blocks,
+            &headings,
+            fence_line,
+            language.as_deref(),
+            &code.join("\n"),
+        );
+    }
+    if let Some(formula_line) = display_math_line {
         let parent = active_heading(state, &headings);
         blocks.emit(
             state,
             &parent,
-            "code block",
-            "document_code_block",
-            fence_line,
-            &code.join("\n"),
+            "formula",
+            "document_formula",
+            formula_line,
+            &display_math.join("\n"),
         );
     }
     flush_document_paragraph(
@@ -2517,6 +2730,20 @@ struct HtmlFrame<'a> {
     name: &'a str,
     excluded: bool,
     capture: Option<HtmlCapture>,
+    figure: Option<HtmlFigureCapture<'a>>,
+}
+
+struct HtmlFigureCapture<'a> {
+    line: usize,
+    caption: HtmlCapture,
+    caption_line: Option<usize>,
+    images: Vec<HtmlImageCapture<'a>>,
+}
+
+struct HtmlImageCapture<'a> {
+    line: usize,
+    source: &'a str,
+    alt: Option<&'a str>,
 }
 
 struct HtmlSourceLines {
@@ -2572,6 +2799,7 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
     let mut source_lines = HtmlSourceLines::new();
     let mut skipped_depth = 0usize;
     let mut depth_limit_reported = false;
+    let mut figure_ordinal = 0usize;
     while cursor < text.len() {
         let token = next_html_token(text, &mut cursor);
         if skipped_depth > 0 {
@@ -2596,6 +2824,16 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
                         append_html_text(capture, value, state.limits.max_scalar_bytes);
                     }
                 }
+                if stack
+                    .iter()
+                    .any(|frame| frame.name.eq_ignore_ascii_case("figcaption"))
+                    && let Some(figure) = stack
+                        .iter_mut()
+                        .rev()
+                        .find_map(|frame| frame.figure.as_mut())
+                {
+                    append_html_text(&mut figure.caption, value, state.limits.max_scalar_bytes);
+                }
             }
             HtmlToken::Start {
                 name,
@@ -2615,6 +2853,29 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
                 {
                     let source = active_heading(state, &headings);
                     state.edge(&source, &reference, "references", line);
+                }
+                if !excluded
+                    && name.eq_ignore_ascii_case("img")
+                    && let Some(figure) = stack
+                        .iter_mut()
+                        .rev()
+                        .find_map(|frame| frame.figure.as_mut())
+                    && let Some(source) = html_attribute(attrs, "src")
+                {
+                    figure.images.push(HtmlImageCapture {
+                        line,
+                        source,
+                        alt: html_attribute(attrs, "alt"),
+                    });
+                }
+                if !excluded
+                    && name.eq_ignore_ascii_case("figcaption")
+                    && let Some(figure) = stack
+                        .iter_mut()
+                        .rev()
+                        .find_map(|frame| frame.figure.as_mut())
+                {
+                    figure.caption_line.get_or_insert(line);
                 }
                 if !excluded
                     && (name.eq_ignore_ascii_case("th") || name.eq_ignore_ascii_case("td"))
@@ -2643,9 +2904,24 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
                         text: String::new(),
                         pending_space: false,
                     });
+                let figure =
+                    (!excluded && name.eq_ignore_ascii_case("figure")).then(|| HtmlFigureCapture {
+                        line,
+                        caption: HtmlCapture {
+                            kind: HtmlBlockKind::Paragraph,
+                            line,
+                            text: String::new(),
+                            pending_space: false,
+                        },
+                        caption_line: None,
+                        images: Vec::new(),
+                    });
                 if self_closing || html_void_element(name) {
                     if let Some(capture) = capture {
                         finish_html_capture(state, &mut blocks, &mut headings, capture);
+                    }
+                    if let Some(figure) = figure {
+                        finish_html_figure(state, &headings, figure, &mut figure_ordinal);
                     }
                     continue;
                 }
@@ -2668,6 +2944,7 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
                     name,
                     excluded,
                     capture,
+                    figure,
                 });
             }
             HtmlToken::End { name } => {
@@ -2681,6 +2958,9 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
                     if let Some(capture) = frame.capture {
                         finish_html_capture(state, &mut blocks, &mut headings, capture);
                     }
+                    if let Some(figure) = frame.figure {
+                        finish_html_figure(state, &headings, figure, &mut figure_ordinal);
+                    }
                 }
             }
             HtmlToken::Skip => {}
@@ -2689,6 +2969,9 @@ fn extract_html(state: &mut State<'_>, bytes: &[u8]) {
     for frame in stack.into_iter().rev() {
         if let Some(capture) = frame.capture {
             finish_html_capture(state, &mut blocks, &mut headings, capture);
+        }
+        if let Some(figure) = frame.figure {
+            finish_html_figure(state, &headings, figure, &mut figure_ordinal);
         }
     }
 }
@@ -2971,6 +3254,86 @@ fn finish_html_capture(
     };
     let parent = active_heading(state, headings);
     blocks.emit(state, &parent, label, kind, capture.line, value);
+}
+
+fn finish_html_figure(
+    state: &mut State<'_>,
+    headings: &[(usize, String)],
+    figure: HtmlFigureCapture<'_>,
+    figure_ordinal: &mut usize,
+) {
+    let figure_index = *figure_ordinal;
+    *figure_ordinal += 1;
+    let parent = active_heading(state, headings);
+    let Some(figure_id) = state.child(
+        &parent,
+        &format!("$figure[{figure_index}]"),
+        "figure",
+        "document_figure",
+        figure.line,
+        ChildOptions::default(),
+    ) else {
+        return;
+    };
+    if !figure.caption.text.trim().is_empty() {
+        html_figure_metadata(
+            state,
+            &figure_id,
+            "html_caption",
+            figure.caption.text.trim(),
+            figure.caption_line.unwrap_or(figure.line),
+        );
+        html_figure_metadata(
+            state,
+            &figure_id,
+            "html_caption_source_location",
+            &format!("L{}", figure.caption_line.unwrap_or(figure.line)),
+            figure.caption_line.unwrap_or(figure.line),
+        );
+    }
+    for (image_index, image) in figure.images.into_iter().enumerate() {
+        let Some(image_id) = state.child(
+            &figure_id,
+            &format!("$figure[{figure_index}].image[{image_index}]"),
+            "image",
+            "document_image",
+            image.line,
+            ChildOptions::default(),
+        ) else {
+            break;
+        };
+        if let Some(alt) = image.alt.filter(|alt| !alt.trim().is_empty()) {
+            html_figure_metadata(state, &image_id, "html_alt_text", alt, image.line);
+        }
+        let source = image.source.trim();
+        if !source.is_empty() && !source.starts_with("data:") {
+            html_figure_metadata(state, &image_id, "html_image_reference", source, image.line);
+            if let Some(reference) =
+                add_document_reference(state, source, image.line, "html_image_reference")
+            {
+                state.edge(&image_id, &reference, "references", image.line);
+            }
+        }
+    }
+}
+
+fn html_figure_metadata(state: &mut State<'_>, id: &str, key: &str, value: &str, line: usize) {
+    if !serialized_len_at_most(value, state.limits.max_scalar_bytes) {
+        state.diagnostic(
+            "scalar_limit",
+            line,
+            format!(
+                "HTML figure metadata {key:?} exceeds {} bytes",
+                state.limits.max_scalar_bytes
+            ),
+        );
+        return;
+    }
+    if let Some(position) = state.node_positions.get(id).copied() {
+        state.nodes[position]
+            .extra
+            .insert(key.into(), Value::String(value.into()));
+    }
 }
 
 fn add_document_reference(
@@ -4081,6 +4444,36 @@ mod tests {
     }
 
     #[test]
+    fn malformed_delimited_and_json_lines_sources_mark_the_root_partial() {
+        for (path, source, diagnostic) in [
+            (
+                "events.jsonl",
+                b"{\"event\":\"start\"}\nnot-json\n{\"event\":\"stop\"}\n".as_slice(),
+                "json_lines_parse_error",
+            ),
+            (
+                "services.csv",
+                b"service,replicas\napi,3\nworker,2\nbroken,\"unterminated".as_slice(),
+                "csv_parse_error",
+            ),
+        ] {
+            let output = extract(path, source);
+
+            assert!(
+                output
+                    .diagnostics
+                    .iter()
+                    .any(|entry| entry.code == diagnostic),
+                "{path} must retain the parse diagnostic"
+            );
+            assert_eq!(
+                output.extraction.nodes[0].extra["parse_status"], "partial",
+                "{path} must not advertise complete extraction after omitting malformed material"
+            );
+        }
+    }
+
+    #[test]
     fn semantic_contract_requires_parsed_domain_facts_for_valid_representations() {
         let fixtures: &[(&str, &[u8], &str)] = &[
             ("service.json", br#"{"service":{"replicas":3}}"#, "replicas"),
@@ -4682,6 +5075,57 @@ mod tests {
     }
 
     #[test]
+    fn markdown_display_math_is_preserved_as_typed_evidence() {
+        let output = extract("formula.md", b"# Model\n\n$$\nF = m a\n$$\n");
+        let formula = nodes_with_type(&output, "document_formula")
+            .into_iter()
+            .find(|node| {
+                node.extra.get("structured_value").and_then(Value::as_str) == Some("F = m a")
+            })
+            .expect("display math must remain typed evidence");
+        assert_eq!(formula.source_location.as_deref(), Some("L4"));
+    }
+
+    #[test]
+    fn markdown_mermaid_fence_retains_its_locator_and_semantics() {
+        let output = extract(
+            "architecture.md",
+            b"# Request flow\n\n```mermaid\nsequenceDiagram\nparticipant Client\nparticipant API\nClient->>API: request\n```\n",
+        );
+
+        let code = nodes_with_type(&output, "document_code_block")
+            .into_iter()
+            .next()
+            .expect("Mermaid code block");
+        assert_eq!(code.source_location.as_deref(), Some("L3"));
+        assert_eq!(code.extra["code_language"], "mermaid");
+        assert_eq!(code.extra["code_fence_source_location"], "L3");
+
+        let client = output
+            .extraction
+            .nodes
+            .iter()
+            .find(|node| node.label == "Client")
+            .expect("Mermaid participant");
+        assert_eq!(client.extra["diagram_format"], "mermaid");
+        assert_eq!(client.extra["mermaid_source_block"], code.id);
+        assert_eq!(client.source_file, "architecture.md");
+        assert_eq!(client.source_location.as_deref(), Some("L5"));
+        assert!(is_contained_by(&output, client, code));
+
+        let message = output
+            .extraction
+            .edges
+            .iter()
+            .find(|edge| edge.relation == "message_to")
+            .expect("Mermaid message relation");
+        assert_eq!(message.extra["diagram_format"], "mermaid");
+        assert_eq!(message.extra["mermaid_source_block"], code.id);
+        assert_eq!(message.source_file, "architecture.md");
+        assert_eq!(message.extra["source_location"], "L7");
+    }
+
+    #[test]
     fn html_scanner_preserves_visible_blocks_and_excludes_hidden_chrome() {
         let output = extract(
             "guide.html",
@@ -4736,6 +5180,49 @@ mod tests {
             assert_eq!(node.source_location.as_deref(), Some(line));
             assert!(is_contained_by(&output, node, heading), "{kind} {value:?}");
         }
+    }
+
+    #[test]
+    fn html_figure_preserves_image_alt_caption_and_reference() {
+        let output = extract(
+            "architecture.html",
+            b"<h1>Architecture</h1>\n<figure><img src=\"assets/request-flow.svg\" alt=\"Service request flow\"><figcaption>Request lifecycle</figcaption></figure>",
+        );
+
+        let figure = nodes_with_type(&output, "document_figure")
+            .into_iter()
+            .next()
+            .expect("typed figure");
+        assert_eq!(figure.source_location.as_deref(), Some("L2"));
+        assert_eq!(figure.extra["html_caption"], "Request lifecycle");
+        assert_eq!(figure.extra["html_caption_source_location"], "L2");
+
+        let image = nodes_with_type(&output, "document_image")
+            .into_iter()
+            .next()
+            .expect("typed image");
+        assert_eq!(image.source_location.as_deref(), Some("L2"));
+        assert_eq!(image.extra["html_alt_text"], "Service request flow");
+        assert_eq!(
+            image.extra["html_image_reference"],
+            "assets/request-flow.svg"
+        );
+        assert!(is_contained_by(&output, image, figure));
+
+        let reference = nodes_with_type(&output, "html_image_reference")
+            .into_iter()
+            .next()
+            .expect("image reference");
+        assert_eq!(
+            reference
+                .extra
+                .get("structured_value")
+                .and_then(Value::as_str),
+            Some("assets/request-flow.svg")
+        );
+        assert!(output.extraction.edges.iter().any(|edge| {
+            edge.source == image.id && edge.target == reference.id && edge.relation == "references"
+        }));
     }
 
     #[test]
@@ -4953,11 +5440,44 @@ const mode = "safe";
     }
 
     #[test]
+    fn omitted_delimited_and_json_lines_material_marks_the_root_partial() {
+        let defaults = StructuredLimits::default();
+        let columns = (0..defaults.max_delimited_fields + 1)
+            .map(|column| format!("column_{column}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let csv = extract_structured_bytes_with_limits(
+            Path::new("wide.csv"),
+            "wide.csv",
+            format!("{columns}\n{columns}\n").as_bytes(),
+            defaults,
+        )
+        .expect("registered delimited extension");
+        assert_eq!(csv.extraction.nodes[0].extra["parse_status"], "partial");
+
+        let json_lines = extract_structured_bytes_with_limits(
+            Path::new("wide.jsonl"),
+            "wide.jsonl",
+            br#"{"one":1,"two":2,"three":3}"#,
+            StructuredLimits {
+                max_facts: 5,
+                ..defaults
+            },
+        )
+        .expect("registered JSON Lines extension");
+        assert_eq!(
+            json_lines.extraction.nodes[0].extra["parse_status"],
+            "partial"
+        );
+    }
+
+    #[test]
     fn delimited_rows_stream_with_bounded_fields() {
         let input = vec![b','; 1_000_000];
         let limits = StructuredLimits {
             max_facts: 64,
             max_depth: 4,
+            max_delimited_fields: 4,
             ..StructuredLimits::default()
         };
         let run = || {
@@ -5019,6 +5539,36 @@ const mode = "safe";
             .nodes
             .iter()
             .all(|node| node.label.len() <= scalar_limits.max_scalar_bytes));
+    }
+
+    #[test]
+    fn delimited_default_preserves_wide_bounded_rows() {
+        let headers = (0..148)
+            .map(|column| format!("column_{column}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let values = (0..148)
+            .map(|column| format!("value_{column}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let input = format!("{headers}\n{values}\n");
+
+        let output = extract_structured_bytes(Path::new("wide.csv"), "wide.csv", input.as_bytes())
+            .expect("registered delimited extension");
+
+        assert_eq!(
+            output
+                .extraction
+                .nodes
+                .iter()
+                .filter(|node| node.extra["type"] == "table_column")
+                .count(),
+            148
+        );
+        assert!(!output
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "field_limit"));
     }
 
     #[test]

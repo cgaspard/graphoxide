@@ -4,6 +4,11 @@ description = "Shared data model: nodes, edges, graph schema, IDs, validation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
+
+[[test]]
+name = "core_integration"
+path = "tests/core_integration.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -16,7 +21,7 @@ unicode-casefold.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 hex.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chrono.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -84,6 +84,24 @@ function sameReferences(left, right) {
   return leftSorted.every((value, index) => value === rightSorted[index]);
 }
 
+export function inspectNextestProvisioning(workflow, source = '<workflow>') {
+  const errors = [];
+  for (const [jobName, job] of Object.entries(workflow?.jobs ?? {})) {
+    let installed = false;
+    for (const step of job.steps ?? []) {
+      if (step.uses?.startsWith('taiki-e/install-action@')
+        && step.with?.tool === 'cargo-nextest@0.9.126' && step.if === undefined) {
+        installed = true;
+      }
+      const consumer = /\bcargo\s+nextest\b|\bnode\s+scripts\/verify-wiki-test-lanes\.mjs\s+--list\b|\bnpm\s+run\s+wiki:test-full\b/u;
+      if (consumer.test(step.run ?? '') && !installed) {
+        errors.push(`${source}: ${jobName} must install pinned cargo-nextest before its test/listing step`);
+      }
+    }
+  }
+  return errors;
+}
+
 export function inspectRepositoryWorkflows() {
   const files = readdirSync(workflowsDirectory, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /\.ya?ml$/u.test(entry.name))
@@ -93,12 +111,19 @@ export function inspectRepositoryWorkflows() {
   let actions = 0;
 
   for (const file of files) {
+    const text = readFileSync(path.join(workflowsDirectory, file), 'utf8');
     const result = inspectWorkflowActionPins(
-      readFileSync(path.join(workflowsDirectory, file), 'utf8'),
+      text,
       `.github/workflows/${file}`,
     );
     actions += result.actions;
     errors.push(...result.errors);
+    if (result.errors.length === 0) {
+      errors.push(...inspectNextestProvisioning(
+        parse(text, { maxAliasCount: 0, uniqueKeys: true }),
+        `.github/workflows/${file}`,
+      ));
+    }
   }
 
   return { actions, errors, files };
