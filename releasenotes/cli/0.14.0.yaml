@@ -1,0 +1,21 @@
+version: 0.14.0
+date: 2026-09-15
+highlights:
+  - Stable release of the CLI and bundled MCP server, with direct-source knowledgebases and the metadata-only Registry v1 capabilities introduced in 0.13.0.
+  - The knowledgebase workflow now uses `graphoxide wiki init`, `wiki source`, and `wiki live`. Source pointers and content digests are tracked alongside derived Markdown and review records; external source bodies remain outside the knowledgebase's tracked content.
+added:
+  - `wiki init --authoring-profile` initializes a knowledgebase at the current Git root using a secret-free profile that selects the author and reviewer models. Credentials remain in configured environment variables.
+  - `wiki source add` and `wiki source refresh` explicitly author provisional derived Markdown from supported source text. `wiki source review` runs the configured AI quality pass, and `wiki source confirm` separately records local human confirmation after review.
+  - `wiki source status --json` reports source digests and lifecycle state; `wiki source retire` removes the pointer and Graphoxide-owned derived artifacts without deleting the external source.
+  - Five stdio MCP lifecycle tools operate on an explicitly bound knowledgebase root: `knowledgebase_source_add`, `knowledgebase_source_status`, `knowledgebase_source_refresh`, `knowledgebase_source_review`, and `knowledgebase_source_retire`. Writes, HTTPS transfers, and model egress require separate explicit authorization; tool inputs and results contain logical metadata rather than raw source bodies or physical paths.
+  - `wiki live` serves a local preview with source navigation, taxonomy, and provisional, reviewed, and stale/error states. Install Hugo 0.165.0 separately and select its executable with `GRAPHOXIDE_HUGO_BINARY`; Graphoxide does not install or manage Hugo.
+changed:
+  - Source authoring and AI review require explicit `--allow-model-egress` consent before transient source text is sent to the configured model. HTTPS source reads additionally require `--allow-network`.
+  - Knowledgebase authoring accepts UTF-8 text up to 16 MiB per source from local files, clean tracked files pinned to a local Git revision, or bounded HTTPS reads. HTTPS transfers have a deadline and do not follow redirects. Binary and non-UTF-8 evidence is rejected before model requests; this workflow does not extract PDF or Office document content.
+  - Windows supports individual source files; Linux and macOS also support directory imports. Remote Git fetching remains disabled, including when `--allow-network` is supplied; pinned Git sources require an available local binding.
+  - Refresh advances a source's recorded digest only when explicitly requested. Changed content returns to provisional state, failed refreshes preserve the last coherent revision, and concurrent source operations report that the knowledgebase is busy.
+  - Registry v1 remains available for metadata-only source registration, discovery, scanning, capture publishing, freshness policies, lifecycle management, and secret-free model-run records. Registry-bound extraction and validated PostgreSQL catalog graph annotations are included in this stable release.
+  - Rust integration tests now share one executable per crate, with parity mappings updated to the consolidated names. Local Cargo builds retain platform linker defaults; the pre-push test-listing check supports optional Nextest acceleration with a Cargo fallback.
+removed:
+  - The previous `wiki plan`, `wiki draft`, `wiki render`, `wiki materialize`, `wiki check`, `wiki index`, and `wiki openapi` commands and the seven previous `wiki_*` MCP tools are removed without automatic migration. Initialize a direct-source knowledgebase and add supported sources explicitly.
+  - The direct-source workflow does not expose `wiki research`, `wiki publish`, `wiki schema`, or a managed Hugo command group.

@@ -1,17 +1,34 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 — 2026-09-15
 
+- Stable VS Code Marketplace release with the matching native CLI bundled for
+  each supported platform.
 - The bundled CLI replaces the earlier wiki workflow with direct-source
   knowledgebases: `wiki init`, `wiki source`, and `wiki live`. Sources are
   referenced by pointers; derived Markdown starts provisional and supports
   explicit AI review and human confirmation.
-- Knowledgebase MCP operations use a bound project root and require explicit
-  authorization for writes, HTTPS access, and model egress. Unsupported binary
-  evidence and remote Git fetching are rejected; local pinned Git sources and
-  bounded HTTPS sources remain supported.
+- Five `knowledgebase_source_*` MCP tools provide source lifecycle operations
+  through an explicitly configured, project-bound stdio server. Writes, HTTPS
+  access, and model egress require separate authorization. Initialization
+  requires a secret-free authoring profile; source add, refresh, and AI review
+  require explicit consent before sending source text to the configured model.
+- Knowledgebase authoring accepts UTF-8 text up to 16 MiB per source from local
+  files, clean tracked files pinned to a local Git revision, and bounded HTTPS
+  reads. Binary and non-UTF-8 evidence is rejected before model requests; PDF
+  and Office document extraction and remote Git fetching are unavailable in
+  this workflow. Windows supports individual files; Linux and macOS also
+  support directory imports.
 - Local preview requires a separately installed Hugo 0.165.0 binary selected
-  by `GRAPHOXIDE_HUGO_BINARY`. Earlier wiki commands have no automatic migration.
+  by `GRAPHOXIDE_HUGO_BINARY`; Graphoxide does not install or manage Hugo.
+- Earlier wiki commands (`plan`, `draft`, `render`, `materialize`, `check`,
+  `index`, and `openapi`) and the seven previous `wiki_*` MCP tools are removed
+  without automatic migration. Initialize a direct-source knowledgebase and
+  add supported sources explicitly. The workflow does not expose `wiki research`,
+  `wiki publish`, `wiki schema`, or a managed Hugo command group.
+- This stable release includes the `graphoxide.registryBinding` workspace
+  setting, Registry v1 source lifecycle commands, and validated PostgreSQL
+  catalog graph annotations introduced in 0.13.0.
 
 ## 0.13.0 — 2026-08-29
 

@@ -1,0 +1,18 @@
+version: 0.14.0
+date: 2026-09-15
+highlights:
+  - Graphoxide 0.14.0 is a stable VS Code Marketplace release, including the matching native CLI for each supported platform.
+  - The bundled CLI replaces the previous wiki workflow with direct-source knowledgebases: `wiki init`, `wiki source`, and `wiki live`. Derived Markdown begins as provisional content, with separate explicit AI review and local human confirmation.
+added:
+  - The bundled CLI supports knowledgebase source add, refresh, review, confirm, status, and retire operations. Tracked metadata contains logical source pointers and content digests; external source bodies remain outside the knowledgebase's tracked content.
+  - Five knowledgebase lifecycle MCP tools are available when the bundled stdio server is explicitly configured with a knowledgebase root and the required capabilities: `knowledgebase_source_add`, `knowledgebase_source_status`, `knowledgebase_source_refresh`, `knowledgebase_source_review`, and `knowledgebase_source_retire`. Writes, HTTPS transfers, and model egress require separate authorization.
+  - The stable extension includes the `graphoxide.registryBinding` workspace setting introduced in 0.13.0. Its `tree` and `origin` values bind extract, index, update, and watch commands to a validated Registry v1 tree while keeping physical source locations outside the shared registry.
+  - The bundled CLI includes Registry v1 source discovery, scanning, capture publishing, freshness policies, lifecycle management, and secret-free model-run records, plus validated PostgreSQL catalog graph annotations.
+changed:
+  - Knowledgebase initialization requires a secret-free authoring profile. Source add, refresh, and AI review require explicit model-egress consent before sending source text to the configured model; HTTPS reads also require network consent.
+  - Knowledgebase authoring supports UTF-8 text up to 16 MiB per source from local files, clean tracked files pinned to a local Git revision, and bounded HTTPS reads. Binary and non-UTF-8 evidence is rejected before model requests; PDF and Office document extraction is unavailable in this workflow. Remote Git fetching is disabled.
+  - Windows supports individual source files; Linux and macOS also support directory imports.
+  - Local knowledgebase preview requires a separately installed Hugo 0.165.0 executable selected by `GRAPHOXIDE_HUGO_BINARY`. Graphoxide does not download or manage Hugo.
+removed:
+  - The previous wiki commands (`plan`, `draft`, `render`, `materialize`, `check`, `index`, and `openapi`) and seven previous `wiki_*` MCP tools are removed without automatic migration. Initialize a direct-source knowledgebase and add supported sources explicitly.
+  - The direct-source workflow does not expose `wiki research`, `wiki publish`, `wiki schema`, or a managed Hugo command group.
