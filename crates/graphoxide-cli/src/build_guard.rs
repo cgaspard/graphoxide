@@ -147,7 +147,8 @@ pub fn stage_graph_from_extractions_with_materialization_limit(
 /// As [`stage_graph_from_extractions_with_materialization_limit`], preserving
 /// a project root for deterministic source normalization during incremental
 /// compatibility graph construction. `on_progress`, when provided, is called
-/// with `(processed, total)` after each extraction is staged.
+/// with an initial `(0, total)` and completed-input counts. The final count
+/// follows the durable flush of the last fact run.
 pub fn stage_graph_from_extractions_with_materialization_limit_and_root(
     extractions: Vec<Extraction>,
     output_directory: &Path,
@@ -211,10 +212,11 @@ fn run_stage(
     let mut store = FactBatchRunStore::create(staging_path, batch_limits, run_limits)?;
     let mut builder = FactBatchRunBuilder::new(run_limits)?;
     let total = extractions.len();
+    if let Some(cb) = on_progress {
+        cb(0, total);
+    }
     for (source_ordinal, extraction) in extractions.into_iter().enumerate() {
-        if let Some(cb) = on_progress {
-            cb(source_ordinal + 1, total);
-        }
+        let processed = source_ordinal + 1;
         let source_ordinal = u64::try_from(source_ordinal)
             .map_err(|_| anyhow::anyhow!("source ordinal exceeds u64"))?;
         for batch in FactBatch::split_extraction(source_ordinal, extraction, batch_limits)? {
@@ -222,9 +224,19 @@ fn run_stage(
                 store.append_run(run)?;
             }
         }
+        if processed < total
+            && let Some(cb) = on_progress
+        {
+            cb(processed, total);
+        }
     }
     if let Some(run) = builder.finish()? {
         store.append_run(run)?;
+    }
+    if total > 0
+        && let Some(cb) = on_progress
+    {
+        cb(total, total);
     }
     StagedGraphOutput::from_run_store_with_materialization_limit_and_root_and_callback(
         &mut store,
@@ -481,6 +493,76 @@ mod tests {
                 .collect(),
             ..KnowledgeGraph::default()
         }
+    }
+
+    #[test]
+    fn staging_counts_begin_at_zero_and_finish_only_after_durable_flush() {
+        let temp = tempfile::tempdir().unwrap();
+        let extraction = Extraction {
+            nodes: graph_with_nodes(2).nodes,
+            ..Default::default()
+        };
+        let expected = graphoxide_graph::build_graph(std::slice::from_ref(&extraction)).unwrap();
+        let events = std::sync::Mutex::new(Vec::new());
+        let progress = |processed, total| {
+            let persisted = FactBatchRunStore::open(temp.path()).unwrap();
+            if processed == 0 {
+                assert_eq!(persisted.run_count(), 0);
+            } else {
+                assert_eq!(
+                    persisted.run_count(),
+                    1,
+                    "final count must follow durable publication of the pending run"
+                );
+            }
+            events.lock().unwrap().push((processed, total));
+        };
+        let actual = run_stage(
+            temp.path(),
+            vec![extraction],
+            BuildOptions::default(),
+            DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
+            None,
+            Some(&progress),
+            None,
+        )
+        .unwrap()
+        .into_parts()
+        .0;
+        assert_eq!(events.into_inner().unwrap(), [(0, 1), (1, 1)]);
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn staging_failure_does_not_count_the_rejected_input_as_processed() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut rejected = graph_with_nodes(1).nodes.remove(0);
+        rejected.label = "x".repeat(graphoxide_graph::DEFAULT_FACT_BATCH_MAX_BYTES);
+        let events = std::sync::Mutex::new(Vec::new());
+        let progress = |processed, total| events.lock().unwrap().push((processed, total));
+        let result = run_stage(
+            temp.path(),
+            vec![
+                Extraction {
+                    nodes: graph_with_nodes(1).nodes,
+                    ..Default::default()
+                },
+                Extraction {
+                    nodes: vec![rejected],
+                    ..Default::default()
+                },
+            ],
+            BuildOptions::default(),
+            DEFAULT_FACT_MATERIALIZATION_MAX_BYTES,
+            None,
+            Some(&progress),
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(events.into_inner().unwrap(), [(0, 2), (1, 2)]);
     }
 
     #[test]

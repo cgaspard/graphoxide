@@ -2,6 +2,7 @@
 
 //! Reusable CLI services.
 
+pub mod activity_progress;
 pub mod build_guard;
 pub mod build_progress;
 pub mod build_telemetry;
@@ -16,6 +17,7 @@ pub mod install;
 pub mod ollama_transport;
 pub mod transcribe;
 pub mod watch;
+pub mod wiki_cancellation;
 pub mod wiki_direct;
 pub mod wiki_hugo;
 mod wiki_lock;

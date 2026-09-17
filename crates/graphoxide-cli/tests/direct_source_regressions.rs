@@ -23,6 +23,7 @@ struct Provider {
     requests: Arc<Mutex<Vec<Value>>>,
     fail: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
+    allow_disconnect: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -35,6 +36,8 @@ impl Provider {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let fail = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(AtomicBool::new(false));
+        let allow_disconnect = Arc::new(AtomicBool::new(false));
+        let disconnected = allow_disconnect.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let (recorded, failing, stopped) = (requests.clone(), fail.clone(), stop.clone());
         let paused = pause.clone();
@@ -83,7 +86,15 @@ impl Provider {
                         } else {
                             "200 OK"
                         };
-                        write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                        if let Err(error) = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()) {
+                            assert!(
+                                disconnected.load(Ordering::Acquire)
+                                    && matches!(error.kind(), std::io::ErrorKind::BrokenPipe
+                                        | std::io::ErrorKind::ConnectionReset
+                                        | std::io::ErrorKind::ConnectionAborted),
+                                "write fixture response: {error}",
+                            );
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -97,6 +108,7 @@ impl Provider {
             requests,
             fail,
             pause,
+            allow_disconnect,
             stop,
             worker: Some(worker),
         }
@@ -615,4 +627,204 @@ fn overlapping_refresh_cannot_replace_an_add_that_is_waiting_for_its_author() {
     fixture.confirm(&source.source_id);
     #[cfg(unix)]
     fixture.preview();
+}
+
+#[test]
+fn wiki_activity_tracks_authored_pages_review_and_failure() {
+    use graphoxide_cli::activity_progress::ACTIVITY_PROGRESS_PREFIX;
+    let fixture = Fixture::new();
+    let source = fixture.external(
+        "private-reference.md",
+        b"Source text must not enter progress.\n",
+    );
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let events = |output: &Output| {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| line.strip_prefix(ACTIVITY_PROGRESS_PREFIX))
+            .map(|payload| {
+                assert!(payload.len() < 512);
+                assert!(!payload.contains("private-reference"));
+                assert!(!payload.contains("Source text"));
+                assert!(!payload.contains("fixture-key"));
+                let value: Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(value["run_nonce"], nonce);
+                assert_eq!(value["operation"], "wiki");
+                value
+            })
+            .collect::<Vec<_>>()
+    };
+    let added = fixture
+        .command()
+        .args([
+            "wiki",
+            "source",
+            "add",
+            "--allow-model-egress",
+            "--progress=json",
+        ])
+        .arg(&source)
+        .env("GRAPHOXIDE_PROGRESS_NONCE", nonce)
+        .output()
+        .unwrap();
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let progress = events(&added);
+    assert_eq!(progress.first().unwrap()["type"], "started");
+    assert_eq!(progress.last().unwrap()["type"], "completed");
+    assert!(progress.iter().any(|event| event["phase"] == "admitting"));
+    assert!(progress.iter().any(|event| event["phase"] == "authoring"
+        && event["processed"] == 0
+        && event["total"] == 1));
+    assert!(progress.iter().any(|event| event["phase"] == "authoring"
+        && event["processed"] == 1
+        && event["total"] == 1));
+    assert_eq!(progress[progress.len() - 2]["phase"], "publishing");
+    let value: Value = serde_json::from_slice(&added.stdout).unwrap();
+    let source_id = value["sources"][0]["source_id"].as_str().unwrap();
+    let reviewed = fixture
+        .command()
+        .args([
+            "wiki",
+            "source",
+            "review",
+            source_id,
+            "--allow-model-egress",
+            "--progress=json",
+        ])
+        .env("GRAPHOXIDE_PROGRESS_NONCE", nonce)
+        .output()
+        .unwrap();
+    assert!(
+        reviewed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reviewed.stderr)
+    );
+    let progress = events(&reviewed);
+    assert!(progress
+        .iter()
+        .any(|event| event["phase"] == "reviewing" && event["processed"] == 0));
+    assert!(progress
+        .iter()
+        .any(|event| event["phase"] == "reviewing" && event["processed"] == 1));
+    assert_eq!(progress.last().unwrap()["type"], "completed");
+    let failed = fixture
+        .command()
+        .args([
+            "wiki",
+            "source",
+            "add",
+            "missing-reference.md",
+            "--allow-model-egress",
+            "--progress=json",
+        ])
+        .env("GRAPHOXIDE_PROGRESS_NONCE", nonce)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let progress = events(&failed);
+    assert_eq!(progress.first().unwrap()["type"], "started");
+    assert_eq!(progress.last().unwrap()["type"], "failed");
+    assert!(!progress.iter().any(|event| event["type"] == "completed"));
+    let silent = fixture.success(&["wiki", "source", "status", "--json"]);
+    assert!(!String::from_utf8_lossy(&silent.stderr).contains(ACTIVITY_PROGRESS_PREFIX));
+}
+
+#[test]
+fn cooperative_wiki_cancel_rolls_back_add_and_preserves_refresh_and_review() {
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    for (operation, close_stdin) in [
+        ("add", false),
+        ("refresh", false),
+        ("review", false),
+        ("add", true),
+    ] {
+        let fixture = Fixture::new();
+        let prior_path = fixture.external("prior.md", ORIGINAL);
+        let prior = fixture.add(&prior_path);
+        let new_path = fixture.external("cancelled.md", b"New source must be rolled back.\n");
+        let target = if operation == "add" {
+            new_path.to_string_lossy().into_owned()
+        } else {
+            if operation == "refresh" {
+                fs::write(&prior_path, b"Changed source must not be published.\n").unwrap();
+            }
+            prior.source_id.clone()
+        };
+        let before = fixture.snapshot();
+        let requests = fixture.provider.count();
+        fixture.provider.pause.store(true, Ordering::Release);
+        let mut child = fixture
+            .command()
+            .args([
+                "wiki",
+                "source",
+                operation,
+                &target,
+                "--allow-model-egress",
+                "--progress=json",
+            ])
+            .env("GRAPHOXIDE_CANCEL_STDIN", "1")
+            .env("GRAPHOXIDE_PROGRESS_NONCE", NONCE)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture.provider.count() == requests {
+            if Instant::now() >= deadline {
+                fixture.provider.pause.store(false, Ordering::Release);
+                let _ = child.kill();
+                panic!("{operation} did not reach the model");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        if close_stdin {
+            drop(child.stdin.take());
+        } else {
+            writeln!(child.stdin.take().unwrap(), "{NONCE}").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                fixture.provider.pause.store(false, Ordering::Release);
+                let _ = child.kill();
+                panic!("{operation} cancellation waited for the blocked model");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        // The client has exited while its response was held. A failed write
+        // to that deliberately closed socket is expected only in this test.
+        fixture
+            .provider
+            .allow_disconnect
+            .store(true, Ordering::Release);
+        fixture.provider.pause.store(false, Ordering::Release);
+        assert!(!output.status.success(), "cancelled {operation} succeeded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Wiki operation cancelled"), "{stderr}");
+        let events = stderr
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix(graphoxide_cli::activity_progress::ACTIVITY_PROGRESS_PREFIX)
+            })
+            .map(|payload| serde_json::from_str::<Value>(payload).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events.last().unwrap()["type"], "failed");
+        assert!(!events.iter().any(|event| event["type"] == "completed"));
+        assert_eq!(
+            fixture.snapshot(),
+            before,
+            "cancelled {operation} changed prior knowledgebase artifacts"
+        );
+        assert_eq!(
+            wiki_source::source_status(&fixture.root).unwrap(),
+            vec![prior]
+        );
+    }
 }

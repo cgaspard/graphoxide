@@ -19,6 +19,7 @@ import {
 import { ServerInvocation } from './mcp/config';
 import { resolvedInvocation } from './mcp/runtime';
 import { GraphStore } from './store';
+import { WikiService } from './wiki';
 
 interface ControlCenterMessage {
   readonly type?: unknown;
@@ -33,6 +34,7 @@ interface ControlCenterServices {
   readonly cli: GraphoxideCli;
   readonly managed: ManagedWorkspaceService;
   readonly aiLabeling: AiLabelingService;
+  readonly wiki: WikiService;
 }
 
 interface ScopeRow extends ScopeStatus {
@@ -61,6 +63,11 @@ const CONTROL_CENTER_COMMANDS = new Set([
   'graphoxide.configureAiLabeling',
   'graphoxide.clearAiCredential',
   'graphoxide.improveCommunityLabels',
+  'graphoxide.initializeWiki',
+  'graphoxide.buildWiki',
+  'graphoxide.manageWikiSources',
+  'graphoxide.previewWiki',
+  'graphoxide.stopWikiPreview',
   'graphoxide.openSettings',
 ]);
 
@@ -107,10 +114,12 @@ export class ControlCenterPanel implements vscode.Disposable {
       services.cli.onDidChangeBuildSummary(() => void this.refresh()),
       services.cli.onDidChangeBuildProgress(() => void this.postBuildProgress()),
       services.managed.onDidChangeEnablement(() => void this.refresh()),
+      services.wiki.onDidChange(() => void this.refresh()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('graphoxide')) void this.refresh();
       }),
     );
+    this.postBuildProgress();
     void this.refresh();
   }
 
@@ -206,7 +215,7 @@ export class ControlCenterPanel implements vscode.Disposable {
     try {
       const folder = this.services.store.state?.folder ?? await this.services.store.preferredFolder(false);
       const graphState = reloadGraph && folder
-        ? await this.services.store.load(folder)
+        ? await this.services.cli.runUiActivity('Loading graph…', () => this.services.store.load(folder))
         : this.services.store.state;
       const invocation = await resolvedInvocation(folder, this.context);
       const reports = await integrationReports({ folder, invocation });
@@ -235,6 +244,7 @@ export class ControlCenterPanel implements vscode.Disposable {
       const configuredScopes = rows.flatMap((row) => row.scopes).filter((scope) => scope.configured).length;
       const staleScopes = rows.flatMap((row) => row.scopes).filter((scope) => scope.stale).length;
       const ai = await this.aiStatus(folder);
+      const wiki = await this.services.wiki.status(folder);
       this.post({
         type: 'state',
         workspace: folder ? { name: folder.name, path: folder.uri.fsPath, trusted: vscode.workspace.isTrusted } : null,
@@ -256,6 +266,8 @@ export class ControlCenterPanel implements vscode.Disposable {
           watching: this.services.cli.watching,
         },
         ai,
+        wiki,
+        buildProgress: this.services.cli.buildProgress?.message,
         mcp: {
           nativeEnabled: enabled && Boolean(folder),
           invocation: invocation.command,
@@ -265,7 +277,9 @@ export class ControlCenterPanel implements vscode.Disposable {
         },
       });
     } catch (error) {
-      this.post({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+      if (!(error instanceof vscode.CancellationError)) {
+        this.post({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+      }
     } finally {
       this.refreshing = false;
       if (this.refreshPending) {
@@ -436,7 +450,7 @@ export class ControlCenterPanel implements vscode.Disposable {
       const message = event.data;
       if (message.type === 'busy') { busy = Boolean(message.busy); updateDisabled(); }
       if (message.type === 'error') showError(message.message);
-      if (message.type === 'state') render(message);
+      if (message.type === 'state') { buildProgressMsg = message.buildProgress; render(message); }
       if (message.type === 'buildProgress') { buildProgressMsg = message.message; updateBuildProgress(); }
     });
     function escapeHtml(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char])); }
@@ -451,7 +465,8 @@ export class ControlCenterPanel implements vscode.Disposable {
       var banner = document.getElementById('build-progress-banner');
       if (!banner) return;
       if (buildProgressMsg === undefined) { banner.style.display = 'none'; }
-      else { banner.style.display = 'flex'; banner.querySelector('.phase').textContent = escapeHtml(buildProgressMsg); }
+      else { banner.style.display = 'flex'; banner.querySelector('.phase').textContent = buildProgressMsg; }
+      updateDisabled();
     }
     function render(state) {
       document.getElementById('error').hidden = true;
@@ -473,6 +488,13 @@ export class ControlCenterPanel implements vscode.Disposable {
       var problem = graph.error ? '<div class="error">' + escapeHtml(graph.error) + '</div>' : '';
       var ready = graph.status === 'ready';
       var exists = graph.exists;
+      var wiki = state.wiki || { initialized: false, sources: [], previewing: false };
+      var wikiDisabled = !state.workspace || !state.workspace.trusted;
+      var wikiReviewed = wiki.sources.filter(source => source.status === 'ai-reviewed' || source.status === 'human-confirmed').length;
+      var wikiStatus = wiki.error ? wiki.error : wiki.initialized ? wiki.sources.length + ' sources · ' + wikiReviewed + ' reviewed' : 'Generate a knowledgebase from selected documents, source files, or HTTPS sources.';
+      var wikiActions = command('graphoxide.buildWiki', wiki.initialized ? 'Build from sources…' : 'Set up and build…', false, wikiDisabled) +
+        (wiki.initialized ? command('graphoxide.manageWikiSources', 'Manage sources…', true, wikiDisabled || !wiki.sources.length) +
+        (wiki.previewing ? command('graphoxide.stopWikiPreview', 'Stop preview', true, false) : command('graphoxide.previewWiki', 'Preview Wiki', true, wikiDisabled)) : command('graphoxide.initializeWiki', 'Initialize only…', true, wikiDisabled));
       var actions = ready
         ? command('graphoxide.update', 'Update incrementally', false, false) + command('graphoxide.rebuild', 'Full rebuild…', true, false) + command('graphoxide.openGraph', 'Open graph', true, false)
         : exists
@@ -519,12 +541,14 @@ export class ControlCenterPanel implements vscode.Disposable {
       document.getElementById('content').innerHTML =
         statusLine +
         problem +
+        progressBanner +
         '<main class="dashboard">' +
-        '<section class="card">' + progressBanner +
+        '<section class="card" aria-label="Workspace graph">' +
         '<div class="metrics"><div class="metric"><strong>' + abbrevNumber(graph.nodes) + '</strong><span>Nodes</span></div><div class="metric"><strong>' + abbrevNumber(graph.edges) + '</strong><span>Edges</span></div><div class="metric"><strong>' + abbrevNumber(graph.communities) + '</strong><span>Communities</span></div>' + sourceBytesStr + '</div>' +
         '<dl><dt>Graph path</dt><dd>' + pathLink + '</dd><dt>Last updated</dt><dd>' + escapeHtml(updated) + '</dd></dl>' +
         latestIndexHtml +
         '<div class="actions">' + actions + '</div></section>' +
+        '<section class="card" aria-label="Wiki"><div class="card-head"><h2>Wiki</h2>' + badge(wiki.error ? 'Needs attention' : wiki.initialized ? 'Initialized' : 'Not initialized', wiki.error ? 'warn' : wiki.initialized ? 'good' : '') + '</div><p class="detail" style="margin:8px 0 0">' + escapeHtml(wikiStatus) + '</p><div class="actions">' + wikiActions + '</div></section>' +
         '<div class="settings-row">' +
         '<div class="card settings-card"><h2>Workspace</h2><div class="inline-status"><span class="' + (state.managed.enabled ? 'dot-green' : '') + '" style="width:6px;height:6px;border-radius:50%;background:' + (state.managed.enabled ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-descriptionForeground)') + ';"></span><span>' + escapeHtml(modeLabel) + ' · ' + watcherStatus + '</span></div>' +
         '<div class="actions" style="margin-top:6px;">' + command('graphoxide.configureFreshness', 'Change mode', true, false) + (state.managed.watching ? command('graphoxide.stopWatch', 'Stop watcher', true, !state.workspace) : command('graphoxide.startWatch', 'Start watcher', true, !state.workspace)) + '</div></div>' +
@@ -548,7 +572,14 @@ export class ControlCenterPanel implements vscode.Disposable {
       }));
       document.querySelectorAll('[data-path]').forEach(button => button.addEventListener('click', () => api.postMessage({ type: 'openPath', path: button.dataset.path })));
     }
-    function updateDisabled() { document.querySelectorAll('button').forEach(button => { if (busy) button.disabled = true; }); document.getElementById('refresh').disabled = busy; }
+    function updateDisabled() {
+      document.querySelectorAll('button').forEach(button => {
+        if (button.dataset.action === 'cancelBuild') { button.disabled = buildProgressMsg === undefined; return; }
+        if (button.dataset.originalDisabled === undefined) button.dataset.originalDisabled = String(button.disabled);
+        button.disabled = busy || button.dataset.originalDisabled === 'true';
+      });
+      document.getElementById('refresh').disabled = busy;
+    }
   </script>
 </body>
 </html>`;

@@ -1,0 +1,17 @@
+version: 0.16.0
+date: 2026-09-16
+highlights:
+  - Stable VS Code Marketplace release with Wiki controls and unified progress for graph builds, Wiki generation, and LLM community naming.
+added:
+  - The Control Center and Command Palette expose Wiki initialization, generation from selected sources, refresh, AI review, human confirmation, retirement, and local preview.
+  - Wiki setup uses project-scoped authoring profiles and explicit model and HTTPS-fetch consent. Both JSON and YAML provider profiles are supported.
+  - LLM naming progress includes completed-community counts and retries; Wiki generation reports completed source pages and partial import outcomes.
+fixed:
+  - Graph builds show one status-bar indicator instead of duplicating the same work through VS Code window progress.
+  - Progress remains visible through graph construction, clustering, publication, and loading the finished graph into the UI.
+  - Cancellation targets the displayed operation without treating user cancellation as an automatic-update failure; progress from overlapping operations is restored correctly.
+  - The Control Center shows progress even without an existing graph and keeps Cancel usable while an operation is busy.
+  - Watch startup, completed watch-pass loading, and manual graph refresh retain visible progress.
+  - Wiki cancellation uses an authenticated cooperative channel so source cleanup completes before the process exits, including when a model request is blocked.
+changed:
+  - Long-running CLI-backed UI commands share one progress and cancellation surface. Percentages describe the current phase rather than the complete operation.

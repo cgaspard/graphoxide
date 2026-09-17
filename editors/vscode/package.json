@@ -2,7 +2,7 @@
   "name": "graphoxide-vscode",
   "displayName": "Graphoxide",
   "description": "Explore, query, and maintain Graphoxide code knowledge graphs without leaving VS Code.",
-  "version": "0.14.0",
+  "version": "0.16.0",
   "publisher": "cgaspard",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -186,6 +186,31 @@
         "command": "graphoxide.improveCommunityLabels",
         "title": "Graphoxide: Improve Community Names with AI",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "graphoxide.buildWiki",
+        "title": "Graphoxide: Build Wiki from Sources…",
+        "icon": "$(book)",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "graphoxide.initializeWiki",
+        "title": "Graphoxide: Initialize Wiki…",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "graphoxide.manageWikiSources",
+        "title": "Graphoxide: Manage Wiki Sources…",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "graphoxide.previewWiki",
+        "title": "Graphoxide: Preview Wiki",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "graphoxide.stopWikiPreview",
+        "title": "Graphoxide: Stop Wiki Preview"
       },
       {
         "command": "graphoxide.enableWorkspace",

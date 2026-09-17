@@ -285,16 +285,47 @@ fn request_for_batch(
     }
 }
 
+/// Aggregate work observed during real requests, including split retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelingProgress {
+    pub retrying: bool,
+    pub processed: usize,
+    pub total: usize,
+}
+
+struct LabelingProgressObserver<'a> {
+    report: &'a (dyn Fn(LabelingProgress) + Sync),
+    processed: std::sync::Mutex<usize>,
+    total: usize,
+}
+
+impl LabelingProgressObserver<'_> {
+    fn emit(&self, retrying: bool, completed: usize) {
+        let mut processed = self
+            .processed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *processed = processed.saturating_add(completed).min(self.total);
+        (self.report)(LabelingProgress {
+            retrying,
+            processed: *processed,
+            total: self.total,
+        });
+    }
+}
+
 fn label_batch_with_retry<F>(
     community_ids: &[i64],
     lines: &[String],
     options: &LabelingOptions,
     depth: usize,
     call: &F,
+    progress: &LabelingProgressObserver<'_>,
 ) -> Result<BatchSuccess, BatchFailure>
 where
     F: Fn(&LabelRequest) -> anyhow::Result<LabelResponse> + Sync,
 {
+    progress.emit(depth > 0, 0);
     let response =
         call(&request_for_batch(community_ids, lines, options)).map_err(|error| BatchFailure {
             error,
@@ -314,6 +345,7 @@ where
                 options,
                 depth + 1,
                 call,
+                progress,
             )
             .map_err(|mut failure| {
                 failure.usage.add(&own_usage);
@@ -325,6 +357,7 @@ where
                 options,
                 depth + 1,
                 call,
+                progress,
             )
             .map_err(|mut failure| {
                 failure.usage.add(&own_usage);
@@ -354,6 +387,24 @@ pub fn label_communities_with<F>(
 ) -> Result<(BTreeMap<i64, String>, LabelUsage), LabelingError>
 where
     F: Fn(&LabelRequest) -> anyhow::Result<LabelResponse> + Sync,
+{
+    label_communities_with_progress(graph, communities, gods, options, call, |_| {})
+}
+
+/// The callback contains only counts, never graph content or provider responses.
+/// Processed counts include completed failed batches; output labels retain the
+/// existing placeholder/failure behavior.
+pub fn label_communities_with_progress<F, P>(
+    graph: &KnowledgeGraph,
+    communities: &BTreeMap<i64, Vec<String>>,
+    gods: &[GodNode],
+    options: &LabelingOptions,
+    call: F,
+    progress: P,
+) -> Result<(BTreeMap<i64, String>, LabelUsage), LabelingError>
+where
+    F: Fn(&LabelRequest) -> anyhow::Result<LabelResponse> + Sync,
+    P: Fn(LabelingProgress) + Sync,
 {
     if options.batch_size == 0 || options.top_k == 0 {
         return Err(LabelingError {
@@ -385,9 +436,19 @@ where
     } else {
         options.max_concurrency.max(1).min(batches.len())
     };
-    let run = |(index, ids, lines): &(usize, &[i64], &[String])| BatchResult {
-        index: *index,
-        result: label_batch_with_retry(ids, lines, options, 0, &call),
+    let observer = LabelingProgressObserver {
+        report: &progress,
+        processed: std::sync::Mutex::new(0),
+        total: community_ids.len(),
+    };
+    observer.emit(false, 0);
+    let run = |(index, ids, lines): &(usize, &[i64], &[String])| {
+        let result = label_batch_with_retry(ids, lines, options, 0, &call, &observer);
+        observer.emit(false, ids.len());
+        BatchResult {
+            index: *index,
+            result,
+        }
     };
     let mut results = if workers == 1 {
         batches.iter().map(run).collect::<Vec<_>>()

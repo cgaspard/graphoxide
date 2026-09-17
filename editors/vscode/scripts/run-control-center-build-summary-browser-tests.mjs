@@ -125,7 +125,7 @@ ${stylesheet}
   <div id="error" class="error" role="alert" hidden></div>
   <div id="content" class="loading" aria-live="polite">Loading Graphoxide status…</div>
   <output id="build-summary-result" hidden></output>
-  <script>globalThis.acquireVsCodeApi = () => ({ postMessage() {} });</script>
+  <script>globalThis.postedMessages = []; globalThis.acquireVsCodeApi = () => ({ postMessage(message) { postedMessages.push(message); } });</script>
   <script>${renderer}</script>
   <script>
     const fixtureState = {
@@ -139,6 +139,10 @@ ${stylesheet}
         latestIndex: null,
       },
       managed: { enabled: true, freshness: 'watch', watching: true },
+      wiki: { initialized: true, previewing: false, sources: [
+        { id: 'src:one', label: 'architecture.md', status: 'provisional', remote: false },
+        { id: 'src:two', label: 'operations.md', status: 'ai-reviewed', remote: false },
+      ] },
       ai: {
         enabled: true, provider: 'LM Studio', endpoint: 'http://127.0.0.1:1234/v1',
         model: 'qwen/qwen3.6-27b', credentialPresent: false, credentialRequired: false,
@@ -155,9 +159,37 @@ ${stylesheet}
       .filter(element => element.textContent.trim() === 'Latest index');
     sendState(fixtureState);
     const initialSummaryCount = summaryHeadings().length;
+    const wikiChecks = {};
+    const wikiButton = name => document.querySelector('[data-command="graphoxide.' + name + '"]');
+    wikiChecks.readyActions = ['buildWiki', 'manageWikiSources', 'previewWiki'].every(name => wikiButton(name) && !wikiButton(name).disabled);
+    wikiButton('buildWiki').click();
+    wikiChecks.buildDispatch = postedMessages.some(message => message.command === 'graphoxide.buildWiki');
+    sendState({ ...fixtureState, workspace: { ...fixtureState.workspace, trusted: false } });
+    wikiChecks.trustGating = ['buildWiki', 'manageWikiSources', 'previewWiki'].every(name => wikiButton(name)?.disabled);
+    sendState({ type: 'busy', busy: true });
+    sendState({ type: 'busy', busy: false });
+    wikiChecks.trustSurvivesBusy = ['buildWiki', 'manageWikiSources', 'previewWiki'].every(name => wikiButton(name)?.disabled);
+    sendState({ ...fixtureState, wiki: { initialized: false, previewing: false, sources: [] }, graph: { ...fixtureState.graph, status: 'missing', exists: false } });
+    wikiChecks.setupActions = ['buildWiki', 'initializeWiki'].every(name => wikiButton(name) && !wikiButton(name).disabled);
+    const progressText = 'Authoring Wiki <sources> & validating pages (3/8)';
+    sendState({ type: 'buildProgress', message: progressText });
+    sendState({ type: 'busy', busy: true });
+    const progressBanner = document.getElementById('build-progress-banner');
+    const cancel = progressBanner.querySelector('[data-action="cancelBuild"]');
+    wikiChecks.progressWithoutGraph = getComputedStyle(progressBanner).display !== 'none' && progressBanner.querySelector('.phase').textContent === progressText;
+    wikiChecks.cancelWhileBusy = !cancel.disabled && wikiButton('buildWiki').disabled;
+    cancel.click();
+    wikiChecks.cancelDispatch = postedMessages.some(message => message.type === 'cancelBuild');
+    sendState({ type: 'busy', busy: false });
+    wikiChecks.actionsRestore = !wikiButton('buildWiki').disabled;
+    sendState({ type: 'buildProgress', message: undefined });
+    wikiChecks.progressClears = getComputedStyle(progressBanner).display === 'none';
+    sendState({ ...fixtureState, wiki: { ...fixtureState.wiki, previewing: true } });
+    wikiChecks.stopPreview = Boolean(wikiButton('stopWikiPreview') && !wikiButton('previewWiki'));
     const completedAt = Date.parse('2026-08-11T20:24:05.000Z');
     sendState({
       ...fixtureState,
+      buildProgress: 'Wiki: authoring sources (3/8)',
       graph: {
         ...fixtureState.graph,
         latestIndex: {
@@ -181,7 +213,7 @@ ${stylesheet}
         && Number(style.opacity) !== 0 && value.right > 0 && value.left < innerWidth && value.bottom > 0 && value.top < innerHeight;
     };
     const headings = summaryHeadings();
-    const graph = document.querySelector('[aria-labelledby="graph-heading"]');
+    const graph = document.querySelector('[aria-label="Workspace graph"]');
     const heading = headings[0];
     const summary = heading && heading.nextElementSibling;
     const pairs = {};
@@ -189,9 +221,10 @@ ${stylesheet}
       for (const term of summary.querySelectorAll('dt')) pairs[term.textContent.trim()] = term.nextElementSibling?.textContent.trim() || '';
     }
     const graphLists = graph ? [...graph.querySelectorAll(':scope > dl')] : [];
-    const detail = graph?.querySelector(':scope > p.detail');
+    const actions = graph?.querySelector(':scope > .actions');
     const dashboard = document.querySelector('.dashboard');
-    const secondary = document.querySelector('.dashboard-secondary');
+    const secondary = document.querySelector('.settings-row');
+    const wiki = document.querySelector('[aria-label="Wiki"]');
     document.getElementById('build-summary-result').textContent = JSON.stringify({
       viewport: { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight },
       scrollWidth: document.documentElement.scrollWidth,
@@ -204,7 +237,14 @@ ${stylesheet}
       heading: heading ? rect(heading) : null,
       summary: summary ? rect(summary) : null,
       baseDetails: graphLists[0] ? rect(graphLists[0]) : null,
-      detail: detail ? rect(detail) : null,
+      actions: actions ? rect(actions) : null,
+      wikiChecks,
+      wikiVisible: Boolean(wiki && visible(wiki)),
+      wiki: wiki ? rect(wiki) : null,
+      wikiButtonsContained: Boolean(wiki && [...wiki.querySelectorAll('button')].every(button => {
+        const outer = rect(wiki); const inner = rect(button);
+        return inner.left >= outer.left && inner.right <= outer.right;
+      })),
       pairs,
       expectedCompleted: new Date(completedAt).toLocaleString(),
       dashboard: dashboard ? rect(dashboard) : null,
@@ -235,6 +275,12 @@ function assertRenderedSummary(report, scenario) {
   if (report.summaryCount !== 1) {
     throw new Error(`${scenario.name}: expected exactly one post-success summary, received ${report.summaryCount}.`);
   }
+  for (const [check, passed] of Object.entries(report.wikiChecks)) {
+    if (!passed) throw new Error(`${scenario.name}: Wiki/progress interaction failed: ${check}.`);
+  }
+  if (!report.wikiVisible || !report.wikiButtonsContained) {
+    throw new Error(`${scenario.name}: Wiki actions are hidden or overflow their card.`);
+  }
   if (!report.summaryInsideGraph || !report.headingVisible || !report.summaryVisible) {
     throw new Error(`${scenario.name}: build summary is not visible inside the Workspace graph card.`);
   }
@@ -254,7 +300,7 @@ function assertRenderedSummary(report, scenario) {
   if (!contains(report.graph, report.heading) || !contains(report.graph, report.summary)) {
     throw new Error(`${scenario.name}: build summary crosses the graph-card bounds.`);
   }
-  if (!(report.baseDetails.bottom <= report.heading.top + 1 && report.summary.bottom <= report.detail.top + 1)) {
+  if (!(report.baseDetails.bottom <= report.heading.top + 1 && report.summary.bottom <= report.actions.top + 1)) {
     throw new Error(`${scenario.name}: build summary is not ordered between graph metadata and graph actions.`);
   }
   if (expectDashboardFlow) assertDashboardFlow(report, scenario);

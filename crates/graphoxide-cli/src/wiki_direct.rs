@@ -2,6 +2,7 @@
 
 pub use crate::wiki_lock::{acquire_source_operation, DirectSourceOperation};
 
+use crate::wiki_cancellation::WikiCancellation;
 use anyhow::{ensure, Context as _, Result};
 use graphoxide_export::direct_taxonomy::{
     canonical_assignments, canonical_review_attestation, canonical_taxonomy_policy,
@@ -190,6 +191,44 @@ fn author_source_with_transport(
     allow_remote: bool,
     transport: &WikiModelTransport,
 ) -> Result<String> {
+    author_source_with_completion(
+        root,
+        source,
+        allow_remote,
+        |prompt| transport.complete_json_object(AUTHOR_SYSTEM, &prompt),
+        &WikiCancellation::default(),
+    )
+}
+
+fn author_source_with_cancellation(
+    root: &Path,
+    source: &SourceEntry,
+    allow_remote: bool,
+    cancellation: &WikiCancellation,
+) -> Result<String> {
+    cancellation.check()?;
+    let config = load_authoring(root)?;
+    let transport = configured_transport(root, &config, &config.author_model)?;
+    author_source_with_completion(
+        root,
+        source,
+        allow_remote,
+        |prompt| {
+            cancellation
+                .model_request(move || transport.complete_json_object(AUTHOR_SYSTEM, &prompt))
+        },
+        cancellation,
+    )
+}
+
+fn author_source_with_completion(
+    root: &Path,
+    source: &SourceEntry,
+    allow_remote: bool,
+    complete: impl FnOnce(String) -> Result<serde_json::Value>,
+    cancellation: &WikiCancellation,
+) -> Result<String> {
+    cancellation.check()?;
     let body = read_source_transient(
         root,
         source,
@@ -198,10 +237,11 @@ fn author_source_with_transport(
     validate_source_text(source, &body)?;
     let state = capture_derived_state(root, source)?;
     let (policy, _, _) = load_taxonomy(root)?;
-    let response =
-        transport.complete_json_object(AUTHOR_SYSTEM, &author_prompt(&body, &policy)?)?;
+    let response = complete(author_prompt(&body, &policy)?)?;
+    cancellation.check()?;
     ensure_source_unchanged(root, source, allow_remote, &body)?;
     ensure_derived_state_unchanged(root, source, &state)?;
+    cancellation.check()?;
     author_source_output(root, source, &body, response)
 }
 
@@ -212,19 +252,60 @@ pub fn refresh_source(
     source_id: &str,
     remote_consent: Option<crate::wiki_source::HttpsFetchConsent>,
 ) -> Result<(SourceEntry, Option<String>)> {
-    refresh_source_with(root, source_id, remote_consent, |body, policy| {
-        let config = load_authoring(root)?;
-        let transport = configured_transport(root, &config, &config.author_model)?;
-        transport.complete_json_object(AUTHOR_SYSTEM, &author_prompt(body, policy)?)
-    })
+    refresh_source_with_cancellation(
+        root,
+        source_id,
+        remote_consent,
+        &WikiCancellation::default(),
+    )
 }
 
+pub fn refresh_source_with_cancellation(
+    root: &Path,
+    source_id: &str,
+    remote_consent: Option<crate::wiki_source::HttpsFetchConsent>,
+    cancellation: &WikiCancellation,
+) -> Result<(SourceEntry, Option<String>)> {
+    cancellation.check()?;
+    refresh_source_with_checked(
+        root,
+        source_id,
+        remote_consent,
+        |body, policy| {
+            let config = load_authoring(root)?;
+            let transport = configured_transport(root, &config, &config.author_model)?;
+            let prompt = author_prompt(body, policy)?;
+            cancellation
+                .model_request(move || transport.complete_json_object(AUTHOR_SYSTEM, &prompt))
+        },
+        cancellation,
+    )
+}
+
+#[cfg(test)]
 fn refresh_source_with(
     root: &Path,
     source_id: &str,
     remote_consent: Option<crate::wiki_source::HttpsFetchConsent>,
     author: impl FnOnce(&[u8], &TaxonomyPolicy) -> Result<serde_json::Value>,
 ) -> Result<(SourceEntry, Option<String>)> {
+    refresh_source_with_checked(
+        root,
+        source_id,
+        remote_consent,
+        author,
+        &WikiCancellation::default(),
+    )
+}
+
+fn refresh_source_with_checked(
+    root: &Path,
+    source_id: &str,
+    remote_consent: Option<crate::wiki_source::HttpsFetchConsent>,
+    author: impl FnOnce(&[u8], &TaxonomyPolicy) -> Result<serde_json::Value>,
+    cancellation: &WikiCancellation,
+) -> Result<(SourceEntry, Option<String>)> {
+    cancellation.check()?;
     let prepared = crate::wiki_source::prepare_source_refresh(root, source_id, remote_consent)?;
     if prepared.refreshed.status != crate::wiki_source::SourceStatus::Provisional {
         let mut index = crate::wiki_source::load_source_index(root)?;
@@ -237,6 +318,7 @@ fn refresh_source_with(
             *current == prepared.previous,
             "source pointer is no longer current"
         );
+        cancellation.check()?;
         *current = prepared.refreshed.clone();
         write_source_index(root, &index)?;
         return Ok((prepared.refreshed, None));
@@ -246,6 +328,7 @@ fn refresh_source_with(
     let state = capture_derived_state(root, &prepared.previous)?;
     let (policy, _, _) = load_taxonomy(root)?;
     let response = author(&body, &policy)?;
+    cancellation.check()?;
     let rechecked = crate::wiki_source::prepare_source_refresh(root, source_id, remote_consent)?;
     ensure!(
         rechecked.previous == prepared.previous,
@@ -256,6 +339,7 @@ fn refresh_source_with(
         "source changed during model operation"
     );
     ensure_derived_state_unchanged(root, &prepared.previous, &state)?;
+    cancellation.check()?;
     let page = author_source_transition(
         root,
         &prepared.previous,
@@ -351,8 +435,46 @@ pub fn author_new_sources(
     receipt: &SourceAdmissionReceipt,
     allow_remote: bool,
 ) -> Result<Vec<DirectAuthoringResult>> {
+    author_new_sources_with_progress(root, receipt, allow_remote, |_, _| {})
+}
+
+/// Reports completed derived pages while preserving transactional rollback.
+pub fn author_new_sources_with_progress(
+    root: &Path,
+    receipt: &SourceAdmissionReceipt,
+    allow_remote: bool,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<DirectAuthoringResult>> {
+    author_new_sources_with_cancellation(
+        root,
+        receipt,
+        allow_remote,
+        progress,
+        &WikiCancellation::default(),
+    )
+}
+
+pub fn author_new_sources_with_cancellation(
+    root: &Path,
+    receipt: &SourceAdmissionReceipt,
+    allow_remote: bool,
+    mut progress: impl FnMut(usize, usize),
+    cancellation: &WikiCancellation,
+) -> Result<Vec<DirectAuthoringResult>> {
+    if let Err(error) = cancellation.check() {
+        rollback_source_admission(root, receipt)?;
+        return Err(error);
+    }
+    let total = receipt.sources().len();
+    let mut processed = 0;
+    progress(0, total);
     author_new_sources_with(root, receipt, |source| {
-        author_source(root, source, allow_remote)
+        let page = author_source_with_cancellation(root, source, allow_remote, cancellation)?;
+        // Includes cancellation during publication in this receipt's rollback.
+        cancellation.check()?;
+        processed += 1;
+        progress(processed, total);
+        Ok(page)
     })
 }
 
@@ -481,6 +603,47 @@ fn review_source_with_transport(
     reviewer_model: &str,
     transport: &WikiModelTransport,
 ) -> Result<()> {
+    review_source_with_completion(
+        root,
+        source,
+        allow_remote,
+        reviewer_model,
+        |prompt| transport.complete_json_object(REVIEW_SYSTEM, &prompt),
+        &WikiCancellation::default(),
+    )
+}
+
+pub fn review_source_with_cancellation(
+    root: &Path,
+    source: &SourceEntry,
+    allow_remote: bool,
+    cancellation: &WikiCancellation,
+) -> Result<()> {
+    cancellation.check()?;
+    let config = load_authoring(root)?;
+    let transport = configured_transport(root, &config, &config.reviewer_model)?;
+    review_source_with_completion(
+        root,
+        source,
+        allow_remote,
+        &config.reviewer_model,
+        |prompt| {
+            cancellation
+                .model_request(move || transport.complete_json_object(REVIEW_SYSTEM, &prompt))
+        },
+        cancellation,
+    )
+}
+
+fn review_source_with_completion(
+    root: &Path,
+    source: &SourceEntry,
+    allow_remote: bool,
+    reviewer_model: &str,
+    complete: impl FnOnce(String) -> Result<serde_json::Value>,
+    cancellation: &WikiCancellation,
+) -> Result<()> {
+    cancellation.check()?;
     let body = read_source_transient(
         root,
         source,
@@ -504,8 +667,8 @@ fn review_source_with_transport(
             .join(format!("{}.md", page_id(source)?)),
         256 * 1024,
     )?;
-    let response =
-        transport.complete_json_object(REVIEW_SYSTEM, &review_prompt(&body, &page, assignment)?)?;
+    let response = complete(review_prompt(&body, &page, assignment)?)?;
+    cancellation.check()?;
     ensure!(
         response == serde_json::json!({"decision":"approve"}),
         "review response must be exact approval JSON"
@@ -521,6 +684,7 @@ fn review_source_with_transport(
     )?;
     ensure!(current_page == page, "derived page changed during review");
     let (policy, assignments, revisions) = load_taxonomy(root)?;
+    cancellation.check()?;
     record_review(
         root,
         source,

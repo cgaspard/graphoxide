@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   classifyWatchProcessClose,
   CloseObservableProcess,
+  FiniteProcessCancellation,
   ProcessTracker,
   quarantineUnclosedWatchProcess,
   SharedWatchRelease,
@@ -62,6 +63,47 @@ class ManualDeadlineScheduler implements WatchStartupDeadlineScheduler {
     return this.tasks.size;
   }
 }
+
+test('finite cancellation escalates an ignored SIGTERM but retains ownership until close', async () => {
+  const child = new FakeProcess(null, true, false);
+  const tracker = new ProcessTracker<FakeProcess>();
+  const closed = trackProcessUntilClose(tracker, child);
+  const scheduler = new ManualDeadlineScheduler();
+  const cancellation = new FiniteProcessCancellation(child, 2000, scheduler);
+  cancellation.cancel();
+  cancellation.cancel();
+  assert.deepEqual(child.signals, ['SIGTERM']);
+  assert.equal(tracker.size, 1);
+  assert.equal(scheduler.size, 1, 'Repeated cancellation must not schedule more deadlines.');
+  assert.equal(scheduler.runNext(), 2000);
+  assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(tracker.size, 1, 'Signaling must not release process ownership.');
+  child.signalCode = 'SIGKILL';
+  child.emit('close', null, 'SIGKILL');
+  await closed;
+  assert.equal(tracker.size, 0);
+  assert.equal(scheduler.size, 0);
+});
+
+test('finite cancellation never escalates a closed or already exiting child', () => {
+  for (const close of [true, false]) {
+    const child = new FakeProcess(null, true, false);
+    const scheduler = new ManualDeadlineScheduler();
+    const cancellation = new FiniteProcessCancellation(child, 2000, scheduler);
+    cancellation.cancel();
+    child.exitCode = 0;
+    if (close) {
+      child.emit('close', 0, null);
+      assert.equal(scheduler.size, 0);
+    } else {
+      scheduler.runNext();
+      child.emit('close', 0, null);
+    }
+    assert.deepEqual(child.signals, ['SIGTERM']);
+    cancellation.cancel();
+    assert.equal(scheduler.size, 0);
+  }
+});
 
 test('shares one bounded completion across every caller blocked by a watch generation', async () => {
   const release = new SharedWatchRelease(17);

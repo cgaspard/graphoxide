@@ -244,10 +244,10 @@ export class AiLabelingService {
         mutationTarget: output.outputDirectory,
         mutationOrigin: 'interactive',
         mutationLabel: 'building the graph for community labeling',
+        afterSuccess: async () => { state = await this.store.load(folder); },
         suppressAutomaticOnFailure: true,
       });
       if (outcome.kind !== 'completed') return;
-      state = await this.store.load(folder);
     }
     if (!state?.model) throw new Error(`No graph was found at ${state?.graphUri.fsPath ?? this.store.graphUri(folder).fsPath}.`);
 
@@ -301,10 +301,10 @@ export class AiLabelingService {
       mutationTarget: path.dirname(state.graphUri.fsPath),
       mutationOrigin: 'interactive',
       mutationLabel: 'labeling graph communities',
+      afterSuccess: () => this.store.load(folder),
       suppressAutomaticOnFailure: false,
     });
     if (labeling.kind !== 'completed') return;
-    await this.store.load(folder);
     const report = vscode.Uri.file(path.join(path.dirname(state.graphUri.fsPath), 'GRAPH_REPORT.md'));
     if (!skipConfirmation) {
       const choice = await vscode.window.showInformationMessage(

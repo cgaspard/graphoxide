@@ -135,40 +135,45 @@ export interface GraphFileIdentity {
 }
 
 /** One ordered stderr segment. Only an admitted event may swallow `raw`. */
-export interface BuildProgressFrame {
+export interface ProgressFrame<Event> {
   readonly raw: string;
-  readonly event?: BuildProgressEvent;
+  readonly event?: Event;
 }
+
+export type BuildProgressFrame = ProgressFrame<BuildProgressEvent>;
 
 export interface DecodedBuildProgress {
   readonly frames: readonly BuildProgressFrame[];
 }
 
 /** Incrementally frames authenticated protocol lines and ordinary stderr. */
-export class BuildProgressDecoder {
+export class ProgressLineDecoder<Event> {
   private readonly textDecoder = new StringDecoder('utf8');
   private pending = '';
   private passthroughUntilNewline = false;
 
-  constructor(private readonly expectedNonce: string) {
+  constructor(
+    private readonly expectedNonce: string,
+    private readonly parseLine: (raw: string, nonce: string) => Event | undefined,
+  ) {
     if (!validRunNonce(expectedNonce)) {
       throw new Error('Build progress nonce must be 32 lowercase hexadecimal characters.');
     }
   }
 
-  push(value: Buffer | string): DecodedBuildProgress {
+  push(value: Buffer | string): { readonly frames: readonly ProgressFrame<Event>[] } {
     const text = this.textDecoder.write(typeof value === 'string' ? Buffer.from(value, 'utf8') : value);
     return { frames: this.consume(text, false) };
   }
 
-  finish(): DecodedBuildProgress {
+  finish(): { readonly frames: readonly ProgressFrame<Event>[] } {
     const frames = this.consume(this.textDecoder.end(), false);
     frames.push(...this.consume('', true));
     return { frames };
   }
 
-  private consume(value: string, finish: boolean): BuildProgressFrame[] {
-    const frames: BuildProgressFrame[] = [];
+  private consume(value: string, finish: boolean): ProgressFrame<Event>[] {
+    const frames: ProgressFrame<Event>[] = [];
     if (this.passthroughUntilNewline) {
       const newline = value.indexOf('\n');
       if (newline < 0) {
@@ -187,7 +192,7 @@ export class BuildProgressDecoder {
       if (newline < 0) break;
       const raw = this.pending.slice(0, newline + 1);
       this.pending = this.pending.slice(newline + 1);
-      const event = parseBuildProgressLine(raw, this.expectedNonce);
+      const event = this.parseLine(raw, this.expectedNonce);
       frames.push(event ? { raw, event } : { raw });
     }
     if (Buffer.byteLength(this.pending, 'utf8') > BUILD_PROGRESS_MAX_PENDING) {
@@ -203,6 +208,12 @@ export class BuildProgressDecoder {
       frames.push({ raw });
     }
     return frames;
+  }
+}
+
+export class BuildProgressDecoder extends ProgressLineDecoder<BuildProgressEvent> {
+  constructor(expectedNonce: string) {
+    super(expectedNonce, parseBuildProgressLine);
   }
 }
 
@@ -263,7 +274,9 @@ export class BuildProgressRun {
     if (hasProcessed !== hasTotal) return false;
 
     if (nextRank === previousRank) {
-      if (!hasProcessed || event.total !== this.lastTotal || event.processed! < (this.lastProcessed ?? 0)) {
+      if (!hasProcessed
+        || (this.lastTotal !== undefined && event.total !== this.lastTotal)
+        || event.processed! < (this.lastProcessed ?? 0)) {
         return false;
       }
     } else {

@@ -106,6 +106,7 @@ export class ManagedWorkspaceService implements vscode.Disposable {
           mutationTarget: environment.GRAPHOXIDE_OUT,
           mutationOrigin: 'interactive',
           mutationLabel: 'synchronizing the managed workspace',
+          afterSuccess: () => this.isCurrent(generation) ? this.store.load(target) : Promise.resolve(),
           suppressAutomaticOnFailure: true,
         });
         if (outcome.kind !== 'completed') return;
@@ -118,12 +119,12 @@ export class ManagedWorkspaceService implements vscode.Disposable {
           mutationTarget: environment.GRAPHOXIDE_OUT,
           mutationOrigin: 'interactive',
           mutationLabel: 'building the managed workspace',
+          afterSuccess: () => this.isCurrent(generation) ? this.store.load(target) : Promise.resolve(),
           suppressAutomaticOnFailure: true,
         });
         if (outcome.kind !== 'completed') return;
       }
       if (!this.isCurrent(generation)) return;
-      await this.store.load(target);
     } catch (error) {
       // A newer enable/disable/configuration action owns workspace state. A
       // failed continuation from this invocation must not erase that choice or
@@ -253,6 +254,12 @@ export class ManagedWorkspaceService implements vscode.Disposable {
   private async resume(folder: vscode.WorkspaceFolder, generation: number): Promise<void> {
     const mode = this.freshness(folder);
     let state = await this.store.load(folder);
+    let reloadedByMutation = false;
+    const afterSuccess = async (): Promise<void> => {
+      if (!this.resumeIsCurrent(folder, mode, generation)) return;
+      state = await this.store.load(folder);
+      reloadedByMutation = true;
+    };
     if (!this.resumeIsCurrent(folder, mode, generation)) return;
     try {
       const environment = this.store.managedOutput(folder).environment;
@@ -268,11 +275,12 @@ export class ManagedWorkspaceService implements vscode.Disposable {
           mutationTarget: environment.GRAPHOXIDE_OUT,
           mutationOrigin: 'automatic',
           mutationLabel: 'rebuilding the managed workspace at startup',
+          afterSuccess,
           suppressAutomaticOnFailure: true,
         }));
         if (!completed) return;
         if (!this.resumeIsCurrent(folder, mode, generation)) return;
-        state = await this.store.load(folder);
+        if (!reloadedByMutation) state = await this.store.load(folder);
         if (!state?.model || !this.resumeIsCurrent(folder, mode, generation)) return;
       } else if (mode !== 'manual') {
         // `--force` currently authorizes legitimate graph shrink after source
@@ -289,11 +297,12 @@ export class ManagedWorkspaceService implements vscode.Disposable {
           mutationTarget: environment.GRAPHOXIDE_OUT,
           mutationOrigin: 'automatic',
           mutationLabel: 'refreshing the managed workspace at startup',
+          afterSuccess,
           suppressAutomaticOnFailure: true,
         }));
         if (!completed) return;
         if (!this.resumeIsCurrent(folder, mode, generation)) return;
-        state = await this.store.load(folder);
+        if (!reloadedByMutation) state = await this.store.load(folder);
         if (!state?.model || !this.resumeIsCurrent(folder, mode, generation)) return;
       }
       if (this.resumeIsCurrent(folder, mode, generation)

@@ -562,8 +562,19 @@ pub fn build_graph_with_report_and_options(
     extractions: &[Extraction],
     options: BuildOptions,
 ) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
+    build_graph_with_report_and_options_with_callback(extractions, options, None)
+}
+
+pub(crate) fn build_graph_with_report_and_options_with_callback(
+    extractions: &[Extraction],
+    options: BuildOptions,
+    on_sub_stage: Option<&BuildSubStageCallback<'_>>,
+) -> anyhow::Result<(KnowledgeGraph, BuildReport)> {
+    if let Some(cb) = on_sub_stage {
+        cb(BuildSubStage::Normalizing);
+    }
     let normalized = normalize_extractions(extractions, None);
-    build_graph_with_report_normalized(&normalized, options, None)
+    build_graph_with_report_normalized(&normalized, options, on_sub_stage)
 }
 
 fn build_graph_with_report_normalized(

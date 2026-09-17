@@ -72,6 +72,47 @@ const nodeDeadlineScheduler: WatchStartupDeadlineScheduler = {
   clear: (handle) => clearTimeout(handle as NodeJS.Timeout),
 };
 
+/** Cancel one owned child without releasing ownership before confirmed close. */
+export class FiniteProcessCancellation {
+  private handle?: unknown;
+  private requested = false;
+  private closed = false;
+  private readonly onClose = (): void => this.dispose();
+
+  constructor(
+    private readonly child: CloseObservableProcess,
+    private readonly graceMs = 2000,
+    private readonly scheduler: WatchStartupDeadlineScheduler = nodeDeadlineScheduler,
+  ) {
+    if (!Number.isSafeInteger(graceMs) || graceMs < 1) throw new Error('Cancellation grace must be a positive integer.');
+    child.once('close', this.onClose);
+  }
+
+  cancel(): void {
+    if (this.requested || this.closed) return;
+    this.requested = true;
+    this.signal('SIGTERM');
+    if (this.closed) return;
+    this.handle = this.scheduler.set(() => {
+      this.handle = undefined;
+      this.signal('SIGKILL');
+    }, this.graceMs);
+  }
+
+  dispose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.handle !== undefined) this.scheduler.clear(this.handle);
+    this.handle = undefined;
+    this.child.removeListener('close', this.onClose);
+  }
+
+  private signal(signal: NodeJS.Signals): void {
+    if (this.closed || this.child.exitCode !== null || this.child.signalCode !== null) return;
+    try { this.child.kill(signal); } catch { /* Ownership still lasts until close, even if signaling failed. */ }
+  }
+}
+
 /**
  * Runs a two-stage watch startup deadline: first request a graceful stop, then
  * quarantine/escalate if close is still unconfirmed after the stop grace.
@@ -158,9 +199,10 @@ export class ProcessTracker<T extends KillableProcess> {
     this.active.delete(child);
   }
 
-  terminateAll(): number {
+  terminateAll(shouldTerminate: (child: T) => boolean = () => true): number {
     let signalled = 0;
     for (const child of this.active) {
+      if (!shouldTerminate(child)) continue;
       if (child.exitCode !== null || child.signalCode !== null) continue;
       if (child.kill('SIGTERM')) signalled += 1;
     }

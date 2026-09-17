@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
+import { ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as http from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { GraphoxideBuildProgressObservation, GraphoxideExtensionApi } from '../../src/extension';
 import { parseGraphJson, sourceLine } from '../../src/graph';
@@ -53,12 +54,14 @@ export async function run(): Promise<void> {
 
   testApi.takeBuildProgressObservations();
   await api.enableWorkspace('manual');
+  const initialProgress = testApi.takeBuildProgressObservations();
   assertProgressLifecycle(
-    testApi.takeBuildProgressObservations(),
-    'notification',
+    initialProgress,
+    'status',
     'interactive initial build',
     true,
   );
+  assertGraphBuildStages(initialProgress, 'interactive initial build');
   assert.doesNotMatch(testApi.statusBarText(), /sync~spin/u, 'Initial child close left progress active.');
   const enabled = await api.status();
   assert.equal(enabled.enabled, true);
@@ -87,7 +90,7 @@ export async function run(): Promise<void> {
   assert.ok(updateSummary.completedAt >= initialSummary.completedAt);
   assertProgressLifecycle(
     testApi.takeBuildProgressObservations(),
-    'notification',
+    'status',
     'interactive incremental update',
   );
 
@@ -119,6 +122,7 @@ export async function run(): Promise<void> {
   await verifyProjectInstallers(folder, enabled.mcp!);
   await verifySaveAndWatchUpdates(api, folder, enabled.graphPath!);
   await verifyAiProviders(api, enabled.graphPath!);
+  await verifyReadOnlyProgress(api, folder);
   await verifyControlCenter();
   await verifyCustomOutputMaintenance(api, folder);
 
@@ -133,6 +137,7 @@ export async function run(): Promise<void> {
     false,
     'A preserved generated graph output was re-indexed as source input.',
   );
+  await verifyWikiBuild(api, folder);
   console.log(`Graphoxide E2E passed: ${finalStatus.nodes} nodes, ${finalStatus.edges} edges.`);
 }
 
@@ -143,13 +148,23 @@ interface CapturedProviderRequest {
   readonly body?: Record<string, unknown>;
 }
 
-type FakeProviderKind = 'lm-studio' | 'ollama';
+type FakeProviderKind = 'lm-studio' | 'ollama' | 'wiki';
 
 class FakeLabelProvider {
   private readonly sockets = new Set<Socket>();
   private server?: http.Server;
   private port = 0;
   readonly requests: CapturedProviderRequest[] = [];
+  private completionGate?: { reached(): void; readonly released: Promise<void> };
+
+  holdNextCompletion(): { readonly reached: Promise<void>; release(): void } {
+    let reached!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.completionGate = { reached, released };
+    return { reached: ready, release };
+  }
 
   constructor(
     readonly kind: FakeProviderKind,
@@ -212,8 +227,21 @@ class FakeLabelProvider {
       return;
     }
     if (pathname === '/v1/chat/completions') {
+      const gate = this.completionGate;
+      this.completionGate = undefined;
+      if (gate) { gate.reached(); await gate.released; }
       await new Promise((resolve) => setTimeout(resolve, this.completionDelayMs));
       const prompt = completionPrompt(body);
+      if (this.kind === 'wiki') {
+        const content = prompt.includes('Independently verify')
+          ? { decision: 'approve' }
+          : {
+              title: 'Protocol overview', markdown: 'The sample service exchanges structured protocol messages.',
+              primary_subject: 'interfaces-and-protocols/grpc', facets: {}, applicability: [],
+            };
+        this.respond(response, 200, { choices: [{ message: { content: JSON.stringify(content) } }] });
+        return;
+      }
       const prefix = this.kind === 'lm-studio' ? 'LM Studio' : 'Ollama';
       const labels = Object.fromEntries(
         [...prompt.matchAll(/Community (-?\d+):/gu)].map((match) => [match[1]!, `${prefix} ${match[1]} Architecture`]),
@@ -264,7 +292,9 @@ async function verifyAiProviders(api: GraphoxideExtensionApi, graphPath: string)
       timeoutSeconds: 600,
     });
     assert.deepEqual(lmModels, [lmStudio.model]);
+    api.test.takeBuildProgressObservations();
     await api.test.improveCommunityLabels();
+    assertActivityProgressLifecycle(api.test.takeBuildProgressObservations(), 'label', 'LM Studio community naming');
     const lmDiscovery = lmStudio.find('/v1/models');
     const lmCompletions = lmStudio.find('/v1/chat/completions');
     assert.equal(lmDiscovery.length, 1);
@@ -318,7 +348,9 @@ async function verifyAiProviders(api: GraphoxideExtensionApi, graphPath: string)
       timeoutSeconds: 600,
     });
     assert.deepEqual(ollamaModels, [ollama.model]);
+    api.test.takeBuildProgressObservations();
     await api.test.improveCommunityLabels();
+    assertActivityProgressLifecycle(api.test.takeBuildProgressObservations(), 'label', 'Ollama community naming');
     const ollamaDiscovery = ollama.find('/api/tags');
     const ollamaCompletions = ollama.find('/v1/chat/completions');
     assert.equal(ollamaDiscovery.length, 1);
@@ -332,6 +364,104 @@ async function verifyAiProviders(api: GraphoxideExtensionApi, graphPath: string)
     await api.test.clearAi();
     await Promise.all([lmStudio.close(), ollama.close()]);
   }
+}
+
+async function verifyWikiBuild(api: GraphoxideExtensionApi, folder: vscode.WorkspaceFolder): Promise<void> {
+  const testApi = api.test;
+  assert.ok(testApi);
+  const provider = new FakeLabelProvider('wiki', 'e2e-wiki-model', 'wiki-fixture-key', 100);
+  const credentialName = 'GRAPHOXIDE_E2E_WIKI_KEY';
+  const previousCredential = process.env[credentialName];
+  try {
+    await provider.start();
+    process.env[credentialName] = 'wiki-fixture-key';
+    // run-e2e creates and removes this isolated workspace. Git metadata is
+    // required by Wiki, but no commits or user Git configuration are needed.
+    await promisify(execFile)('git', ['init', '--quiet'], { cwd: folder.uri.fsPath });
+    const configDirectory = path.join(folder.uri.fsPath, 'config');
+    await fs.mkdir(configDirectory, { recursive: true });
+    await fs.writeFile(path.join(configDirectory, 'e2e-provider.json'), JSON.stringify({
+      version: 1, id: 'e2e-wiki', protocol: 'openai-compatible', endpoint: provider.baseUrl,
+      credential_env: credentialName, source_egress_consent: 'e2e-local-fixture',
+      models: [{ id: 'model', api_model: provider.model, label: 'E2E model', capabilities: ['structured-output', 'text-generation'] }],
+    }));
+    const profile = path.join(configDirectory, 'e2e-authoring-input.json');
+    await fs.writeFile(profile, JSON.stringify({
+      provider_profile: 'config/e2e-provider.json', author_model: 'model', reviewer_model: 'model',
+      source_egress_consent: 'e2e-local-fixture',
+    }));
+    await testApi.initializeWiki(profile);
+    await fs.access(path.join(configDirectory, 'authoring-profile.json'));
+    const input = path.join(path.dirname(folder.uri.fsPath), 'wiki-protocol-source.md');
+    await fs.writeFile(input, '# Protocol\nThe sample gRPC service exchanges structured messages between clients and servers.\n');
+    testApi.takeBuildProgressObservations();
+    await testApi.addWikiSources([input]);
+    const observations = testApi.takeBuildProgressObservations();
+    assertActivityProgressLifecycle(observations, 'wiki', 'Wiki source build');
+    const requests = provider.find('/v1/chat/completions');
+    assert.equal(requests.length, 1, 'Wiki build must author the selected source.');
+    assert.ok(requests.every((request) => request.authorization === 'Bearer wiki-fixture-key'));
+    const index = JSON.parse(await fs.readFile(path.join(folder.uri.fsPath, 'sources', 'index.json'), 'utf8')) as {
+      sources: Array<{ status: string }>;
+    };
+    assert.equal(index.sources.length, 1);
+    assert.equal(index.sources[0]!.status, 'provisional', 'Newly authored Wiki pages must await explicit review.');
+    const pageDirectory = path.join(folder.uri.fsPath, 'content', 'provisional');
+    const pages = (await fs.readdir(pageDirectory)).filter((name) => name.endsWith('.md'));
+    assert.equal(pages.length, 1, 'Wiki UI build did not publish its generated page.');
+    assert.match(await fs.readFile(path.join(pageDirectory, pages[0]!), 'utf8'), /sample service exchanges structured protocol messages/u);
+    const priorIndex = await fs.readFile(path.join(folder.uri.fsPath, 'sources', 'index.json'), 'utf8');
+    const cancelledInput = path.join(path.dirname(folder.uri.fsPath), 'wiki-cancelled-source.md');
+    await fs.writeFile(cancelledInput, '# Cancelled source\nThis source must never remain admitted after cancellation.\n');
+    const held = provider.holdNextCompletion();
+    testApi.takeBuildProgressObservations();
+    const build = testApi.addWikiSources([cancelledInput]);
+    const cancelled = assert.rejects(build, vscode.CancellationError);
+    try {
+      await Promise.race([held.reached, build.then(() => { throw new Error('Wiki build completed before the held author request.'); })]);
+      testApi.cancelActiveBuild();
+      await cancelled;
+      assertCancelledProgressLifecycle(testApi.takeBuildProgressObservations());
+      assert.equal(await fs.readFile(path.join(folder.uri.fsPath, 'sources', 'index.json'), 'utf8'), priorIndex, 'Cancelled Wiki authoring left an admitted source behind.');
+      assert.deepEqual((await fs.readdir(pageDirectory)).filter((name) => name.endsWith('.md')), pages, 'Cancelled Wiki authoring changed generated pages.');
+    } finally {
+      held.release();
+      await cancelled;
+    }
+  } finally {
+    if (previousCredential === undefined) delete process.env[credentialName];
+    else process.env[credentialName] = previousCredential;
+    await provider.close();
+  }
+}
+
+async function verifyReadOnlyProgress(api: GraphoxideExtensionApi, folder: vscode.WorkspaceFolder): Promise<void> {
+  const testApi = api.test;
+  assert.ok(testApi);
+  testApi.takeBuildProgressObservations();
+  await vscode.commands.executeCommand('graphoxide.refresh');
+  const refresh = testApi.takeBuildProgressObservations();
+  assert.ok(refresh.some((observation) => observation.progress?.operation === 'command' && observation.progress.message === 'Loading graph…'));
+  assert.equal(refresh.at(-1)?.progress, null, 'Manual refresh did not clear its loading status.');
+  const outputDirectory = path.join(folder.uri.fsPath, 'graphoxide-out');
+  const report = path.join(outputDirectory, 'e2e-report.md');
+  const exported = path.join(outputDirectory, 'e2e-export.json');
+  for (const [name, execute] of [
+    ['report', () => testApi.runReport(report)],
+    ['export', () => testApi.runExport(exported)],
+  ] as const) {
+    testApi.takeBuildProgressObservations();
+    await execute();
+    const observations = testApi.takeBuildProgressObservations();
+    assert.ok(observations.some((observation) => observation.progress?.operation === 'command'), `${name} omitted its activity indicator.`);
+    assert.ok(observations.filter((observation) => observation.progress).every((observation) => observation.progress!.presentation === 'status' && /sync~spin/u.test(observation.statusBarText)));
+    assert.equal(observations.at(-1)?.progress, null);
+  }
+  assert.match(await fs.readFile(report, 'utf8'), /Graph|Architecture|Communit/u);
+  assert.ok(parseGraphJson(await fs.readFile(exported, 'utf8')).nodes.length > 0, 'Export failed to write graph nodes.');
+  testApi.takeBuildProgressObservations();
+  assert.equal(await testApi.runCancelledQuery(), true);
+  assertCancelledProgressLifecycle(testApi.takeBuildProgressObservations());
 }
 
 async function assertGeneratedLabels(graphPath: string, prefix: string, forbiddenSecret: string): Promise<void> {
@@ -772,6 +902,38 @@ function assertProgressLifecycle(
     `${label} was not exposed in the status bar while active.`,
   );
   assert.equal(observations.at(-1)?.progress, null, `${label} did not clear on its owning terminal/close.`);
+  assert.doesNotMatch(observations.at(-1)?.statusBarText ?? '', /sync~spin/u);
+}
+
+function assertGraphBuildStages(observations: readonly GraphoxideBuildProgressObservation[], label: string): void {
+  const messages = observations.flatMap((observation) => observation.progress ? [observation.progress.message] : []);
+  let previous = -1;
+  for (const stage of ['Extracting inputs', 'Building graph', 'Merging nodes', 'Resolving edges', 'Deduplicating entities', 'Clustering communities', 'Publishing graph']) {
+    const index = messages.findIndex((message, position) => position > previous && message.startsWith(stage));
+    assert.ok(index > previous, `${label} did not advance to ${stage}: ${JSON.stringify(messages)}`);
+    previous = index;
+  }
+}
+
+function assertActivityProgressLifecycle(
+  observations: readonly GraphoxideBuildProgressObservation[],
+  operation: 'label' | 'wiki',
+  label: string,
+): void {
+  const active = observations.filter((observation) => observation.progress !== null);
+  assert.ok(active.length > 0, `${label} never became visible.`);
+  assert.ok(active.every((observation) => observation.progress!.operation === operation));
+  assert.ok(active.every((observation) => observation.progress!.presentation === 'status'));
+  assert.equal(new Set(active.map((observation) => observation.progress!.generation)).size, 1);
+  assert.ok(active.every((observation) => /sync~spin/u.test(observation.statusBarText)));
+  const workPhase = operation === 'label' ? /(?:Naming|Labeling).*\(\d+\/\d+\)/iu : /(?:Writing|Authoring|Building|Generating).*wiki/iu;
+  const work = active.findIndex((observation) => workPhase.test(observation.progress!.message));
+  assert.ok(work >= 0, `${label} omitted work progress: ${JSON.stringify(active)}`);
+  assert.ok(
+    active.some((observation, index) => index > work && /Publishing/iu.test(observation.progress!.message)),
+    `${label} cleared before publication.`,
+  );
+  assert.equal(observations.at(-1)?.progress, null, `${label} did not clear on child close.`);
   assert.doesNotMatch(observations.at(-1)?.statusBarText ?? '', /sync~spin/u);
 }
 

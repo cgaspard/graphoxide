@@ -229,3 +229,43 @@ fn staged_output_uses_existing_atomic_graph_writer() {
     assert!(staged.commit_atomic(&path, true).unwrap());
     assert_eq!(read_graph(path).unwrap().nodes[0].id, "a");
 }
+
+#[test]
+fn callback_observes_rootless_and_rooted_builds_without_changing_output() {
+    use graphoxide_graph::BuildSubStage;
+    let extraction = Extraction {
+        nodes: vec![node("a"), node("b")],
+        edges: vec![edge("a", "b")],
+        hyperedges: vec![],
+    };
+    for root in [None, Some(std::path::Path::new("/repo"))] {
+        let batches =
+            FactBatch::split_extraction(0, extraction.clone(), FactBatchLimits::default()).unwrap();
+        let expected =
+            build_graph_from_fact_batches_with_root(batches.clone(), BuildOptions::default(), root)
+                .unwrap();
+        let stages = std::sync::Mutex::new(Vec::new());
+        let callback = |stage| stages.lock().unwrap().push(stage);
+        let observed =
+            graphoxide_graph::streaming::build_graph_from_fact_batches_with_root_and_callback(
+                batches,
+                BuildOptions::default(),
+                root,
+                Some(&callback),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&observed).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        let stages = stages.into_inner().unwrap();
+        for stage in [
+            BuildSubStage::Normalizing,
+            BuildSubStage::MergingNodes,
+            BuildSubStage::ResolvingEdges,
+            BuildSubStage::Deduplicating,
+        ] {
+            assert!(stages.contains(&stage), "missing {stage:?}: {stages:?}");
+        }
+    }
+}

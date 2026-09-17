@@ -1,0 +1,14 @@
+version: 0.16.0
+date: 2026-09-16
+highlights:
+  - Stable release with complete graph build progress and opt-in Wiki and LLM naming activity reporting.
+added:
+  - `label` and `wiki` accept `--progress=json` for bounded, authenticated activity events on stderr. Events contain fixed phases and aggregate counters, never source text, model responses, or credentials.
+  - Community naming reports completed communities after each batch and split retries; Wiki operations report admission, authoring, review, publication, completion, and failure.
+fixed:
+  - Initial graph builds retain internal construction callbacks, exposing merging, edge resolution, and deduplication before clustering and publication.
+  - Graph substages no longer regress to earlier phases, and a phase can acquire its first counters after an indeterminate start.
+  - Staging progress reports completed work and throttles intermediate updates while preserving initial and final counters.
+  - Owned Wiki operations accept cooperative cancellation and roll back newly admitted sources when cancelled during model work; model workers cannot publish after cancellation.
+changed:
+  - Default CLI stdout and deterministic graph output remain unchanged by progress reporting.

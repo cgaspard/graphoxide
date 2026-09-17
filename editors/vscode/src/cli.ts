@@ -1,5 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import * as vscode from 'vscode';
+import { ActivityOperation, ActivityProgressDecoder, ActivityProgressEvent, ActivityProgressRun, activityProgressMessage } from './activity-progress';
 import { registryBindingArguments, workspaceGraphMutationAllowed } from './build';
 import {
   BUILD_PROGRESS_NONCE_ENV,
@@ -34,6 +35,7 @@ import {
 } from './process-output';
 import {
   classifyWatchProcessClose,
+  FiniteProcessCancellation,
   ProcessTracker,
   quarantineUnclosedWatchProcess,
   SharedWatchRelease,
@@ -56,6 +58,8 @@ export interface RunOptions {
   readonly progressTarget?: string;
   /** Internal non-notification cancellation source used by managed/test runs. */
   readonly cancellationToken?: vscode.CancellationToken;
+  /** Keep the owned progress visible while the published graph is loaded into the UI. */
+  readonly afterSuccess?: () => Promise<unknown>;
 }
 
 export interface RunResult {
@@ -76,7 +80,7 @@ export type WatchStartOutcome = { readonly kind: 'watching' } | { readonly kind:
 
 export interface BuildProgressSnapshot {
   readonly generation: number;
-  readonly operation: 'extract' | 'index' | 'update';
+  readonly operation: 'extract' | 'index' | 'update' | ActivityOperation | 'command';
   readonly message: string;
   readonly presentation: 'notification' | 'status';
 }
@@ -88,6 +92,7 @@ export class GraphoxideCli implements vscode.Disposable {
   readonly output = vscode.window.createOutputChannel('Graphoxide', { log: true });
   private readonly mutationCoordinator = new GraphMutationCoordinator();
   private readonly activeRunProcesses = new ProcessTracker<ChildProcessWithoutNullStreams>();
+  private readonly cooperativeRunProcesses = new Set<ChildProcessWithoutNullStreams>();
   private readonly reportedErrors = new WeakSet<object>();
   private watchProcess?: ChildProcessWithoutNullStreams;
   private watchGeneration?: number;
@@ -101,6 +106,8 @@ export class GraphoxideCli implements vscode.Disposable {
   private readonly buildSummaries?: LatestBuildSummaryStore;
   private watchBuildProgress?: WatchBuildProgress;
   private activeBuildProgress?: BuildProgressSnapshot;
+  private readonly progressSnapshots = new Map<number, BuildProgressSnapshot>();
+  private readonly progressCancellations = new Map<number, vscode.CancellationTokenSource>();
   private nextBuildProgressGeneration = 0;
   private nextMutationBarrier?: MutationStartBarrier;
   private disposed = false;
@@ -108,7 +115,11 @@ export class GraphoxideCli implements vscode.Disposable {
   readonly onDidChangeBuildSummary = this.buildSummaryEmitter.event;
   readonly onDidChangeBuildProgress = this.buildProgressEmitter.event;
 
-  constructor(private readonly extensionUri: vscode.Uri, workspaceState?: vscode.Memento) {
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    workspaceState?: vscode.Memento,
+    private readonly onGraphPublished?: (outputTarget: string) => Promise<unknown>,
+  ) {
     this.buildSummaries = workspaceState ? new LatestBuildSummaryStore(workspaceState) : undefined;
   }
 
@@ -155,10 +166,12 @@ export class GraphoxideCli implements vscode.Disposable {
     return typeof error === 'object' && error !== null && this.reportedErrors.has(error);
   }
 
-  /** Cancel any active finite build by sending SIGTERM to tracked child processes. */
+  /** Cancel the operation currently shown in the status bar and Control Center. */
   cancelActiveBuild(): void {
     if (this.disposed) return;
-    this.activeRunProcesses.terminateAll();
+    const generation = this.activeBuildProgress?.generation;
+    if (generation !== undefined) this.progressCancellations.get(generation)?.cancel();
+    if (generation === this.watchBuildProgress?.generation) this.stopWatch();
   }
 
   holdNextMutationStart(): MutationStartBarrierControl {
@@ -218,14 +231,48 @@ export class GraphoxideCli implements vscode.Disposable {
     return outcome;
   }
 
+  /** Own a visible operation while extension-side work is still in progress. */
+  async runUiActivity<T>(
+    message: string,
+    execute: (token: vscode.CancellationToken) => Promise<T>,
+    onCancel?: () => void,
+  ): Promise<T> {
+    const generation = ++this.nextBuildProgressGeneration;
+    const cancellation = new vscode.CancellationTokenSource();
+    this.progressCancellations.set(generation, cancellation);
+    const subscription = cancellation.token.onCancellationRequested(() => {
+      this.setBuildProgress(generation, 'command', 'Cancelling…', 'status');
+      onCancel?.();
+    });
+    try {
+      if (this.disposed) throw new vscode.CancellationError();
+      this.setBuildProgress(generation, 'command', message, 'status');
+      if (cancellation.token.isCancellationRequested) throw new vscode.CancellationError();
+      const result = await execute(cancellation.token);
+      if (this.disposed || cancellation.token.isCancellationRequested) throw new vscode.CancellationError();
+      return result;
+    } finally {
+      subscription.dispose();
+      cancellation.dispose();
+      this.progressCancellations.delete(generation);
+      this.finishBuildProgress(generation);
+    }
+  }
+
   async run(options: RunOptions): Promise<RunResult> {
     const requestedBuildOperation = buildOperationFromArgs(options.args);
     const buildOperation = options.progressTarget ? requestedBuildOperation : undefined;
+    const activityOperation = activityOperationFromArgs(options.args);
     const buildProgressEnabled = buildOperation !== undefined;
-    const execute = async (
-      token?: vscode.CancellationToken,
-      progress?: vscode.Progress<{ message?: string }>,
-    ): Promise<RunResult> => {
+    const protocolProgress = buildProgressEnabled || activityOperation !== undefined;
+    const ownedProgress = protocolProgress || options.showProgress !== false;
+    const operation = buildOperation ?? activityOperation ?? 'command';
+    const cooperativeCancellation = wikiMutationFromArgs(options.args);
+    const progressGeneration = ownedProgress ? ++this.nextBuildProgressGeneration : undefined;
+    const cancellationSource = ownedProgress ? new vscode.CancellationTokenSource() : undefined;
+    const externalCancellation = cancellationSource && options.cancellationToken?.onCancellationRequested(() => cancellationSource.cancel());
+    if (options.cancellationToken?.isCancellationRequested) cancellationSource?.cancel();
+    const execute = async (token?: vscode.CancellationToken): Promise<RunResult> => {
       if (this.disposed || token?.isCancellationRequested) throw new vscode.CancellationError();
       const config = vscode.workspace.getConfiguration('graphoxide', options.folder.uri);
       const useTrustedExecutable = shouldUseTrustedExecutable(options.trustedExecutable, options.environment);
@@ -237,23 +284,31 @@ export class GraphoxideCli implements vscode.Disposable {
       const registryArguments = requestedBuildOperation
         ? registryBindingArguments(options.folder.uri.fsPath, config.get<unknown>('registryBinding'))
         : [];
-      const args = [...prefix, ...options.args, ...registryArguments, ...(buildProgressEnabled ? ['--progress=json'] : [])];
+      const args = [...prefix, ...options.args, ...registryArguments, ...(protocolProgress ? ['--progress=json'] : [])];
       this.logInfo(`$ ${executable} ${args.map(formatArgument).join(' ')}`);
-      const progressNonce = buildProgressEnabled ? createBuildProgressNonce() : undefined;
-      const progressDecoder = progressNonce ? new BuildProgressDecoder(progressNonce) : undefined;
+      const progressNonce = protocolProgress ? createBuildProgressNonce() : undefined;
+      const progressDecoder = progressNonce && buildProgressEnabled ? new BuildProgressDecoder(progressNonce) : undefined;
+      const activityDecoder = progressNonce && activityOperation ? new ActivityProgressDecoder(progressNonce) : undefined;
+      const activityRun = activityOperation ? new ActivityProgressRun(activityOperation) : undefined;
       const progressRun = buildOperation ? new BuildProgressRun(buildOperation) : undefined;
-      const progressGeneration = buildProgressEnabled ? ++this.nextBuildProgressGeneration : undefined;
-      const progressPresentation = options.showProgress === false ? 'status' : 'notification';
+      const progressPresentation = 'status';
       const acceptProgress = (event: BuildProgressEvent): boolean => {
         if (!progressRun?.accept(event)) return false;
+        if (token?.isCancellationRequested) return true;
         if (event.type === 'started' && progressGeneration !== undefined) {
           const message = buildStartMessage(event.mode);
-          progress?.report({ message });
           this.setBuildProgress(progressGeneration, event.operation, message, progressPresentation);
         } else if (event.type === 'phase' && progressGeneration !== undefined) {
           const message = phaseProgressMessage(event);
-          progress?.report({ message });
           this.setBuildProgress(progressGeneration, event.operation, message, progressPresentation);
+        }
+        return true;
+      };
+      const acceptActivity = (event: ActivityProgressEvent): boolean => {
+        if (!activityRun?.accept(event)) return false;
+        if (token?.isCancellationRequested) return true;
+        if ((event.type === 'started' || event.type === 'phase') && progressGeneration !== undefined) {
+          this.setBuildProgress(progressGeneration, event.operation, activityProgressMessage(event), 'status');
         }
         return true;
       };
@@ -266,6 +321,7 @@ export class GraphoxideCli implements vscode.Disposable {
               ? {
                   ...options.environment,
                   [BUILD_PROGRESS_NONCE_ENV]: progressNonce,
+                  ...(cooperativeCancellation ? { GRAPHOXIDE_CANCEL_STDIN: '1' } : {}),
                 }
               : options.environment),
             shell: false,
@@ -275,14 +331,28 @@ export class GraphoxideCli implements vscode.Disposable {
           return;
         }
         const close = trackProcessUntilClose(this.activeRunProcesses, child);
+        if (cooperativeCancellation) this.cooperativeRunProcesses.add(child);
         let settled = false;
         let stdout = '';
         const stderr = new BoundedTextTail(STDERR_CAPTURE_LIMIT);
-        const cancellation = token?.onCancellationRequested(() => child.kill('SIGTERM'));
+        const processCancellation = cooperativeCancellation ? undefined : new FiniteProcessCancellation(child);
+        // A closed child's stdin may reject a racing cooperative cancellation;
+        // close remains authoritative and no signal may interrupt Wiki rollback.
+        child.stdin.on('error', () => {});
+        const cancellation = token?.onCancellationRequested(() => {
+          if (progressGeneration !== undefined) this.setBuildProgress(progressGeneration, operation,
+            cooperativeCancellation ? 'Cancelling Wiki and cleaning up…' : 'Cancelling…', 'status');
+          if (cooperativeCancellation) {
+            if (child.exitCode === null && child.signalCode === null && !child.stdin.destroyed) {
+              child.stdin.end(`${progressNonce}\n`);
+            }
+          } else processCancellation?.cancel();
+        });
         const finish = (error?: Error, value?: RunResult): void => {
           if (settled) return;
           settled = true;
           cancellation?.dispose();
+          processCancellation?.dispose();
           if (error) reject(error);
           else if (value) resolve(value);
         };
@@ -292,18 +362,25 @@ export class GraphoxideCli implements vscode.Disposable {
           this.appendOutput(text);
         });
         child.stderr.on('data', (chunk: Buffer) => {
-          if (!progressDecoder) {
-            stderr.append(chunk.toString());
-            return;
-          }
-          this.consumeProgressFrames(progressDecoder.push(chunk).frames, stderr, acceptProgress);
+          if (progressDecoder) this.consumeProgressFrames(progressDecoder.push(chunk).frames, stderr, acceptProgress);
+          else if (activityDecoder) {
+            for (const frame of activityDecoder.push(chunk).frames) {
+              if (!frame.event || !acceptActivity(frame.event)) stderr.append(frame.raw);
+            }
+          } else stderr.append(chunk.toString());
         });
         void close.then(({ code, signal, error }) => {
+          this.cooperativeRunProcesses.delete(child);
           if (progressDecoder) {
             this.consumeProgressFrames(progressDecoder.finish().frames, stderr, acceptProgress);
           }
-          if (progressGeneration !== undefined) this.finishBuildProgress(progressGeneration);
+          if (activityDecoder) {
+            for (const frame of activityDecoder.finish().frames) {
+              if (!frame.event || !acceptActivity(frame.event)) stderr.append(frame.raw);
+            }
+          }
           if (token?.isCancellationRequested || this.disposed) {
+            if (stderr.value().trim()) this.appendOutput(stderr.value());
             finish(new vscode.CancellationError());
             return;
           }
@@ -324,6 +401,14 @@ export class GraphoxideCli implements vscode.Disposable {
       if (completedEvent && options.progressTarget) {
         await this.persistBuildSummary(options.progressTarget, completedEvent);
       }
+      if (token?.isCancellationRequested || this.disposed) throw new vscode.CancellationError();
+      if (options.afterSuccess) {
+        if (progressGeneration !== undefined) {
+          this.setBuildProgress(progressGeneration, operation, operation === 'command' ? 'Finishing…' : 'Loading graph…', 'status');
+        }
+        await options.afterSuccess();
+        if (token?.isCancellationRequested || this.disposed) throw new vscode.CancellationError();
+      }
       if (result.stderr.trim()) this.appendOutput(result.stderr);
       const reveal = config.get<string>('revealOutput', 'onError');
       if (reveal === 'always' && !this.disposed) this.output.show(true);
@@ -331,15 +416,12 @@ export class GraphoxideCli implements vscode.Disposable {
     };
 
     try {
-      if (options.showProgress === false) return await execute(options.cancellationToken);
-      return await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Window,
-          title: options.title,
-          cancellable: options.cancellable ?? true,
-        },
-        async (progress, token) => execute(token, progress),
-      );
+      if (progressGeneration !== undefined && cancellationSource) {
+        this.progressCancellations.set(progressGeneration, cancellationSource);
+        this.setBuildProgress(progressGeneration, operation, options.title.replace(/^Graphoxide:\s*/u, ''), 'status');
+        return await execute(cancellationSource.token);
+      }
+      return await execute(options.cancellationToken);
     } catch (error) {
       if (error instanceof vscode.CancellationError) throw error;
       const reported = this.reportFailure(error, options.failureGuidance);
@@ -347,6 +429,13 @@ export class GraphoxideCli implements vscode.Disposable {
         this.output.show(true);
       }
       throw reported;
+    } finally {
+      externalCancellation?.dispose();
+      cancellationSource?.dispose();
+      if (progressGeneration !== undefined) {
+        this.progressCancellations.delete(progressGeneration);
+        this.finishBuildProgress(progressGeneration);
+      }
     }
   }
 
@@ -381,7 +470,7 @@ export class GraphoxideCli implements vscode.Disposable {
     try {
       outcome = await this.mutationCoordinator.request(
         { target: outputDirectory, origin: 'watch', label: 'starting watch mode', failurePolicy: 'report-only' },
-        () => this.startWatchProcess(folder, environment),
+        () => this.runUiActivity('Starting watch mode…', (token) => this.startWatchProcess(folder, environment, token), () => this.stopWatch()),
       );
     } catch (error) {
       if (error instanceof vscode.CancellationError) throw error;
@@ -400,11 +489,12 @@ export class GraphoxideCli implements vscode.Disposable {
     return this.isWatchingTarget(outputDirectory) ? { kind: 'watching' } : { kind: 'unavailable' };
   }
 
-  private async startWatchProcess(folder: vscode.WorkspaceFolder, environment: EnvironmentOverlay): Promise<void> {
-    if (this.disposed) throw new vscode.CancellationError();
+  private async startWatchProcess(folder: vscode.WorkspaceFolder, environment: EnvironmentOverlay, token: vscode.CancellationToken): Promise<void> {
+    if (this.disposed || token.isCancellationRequested) throw new vscode.CancellationError();
     if (this.watchStart) return this.watchStart;
     if (this.watchProcess) {
       await this.stopWatchAndWait();
+      if (this.disposed || token.isCancellationRequested) throw new vscode.CancellationError();
       // Multiple callers can wait for the same `close`. Recheck ownership after
       // that await so later continuations join the replacement started by the
       // first instead of calling `beginStart` from stale pre-await state.
@@ -430,6 +520,7 @@ export class GraphoxideCli implements vscode.Disposable {
     const outputDirectory = environment.GRAPHOXIDE_OUT;
     if (!outputDirectory) throw new Error('Graphoxide watch mode requires a managed output directory.');
     const progressNonce = createBuildProgressNonce();
+    if (this.disposed || token.isCancellationRequested) throw new vscode.CancellationError();
     this.logInfo(`$ ${executable} ${args.map(formatArgument).join(' ')}`);
     const generation = this.watchLifecycleState.beginStart(outputDirectory);
     const watchStart = new Promise<void>((resolve, reject) => {
@@ -634,7 +725,8 @@ export class GraphoxideCli implements vscode.Disposable {
     this.mutationCoordinator.dispose();
     this.nextMutationBarrier?.release();
     this.nextMutationBarrier = undefined;
-    this.activeRunProcesses.terminateAll();
+    for (const cancellation of this.progressCancellations.values()) cancellation.cancel();
+    this.activeRunProcesses.terminateAll((child) => !this.cooperativeRunProcesses.has(child));
     this.stopWatch();
     this.watchEmitter.dispose();
     this.finishWatchBuildProgress();
@@ -666,6 +758,7 @@ export class GraphoxideCli implements vscode.Disposable {
     // late authenticated frame from an exited generation must remain ordinary
     // stderr and cannot supersede the replacement child's session.
     if (!ownsBuildProgressGeneration(this.watchGeneration, ownerGeneration)) return false;
+    if (this.watchLifecycleState.snapshot().phase === 'stopping') return true;
     if (event.type === 'started') {
       const run = new BuildProgressRun('update');
       if (!run.accept(event)) return false;
@@ -683,29 +776,42 @@ export class GraphoxideCli implements vscode.Disposable {
     if (event.type === 'phase') {
       const session = this.watchBuildProgress;
       if (!session || !session.run.accept(event)) return false;
+      if (this.watchLifecycleState.snapshot().phase === 'stopping') return true;
       this.setBuildProgress(session.generation, event.operation, phaseProgressMessage(event), 'status');
       return true;
     }
     if (event.type === 'completed') {
       const session = this.watchBuildProgress;
       if (!session) return false;
-      // Accept for summary persistence, but always clear progress on a terminal
-      // event even when the state machine rejects (e.g., mode mismatch after
-      // adaptive start). A stale spinner is worse than missing summary data.
-      this.finishWatchBuildProgress(ownerGeneration);
-      if (session.run.accept(event)) {
-        void this.persistBuildSummary(outputTarget, event);
-      }
+      if (this.watchLifecycleState.snapshot().phase === 'stopping') return true;
+      if (!session.run.accept(event)) return false;
+      this.setBuildProgress(session.generation, event.operation, 'Loading graph…', 'status');
+      void this.finishWatchPublication(session, outputTarget, event);
       return true;
     }
     if (event.type === 'failed' || event.type === 'not_completed') {
       const session = this.watchBuildProgress;
       if (!session) return false;
-      // Same rationale as completed: always clear progress on terminal events.
+      if (this.watchLifecycleState.snapshot().phase === 'stopping') return true;
+      if (!session.run.accept(event)) return false;
       this.finishWatchBuildProgress(ownerGeneration);
       return true;
     }
     return false;
+  }
+
+  private async finishWatchPublication(session: WatchBuildProgress, outputTarget: string, event: BuildCompletedEvent): Promise<void> {
+    try {
+      await this.persistBuildSummary(outputTarget, event);
+      if (this.disposed || this.watchBuildProgress !== session || this.watchLifecycleState.snapshot().phase === 'stopping') return;
+      await this.onGraphPublished?.(outputTarget);
+    } catch (error) {
+      if (!this.disposed) this.logInfo(`Could not refresh the published graph: ${compactError(error)}`);
+    } finally {
+      if (this.watchBuildProgress === session && this.watchLifecycleState.snapshot().phase !== 'stopping') {
+        this.finishWatchBuildProgress(session.ownerGeneration);
+      }
+    }
   }
 
   private finishWatchBuildProgress(ownerGeneration?: number): void {
@@ -728,20 +834,23 @@ export class GraphoxideCli implements vscode.Disposable {
 
   private setBuildProgress(
     generation: number,
-    operation: 'extract' | 'index' | 'update',
+    operation: BuildProgressSnapshot['operation'],
     message: string,
     presentation: 'notification' | 'status',
   ): void {
     if (this.disposed) return;
     const snapshot = { generation, operation, message, presentation } as const;
+    this.progressSnapshots.set(generation, snapshot);
+    if (this.activeBuildProgress && this.activeBuildProgress.generation > generation) return;
     this.activeBuildProgress = snapshot;
     this.buildProgressEmitter.fire(snapshot);
   }
 
   private finishBuildProgress(generation: number): void {
+    this.progressSnapshots.delete(generation);
     if (!ownsBuildProgressGeneration(this.activeBuildProgress?.generation, generation)) return;
-    this.activeBuildProgress = undefined;
-    if (!this.disposed) this.buildProgressEmitter.fire(undefined);
+    this.activeBuildProgress = [...this.progressSnapshots.values()].sort((a, b) => b.generation - a.generation)[0];
+    if (!this.disposed) this.buildProgressEmitter.fire(this.activeBuildProgress);
   }
 
   private appendOutput(value: string): void {
@@ -788,6 +897,8 @@ export class GraphoxideCli implements vscode.Disposable {
       && lifecycle.activeGeneration === generation
       && lifecycle.phase !== 'stopping';
     if (firstRequest) this.watchLifecycleState.markStopping(generation);
+    const session = this.watchBuildProgress;
+    if (session && session.ownerGeneration === generation) this.setBuildProgress(session.generation, 'update', 'Stopping watch mode…', 'status');
     const wasReady = this.watchProcess === child && this.watchReady;
     if (wasReady) {
       this.watchReady = false;
@@ -808,6 +919,15 @@ export class GraphoxideCli implements vscode.Disposable {
 
 function formatArgument(value: string): string {
   return /^[a-zA-Z0-9_./:=+-]+$/u.test(value) ? value : JSON.stringify(value);
+}
+
+function activityOperationFromArgs(args: readonly string[]): ActivityOperation | undefined {
+  return args[0] === 'label' ? 'label' : args[0] === 'wiki' && args[1] !== 'live' ? 'wiki' : undefined;
+}
+
+function wikiMutationFromArgs(args: readonly string[]): boolean {
+  return args[0] === 'wiki' && (args[1] === 'init'
+    || (args[1] === 'source' && ['add', 'refresh', 'review', 'confirm', 'retire'].includes(args[2] ?? '')));
 }
 
 function buildOperationFromArgs(args: readonly string[]): 'extract' | 'index' | 'update' | undefined {

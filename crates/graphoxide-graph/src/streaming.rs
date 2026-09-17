@@ -8,7 +8,7 @@
 //! materialization explicit at the staging boundary.
 
 use crate::{
-    build_graph_with_report_and_options,
+    build::build_graph_with_report_and_options_with_callback,
     build_graph_with_report_and_options_and_root_with_callback, BuildOptions, BuildReport,
 };
 use crc32fast::Hasher as Crc32;
@@ -1585,7 +1585,7 @@ pub fn build_graph_from_fact_batches_with_root_and_callback(
             on_sub_stage,
         )
     } else {
-        build_graph_with_report_and_options(&extractions, options)
+        build_graph_with_report_and_options_with_callback(&extractions, options, on_sub_stage)
     }
 }
 
@@ -1787,6 +1787,7 @@ impl StagedGraphOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build_graph_with_report_and_options;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 

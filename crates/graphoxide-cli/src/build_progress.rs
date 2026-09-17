@@ -19,6 +19,36 @@ pub const BUILD_PROGRESS_NONCE_HEX_LEN: usize = 32;
 pub const BUILD_PROGRESS_MAX_VALUE: u64 = 9_007_199_254_740_991;
 const COUNTER_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Per-emitter state bounds noisy staging callbacks without dropping the
+/// first or final observation. A fixed total and monotonic seen count also
+/// prevent stale or duplicated observations from reappearing after a delay.
+#[derive(Default)]
+struct CounterProgressThrottle {
+    total: Option<u64>,
+    processed: Option<u64>,
+    last_emit: Option<Instant>,
+}
+
+impl CounterProgressThrottle {
+    fn should_emit(&mut self, processed: u64, total: u64, now: Instant) -> bool {
+        if self.total.is_some_and(|previous| previous != total)
+            || self.processed.is_some_and(|previous| processed <= previous)
+        {
+            return false;
+        }
+        self.total = Some(total);
+        self.processed = Some(processed);
+        let emit = processed == total
+            || self
+                .last_emit
+                .is_none_or(|last| now.saturating_duration_since(last) >= COUNTER_EMIT_INTERVAL);
+        if emit {
+            self.last_emit = Some(now);
+        }
+        emit
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BuildProgressMode {
     #[default]
@@ -41,6 +71,24 @@ pub enum BuildProgressPhase {
     Deduplicating,
     Clustering,
     Publishing,
+}
+
+impl From<graphoxide_graph::BuildSubStage> for BuildProgressPhase {
+    fn from(stage: graphoxide_graph::BuildSubStage) -> Self {
+        use graphoxide_graph::BuildSubStage;
+        match stage {
+            BuildSubStage::Normalizing | BuildSubStage::ResolvingSemanticIds => Self::Building,
+            BuildSubStage::MergingNodes
+            | BuildSubStage::ResolvingTwins
+            | BuildSubStage::IndexingAliases => Self::MergingNodes,
+            BuildSubStage::ResolvingEdges | BuildSubStage::ResolvingHyperedges => {
+                Self::ResolvingEdges
+            }
+            BuildSubStage::Deduplicating | BuildSubStage::DisambiguatingLabels => {
+                Self::Deduplicating
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -355,7 +403,9 @@ impl BuildProgressReporter {
 
     /// Create a source-safe emitter for a central extraction progress monitor.
     /// Worker threads update counters only; the single monitor owns calls to
-    /// this closure and therefore owns all stderr writes.
+    /// this closure and therefore owns all stderr writes. The same emitter
+    /// bounds per-input staging callbacks to ten updates per second, while
+    /// always showing the first and final observations.
     pub fn counter_emitter(
         &self,
         phase: BuildProgressPhase,
@@ -367,9 +417,16 @@ impl BuildProgressReporter {
         let human = self.human;
         let operation = self.operation;
         let run_nonce = self.run_nonce.clone();
+        let throttle = std::sync::Mutex::new(CounterProgressThrottle::default());
         Some(std::sync::Arc::new(move |processed, total| {
             let total = bounded_usize(total);
             let processed = bounded_usize(processed).min(total);
+            let Ok(mut throttle) = throttle.lock() else {
+                return;
+            };
+            if !throttle.should_emit(processed, total, Instant::now()) {
+                return;
+            }
             emit_json(
                 json,
                 &BuildProgressEvent::Phase {
@@ -449,7 +506,7 @@ impl BuildProgressReporter {
             let Some((processed, total)) = progress else {
                 return;
             };
-            if self.last_total != Some(total)
+            if self.last_total.is_some_and(|previous| previous != total)
                 || self
                     .last_processed
                     .is_some_and(|previous| processed < previous)
@@ -584,7 +641,7 @@ impl Drop for BuildProgressReporter {
     }
 }
 
-fn resolve_run_nonce() -> anyhow::Result<String> {
+pub(crate) fn resolve_run_nonce() -> anyhow::Result<String> {
     match std::env::var(BUILD_PROGRESS_NONCE_ENV) {
         Ok(value) => {
             anyhow::ensure!(
@@ -602,7 +659,7 @@ fn resolve_run_nonce() -> anyhow::Result<String> {
     }
 }
 
-fn valid_run_nonce(value: &str) -> bool {
+pub(crate) fn valid_run_nonce(value: &str) -> bool {
     value.len() == BUILD_PROGRESS_NONCE_HEX_LEN
         && value
             .bytes()
@@ -667,6 +724,51 @@ mod tests {
     const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
     #[test]
+    fn counter_throttle_bounds_bursts_but_keeps_first_final_and_periodic_updates() {
+        let mut throttle = CounterProgressThrottle::default();
+        let start = Instant::now();
+        let mut emitted = Vec::new();
+        for processed in 0..=10_000 {
+            if throttle.should_emit(processed, 10_000, start) {
+                emitted.push(processed);
+            }
+        }
+        assert_eq!(emitted, [0, 10_000]);
+        assert!(!throttle.should_emit(10_000, 10_000, start + Duration::from_secs(1)));
+        assert!(!throttle.should_emit(1, 10_000, start + Duration::from_secs(1)));
+        assert!(!throttle.should_emit(10_001, 10_001, start + Duration::from_secs(1)));
+        let mut throttle = CounterProgressThrottle::default();
+        assert!(throttle.should_emit(0, 4, start));
+        assert!(!throttle.should_emit(1, 4, start + Duration::from_millis(99)));
+        assert!(throttle.should_emit(2, 4, start + Duration::from_millis(100)));
+        assert!(throttle.should_emit(4, 4, start + Duration::from_millis(101)));
+        let mut empty = CounterProgressThrottle::default();
+        assert!(empty.should_emit(0, 0, start));
+        assert!(!empty.should_emit(0, 0, start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn build_substage_phases_never_regress_to_building() {
+        use graphoxide_graph::BuildSubStage;
+        let stages = [
+            BuildSubStage::Normalizing,
+            BuildSubStage::ResolvingSemanticIds,
+            BuildSubStage::MergingNodes,
+            BuildSubStage::ResolvingTwins,
+            BuildSubStage::IndexingAliases,
+            BuildSubStage::ResolvingEdges,
+            BuildSubStage::ResolvingHyperedges,
+            BuildSubStage::Deduplicating,
+            BuildSubStage::DisambiguatingLabels,
+        ];
+        let phases = stages.map(BuildProgressPhase::from);
+        assert!(phases.windows(2).all(|pair| pair[0] as u8 <= pair[1] as u8));
+        assert_eq!(phases[2], BuildProgressPhase::MergingNodes);
+        assert_eq!(phases[5], BuildProgressPhase::ResolvingEdges);
+        assert_eq!(phases[8], BuildProgressPhase::Deduplicating);
+    }
+
+    #[test]
     fn completed_event_contains_only_bounded_aggregate_fields() {
         let mut report = BuildTelemetry::new(
             BuildOperation::Index,
@@ -705,6 +807,29 @@ mod tests {
         assert!(!encoded.contains("nodes"));
         assert!(encoded.contains(&format!("\"source_bytes\":{BUILD_PROGRESS_MAX_VALUE}")));
         assert!(encoded.contains(&format!("\"elapsed_ms\":{BUILD_PROGRESS_MAX_VALUE}")));
+    }
+
+    #[test]
+    fn phase_can_gain_counters_without_changing_its_name() {
+        let mut reporter = BuildProgressReporter::with_prepared_mode(
+            BuildOperation::Update,
+            BuildProgressRunMode::Full,
+            BuildProgressMode::Never,
+            false,
+            NONCE.into(),
+        );
+        // Enable bookkeeping without requiring an environment nonce.
+        reporter.json = true;
+        reporter.start();
+        reporter.phase(BuildProgressPhase::Building);
+        reporter.phase_progress(BuildProgressPhase::Building, 0, 4);
+        assert_eq!(reporter.last_total, Some(4));
+        assert_eq!(reporter.last_processed, Some(0));
+        reporter.phase_progress(BuildProgressPhase::Building, 4, 4);
+        assert_eq!(reporter.last_processed, Some(4));
+        reporter.phase_progress(BuildProgressPhase::Building, 1, 5);
+        assert_eq!(reporter.last_total, Some(4));
+        reporter.finished = true;
     }
 
     #[test]

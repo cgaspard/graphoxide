@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.16.0 — 2026-09-16
+
+- Stable release with Wiki setup, source generation, review and lifecycle actions,
+  and local preview in the Control Center and Command Palette.
+- One progress indicator follows graph construction, clustering, publication,
+  and loading into VS Code. Internal stages now appear for initial builds too.
+- Wiki authoring and LLM community naming report phases, completed work, and
+  naming retries. Long-running commands share progress and cancellation.
+- Watch startup, watch-pass loading, and manual refresh show progress. Wiki
+  cancellation lets the CLI roll back new sources before exiting; model workers
+  cannot publish after cancellation.
+- Explicit source fetching and model consent remain required. Existing JSON and
+  YAML provider profiles are supported; partial Wiki imports report their outcome.
+
 ## 0.14.0 — 2026-09-15
 
 - Stable VS Code Marketplace release with the matching native CLI bundled for

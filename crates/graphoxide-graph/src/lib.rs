@@ -67,9 +67,9 @@ pub use incremental::{
 };
 pub use labeling::{
     community_label_lines, generate_community_labels_with, label_communities_with,
-    parse_label_response, placeholder_community_labels, GeneratedLabels, LabelRequest,
-    LabelResponse, LabelSource, LabelUsage, LabelingError, LabelingOptions, DEFAULT_BATCH_SIZE,
-    DEFAULT_TOP_K,
+    label_communities_with_progress, parse_label_response, placeholder_community_labels,
+    GeneratedLabels, LabelRequest, LabelResponse, LabelSource, LabelUsage, LabelingError,
+    LabelingOptions, LabelingProgress, DEFAULT_BATCH_SIZE, DEFAULT_TOP_K,
 };
 pub use merge_repos::{distinct_repo_tags, merge_repository_graphs};
 pub use minhash::{optimal_lsh_params, MinHash, MinHashLsh};

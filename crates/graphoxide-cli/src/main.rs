@@ -7,6 +7,9 @@ mod site;
 
 use anyhow::{ensure, Context};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use graphoxide_cli::activity_progress::{
+    ActivityOperation, ActivityPhase, ActivityProgressReporter,
+};
 use graphoxide_cli::build_progress::{
     BuildProgressFactory, BuildProgressMode, BuildProgressPhase, BuildProgressReporter,
 };
@@ -414,6 +417,9 @@ enum Command {
     },
     /// Build and validate a schema-enforced knowledgebase.
     Wiki {
+        /// Opt-in authenticated activity progress on stderr.
+        #[arg(long, value_enum, default_value = "auto", global = true)]
+        progress: ProgressModeArg,
         #[command(subcommand)]
         command: WikiCommand,
     },
@@ -598,6 +604,9 @@ enum Command {
     },
     /// Name graph communities through an OpenAI- or Anthropic-compatible HTTP endpoint
     Label {
+        /// Opt-in authenticated activity progress on stderr.
+        #[arg(long, value_enum, default_value = "auto")]
+        progress: ProgressModeArg,
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -2665,36 +2674,7 @@ fn run_project_build_with_cancellation(
                     if let Ok(mut t) = timer.lock() {
                         t.tick(stage);
                     }
-                    let phase = match stage {
-                        graphoxide_graph::BuildSubStage::Normalizing => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingSemanticIds => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::MergingNodes => {
-                            BuildProgressPhase::MergingNodes
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingTwins => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::IndexingAliases => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingEdges => {
-                            BuildProgressPhase::ResolvingEdges
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingHyperedges => {
-                            BuildProgressPhase::ResolvingEdges
-                        }
-                        graphoxide_graph::BuildSubStage::Deduplicating => {
-                            BuildProgressPhase::Deduplicating
-                        }
-                        graphoxide_graph::BuildSubStage::DisambiguatingLabels => {
-                            BuildProgressPhase::Building
-                        }
-                    };
-                    (emit)(phase);
+                    (emit)(stage.into());
                 });
             adapter
         },
@@ -2835,7 +2815,7 @@ fn main() -> anyhow::Result<()> {
             legacy_executor,
         } => run_project_build(build, ProjectBuildWorkflow::Extract { legacy_executor }),
         Command::Index { build } => run_project_build(build, ProjectBuildWorkflow::Index),
-        Command::Wiki { command } => wiki(command),
+        Command::Wiki { command, progress } => wiki(command, progress),
         Command::Registry { command } => registry(command),
         Command::Audit {
             path,
@@ -3128,6 +3108,7 @@ fn main() -> anyhow::Result<()> {
             write_output(&format!("Reclustered {} nodes", graph.nodes.len()))
         }
         Command::Label {
+            progress,
             path,
             backend,
             model,
@@ -3135,15 +3116,22 @@ fn main() -> anyhow::Result<()> {
             max_concurrency,
             batch_size,
             timeout_seconds,
-        } => label_communities(
-            &path,
-            backend.as_deref(),
-            model.as_deref(),
-            missing_only,
-            max_concurrency,
-            batch_size,
-            timeout_seconds,
-        ),
+        } => {
+            let mut reporter =
+                ActivityProgressReporter::new(ActivityOperation::Label, progress.into())?;
+            label_communities(
+                &path,
+                backend.as_deref(),
+                model.as_deref(),
+                missing_only,
+                max_concurrency,
+                batch_size,
+                timeout_seconds,
+                &reporter,
+            )?;
+            reporter.complete();
+            Ok(())
+        }
         Command::Report { graph, output } => {
             let graph = graphoxide_core::read_graph(graph)?;
             let analysis = graphoxide_graph::analyze(&graph)?;
@@ -4360,16 +4348,37 @@ fn initialize_direct_wiki(root: &Path, authoring_profile: &Path) -> anyhow::Resu
     Ok(())
 }
 
-fn wiki(command: WikiCommand) -> anyhow::Result<()> {
+fn wiki(command: WikiCommand, progress: ProgressModeArg) -> anyhow::Result<()> {
+    let mut reporter = ActivityProgressReporter::new(ActivityOperation::Wiki, progress.into())?;
+    let cancellation = graphoxide_cli::wiki_cancellation::WikiCancellation::from_stdin_environment(
+        progress.into(),
+    )?;
+    wiki_with_progress(command, &reporter, &cancellation)?;
+    cancellation.check()?;
+    reporter.complete();
+    Ok(())
+}
+
+fn wiki_with_progress(
+    command: WikiCommand,
+    reporter: &ActivityProgressReporter,
+    cancellation: &graphoxide_cli::wiki_cancellation::WikiCancellation,
+) -> anyhow::Result<()> {
+    cancellation.check()?;
+    reporter.phase(ActivityPhase::Preparing);
     match command {
         WikiCommand::Init { authoring_profile } => {
             let root = direct_wiki_root()?;
+            reporter.phase(ActivityPhase::Publishing);
+            cancellation.check()?;
             initialize_direct_wiki(&root, &authoring_profile)?;
             write_output("Initialized knowledgebase")
         }
         WikiCommand::Source { command } => {
             let root = direct_wiki_root()?;
+            reporter.phase(ActivityPhase::Waiting);
             let _operation = graphoxide_cli::wiki_direct::acquire_source_operation(&root)?;
+            cancellation.check()?;
             match command {
                 WikiSourceCommand::Add {
                     inputs,
@@ -4420,17 +4429,26 @@ fn wiki(command: WikiCommand) -> anyhow::Result<()> {
                         }
                     }
                     let mut outcomes = Vec::new();
+                    reporter.phase(ActivityPhase::Admitting);
+                    cancellation.check()?;
                     let receipt = graphoxide_cli::wiki_source::admit_source_inputs(
                         &root,
                         &admission_inputs,
                         |outcome| outcomes.push(outcome),
                     )?;
-                    let (sources, authored) = author_admitted_sources(
-                        &root,
-                        &receipt,
-                        allow_network,
-                        allow_model_egress,
-                    )?;
+                    let sources = receipt.sources().to_vec();
+                    reporter.phase_progress(ActivityPhase::Admitting, sources.len(), sources.len());
+                    let authored =
+                        graphoxide_cli::wiki_direct::author_new_sources_with_cancellation(
+                            &root,
+                            &receipt,
+                            allow_network,
+                            |processed, total| {
+                                reporter.phase_progress(ActivityPhase::Authoring, processed, total)
+                            },
+                            cancellation,
+                        )?;
+                    reporter.phase(ActivityPhase::Publishing);
                     write_output(&serde_json::to_string_pretty(&serde_json::json!({
                         "sources": sources,
                         "authored": authored,
@@ -4447,11 +4465,16 @@ fn wiki(command: WikiCommand) -> anyhow::Result<()> {
                         allow_model_egress,
                         "source refresh requires --allow-model-egress"
                     );
-                    let (source, page_id) = graphoxide_cli::wiki_direct::refresh_source(
-                        &root,
-                        &source_id,
-                        allow_network.then(graphoxide_cli::wiki_source::allow_https_fetch),
-                    )?;
+                    reporter.phase_progress(ActivityPhase::Authoring, 0, 1);
+                    let (source, page_id) =
+                        graphoxide_cli::wiki_direct::refresh_source_with_cancellation(
+                            &root,
+                            &source_id,
+                            allow_network.then(graphoxide_cli::wiki_source::allow_https_fetch),
+                            cancellation,
+                        )?;
+                    reporter.phase_progress(ActivityPhase::Authoring, 1, 1);
+                    reporter.phase(ActivityPhase::Publishing);
                     write_output(&serde_json::to_string_pretty(&serde_json::json!({
                         "source": source,
                         "page_id": page_id,
@@ -4471,7 +4494,15 @@ fn wiki(command: WikiCommand) -> anyhow::Result<()> {
                         .into_iter()
                         .find(|source| source.source_id == source_id)
                         .context("direct source is unavailable")?;
-                    graphoxide_cli::wiki_direct::review_source(&root, &source, allow_network)?;
+                    reporter.phase_progress(ActivityPhase::Reviewing, 0, 1);
+                    graphoxide_cli::wiki_direct::review_source_with_cancellation(
+                        &root,
+                        &source,
+                        allow_network,
+                        cancellation,
+                    )?;
+                    reporter.phase_progress(ActivityPhase::Reviewing, 1, 1);
+                    reporter.phase(ActivityPhase::Publishing);
                     let source = graphoxide_cli::wiki_source::source_status(&root)?
                         .into_iter()
                         .find(|source| source.source_id == source_id)
@@ -4484,6 +4515,8 @@ fn wiki(command: WikiCommand) -> anyhow::Result<()> {
                         .into_iter()
                         .find(|source| source.source_id == source_id)
                         .context("direct source is unavailable")?;
+                    reporter.phase(ActivityPhase::Publishing);
+                    cancellation.check()?;
                     graphoxide_cli::wiki_direct::human_confirm(&root, &source)?;
                     let source = graphoxide_cli::wiki_source::source_status(&root)?
                         .into_iter()
@@ -4500,12 +4533,15 @@ fn wiki(command: WikiCommand) -> anyhow::Result<()> {
                     }
                 }
                 WikiSourceCommand::Retire { source_id } => {
+                    reporter.phase(ActivityPhase::Publishing);
+                    cancellation.check()?;
                     graphoxide_cli::wiki_direct::retire_source(&direct_wiki_root()?, &source_id)?;
                     write_output(&source_id)
                 }
             }
         }
         WikiCommand::Live { root, port, open } => {
+            reporter.phase(ActivityPhase::Serving);
             graphoxide_cli::wiki_hugo::live(&root, port, open)
         }
     }
@@ -5421,6 +5457,7 @@ fn check_update(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn label_communities(
     path: &std::path::Path,
     backend: Option<&str>,
@@ -5429,7 +5466,9 @@ fn label_communities(
     max_concurrency: usize,
     batch_size: usize,
     timeout_seconds: Option<f64>,
+    reporter: &ActivityProgressReporter,
 ) -> anyhow::Result<()> {
+    reporter.phase(ActivityPhase::Waiting);
     let known_managed_directory = if path.is_dir() {
         Some(managed_output_directory(path, None))
     } else {
@@ -5440,6 +5479,7 @@ fn label_communities(
         .map_or_else(|| path.to_path_buf(), |output| output.join("graph.json"));
     let _managed_graph_lock =
         acquire_managed_graph_lock(&graph_path, known_managed_directory.as_deref())?;
+    reporter.phase(ActivityPhase::Preparing);
     let mut graph = graphoxide_core::read_graph(&graph_path)?;
     let output = graph_path
         .parent()
@@ -5492,13 +5532,25 @@ fn label_communities(
     options.allow_claude_cli_parallel =
         std::env::var("GRAPHIFY_CLAUDE_CLI_PARALLEL").is_ok_and(|value| value.trim() == "1");
     let gods = graphoxide_graph::god_nodes(&graph, 10);
-    let (generated, usage) = graphoxide_graph::label_communities_with(
+    let (generated, usage) = graphoxide_graph::label_communities_with_progress(
         &graph,
         &communities,
         &gods,
         &options,
         |request| transport.call(request),
+        |progress| {
+            reporter.phase_progress(
+                if progress.retrying {
+                    ActivityPhase::Retrying
+                } else {
+                    ActivityPhase::Labeling
+                },
+                progress.processed,
+                progress.total,
+            )
+        },
     )?;
+    reporter.phase(ActivityPhase::Publishing);
     for (community, label) in generated {
         existing.insert(community, label);
     }
@@ -7051,36 +7103,7 @@ fn rebuild_isolated_pass(
                     if let Ok(mut t) = timer.lock() {
                         t.tick(stage);
                     }
-                    let phase = match stage {
-                        graphoxide_graph::BuildSubStage::Normalizing => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingSemanticIds => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::MergingNodes => {
-                            BuildProgressPhase::MergingNodes
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingTwins => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::IndexingAliases => {
-                            BuildProgressPhase::Building
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingEdges => {
-                            BuildProgressPhase::ResolvingEdges
-                        }
-                        graphoxide_graph::BuildSubStage::ResolvingHyperedges => {
-                            BuildProgressPhase::ResolvingEdges
-                        }
-                        graphoxide_graph::BuildSubStage::Deduplicating => {
-                            BuildProgressPhase::Deduplicating
-                        }
-                        graphoxide_graph::BuildSubStage::DisambiguatingLabels => {
-                            BuildProgressPhase::Building
-                        }
-                    };
-                    (emit)(phase);
+                    (emit)(stage.into());
                 });
             adapter
         },
@@ -8611,6 +8634,40 @@ mod tests {
         let cli =
             parse_cli(["graphoxide", "update", ".", "--force"]).expect("parse update --force");
         assert!(matches!(cli.command, Command::Update { force: true, .. }));
+    }
+
+    #[test]
+    fn activity_commands_accept_progress_after_wiki_subcommands() {
+        for args in [
+            vec!["graphoxide", "wiki", "--progress=json", "source", "status"],
+            vec!["graphoxide", "wiki", "source", "status", "--progress=json"],
+            vec![
+                "graphoxide",
+                "wiki",
+                "source",
+                "add",
+                "reference.md",
+                "--allow-model-egress",
+                "--progress=json",
+            ],
+        ] {
+            assert!(matches!(
+                parse_cli(args).unwrap().command,
+                Command::Wiki {
+                    progress: ProgressModeArg::Json,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            parse_cli(["graphoxide", "label", ".", "--progress=json"])
+                .unwrap()
+                .command,
+            Command::Label {
+                progress: ProgressModeArg::Json,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -10205,6 +10262,7 @@ mod tests {
         assert!(matches!(
             review.command,
             Command::Wiki {
+                progress: _,
                 command: WikiCommand::Source {
                     command: WikiSourceCommand::Review { .. }
                 }
@@ -10216,6 +10274,7 @@ mod tests {
         assert!(matches!(
             confirm.command,
             Command::Wiki {
+                progress: _,
                 command: WikiCommand::Source {
                     command: WikiSourceCommand::Confirm { .. }
                 }

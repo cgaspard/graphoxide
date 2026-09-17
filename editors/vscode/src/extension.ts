@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { automaticGraphUpdateArguments, graphBuildDecision, GraphBuildOperation, workspaceGraphMutationAllowed } from './build';
 import { LatestBuildSummary } from './build-progress';
+import { WikiService } from './wiki';
 import { BuildProgressSnapshot, GraphoxideCli } from './cli';
 import { GraphCodeLensProvider } from './codelens';
 import { ControlCenterPanel } from './control-center';
@@ -25,6 +26,7 @@ interface ExtensionServices {
   readonly statusBar: vscode.StatusBarItem;
   readonly managed: ManagedWorkspaceService;
   readonly aiLabeling: AiLabelingService;
+  readonly wiki: WikiService;
 }
 
 export interface GraphoxideExtensionStatus {
@@ -61,6 +63,12 @@ export interface GraphoxideExtensionApi {
   readonly version: 1;
   readonly test?: {
     configureAi(input: AiLabelingTestConfiguration): Promise<readonly string[]>;
+    initializeWiki(profilePath: string): Promise<void>;
+    addWikiSources(inputs: readonly string[]): Promise<void>;
+    cancelActiveBuild(): void;
+    runReport(outputPath: string): Promise<void>;
+    runExport(outputPath: string): Promise<void>;
+    runCancelledQuery(): Promise<boolean>;
     improveCommunityLabels(): Promise<void>;
     clearAi(): Promise<void>;
     watchLifecycle(): GraphoxideWatchLifecycleStatus;
@@ -96,7 +104,12 @@ export interface GraphoxideExtensionApi {
 
 export async function activate(context: vscode.ExtensionContext): Promise<GraphoxideExtensionApi> {
   const store = new GraphStore();
-  const cli = new GraphoxideCli(context.extensionUri, context.workspaceState);
+  const cli = new GraphoxideCli(context.extensionUri, context.workspaceState, async (outputTarget) => {
+    const state = store.state;
+    if (state && path.resolve(path.dirname(state.graphUri.fsPath)) === path.resolve(outputTarget)) {
+      await store.load(state.folder);
+    }
+  });
   const explorer = new GraphExplorerProvider(store);
   const results = new ResultsProvider();
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 40);
@@ -113,8 +126,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
   );
   const managed = new ManagedWorkspaceService(context, store, cli);
   const aiLabeling = new AiLabelingService(context, cli, store);
+  const wiki = new WikiService(context, cli, store);
   const mcpProvider = new GraphoxideMcpProvider(context, (folder) => managed.isEnabled(folder));
-  const services: ExtensionServices = { store, cli, explorer, results, visualizer, statusBar, managed, aiLabeling };
+  const services: ExtensionServices = { store, cli, explorer, results, visualizer, statusBar, managed, aiLabeling, wiki };
   const codeLens = new GraphCodeLensProvider(store);
   let graphPathReload = Promise.resolve();
   let graphPathRestartBarrier: TestGraphPathRestartBarrier | undefined;
@@ -149,6 +163,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
     codeLens,
     statusBar,
     managed,
+    wiki,
     mcpProvider,
     vscode.window.registerTreeDataProvider('graphoxide.explorer', explorer),
     vscode.window.registerTreeDataProvider('graphoxide.results', results),
@@ -198,6 +213,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<Grapho
     ...(context.extensionMode !== vscode.ExtensionMode.Production ? {
       test: {
         configureAi: (input: AiLabelingTestConfiguration) => aiLabeling.configureForTest(input),
+        initializeWiki: async (profilePath: string) => {
+          const folder = await store.preferredFolder(false);
+          if (!folder) throw new Error('A workspace is required to test Wiki initialization.');
+          await wiki.initializeFromProfile(folder, profilePath);
+        },
+        addWikiSources: async (inputs: readonly string[]) => {
+          const folder = await store.preferredFolder(false);
+          if (!folder) throw new Error('A workspace is required to test Wiki authoring.');
+          await wiki.addSources(folder, inputs, { allowModelEgress: true, allowNetwork: false });
+        },
+        cancelActiveBuild: () => cli.cancelActiveBuild(),
+        runReport: async (outputPath: string) => {
+          const state = store.state;
+          if (!state?.model) throw new Error('A graph is required to test reports.');
+          await cli.run({ title: 'Graphoxide: generating architecture report…', folder: state.folder,
+            args: ['report', '--graph', state.graphUri.fsPath, '--output', outputPath] });
+        },
+        runExport: async (outputPath: string) => {
+          const state = store.state;
+          if (!state?.model) throw new Error('A graph is required to test exports.');
+          await cli.run({ title: 'Graphoxide: exporting JSON…', folder: state.folder,
+            args: ['export', 'json', outputPath, '--graph', state.graphUri.fsPath] });
+        },
+        runCancelledQuery: async () => {
+          const state = store.state;
+          if (!state?.model) throw new Error('A graph is required to test query cancellation.');
+          const listener = cli.onDidChangeBuildProgress((progress) => {
+            if (progress?.message === 'Testing query cancellation…') queueMicrotask(() => cli.cancelActiveBuild());
+          });
+          try {
+            await cli.run({ title: 'Graphoxide: Testing query cancellation…', folder: state.folder,
+              args: ['query', 'cart', '--graph', state.graphUri.fsPath] });
+            return false;
+          } catch (error) {
+            if (error instanceof vscode.CancellationError) return true;
+            throw error;
+          } finally { listener.dispose(); }
+        },
         improveCommunityLabels: () => aiLabeling.improveCommunityLabelsForTest(),
         clearAi: () => aiLabeling.clearTestConfiguration(),
         watchLifecycle: () => observeWatchLifecycle(store, cli),
@@ -599,10 +652,10 @@ async function repairRegistrations(context: vscode.ExtensionContext, cli: Grapho
 }
 
 function registerCommands(context: vscode.ExtensionContext, services: ExtensionServices): vscode.Disposable[] {
-  const { store, cli, explorer, results, visualizer, managed, aiLabeling } = services;
+  const { store, cli, explorer, results, visualizer, managed, aiLabeling, wiki } = services;
   const command = (id: string, handler: (...args: unknown[]) => unknown): vscode.Disposable =>
     vscode.commands.registerCommand(id, (...args: unknown[]) => Promise.resolve(handler(...args)).catch((error: unknown) => handleError(error)));
-  const openControlCenter = (): void => ControlCenterPanel.show(context, { store, cli, managed, aiLabeling });
+  const openControlCenter = (): void => ControlCenterPanel.show(context, { store, cli, managed, aiLabeling, wiki });
 
   return [
     command('graphoxide.initialize', () => runGraphBuild('build', services)),
@@ -613,10 +666,10 @@ function registerCommands(context: vscode.ExtensionContext, services: ExtensionS
       if (folder) await cli.startWatch(folder, store.managedOutput(folder).environment);
     }),
     command('graphoxide.stopWatch', () => cli.stopWatch()),
-    command('graphoxide.refresh', async () => {
+    command('graphoxide.refresh', () => cli.runUiActivity('Loading graph…', async () => {
       await store.load();
       explorer.refresh();
-    }),
+    })),
     command('graphoxide.openGraph', () => {
       const model = store.state?.model;
       if (!model) return missingGraph();
@@ -706,6 +759,11 @@ function registerCommands(context: vscode.ExtensionContext, services: ExtensionS
       const community = communityFromArgument(value);
       if (model && community) visualizer.show(model, community.id);
     }),
+    command('graphoxide.initializeWiki', () => services.wiki.initialize()),
+    command('graphoxide.buildWiki', () => services.wiki.build()),
+    command('graphoxide.manageWikiSources', () => services.wiki.manageSources()),
+    command('graphoxide.previewWiki', () => services.wiki.preview()),
+    command('graphoxide.stopWikiPreview', () => services.wiki.stopPreview()),
     command('graphoxide.report', async () => {
       const state = store.state;
       if (!state?.model) return missingGraph();
@@ -823,10 +881,10 @@ async function runGraphBuild(operation: GraphBuildOperation, services: Extension
     mutationTarget: environment.GRAPHOXIDE_OUT,
     mutationOrigin: 'interactive',
     mutationLabel: operation === 'rebuild' ? 'performing a full rebuild' : `running an interactive ${operation}`,
+    afterSuccess: () => services.store.load(folder),
     suppressAutomaticOnFailure: true,
   });
   if (outcome.kind !== 'completed') return;
-  await services.store.load(folder);
   if (watchWasStopped) {
     await services.cli.startWatch(folder, environment);
   }
@@ -863,14 +921,13 @@ function registerUpdateOnSave(services: ExtensionServices): vscode.Disposable {
         mutationTarget: output.outputDirectory,
         mutationOrigin: 'automatic',
         mutationLabel: 'updating the graph after save',
+        afterSuccess: () => services.store.load(folder),
         suppressAutomaticOnFailure: true,
       });
-      if (outcome.kind === 'completed') {
-        await services.store.load(folder);
-      } else if (outcome.kind === 'busy') {
+      if (outcome.kind === 'busy') {
         pending = true;
         await services.cli.waitForMutationIdle();
-      } else {
+      } else if (outcome.kind !== 'completed') {
         pending = false;
       }
     } catch (error) {
@@ -1011,7 +1068,9 @@ function updateStatusBar(
 ): void {
   if (progress) {
     const counterMatch = progress.message.match(/\((\d+)\/(\d+)\)\s*$/u);
-    const pct = counterMatch ? Math.round((Number(counterMatch[1]) / Number(counterMatch[2])) * 100) : undefined;
+    const pct = counterMatch && Number(counterMatch[2]) > 0
+      ? Math.round((Number(counterMatch[1]) / Number(counterMatch[2])) * 100)
+      : undefined;
     const label = progress.message.replace(/…\s*(\(\d+\/\d+\))?$/u, '').replace(/…$/u, '');
     item.text = pct !== undefined ? `$(sync~spin) Graphoxide: ${label} ${pct}%` : `$(sync~spin) Graphoxide: ${label}`;
     item.tooltip = `Graphoxide ${progress.operation}: ${progress.message}`;

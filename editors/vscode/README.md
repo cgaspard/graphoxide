@@ -40,7 +40,7 @@ notes under [`../../releasenotes/cli`](../../releasenotes/cli).
 2. At the first-open prompt, choose **Enable Graphoxide**.
 3. Graphoxide builds or updates the local graph and registers its MCP server with VS Code.
 4. Choose continuous watch, update-on-save, or manual freshness.
-5. Open the **Graphoxide Control Center** from the status bar or Graph Explorer title to review graph health, automatic updates, AI labeling, and MCP connections in one place.
+5. Open the **Graphoxide Control Center** from the status bar or Graph Explorer title to review graph health, automatic updates, Wiki authoring, AI labeling, and MCP connections in one place.
 6. If Claude Code, Codex, or OpenCode is detected, optionally install Graphoxide at project or user scope from the Control Center.
 7. Select the Graphoxide icon in the Activity Bar to explore communities, architectural hubs, files, and query results.
 
@@ -159,6 +159,9 @@ Useful commands include:
 | `Graphoxide: Show Architectural Hubs` | List the most connected nodes |
 | `Graphoxide: Generate Architecture Report` | Create a Markdown architecture report |
 | `Graphoxide: Export Graph…` | Export HTML, call-flow HTML, GraphML, Cypher, JSON, or an Obsidian vault |
+| `Graphoxide: Build Wiki from Sources…` | Initialize a knowledgebase if needed, select sources, and generate Wiki pages |
+| `Graphoxide: Manage Wiki Sources…` | Open generated pages, refresh sources, run AI review, confirm reviewed pages, or retire sources |
+| `Graphoxide: Preview Wiki` | Start a local Hugo preview; use **Stop Wiki Preview** to close it |
 
 Query results appear in a dedicated sidebar view. Node results link back to source. Text output also streams to **View → Output → Graphoxide**.
 
@@ -202,10 +205,12 @@ Graph build and update commands require a trusted workspace. All spawned command
 are argument-safe, run without a shell, support cancellation where applicable,
 and stream diagnostics to the Graphoxide output channel.
 
-Manual builds display their current phase and any real phase-local counters in a
-VS Code progress notification. Update-on-save and continuous-watch rebuilds use
-the status bar instead, so background maintenance does not repeatedly interrupt
-editing. Progress closes with the exact child process that owns the build.
+Builds show one Graphoxide status-bar indicator and a matching Control Center
+progress banner with a Cancel button. Progress follows extraction, graph building,
+clustering, output writing, and publication until the owning process finishes.
+Percentages describe the current phase, not the complete build. Wiki authoring and
+LLM community naming use the same progress display with their own phases and
+available source or community counts.
 
 After an index or reindex succeeds, the Control Center's **Workspace graph** card
 shows the latest total runtime, actual full or incremental mode, indexed-input
@@ -253,6 +258,54 @@ command, the extension ignores Binary Path,
 Additional Arguments, `PATH`, and `GRAPHOXIDE_BINARY`, and invokes only its
 packaged executable (or this repository's own build in an Extension Development
 Host). Use **Graphoxide: Clear Stored AI Credential…** to delete a key.
+
+## Build and review a Wiki
+
+Open the Control Center's **Wiki** card or run **Graphoxide: Build Wiki from
+Sources…**. The workspace must be trusted and opened at its Git worktree root.
+On first use, select an existing secret-free authoring-profile JSON file inside
+that workspace. **Graphoxide: Initialize Wiki…** runs setup without adding sources.
+Wiki authoring uses its own project profiles; the community-naming settings do
+not configure Wiki models.
+
+For example, `config/authoring-input.json` can select model IDs declared in your
+provider profile:
+
+```json
+{
+  "provider_profile": "config/wiki-provider.json",
+  "author_model": "author",
+  "reviewer_model": "reviewer",
+  "source_egress_consent": "wiki-source-authoring"
+}
+```
+
+The provider profile must use the identical consent string, declare the selected
+models with `text-generation` and `structured-output` capabilities, and specify
+the exact API endpoint and model IDs. Credentials stay in its `credential_env`
+environment variable; start VS Code with that variable available. The extension
+does not write global credentials or invent model profiles. See the
+[knowledgebase guide](../../docs/knowledgebase.md) for the direct-source workflow.
+
+Choose local files, a folder (macOS/Linux), or a public HTTPS URL. Sources must
+be UTF-8 text; convert binary documents to text first. Git inputs must be clean,
+tracked files. Before generation or AI review, the extension shows the selected
+sources, exact model, endpoint, and permission to transmit source text. HTTPS
+source reads also require explicit fetch consent for that operation.
+For YAML provider profiles, the extension opens the validated profile for you
+to review its endpoint and API model before granting consent.
+
+**Manage sources…** lists each source's lifecycle status. Open the generated page,
+refresh it after source changes, or request AI review. Human confirmation is a
+separate action available after AI review. Retiring removes the Wiki pointer and
+generated artifacts while preserving the original source. Progress and Cancel
+remain available in the Control Center during generation and review.
+
+**Preview Wiki** opens a dedicated terminal and launches the local browser
+preview on port 1313. Preview requires the separately installed Hugo version and
+`GRAPHOXIDE_HUGO_BINARY` described in the knowledgebase guide. **Stop preview**
+closes that terminal. Wiki operations use the bundled Graphoxide executable or
+this repository's own build.
 
 ## Connect an AI coding client
 
@@ -324,7 +377,7 @@ Settings that identify files are scoped per workspace, so multi-root workspaces 
 
 ## Privacy and security
 
-The extension does not send complete source files over the network. Its visualizer uses a restrictive Content Security Policy, has no external runtime dependencies, and escapes graph content before rendering. The explicit AI-labeling command sends representative node labels and community IDs to the endpoint shown in its confirmation dialog; labels can contain identifiers, filenames, and truncated comments or docstrings, while full files and `source_file` metadata are excluded. Model discovery contacts only a configured loopback OpenAI-compatible, LM Studio, or Ollama endpoint. MCP clients may separately read graph-derived results when you enable their integration.
+Graph extraction remains local. The visualizer uses a restrictive Content Security Policy, has no external runtime dependencies, and escapes graph content before rendering. The explicit AI-labeling command sends representative node labels and community IDs to the endpoint shown in its confirmation dialog; labels can contain identifiers, filenames, and truncated comments or docstrings, while full files and `source_file` metadata are excluded. Explicit Wiki generation and AI review can send selected source text to the model endpoint after confirmation; HTTPS source transfers require separate per-operation consent. Model discovery contacts only a configured loopback OpenAI-compatible, LM Studio, or Ollama endpoint. MCP clients may separately read graph-derived results when you enable their integration.
 
 ## License
 

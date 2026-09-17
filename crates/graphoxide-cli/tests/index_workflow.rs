@@ -217,8 +217,12 @@ fn opt_in_progress_is_bounded_source_safe_stderr_and_keeps_json_stdout() {
         "scanning" => 2,
         "extracting" => 3,
         "building" => 4,
-        "clustering" => 5,
-        "publishing" => 6,
+        "reconciling" => 5,
+        "merging_nodes" => 6,
+        "resolving_edges" => 7,
+        "deduplicating" => 8,
+        "clustering" => 9,
+        "publishing" => 10,
         other => panic!("unknown phase {other}"),
     };
     assert!(phases
@@ -1854,4 +1858,72 @@ fn cluster_only_waits_for_the_same_lock_before_read_modify_write() {
     drop(guard);
     let result = wait_with_timeout(child, Duration::from_secs(20));
     assert!(result.status.success(), "{}", output_text(&result));
+}
+
+#[test]
+fn clustered_full_and_incremental_progress_reaches_every_build_stage() {
+    let fixture = tempfile::tempdir().unwrap();
+    let source = fixture.path().join("main.rs");
+    fs::write(&source, "pub fn answer() -> u8 { 42 }\n").unwrap();
+    for pass in 0..2 {
+        if pass == 1 {
+            fs::write(
+                &source,
+                "pub fn answer() -> u8 { 43 }\npub fn call() { answer(); }\n",
+            )
+            .unwrap();
+        }
+        let output = graphoxide(fixture.path())
+            .args(["update", ".", "--progress=json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let events = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix(BUILD_PROGRESS_PREFIX))
+            .map(|payload| serde_json::from_str::<Value>(payload).unwrap())
+            .collect::<Vec<_>>();
+        let phases = events
+            .iter()
+            .filter_map(|event| event["phase"].as_str())
+            .collect::<Vec<_>>();
+        let order = [
+            "waiting",
+            "auditing",
+            "scanning",
+            "extracting",
+            "building",
+            "reconciling",
+            "merging_nodes",
+            "resolving_edges",
+            "deduplicating",
+            "clustering",
+            "publishing",
+        ];
+        let ranks = phases
+            .iter()
+            .map(|phase| order.iter().position(|expected| phase == expected).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            ranks.windows(2).all(|pair| pair[0] <= pair[1]),
+            "regressing phases: {phases:?}"
+        );
+        for expected in [
+            "extracting",
+            "building",
+            "merging_nodes",
+            "resolving_edges",
+            "deduplicating",
+            "clustering",
+            "publishing",
+        ] {
+            assert!(phases.contains(&expected), "missing {expected}: {phases:?}");
+        }
+        assert_eq!(events.last().unwrap()["type"], "completed");
+        assert_eq!(
+            events.last().unwrap()["mode"],
+            if pass == 0 { "full" } else { "incremental" }
+        );
+    }
 }

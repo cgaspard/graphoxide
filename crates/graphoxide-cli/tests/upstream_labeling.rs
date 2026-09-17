@@ -512,3 +512,73 @@ fn test_cluster_only_heals_persisted_placeholder_but_reuses_genuine() {
     assert_ne!(saved["0"], "Community 0");
     assert_eq!(saved["1"], "Payment Flow");
 }
+
+#[test]
+fn label_activity_covers_model_requests_and_publishing_without_source_payloads() {
+    use graphoxide_cli::activity_progress::ACTIVITY_PROGRESS_PREFIX;
+    let temporary = tempdir().unwrap();
+    two_community_graph(temporary.path());
+    let (endpoint, request, server) = serve_once(r#"{"0":"Orders","1":"Payments"}"#);
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let result = run_with_endpoint_and_env(
+        temporary.path(),
+        &["label", ".", "--backend", "lm-studio", "--progress=json"],
+        &endpoint,
+        &[("GRAPHOXIDE_PROGRESS_NONCE", nonce)],
+    );
+    assert!(result.status.success(), "{}", output_text(&result.stderr));
+    request.recv_timeout(Duration::from_secs(5)).unwrap();
+    server.join().unwrap();
+    let stderr = output_text(&result.stderr);
+    let events = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(ACTIVITY_PROGRESS_PREFIX))
+        .map(|payload| {
+            assert!(payload.len() < 512);
+            assert!(!payload.contains("OrderService"));
+            assert!(!payload.contains("sample.py"));
+            serde_json::from_str::<Value>(payload).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events.first().unwrap()["type"], "started");
+    assert_eq!(events.last().unwrap()["type"], "completed");
+    assert!(events
+        .iter()
+        .all(|event| event["run_nonce"] == nonce && event["operation"] == "label"));
+    assert!(events.iter().any(|event| event["phase"] == "labeling"
+        && event["processed"] == 0
+        && event["total"] == 2));
+    assert!(events.iter().any(|event| event["phase"] == "labeling"
+        && event["processed"] == 2
+        && event["total"] == 2));
+    assert_eq!(events[events.len() - 2]["phase"], "publishing");
+    assert!(!output_text(&result.stdout).contains(ACTIVITY_PROGRESS_PREFIX));
+}
+
+#[test]
+fn label_activity_failure_is_terminal_and_progress_is_opt_in() {
+    use graphoxide_cli::activity_progress::ACTIVITY_PROGRESS_PREFIX;
+    let temporary = tempdir().unwrap();
+    for arguments in [
+        vec!["label", "missing.json"],
+        vec!["label", "missing.json", "--progress=never"],
+    ] {
+        let result = run(temporary.path(), &arguments);
+        assert!(!result.status.success());
+        assert!(!output_text(&result.stderr).contains(ACTIVITY_PROGRESS_PREFIX));
+    }
+    let result = run(
+        temporary.path(),
+        &["label", "missing.json", "--progress=json"],
+    );
+    assert!(!result.status.success());
+    let stderr = output_text(&result.stderr);
+    let events = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(ACTIVITY_PROGRESS_PREFIX))
+        .map(|payload| serde_json::from_str::<Value>(payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events.first().unwrap()["type"], "started");
+    assert_eq!(events.last().unwrap()["type"], "failed");
+    assert!(!events.iter().any(|event| event["type"] == "completed"));
+}

@@ -64,3 +64,14 @@ test('subscribes to build progress changes and forwards cancel message', async (
   assert.match(source, /cancelBuild/u);
   assert.match(source, /cancelActiveBuild/u);
 });
+
+test('exposes Wiki build, source lifecycle, and preview controls with workspace trust', async () => {
+  const source = await readFile(controlCenterPath, 'utf8');
+  assert.match(source, /services\.wiki\.onDidChange/u);
+  assert.match(source, /services\.wiki\.status\(folder\)/u);
+  for (const command of ['initializeWiki', 'buildWiki', 'manageWikiSources', 'previewWiki', 'stopWikiPreview']) {
+    assert.ok(source.includes(`'graphoxide.${command}'`));
+  }
+  assert.match(source, /wikiDisabled = !state\.workspace \|\| !state\.workspace\.trusted/u);
+  assert.match(source, /button\.dataset\.action === 'cancelBuild'.*button\.disabled = buildProgressMsg === undefined/u);
+});

@@ -61,3 +61,62 @@ fn test_label_batch_recovers_via_split_on_invalid_json() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
+
+#[test]
+fn progress_preserves_retry_results_and_counts_completed_communities() {
+    let graph = KnowledgeGraph {
+        nodes: vec![node("first"), node("second"), node("third")],
+        ..Default::default()
+    };
+    let communities = BTreeMap::from([
+        (0, vec!["first".into()]),
+        (1, vec!["second".into()]),
+        (2, vec!["third".into()]),
+    ]);
+    let mut options = LabelingOptions::new("gemini");
+    options.batch_size = 2;
+    options.max_concurrency = 2;
+    let events = std::sync::Mutex::new(Vec::new());
+    let (labels, _) = graphoxide_graph::label_communities_with_progress(
+        &graph,
+        &communities,
+        &[],
+        &options,
+        |request| {
+            let ids = request
+                .prompt
+                .lines()
+                .filter_map(|line| line.strip_prefix("Community "))
+                .filter_map(|line| line.split_once(':'))
+                .map(|(id, _)| id.to_owned())
+                .collect::<Vec<_>>();
+            if ids.len() > 1 {
+                return Ok("invalid json".into());
+            }
+            Ok(serde_json::json!({ &ids[0]: format!("Label {}", ids[0]) })
+                .to_string()
+                .into())
+        },
+        |progress| events.lock().unwrap().push(progress),
+    )
+    .unwrap();
+    assert_eq!(
+        labels,
+        BTreeMap::from([
+            (0, "Label 0".into()),
+            (1, "Label 1".into()),
+            (2, "Label 2".into())
+        ])
+    );
+    let events = events.into_inner().unwrap();
+    assert_eq!(events.first().unwrap().processed, 0);
+    assert_eq!(events.last().unwrap().processed, 3);
+    assert!(events.iter().all(|event| event.total == 3));
+    assert!(events.iter().any(|event| event.retrying));
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0].processed <= pair[1].processed));
+    assert!(events
+        .iter()
+        .any(|event| event.processed > 0 && event.processed < 3));
+}
