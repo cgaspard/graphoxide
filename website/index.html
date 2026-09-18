@@ -68,7 +68,8 @@
           <p class="hero-lede">
             Graphoxide turns a repository into an explorable architecture map. Trace calls,
             imports, and dependencies; query how a system works; and see the impact of a change
-            without leaving VS Code — or sending your code anywhere.
+            from VS Code, the terminal, or an AI client. Core graph analysis runs locally;
+            AI enrichment and knowledgebase authoring are explicit, optional workflows.
           </p>
           <div class="hero-actions">
             <a class="button button-primary" href="#quickstart">
@@ -80,6 +81,7 @@
               <span aria-hidden="true">↓</span>
             </a>
           </div>
+          <p class="release-note"><a href="https://github.com/cgaspard/graphoxide/releases/tag/v0.16.0">Stable 0.16.0 release and downloads</a> · <a href="https://marketplace.visualstudio.com/items?itemName=cgaspard.graphoxide-vscode">VS Code Marketplace</a></p>
           <div class="hero-proof" aria-label="Product qualities">
             <span><i aria-hidden="true">✓</i> One native binary</span>
             <span><i aria-hidden="true">✓</i> Local by default</span>
@@ -256,8 +258,8 @@
           <div class="feature-grid">
             <article class="feature-card feature-card-large reveal">
               <div class="feature-icon"><span aria-hidden="true">⌘</span></div>
-              <h3>Search by meaning</h3>
-              <p>Ask architecture questions in natural language. Results combine ranked matches with bounded graph traversal, so context stays useful.</p>
+              <h3>Search architectural context</h3>
+              <p>Search with a question or symbol name. Deterministic term matching and bounded graph traversal return related nodes and source references.</p>
               <div class="mini-search"><span>⌕</span><code>where are permissions enforced?</code><kbd>↵</kbd></div>
             </article>
             <article class="feature-card reveal">
@@ -290,6 +292,12 @@
               <p>Export HTML, GraphML, Cypher, JSON, call flows, and Obsidian vaults — or serve the graph over MCP.</p>
               <div class="format-list" aria-label="Supported exports"><span>HTML</span><span>GraphML</span><span>Cypher</span><span>JSON</span></div>
             </article>
+            <article class="feature-card feature-card-large reveal">
+              <div class="feature-icon"><span aria-hidden="true">▤</span></div>
+              <h3>Build a source-linked knowledgebase</h3>
+              <p>Turn supported text sources into provisional Markdown with a configured author model. Keep source pointers and digests, refresh deliberately, and separate AI review from human confirmation. Preview locally with a separately installed Hugo binary.</p>
+              <p><a href="knowledgebase.html">Knowledgebase setup and source lifecycle →</a></p>
+            </article>
           </div>
         </div>
       </section>
@@ -300,6 +308,7 @@
             <div class="eyebrow"><span></span> Graphoxide for VS Code</div>
             <h2>Your architecture, <em>in the editor.</em></h2>
             <p>Enable Graphoxide once, let it build and maintain the graph, and keep architectural context where you work.</p>
+            <p><a href="https://marketplace.visualstudio.com/items?itemName=cgaspard.graphoxide-vscode">Install the stable extension</a> · <a href="https://github.com/cgaspard/graphoxide/blob/main/editors/vscode/README.md">Extension commands and settings</a></p>
           </div>
 
           <div class="editor-frame reveal">
@@ -334,7 +343,7 @@
                   <div><b>47</b><code>  orders::commit(stock, payment).<em>await</em></code></div>
                   <div><b>48</b><code>}</code></div>
                 </div>
-                <div class="code-lens">3 callers · 8 dependencies · community: Checkout</div>
+                <div class="code-lens">Optional CodeLens · enable graphoxide.codeLens.enabled</div>
               </div>
               <div class="graph-pane">
                 <div class="graph-pane-toolbar"><span>Graph Explorer</span><div>⊖ &nbsp; ⊕ &nbsp; ⛶</div></div>
@@ -353,9 +362,9 @@
           </div>
 
           <div class="editor-benefits reveal">
-            <div><span>01</span><h3>Navigate both ways</h3><p>Reveal a graph node from source, or jump from any node to its exact file and line.</p></div>
+            <div><span>01</span><h3>Navigate both ways</h3><p>Reveal a graph node from source, or open its available file and line. Archive members link to the containing archive.</p></div>
             <div><span>02</span><h3>Refactor with context</h3><p>Preview affected callers and dependencies before you touch a public boundary.</p></div>
-            <div><span>03</span><h3>Fully managed</h3><p>Choose continuous or save-triggered updates and connect detected MCP clients at project or user scope.</p></div>
+            <div><span>03</span><h3>Manage work in one place</h3><p>Choose continuous or save-triggered graph updates, run Wiki source actions, and follow graph, Wiki, and naming progress. MCP registrations stay scoped to the open project.</p></div>
           </div>
         </div>
       </section>
@@ -364,13 +373,13 @@
         <div class="shell privacy-grid">
           <div class="privacy-copy reveal">
             <div class="eyebrow"><span></span> Your code stays yours</div>
-            <h2>Deep analysis.<br><em>Zero upload.</em></h2>
-            <p>Extraction, graph construction, clustering, search, paths, and impact analysis all run locally. No account. No daemon. No source-code telemetry.</p>
+            <h2>Local graph analysis.<br><em>Explicit AI workflows.</em></h2>
+            <p>Structural extraction, graph construction, clustering, search, paths, and impact analysis run locally without a hosted service. Optional labeling, enrichment, and knowledgebase authoring use the model provider you configure; knowledgebase commands require explicit consent before source text is sent to a model.</p>
             <ul>
-              <li><span>✓</span> Works completely offline</li>
+              <li><span>✓</span> Core graph analysis works offline</li>
               <li><span>✓</span> Skips credentials and ignored files</li>
               <li><span>✓</span> Deterministic, inspectable JSON output</li>
-              <li><span>✓</span> Optional LLM labeling is explicit</li>
+              <li><span>✓</span> Model access and source transfer are explicit</li>
             </ul>
           </div>
           <div class="privacy-visual reveal" aria-label="Local analysis architecture">
@@ -393,10 +402,10 @@
         <div class="section-heading reveal">
           <div class="eyebrow"><span></span> How it works</div>
           <h2>Source in. Understanding out.</h2>
-          <p>A deterministic pipeline turns syntax into navigable architectural context in seconds.</p>
+          <p>A deterministic pipeline turns code and supported structured inputs into navigable context.</p>
         </div>
         <div class="pipeline reveal">
-          <article><span class="step-number">01</span><div class="step-icon">&lt;/&gt;</div><h3>Parse</h3><p>Compiled parsers extract symbols and relationships across your source tree.</p></article>
+          <article><span class="step-number">01</span><div class="step-icon">&lt;/&gt;</div><h3>Parse</h3><p>Code parsers and bounded readers index source, documents, data, and archives. Run <code>graphoxide formats</code> for supported formats and limits.</p></article>
           <i class="pipeline-arrow" aria-hidden="true">→</i>
           <article><span class="step-number">02</span><div class="step-icon">⌬</div><h3>Connect</h3><p>Calls, imports, inheritance, containment, and references become typed edges.</p></article>
           <i class="pipeline-arrow" aria-hidden="true">→</i>
@@ -418,15 +427,16 @@
               <button type="button" data-install="source">Local checkout</button>
             </div>
             <div class="install-command">
-              <code data-install-command>cargo install --git https://github.com/cgaspard/graphoxide graphoxide-cli</code>
+              <code data-install-command>cargo install --git https://github.com/cgaspard/graphoxide --tag v0.16.0 --locked graphoxide-cli</code>
               <button type="button" class="copy-button" data-copy-target="[data-install-command]" aria-label="Copy install command">Copy</button>
             </div>
-            <p class="install-note" data-install-note>Builds the CLI from the current main branch and installs it on your Cargo PATH.</p>
+            <p class="install-note" data-install-note>Builds stable 0.16.0 with its locked dependencies and installs the CLI on your Cargo PATH. Requires the repository's Rust toolchain.</p>
+            <p class="install-note"><a href="https://github.com/cgaspard/graphoxide/releases/latest">Prebuilt downloads for all six platforms</a> · <a href="https://github.com/cgaspard/graphoxide/blob/main/README.md">Full CLI documentation</a></p>
           </div>
           <div class="terminal reveal" aria-label="Graphoxide quickstart terminal">
             <div class="terminal-bar"><div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div><span>~/projects/checkout</span><button type="button" class="copy-button" data-copy-target="#quickstart-code">Copy all</button></div>
             <pre id="quickstart-code"><code><span class="comment"># Build a graph from this repository</span>
-<span class="prompt">$</span> graphoxide extract . --code-only
+<span class="prompt">$</span> graphoxide index . --code-only
 <span class="success">✓</span> 2,162 nodes · 4,300 edges · 125 communities
 
 <span class="comment"># Ask an architectural question</span>
@@ -439,6 +449,7 @@
 <span class="comment"># Open the MCP server for your AI client</span>
 <span class="prompt">$</span> graphoxide serve
 <span class="success">✓</span> Graphoxide MCP ready on stdio</code></pre>
+            <p class="install-note">Illustrative output. Graph contents and counts depend on your project.</p>
           </div>
         </div>
       </section>
@@ -452,7 +463,7 @@
           <div class="ecosystem-cards">
             <article><span class="ecosystem-icon">⌘</span><div><h3>Command line</h3><p>Extract, query, inspect, report, and export from scripts or a terminal.</p></div></article>
             <article><span class="ecosystem-icon">⌬</span><div><h3>VS Code</h3><p>Explore architecture and jump between graph nodes and source.</p></div></article>
-            <article><span class="ecosystem-icon">◈</span><div><h3>MCP clients</h3><p>Give coding agents precise, bounded structural context over stdio.</p></div></article>
+            <article><span class="ecosystem-icon">◈</span><div><h3>MCP clients</h3><p>Serve bounded graph context over stdio or Streamable HTTP. Knowledgebase lifecycle tools require an explicitly bound stdio server.</p></div></article>
             <article><span class="ecosystem-icon">⇄</span><div><h3>Open formats</h3><p>Take your graph to Neo4j, Gephi, Obsidian, or a standalone HTML file.</p></div></article>
           </div>
         </div>
@@ -466,15 +477,15 @@
         <div class="faq-list reveal">
           <details>
             <summary>Does Graphoxide use an LLM to analyze my code?<span>+</span></summary>
-            <p>No. Core extraction, clustering, querying, impact analysis, and reports are deterministic and run locally. An optional <code>graphoxide label</code> command can use a configured API only to create friendlier community names.</p>
+            <p>Core structural extraction, clustering, querying, impact analysis, and reports are deterministic and local. Optional community labeling and enrichment use configured models. Knowledgebase authoring and AI review also use configured models and require explicit source-egress consent. See the <a href="knowledgebase.html">knowledgebase guide</a> for that separate workflow.</p>
           </details>
           <details>
             <summary>Is the binary really standalone?<span>+</span></summary>
-            <p>Yes for core use: it requires no Python, Node.js, JVM, parser downloads, account, or network connection. Release binaries are platform-specific. Git integration needs Git, and PR-aware MCP tools need the GitHub CLI.</p>
+            <p>Yes for core graph analysis: no Python, Node.js, JVM, parser downloads, account, or network connection is required. Release binaries are platform-specific. Git integration needs Git, PR-aware MCP tools need the GitHub CLI, and knowledgebase authoring needs a configured model provider. Knowledgebase preview requires a separately installed Hugo 0.165.0 binary.</p>
           </details>
           <details>
             <summary>Which languages are supported?<span>+</span></summary>
-            <p>Graphoxide includes compiled parsers for major languages and deterministic structured fallbacks for a broad language matrix. Unsupported text files are ignored safely.</p>
+            <p>Graphoxide includes compiled parsers for major languages and deterministic fallbacks for a broader language matrix. Bounded readers also handle supported structured documents, schemas, archives, PDFs, and SQLite files. <code>graphoxide formats</code> lists each format's semantic, structural, container, or inventory-only support; <code>graphoxide audit coverage .</code> reports file outcomes. Inventory does not imply full content extraction.</p>
           </details>
           <details>
             <summary>Can I use it without VS Code?<span>+</span></summary>
@@ -496,7 +507,7 @@
         <div class="shell reveal">
           <svg class="cta-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M9 10.5 20 4l11 6.5v13L20 30 9 23.5z" /><circle cx="9" cy="10.5" r="3" /><circle cx="31" cy="10.5" r="3" /><circle cx="20" cy="30" r="3" /><circle cx="20" cy="17" r="4" /><path d="m11.5 12 5.3 3M28.5 12l-5.3 3M20 21v6" /></svg>
           <h2>See what your code<br>has been trying to tell you.</h2>
-          <p>Build your first graph in seconds.</p>
+          <p>Install the stable release and build your first graph locally.</p>
           <a class="button button-primary" href="#quickstart">Get started with Graphoxide <span>→</span></a>
         </div>
       </section>
@@ -512,7 +523,7 @@
           <p>Native code intelligence,<br>for humans and agents.</p>
         </div>
         <div class="footer-links"><h3>Product</h3><a href="#features">Features</a><a href="knowledgebase.html">Knowledgebase</a><a href="#vscode">VS Code</a><a href="#quickstart">Install</a><a href="#faq">FAQ</a></div>
-        <div class="footer-links"><h3>Origins</h3><a href="https://github.com/Graphify-Labs/graphify">Original Graphify</a></div>
+        <div class="footer-links"><h3>Project</h3><a href="https://github.com/cgaspard/graphoxide">Source and documentation</a><a href="https://github.com/cgaspard/graphoxide/releases/latest">Stable releases</a><a href="https://github.com/Graphify-Labs/graphify">Original Graphify</a></div>
       </div>
       <div class="shell footer-bottom">
         <p>Graphoxide is based on Graphify, © 2026 Safi Shamsi and the Graphify contributors. Licensed under Apache-2.0; portions originally MIT.</p>

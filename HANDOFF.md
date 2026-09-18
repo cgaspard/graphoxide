@@ -1,4 +1,13 @@
-# HANDOFF — Graphoxide Rust port
+# Historical handoff — Graphoxide Rust port
+
+> This document preserves the original porting plan and dated progress notes.
+> Its scaffold state, scope decisions, tool counts, dependency choices, and next
+> steps describe that historical work, not the current release. For current
+> behavior and setup, use the [README](README.md),
+> [contributor guide](AGENTS.md), [architecture guide](docs/how-it-works.md),
+> [knowledgebase guide](docs/knowledgebase.md), and
+> [VS Code guide](editors/vscode/README.md). Follow current source and tests when
+> this plan differs from the implementation.
 
 **Goal:** a single-binary Rust implementation, originally intended to reduce runtime overhead, derived from
 [Graphify](https://github.com/Graphify-Labs/graphify) that requires **no Python runtime**,
@@ -11,7 +20,7 @@ distills the parts that matter so you don't have to re-derive them.
 
 ---
 
-## 1. Current state (what's already done)
+## 1. Historical state and completion notes
 
 > **Port completion update (2026-08-01):** The offline Rust conversion described by
 > this handoff is implemented end to end. The workspace now contains production
@@ -371,7 +380,7 @@ The Python reference is right there in `upstream/` — use it as the oracle:
 - Windows: atomic rename needs a copy fallback; keep paths forward-slashed in all
   serialized output.
 
-## 14. Immediate next steps
+## 14. Original next steps
 
 1. Phase 1: implement the tolerant graph.json reader/writer in `graphoxide-core` and
    round-trip a real Python-built graph (`cd upstream && uv sync && uv run graphify

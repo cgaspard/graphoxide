@@ -89,8 +89,8 @@ queryDemo?.querySelectorAll('[data-query]').forEach((button) => {
 });
 
 const installs = {
-  cargo: ['cargo install --git https://github.com/cgaspard/graphoxide graphoxide-cli', 'Builds the CLI from the current main branch and installs it on your Cargo PATH.'],
-  release: ['gh release download --repo cgaspard/graphoxide --pattern "graphoxide-*"', 'Downloads release artifacts; choose the archive for your platform and put graphoxide on PATH.'],
+  cargo: ['cargo install --git https://github.com/cgaspard/graphoxide --tag v0.16.0 --locked graphoxide-cli', "Builds stable 0.16.0 with its locked dependencies and installs the CLI on your Cargo PATH. Requires the repository's Rust toolchain."],
+  release: ['gh release download v0.16.0 --repo cgaspard/graphoxide --pattern "graphoxide-darwin-arm64-0.16.0.tar.gz" --pattern SHA256SUMS', 'macOS Apple silicon example. Choose the matching archive for your platform from the release, verify SHA256SUMS, then extract it and put graphoxide on PATH.'],
   source: ['cargo install --path crates/graphoxide-cli', 'Builds and installs from an existing local Graphoxide checkout.'],
 };
 

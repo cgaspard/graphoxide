@@ -94,10 +94,12 @@ fn test_skill_registration_uses_host_generic_instruction() {
 }
 
 #[test]
-fn test_how_it_works_clarifies_code_only_semantic_extraction() {
+fn test_how_it_works_separates_offline_indexing_from_explicit_model_operations() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/how-it-works.md");
     let document = fs::read_to_string(path).unwrap();
-    assert!(document.contains("Code files are not sent to the LLM semantic extractor"));
-    assert!(document.contains("code files, Pass 3 is skipped entirely"));
-    assert!(document.contains("docs, papers, images, and transcripts"));
+    assert!(document.contains("indexing pipeline is deterministic and offline"));
+    assert!(document.contains("do not invoke a model provider"));
+    assert!(document.contains("Model operations are separate, explicit workflows"));
+    assert!(document.contains("explicit model-egress consent"));
+    assert!(!document.contains("Pass 3"));
 }

@@ -122,6 +122,8 @@ h1 em, h2 em { color: var(--rust-light); font-family: Georgia, "Times New Roman"
 .button-primary:hover { background: linear-gradient(135deg, #ffa575, #ef7540); }
 .button-secondary { color: #d8d8d3; background: rgba(255, 255, 255, .03); border-color: var(--line); }
 .button-secondary:hover { background: rgba(255, 255, 255, .06); border-color: #3b474c; }
+.release-note { margin-top: 18px; color: #aab2b4; font-size: 13px; }
+.release-note a { color: #e7b38f; text-underline-offset: 3px; }
 .hero-proof { display: flex; flex-wrap: wrap; gap: 22px; margin-top: 26px; color: #747c7e; font-size: 11px; }
 .hero-proof i { margin-right: 5px; color: #859b89; font-style: normal; }
 

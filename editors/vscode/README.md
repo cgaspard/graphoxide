@@ -22,8 +22,11 @@ graphoxide --help
 
 Alternatively, set **Graphoxide: Binary Path** to an absolute executable path. The extension has no Node runtime dependencies and its graph visualization loads no remote scripts or assets.
 
-Binary discovery checks an explicit setting first, followed by the packaged
-binary, `PATH`, and this repository's release/debug build directories.
+Binary discovery uses **Graphoxide: Binary Path** when it differs from the default
+`graphoxide`. Otherwise it checks `GRAPHOXIDE_BINARY`, the packaged binary,
+`PATH`, and this repository's release/debug build directories, in that order.
+AI community labeling and Wiki operations use only the packaged executable or
+this repository's own build; they ignore those settings and environment overrides.
 Linux-targeted packages use a statically linked musl executable and therefore do
 not inherit a glibc-version requirement from the GitHub Actions runner.
 
@@ -41,7 +44,7 @@ notes under [`../../releasenotes/cli`](../../releasenotes/cli).
 3. Graphoxide builds or updates the local graph and registers its MCP server with VS Code.
 4. Choose continuous watch, update-on-save, or manual freshness.
 5. Open the **Graphoxide Control Center** from the status bar or Graph Explorer title to review graph health, automatic updates, Wiki authoring, AI labeling, and MCP connections in one place.
-6. If Claude Code, Codex, or OpenCode is detected, optionally install Graphoxide at project or user scope from the Control Center.
+6. If Claude Code, Codex, or OpenCode is detected, optionally install Graphoxide for this project from the Control Center.
 7. Select the Graphoxide icon in the Activity Bar to explore communities, architectural hubs, files, and query results.
 
 Enabling is workspace-specific and requires a trusted workspace. **Not now** asks
@@ -143,7 +146,7 @@ confidence, with matching arrows, patterns, glyphs, and text labels.
 
 ## Understand code in context
 
-When **Graphoxide: Code Lens Enabled** is on, indexed symbols show their graph connection count directly above the source. Select that CodeLens—or right-click and choose **Graphoxide: Explain Symbol at Cursor**—to inspect the symbol and its neighbors.
+**Graphoxide: Code Lens Enabled** is off by default. Turn it on to show graph connection counts above indexed symbols. Select that CodeLens—or right-click and choose **Graphoxide: Explain Symbol at Cursor**—to inspect the symbol and its neighbors. Source navigation is enabled by default and can be disabled with **Graphoxide: Source Links Enabled**.
 
 Useful commands include:
 
@@ -287,9 +290,10 @@ environment variable; start VS Code with that variable available. The extension
 does not write global credentials or invent model profiles. See the
 [knowledgebase guide](../../docs/knowledgebase.md) for the direct-source workflow.
 
-Choose local files, a folder (macOS/Linux), or a public HTTPS URL. Sources must
-be UTF-8 text; convert binary documents to text first. Git inputs must be clean,
-tracked files. Before generation or AI review, the extension shows the selected
+Choose local files, a folder (macOS/Linux), or a public HTTPS URL without query
+parameters. Sources must be UTF-8 text up to 16 MiB each; convert binary documents
+to text first. Git inputs must be clean, tracked files from a committed revision
+with an HTTPS or SSH `origin` remote. Before generation or AI review, the extension shows the selected
 sources, exact model, endpoint, and permission to transmit source text. HTTPS
 source reads also require explicit fetch consent for that operation.
 For YAML provider profiles, the extension opens the validated profile for you
@@ -300,6 +304,8 @@ refresh it after source changes, or request AI review. Human confirmation is a
 separate action available after AI review. Retiring removes the Wiki pointer and
 generated artifacts while preserving the original source. Progress and Cancel
 remain available in the Control Center during generation and review.
+The completion message reports generated pages, skipped inputs, and source errors;
+see **View → Output → Graphoxide** for details when an input cannot be used.
 
 **Preview Wiki** opens a dedicated terminal and launches the local browser
 preview on port 1313. Preview requires the separately installed Hugo version and
@@ -319,18 +325,24 @@ For an enabled workspace, the extension publishes Graphoxide directly to VS Code
 through its native MCP provider. Open **Graphoxide: Open Control Center** to detect
 and configure other installed clients:
 
-| Client | Project scope | User scope |
-| --- | --- | --- |
-| VS Code | Native provider for the enabled workspace | Managed by VS Code |
-| Claude Code | `.mcp.json` | Claude Code user MCP registry |
-| Codex | `.codex/config.toml` | `~/.codex/config.toml` |
-| OpenCode | `opencode.json` | `~/.config/opencode/opencode.json` |
+| Client | Project integration |
+| --- | --- |
+| VS Code | Native provider for the enabled workspace |
+| Claude Code | `.mcp.json` |
+| Codex | `.codex/config.toml` |
+| OpenCode | `opencode.json` |
 
-The Control Center separates project scope from all-projects user scope, reports
-installed, missing, and stale registrations, and confirms every Install, Update,
-or Remove action. It preserves unrelated servers and settings. Project
-configuration can be shared with collaborators; user configuration applies
-across projects.
+The Control Center installs and updates project registrations with this
+workspace's working directory. It reports installed, missing, and stale entries
+and confirms each requested Install, Update, or Remove action while preserving
+unrelated servers and settings. Existing all-project registrations are shown as
+legacy entries with a **Remove legacy** action; new user-scope installations are
+not offered.
+
+Registrations that use the bundled executable store a version-independent binary
+path so extension updates do not break them. On activation, Graphoxide also
+repairs project entries whose old extension binary directory has been deleted;
+these repairs are logged in the Graphoxide output channel.
 
 The extension does not keep an MCP process running. VS Code, Claude Code, Codex,
 or OpenCode starts `graphoxide serve` over stdio when it needs Graphoxide tools and
@@ -345,6 +357,12 @@ then restrict traversal to call, import, type, or structural relationships. Tool
 results are static-analysis evidence with source locations and confidence labels,
 which Codex uses to synthesize and verify its final explanation.
 
+The default MCP registration provides graph and GitHub tools. Knowledgebase
+source lifecycle tools require a separately configured stdio server bound to a
+Wiki root, with explicit write, network, and model-egress capabilities as needed.
+Using the Wiki commands above does not enable those MCP capabilities. See the
+[knowledgebase guide](../../docs/knowledgebase.md) for configuration.
+
 Core extraction, clustering, querying, visualization, and reports are offline and require no API key. Explicit AI configuration may contact a loopback endpoint to discover models, and the labeling command contacts the confirmed model endpoint.
 
 ## Settings
@@ -358,7 +376,7 @@ Open **Graphoxide: Open Settings** to configure:
 - Automatic graph refresh and update-on-save debounce
 - First-open managed-workspace prompt
 - Visualization node limit
-- Source CodeLens
+- Source CodeLens and source-link navigation
 - Additional CLI arguments
 - Output-channel reveal behavior
 - AI community-labeling provider, endpoint, model, concurrency, batch size, and request timeout
@@ -367,7 +385,7 @@ Settings that identify files are scoped per workspace, so multi-root workspaces 
 
 ## Troubleshooting
 
-**The binary cannot be found:** Set **Graphoxide: Binary Path** to the absolute path returned by `which graphoxide` (macOS/Linux) or `where graphoxide` (Windows), then run **Refresh Graph**. AI labeling intentionally requires the packaged binary or a build from this repository and does not use that setting.
+**The binary cannot be found:** Set **Graphoxide: Binary Path** to the absolute path returned by `which graphoxide` (macOS/Linux) or `where graphoxide` (Windows), then run **Refresh Graph**. AI labeling and Wiki commands require the packaged binary or a build from this repository and do not use that setting.
 
 **The graph is empty or missing:** Run **Graphoxide: Build Graph**. If the repository already has a graph, verify **Graphoxide: Graph Path**.
 

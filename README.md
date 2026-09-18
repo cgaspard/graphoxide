@@ -18,7 +18,7 @@ Graphoxide stores its deterministic, queryable graph at
 `graphoxide-out/graph.json`. The format retains compatibility with Graphify's
 graph schema while adding a native CLI/MCP runtime and IDE integration.
 
-For schema-enforced implementation references and agent-managed research, see
+For source-backed derived pages with explicit authoring and review, see
 [Knowledgebase](docs/knowledgebase.md).
 
 ## Install
@@ -186,6 +186,12 @@ that an embedding process can set with `GRAPHOXIDE_PROGRESS_NONCE` and validate
 before trusting it. Progress is always separate from command output, so
 selecting any progress mode does not change a command's stdout schema.
 
+`label` and `wiki` also accept `--progress=json`. Their separate
+`[graphoxide-activity]` stderr events contain a run nonce, fixed operation and
+phase names, and aggregate counters. They never contain source text, model
+responses, or credentials. Their default `auto` and `never` modes emit no
+activity events. Counters describe the current phase, not the whole operation.
+
 The default executor separates filesystem I/O from CPU extraction behind
 bounded queues and a resolved managed-memory budget. `--memory-budget-bytes`,
 `--io-workers`, `--compute-workers`, `--read-batch-bytes`, and `--io-backend`
@@ -334,6 +340,8 @@ HTML outputs open directly in a browser. GraphML can be imported by graph tools,
 | `audit [path]` | Report unresolved, malformed, merged, repaired, or dropped graph facts |
 | `update [path]` | Incrementally refresh an existing project graph |
 | `enrich [path]` | Explicitly add bounded, provider-authored facts from a named enrichment profile |
+| `wiki` | Initialize, author, review, and preview a direct-source knowledgebase |
+| `registry` | Manage a metadata-only source registry and its capture lifecycle |
 | `cluster-only <path>` | Recompute communities without source extraction |
 | `query <question>` | Search and traverse a relevant neighborhood |
 | `path <a> <b>` | Find the shortest relationship path between two nodes |
@@ -349,7 +357,7 @@ HTML outputs open directly in a browser. GraphML can be imported by graph tools,
 | `global-graph` | Discover graphs beneath roots and merge them |
 | `global` | Maintain the user-wide graph under `~/.graphoxide/` |
 | `label [path]` | Optionally label communities through an LLM endpoint |
-| `serve` | Run the MCP stdio server |
+| `serve` | Run the MCP server over stdio or Streamable HTTP |
 | `hook` / `claude` | Install, remove, or inspect integrations |
 
 Run `graphoxide <command> --help` for the exact arguments and defaults of any command.
@@ -402,12 +410,12 @@ accepted graph untouched; the first successful rebuild replaces it with the
 redacted graph. Remove `graphoxide-out` manually when immediate removal of all
 previously published local output is required.
 
-ZIP, TAR, and single-member GZIP inputs recursively index supported member
+ZIP, TAR, GZIP, BZIP2, XZ, Zstandard, and LZ4 inputs recursively index supported member
 formats in the default isolated runtime. Members stay in memory, receive stable
 `outer!/member` provenance, and are never extracted to the filesystem. Archive
 paths, nesting, member counts, decoded bytes, expansion ratios, retained facts,
 and compressed scratch are bounded; sensitive members remain visible as inert
-inventory without being decompressed. BZIP2, XZ, Zstandard, 7z, and RAR remain
+inventory without being decompressed. 7z, RAR, CPIO, CAB, and Lzip remain
 inventory-only. Encrypted members, links, special entries, and unsupported ZIP
 compression reject that archive before any child dispatch.
 
@@ -423,22 +431,26 @@ never fetched, evaluated, rendered, or dispatched as source files. Recognized
 macro, script, OLE/ActiveX, and encrypted package structures reject the package
 before semantic publication.
 
-PDF inputs use an in-process, byte-only parser for bounded classic-xref
-documents. It supports raw or single-Flate page streams and a conservative
-Type 1 Standard-14/WinAnsi text subset, emitting deterministic document and
-page facts with page-numbered provenance under explicit input, object, page,
-decoded-stream, text, and fact ceilings. Encrypted, incremental, hybrid-xref,
-object-stream, unsupported-font/filter, malformed, or over-limit PDFs retain a
-stable inventory diagnostic instead of attempting unbounded recovery. Actions,
-annotations, embedded files, external references, images, and JavaScript are
-never traversed or executed; OCR and rendering remain explicit future
-enrichment work. The isolated runtime's shared parser arena applies an
-additional 16× source admission, so its current 16 MiB per-file policy admits
-semantic PDF parsing only below roughly 1 MiB even though the registry's
-absolute PDF input ceiling is 16 MiB. `graphoxide formats --json` reports this
-distinction machine-readably: each format carries its absolute `limits` plus a
-`runtime_admission` profile listing the effective admission ceilings the
-default isolated runtime actually enforces for byte-credit-multiplied adapters.
+PDF inputs use an in-process, byte-only parser with bounded support for classic
+cross-reference tables, cross-reference and object streams, Unicode text maps,
+and tagged layouts. It emits document and page facts with page-numbered
+provenance, plus inert image inventory, under explicit input, object, page,
+decoded-stream, text, and fact ceilings. Supported empty-password encrypted
+PDFs can also dispatch bounded embedded files through the shared container
+budget. Unsupported encryption, fonts, filters, malformed input, and exceeded
+limits retain diagnostics; PDF actions and JavaScript are never executed, and
+pages are not rendered or OCRed.
+
+PDF admission accounts for source bytes at 2× their size plus separate bounded
+decode, text, and retained-fact allowances. Multi-megabyte PDFs can be admitted;
+there is no fixed 1 MiB cutoff. The format registry's static PDF ceiling is
+16 MiB, and the effective ceiling depends on the parser allowance.
+`graphoxide formats --json` reports static `limits` and the default runtime's
+`runtime_admission` profile.
+
+SQLite files (`.db`, `.sqlite`, and `.sqlite3`) are indexed directly from their
+bytes without opening a database or executing SQL. Supported schema facts
+include tables, views, indexes, triggers, columns, and foreign-key relationships.
 
 The walker honors `.gitignore` and `.graphoxideignore`, skips dependency/build/cache directories and sensitive credential files, and never re-ingests `graphoxide-out/`. The `outer!/member` source spelling is reserved for logical archive members, so physical directory names ending in `!` are skipped with a discovery diagnostic.
 
@@ -519,20 +531,32 @@ It provides an Activity Bar explorer, interactive graph canvas, community and
 hub views, graph-aware CodeLens, source navigation, query results, impact/path
 workflows, managed graph freshness, report/export commands, and MCP integration.
 
-Install the packaged extension for your platform from this checkout, for example:
+Install the stable extension from the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=cgaspard.graphoxide-vscode),
+or download the matching VSIX from the GitHub release and install it, for example:
 
 ```bash
-code --install-extension editors/vscode/graphoxide-vscode-darwin-arm64-0.16.0.vsix
+code --install-extension ./graphoxide-vscode-darwin-arm64-0.16.0.vsix
 ```
 
 Then open a repository and accept the first-open **Enable Graphoxide** prompt.
 The extension builds the graph, registers Graphoxide as a native VS Code MCP
-server, asks how to keep the graph fresh, and offers project/user installers for
-detected Claude Code, Codex, and OpenCode clients. The extension uses
-`graphoxide` from `PATH` by default; set **Graphoxide: Binary Path** if the
-executable lives elsewhere. Platform-specific VSIX packages include the same
-standalone native executable, so Marketplace users do not need a separate CLI
-installation.
+server, asks how to keep the graph fresh, and offers project installers for
+detected Claude Code, Codex, and OpenCode clients. An explicit **Graphoxide:
+Binary Path** takes precedence. Otherwise discovery checks `GRAPHOXIDE_BINARY`,
+the bundled executable, `PATH`, and repository release/debug builds in that
+order. Platform-specific VSIX packages include the native executable, so
+Marketplace users do not need a separate CLI installation.
+
+Existing all-project MCP registrations appear as legacy entries that can be
+removed. New registrations use the current project's working directory. Wiki
+operations and AI community labeling use only the bundled executable or a build
+from this repository, ignoring Binary Path, `PATH`, and environment overrides.
+
+The Control Center and Command Palette also expose Wiki initialization, source
+generation, refresh, AI review, human confirmation, retirement, and local
+preview. Graph builds, Wiki operations, and community naming share a status-bar
+progress and cancellation surface; percentages refer to the current phase.
 
 Release builds publish six target-specific VSIX packages to the
 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=cgaspard.graphoxide-vscode)
@@ -558,14 +582,27 @@ See [`releasenotes/README.md`](releasenotes/README.md) for the release process.
 
 ## MCP
 
-Run `graphoxide serve` as a stdio MCP server. It exposes eleven tools:
+Run `graphoxide serve` as a stdio MCP server, or select `--transport http`
+for Streamable HTTP. The default service exposes eleven graph and PR tools:
 
 `project_overview`, `query_graph`, `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`, `list_prs`, `get_pr_impact`, and `triage_prs`.
 
-It also exposes report, stats, god-node, surprise, audit, and question resources. Every tool accepts an optional `project_path`; graph contexts hot-reload through an eight-entry mtime/size LRU. PR tools use the installed `gh` CLI.
+It also exposes report, stats, god-node, surprise, audit, and question resources.
+These eleven tools accept an optional `project_path`; graph contexts hot-reload
+through an eight-entry mtime/size LRU. PR tools use the installed `gh` CLI and
+can contact GitHub.
+
+An explicitly bound stdio knowledgebase service adds five lifecycle tools:
+`knowledgebase_source_add`, `knowledgebase_source_status`,
+`knowledgebase_source_refresh`, `knowledgebase_source_review`, and
+`knowledgebase_source_retire`. These operate on one bound root, and can write
+derived content or invoke configured models only with the required capability
+and per-call consent. See [Knowledgebase MCP setup](docs/knowledgebase.md#mcp-service-capabilities).
 
 The server advertises Codex-oriented usage instructions, intent-based tool
-descriptions, input guidance, and read-only annotations. For architecture work,
+descriptions, input guidance, and operation-specific annotations. The graph and
+PR tools are annotated read-only; enabled knowledgebase lifecycle tools include
+writes. For architecture work,
 agents begin with `project_overview`, narrow structural questions with
 `query_graph`, and follow up with exact node, neighbor, or path calls. The
 optional `context_filter` accepts `call`, `import`, `type`, `structure`, or an
@@ -768,20 +805,28 @@ builds, queries, reports, and exports remain fully offline.
 
 ## Knowledgebase
 
-Graphoxide's knowledgebase is a direct-only, Git-root workflow. It commits a
-taxonomy, pointer-only source index, derived pages, and review records—not
-source bodies. Source operations are user-owned and manual: add sources as
+Graphoxide's knowledgebase is a direct-only, Git-root workflow. It writes a
+taxonomy, pointer-only source index, model-derived pages, and review records
+that you can commit. It does not copy external source bodies into that tracked
+state; derived prose still contains information from those sources and should
+be reviewed before sharing. Source operations are user-owned and manual: add sources as
 provisional content, run the explicit AI review, then confirm the reviewed
-source locally when appropriate. See the [Knowledgebase guide](docs/knowledgebase.md):
+source locally when appropriate. Follow the [Knowledgebase guide](docs/knowledgebase.md)
+to create the required provider and authoring profiles before these commands:
 
-Authoring accepts UTF-8 text up to 16 MiB. Git sources require a local binding
-to the pinned revision; network Git fetching is disabled. HTTPS text transfers
+Authoring accepts UTF-8 text up to 16 MiB. Git sources require clean, tracked
+files at a committed revision, an HTTPS or SSH `origin` remote, and a local
+binding to that revision; network Git fetching is disabled. HTTPS text transfers
 are bounded and require explicit consent. Local preview requires a separately
 installed Hugo 0.165.0 executable.
 
+The previous wiki commands and `wiki_*` MCP tools were removed in 0.14.0
+without automatic migration. The current workflow has no `wiki research`,
+`wiki publish`, `wiki schema`, or managed Hugo command group.
+
 ```bash
 graphoxide wiki init --authoring-profile config/authoring-input.json
-graphoxide wiki source add docs/spec.md https://docs.example.test/spec.md \
+graphoxide wiki source add ../source-docs/spec.md https://docs.example.test/spec.md \
   --allow-network --allow-model-egress
 graphoxide wiki source review src:SOURCE_ID --allow-model-egress
 graphoxide wiki source confirm src:SOURCE_ID

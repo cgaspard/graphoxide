@@ -39,12 +39,16 @@ will create or update `website/CNAME`; keep that file in version control afterwa
 
 ## Content notes
 
-- Performance claims come from the repository's `BENCHMARKS.md` and include a
-  visible qualification.
+- `BENCHMARKS.md` describes the measurement methodology. Do not add performance
+  numbers without current, reproducible evidence.
 - Graphify attribution and licensing appear at the top and bottom of the page;
   the banner also states that Graphoxide is an independent, unaffiliated project.
-- Repository links assume the project will live at
-  `https://github.com/cgaspard/graphoxide`.
+- The deployed site is <https://cgaspard.github.io/graphoxide/> and the source
+  repository is <https://github.com/cgaspard/graphoxide>.
+- When publishing a new stable release, update the release link and pinned
+  installation examples in `index.html` and `app.js`. Keep development builds
+  distinct from released downloads; odd minor versions use the Marketplace
+  prerelease channel and even minor versions use stable.
 - `knowledgebase.html` documents the direct-source workflow: bootstrap, add,
   refresh, explicit review, status, retirement, local preview, and MCP
   capabilities. Keep its examples provider-neutral and never put credentials,
