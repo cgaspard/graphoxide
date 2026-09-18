@@ -94,7 +94,7 @@ fn test_skill_registration_uses_host_generic_instruction() {
 }
 
 #[test]
-fn test_how_it_works_separates_offline_indexing_from_explicit_model_operations() {
+fn test_how_it_works_clarifies_code_only_semantic_extraction() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/how-it-works.md");
     let document = fs::read_to_string(path).unwrap();
     assert!(document.contains("indexing pipeline is deterministic and offline"));
